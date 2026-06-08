@@ -200,6 +200,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "certo-wasm"
+version = "0.1.0"
+dependencies = [
+ "certo-ast",
+ "certo-llvm",
+ "certo-parser",
+ "tempfile",
+]
+
+[[package]]
 name = "cfg-if"
 version = "1.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"

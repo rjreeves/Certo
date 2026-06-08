@@ -18,6 +18,7 @@ members = [
     "crates/stdlib",
     "crates/testrunner",
     "crates/llvm",
+    "crates/wasm",
 ]
 resolver = "2"
 

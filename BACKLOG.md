@@ -21,6 +21,7 @@ Tasks are listed in implementation order. Completed tasks have the crate they li
 | 14 | LSP server | `crates/lsp` |
 | 13 | LLVM backend (`certo-llvm`) | `crates/llvm` |
 | 15 | Formatter (`certo fmt`) | `crates/fmt` |
+| 18 | WASM target (`certo-wasm`) | `crates/wasm` |
 
 ## Pending
 
@@ -28,7 +29,6 @@ Tasks are listed in implementation order. Completed tasks have the crate they li
 |---|------|------------|-------|
 | 16 | UI compiler | #9 | Schema-driven view/form generation, Htmx output |
 | 17 | C FFI and REST client generation | #9 | `extern` declarations → C headers; REST schema → typed clients |
-| 18 | WASM target | #13 | Compile to WebAssembly via LLVM wasm32 target |
 
 ## Critical path to a running program
 
@@ -37,7 +37,7 @@ AST → Parser → Resolve → Typeck → HIR → MIR → Codegen (C) → gcc/cl
  1       2        3         4       8     8         9
 ```
 
-Tasks #1–#15 are complete. The core pipeline (parse → resolve →
+Tasks #1–#15 and #18 are complete. The core pipeline (parse → resolve →
 typeck → HIR → MIR → C → binary) is fully operational. Stdlib, test runner,
 migration tool, LSP server, and formatter are all in place.
 
