@@ -451,6 +451,39 @@ fn lower_block(stmts: &[Stmt], span: Span, cx: &mut Cx) -> HirExpr {
                     Pattern::Wildcard { .. } => {
                         hir_stmts.push(HirStmt::Expr(init));
                     }
+                    Pattern::Tuple { elements, .. } => {
+                        let tmp = cx.fresh_local();
+                        hir_stmts.push(HirStmt::Let { local: tmp, name: "_tup".into(), ty: Ty::Error, init });
+                        for (i, elem) in elements.iter().enumerate() {
+                            if let Pattern::Ident { name, .. } = &elem.node {
+                                let local = cx.define_local(&name.node);
+                                let base = HirExpr { kind: HirExprKind::Local(tmp), ty: Ty::Error, span };
+                                let field_expr = HirExpr {
+                                    kind: HirExprKind::Field { base: Box::new(base), field: i.to_string() },
+                                    ty: Ty::Error, span,
+                                };
+                                hir_stmts.push(HirStmt::Let { local, name: name.node.clone(), ty: Ty::Error, init: field_expr });
+                            }
+                        }
+                    }
+                    Pattern::Record { fields, .. } => {
+                        let tmp = cx.fresh_local();
+                        hir_stmts.push(HirStmt::Let { local: tmp, name: "_rec".into(), ty: Ty::Error, init });
+                        for pf in fields {
+                            let binding_name = if let Some(sub) = &pf.pattern {
+                                if let Pattern::Ident { name, .. } = &sub.node { name.node.clone() } else { continue }
+                            } else {
+                                pf.name.node.clone()
+                            };
+                            let local = cx.define_local(&binding_name);
+                            let base = HirExpr { kind: HirExprKind::Local(tmp), ty: Ty::Error, span };
+                            let field_expr = HirExpr {
+                                kind: HirExprKind::Field { base: Box::new(base), field: pf.name.node.clone() },
+                                ty: Ty::Error, span,
+                            };
+                            hir_stmts.push(HirStmt::Let { local, name: binding_name, ty: Ty::Error, init: field_expr });
+                        }
+                    }
                     _ => {
                         // Complex patterns: lower to match + let
                         let tmp = cx.fresh_local();
