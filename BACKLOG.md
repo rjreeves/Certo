@@ -23,12 +23,11 @@ Tasks are listed in implementation order. Completed tasks have the crate they li
 | 15 | Formatter (`certo fmt`) | `crates/fmt` |
 | 18 | WASM target (`certo-wasm`) | `crates/wasm` |
 | 17 | C FFI and REST client generation | `crates/ffi` |
+| 16 | UI compiler (`certo-ui`) | `crates/ui` |
 
 ## Pending
 
-| # | Task | Blocked by | Notes |
-|---|------|------------|-------|
-| 16 | UI compiler | #9 | Schema-driven view/form generation, Htmx output |
+_All tasks complete._
 
 ## Critical path to a running program
 
@@ -42,4 +41,4 @@ typeck → HIR → MIR → C → binary) is fully operational. Stdlib, test runn
 migration tool, LSP server, formatter, LLVM backend, WASM target, and C FFI /
 REST codegen are all in place.
 
-Remaining work: UI compiler (#16) — schema-driven view/form → Htmx output.
+All tasks complete. The full pipeline is operational end-to-end.
