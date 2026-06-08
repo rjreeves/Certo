@@ -1,0 +1,18 @@
+module Math
+
+pub fn factorial(n: Int): Int = if n <= 1 then 1 else n * factorial(n - 1)
+
+pub fn fibonacci(n: Int): Int =
+    if n <= 1 then n else fibonacci(n - 1) + fibonacci(n - 2)
+
+pub fn isPrime(n: Int): Bool = if n < 2 then false else checkPrime(n, 2)
+
+pub fn gcd(a: Int, b: Int): Int = if b == 0 then a else gcd(b, a % b)
+
+pub fn clamp(value: Int, lo: Int, hi: Int): Int =
+    if value < lo then lo else if value > hi then hi else value
+
+pub fn average(a: Float, b: Float): Float = a + b / 2.0
+
+fn checkPrime(n: Int, i: Int): Bool =
+    if i * i > n then true else if n % i == 0 then false else checkPrime(n, i + 1)

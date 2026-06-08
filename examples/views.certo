@@ -1,0 +1,29 @@
+module TasksUI
+
+// UI declarations — compiled to Htmx HTML with: certo-ui views.certo -o out/
+
+view Dashboard {
+  layout = VStack(children: [
+    Heading("Task Dashboard"),
+    HStack(children: [
+      Button("New Task",   "/tasks/new"),
+      Button("Refresh",    "/tasks"),
+    ]),
+    Button("View All Tasks", "/tasks"),
+  ])
+}
+
+view TaskDetail {
+  layout = VStack(children: [
+    Heading("Task Detail"),
+    Text("Loading task…"),
+    HStack(children: [
+      Button("Complete", "/tasks/complete"),
+      Button("Delete",   "/tasks/delete"),
+      Link("Back to list", "/tasks"),
+    ]),
+  ])
+}
+
+// Note: form declarations require the `form` keyword to be added to the lexer.
+// See examples/new_task_form.certo for a standalone form example once supported.
