@@ -108,6 +108,11 @@ pub fn infer_expr(expr: &S<Expr>, env: &EffectEnv, out: &mut InferredEffects) {
             // parallel implies async
             out.add(Effect::Async, expr.span);
         }
+
+        Expr::For { iter, body, .. } => {
+            infer_expr(iter, env, out);
+            infer_expr(body, env, out);
+        }
     }
 }
 

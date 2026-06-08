@@ -320,6 +320,15 @@ pub fn infer(expr: &S<Expr>, ctx: &mut Ctx<'_>) -> Ty {
             ctx.unify(inferred, annotated.clone(), *span);
             annotated
         }
+
+        Expr::For { iter, body, .. } => {
+            // iter must be a list; body is evaluated for side effects; result is Unit
+            let iter_ty  = infer(iter, ctx);
+            let elem_ty  = ctx.fresh();
+            ctx.unify(iter_ty, Ty::List(Box::new(elem_ty)), iter.span);
+            infer(body, ctx);
+            Ty::Unit
+        }
     }
 }
 

@@ -280,6 +280,69 @@ fn lower_expr(expr: &HirExpr, b: &mut Builder) -> Operand {
         }
 
         HirExprKind::Unsafe(inner) => lower_expr(inner, b),
+
+        HirExprKind::For { binding, binding_name, iter, body } => {
+            // Evaluate the iterable once.
+            let iter_op = lower_expr(iter, b);
+
+            // Obtain the length: _len = List.len(iter)
+            let len_local = b.declare_local("_len", Ty::Int);
+            let len_done  = b.new_block();
+            b.terminate(Terminator::Call {
+                func: Operand::Global("List.len".into()),
+                args: vec![iter_op.clone()],
+                dest: len_local,
+                next: len_done,
+            });
+            b.switch_to(len_done);
+
+            // Loop index: _i = 0
+            let i_local = b.declare_local("_i", Ty::Int);
+            b.assign(i_local, Rvalue::Use(Operand::Const(MirConst::Int(0))));
+
+            let loop_test_bb = b.new_block();
+            let loop_body_bb = b.new_block();
+            let loop_exit_bb = b.new_block();
+            b.terminate(Terminator::Goto(loop_test_bb));
+
+            // loop_test: if _i < _len goto loop_body else loop_exit
+            b.switch_to(loop_test_bb);
+            let cmp = b.declare_local("_for_cmp", Ty::Bool);
+            b.assign(cmp, Rvalue::BinOp {
+                op:  certo_hir::BinOp::Lt,
+                lhs: Operand::Local(i_local),
+                rhs: Operand::Local(len_local),
+            });
+            b.terminate(Terminator::If {
+                cond:     Operand::Local(cmp),
+                true_bb:  loop_body_bb,
+                false_bb: loop_exit_bb,
+            });
+
+            // loop_body: binding = List.getOrPanic(iter, _i); body; _i = _i + 1
+            b.switch_to(loop_body_bb);
+            let binding_local = b.map_hir_local(*binding, binding_name, Ty::Error);
+            let elem_done = b.new_block();
+            b.terminate(Terminator::Call {
+                func: Operand::Global("List.getOrPanic".into()),
+                args: vec![iter_op.clone(), Operand::Local(i_local)],
+                dest: binding_local,
+                next: elem_done,
+            });
+            b.switch_to(elem_done);
+            lower_expr(body, b); // result discarded
+            let inc = b.declare_local("_i_inc", Ty::Int);
+            b.assign(inc, Rvalue::BinOp {
+                op:  certo_hir::BinOp::Add,
+                lhs: Operand::Local(i_local),
+                rhs: Operand::Const(MirConst::Int(1)),
+            });
+            b.assign(i_local, Rvalue::Use(Operand::Local(inc)));
+            b.terminate(Terminator::Goto(loop_test_bb));
+
+            b.switch_to(loop_exit_bb);
+            Operand::Const(MirConst::Unit)
+        }
     }
 }
 
