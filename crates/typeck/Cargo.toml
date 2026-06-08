@@ -1,0 +1,11 @@
+[package]
+name    = "certo-typeck"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+certo-ast = { path = "../ast" }
+
+[dev-dependencies]
+certo-parser  = { path = "../parser" }
+certo-resolve = { path = "../resolve" }
