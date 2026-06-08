@@ -8,6 +8,11 @@ pub const DATETIME_C: &str = r#"
 
 #include <time.h>
 
+/* timegm is POSIX; on Windows use _mkgmtime */
+#ifdef _WIN32
+#  define timegm _mkgmtime
+#endif
+
 typedef int64_t CertoDateTime;   /* Unix seconds */
 typedef int64_t CertoDate;       /* Unix seconds at midnight UTC */
 
