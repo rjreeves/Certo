@@ -72,6 +72,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "certo-fmt"
+version = "0.1.0"
+dependencies = [
+ "certo-ast",
+ "certo-parser",
+]
+
+[[package]]
 name = "certo-hir"
 version = "0.1.0"
 dependencies = [
