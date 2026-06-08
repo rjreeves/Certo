@@ -5,6 +5,7 @@ use certo_migrate::{
     plan_up, plan_down, run_steps, status,
     default_manifest_path, RunOptions,
 };
+use certo_diagnostics::{Diagnostic, render_all};
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -88,8 +89,15 @@ fn cmd_build(args: &[String]) {
         eprintln!("error: cannot read {}: {}", input.display(), e);
         process::exit(1);
     });
+    let filename = input.display().to_string();
+    let colour   = stderr_is_tty();
+
     let module = certo_parser::parse(&src).unwrap_or_else(|errs| {
-        for e in &errs { eprintln!("parse error: {:?}", e); }
+        let diags: Vec<Diagnostic> = errs.iter().map(|e| {
+            Diagnostic::error("", format!("{}", e)).with_span(e.span)
+        }).collect();
+        eprint!("{}", render_all(&diags, &src, &filename, colour));
+        eprintln!("aborting due to {} parse error(s)", diags.len());
         process::exit(1);
     });
 
@@ -290,6 +298,19 @@ fn die(msg: &str, code: i32) -> ! {
     process::exit(code);
 }
 
+/// Returns true when colour output is appropriate for stderr.
+/// Respects the `NO_COLOR` env var and `TERM=dumb` convention.
+fn stderr_is_tty() -> bool {
+    if std::env::var_os("NO_COLOR").is_some() { return false; }
+    if std::env::var("TERM").as_deref() == Ok("dumb") { return false; }
+    // On Windows the console supports ANSI escapes from Windows 10+.
+    // On Unix-like systems, assume colour when TERM is set.
+    #[cfg(windows)]
+    { std::env::var_os("TERM").is_some() || std::env::var_os("WT_SESSION").is_some() }
+    #[cfg(not(windows))]
+    { std::env::var_os("TERM").is_some() }
+}
+
 // ------------------------------------------------------------------ //
 // migrate (unchanged)
 // ------------------------------------------------------------------ //
@@ -400,8 +421,14 @@ fn load_migrations(project_root: &Path) -> Vec<MigrationDecl> {
         let src = std::fs::read_to_string(&path).unwrap_or_else(|e| {
             eprintln!("error reading {}: {}", path.display(), e); process::exit(1);
         });
-        let module = certo_parser::parse(&src).unwrap_or_else(|e| {
-            eprintln!("parse error in {}: {:?}", path.display(), e); process::exit(1);
+        let filename_m = path.display().to_string();
+        let colour_m   = stderr_is_tty();
+        let module = certo_parser::parse(&src).unwrap_or_else(|errs| {
+            let diags: Vec<Diagnostic> = errs.iter().map(|e| {
+                Diagnostic::error("", format!("{}", e)).with_span(e.span)
+            }).collect();
+            eprint!("{}", render_all(&diags, &src, &filename_m, colour_m));
+            process::exit(1);
         });
         for decl in &module.decls {
             if let Decl::Migration(m) = &decl.node { result.push(m.clone()); }
