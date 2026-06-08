@@ -40,6 +40,7 @@ fn cmd_build(args: &[String]) {
     let mut output:  Option<PathBuf> = None;
     let mut verbose  = false;
     let mut emit_c   = false;
+    let mut emit_dll = false;
 
     let mut i = 0;
     while i < args.len() {
@@ -50,15 +51,17 @@ fn cmd_build(args: &[String]) {
                     args.get(i).unwrap_or_else(|| die("-o requires a path", 2))
                 ));
             }
-            "--emit-c"  => emit_c   = true,
+            "--emit-c"   => emit_c   = true,
+            "--emit-dll" => emit_dll = true,
             "--verbose" | "-v" => verbose = true,
             "--help" | "-h" => {
-                println!("Usage: certo <file.certo> [-o <out>] [--emit-c] [-v]");
-                println!("       certo build <file.certo> [-o <out>] [--emit-c] [-v]");
+                println!("Usage: certo <file.certo> [-o <out>] [--emit-c] [--emit-dll] [-v]");
+                println!("       certo build <file.certo> [-o <out>] [--emit-c] [--emit-dll] [-v]");
                 println!();
                 println!("Options:");
-                println!("  -o <file>    Output path (default: <stem>.exe on Windows, <stem> elsewhere)");
-                println!("  --emit-c     Write the generated C to <stem>.c and stop (do not compile)");
+                println!("  -o <file>    Output path");
+                println!("  --emit-c     Write the generated C to <stem>.c and stop");
+                println!("  --emit-dll   Compile to a shared library (.dll/.so) instead of an exe");
                 println!("  -v           Print the compiler command before running it");
                 return;
             }
@@ -94,9 +97,9 @@ fn cmd_build(args: &[String]) {
     let has_main = module.decls.iter().any(|d| {
         matches!(&d.node, certo_ast::decl::Decl::Fn(f) if f.name.node == "main")
     });
-    if !has_main && !emit_c {
+    if !has_main && !emit_c && !emit_dll {
         eprintln!("error: module has no `main` function");
-        eprintln!("       use --emit-c to compile as a library, or add:");
+        eprintln!("       use --emit-dll to build a shared library, or add:");
         eprintln!("       fn main(): Unit [io] = {{ ... }}");
         process::exit(1);
     }
@@ -110,7 +113,10 @@ fn cmd_build(args: &[String]) {
     let stdlib_c  = certo_stdlib::full_c_runtime();
     let module_c  = certo_codegen::emit_module(
         &module,
-        &certo_codegen::CodegenOptions { inline_runtime: false },
+        &certo_codegen::CodegenOptions {
+            inline_runtime: false,
+            export_public:  emit_dll,
+        },
     );
     // Strip the `#include "certo_runtime.h"` and duplicate system includes from
     // emit_module output — types are already supplied by preamble + runtime_header.
@@ -160,7 +166,15 @@ fn cmd_build(args: &[String]) {
 
     // ── Default output path ───────────────────────────────────────────
     let out_path = output.unwrap_or_else(|| {
-        if cfg!(windows) {
+        if emit_dll {
+            if cfg!(windows) {
+                PathBuf::from(format!("{}.dll", stem))
+            } else if cfg!(target_os = "macos") {
+                PathBuf::from(format!("lib{}.dylib", stem))
+            } else {
+                PathBuf::from(format!("lib{}.so", stem))
+            }
+        } else if cfg!(windows) {
             PathBuf::from(format!("{}.exe", stem))
         } else {
             PathBuf::from(stem)
@@ -177,12 +191,28 @@ fn cmd_build(args: &[String]) {
        .arg("-Wno-int-conversion")
        .arg("-Wno-implicit-function-declaration")
        .arg("-Wno-deprecated-declarations");
-    // -lm is implicit on Windows (math is part of the UCRT)
-    if !cfg!(windows) {
-        cmd.arg("-lm");
+
+    if emit_dll {
+        cmd.arg("-shared");
+        if cfg!(windows) {
+            // Generate an import library alongside the DLL.
+            let implib = out_path.with_extension("lib");
+            cmd.arg("-Xlinker").arg(format!("/IMPLIB:{}", implib.display()));
+            cmd.arg("-Xlinker").arg("/DLL");
+        } else {
+            cmd.arg("-fPIC");
+            if !cfg!(target_os = "macos") {
+                cmd.arg("-lm");
+            }
+        }
     } else {
-        // lld-link requires an explicit subsystem for console apps
-        cmd.arg("-Xlinker").arg("/subsystem:console");
+        // -lm is implicit on Windows (math is part of the UCRT)
+        if !cfg!(windows) {
+            cmd.arg("-lm");
+        } else {
+            // lld-link requires an explicit subsystem for console apps
+            cmd.arg("-Xlinker").arg("/subsystem:console");
+        }
     }
 
     if verbose {
@@ -243,8 +273,9 @@ fn print_top_help() {
     eprintln!("  certo migrate <subcommand>       Database migration tools");
     eprintln!();
     eprintln!("Build options:");
-    eprintln!("  -o <file>    Output binary path");
+    eprintln!("  -o <file>    Output path");
     eprintln!("  --emit-c     Stop after emitting C; write <stem>.c");
+    eprintln!("  --emit-dll   Compile to a shared library (.dll / .so)");
     eprintln!("  -v           Verbose: print the compiler command");
     eprintln!();
     eprintln!("Migrate subcommands:");
