@@ -202,6 +202,7 @@ pub enum BinOp {
     Eq, NotEq, Lt, LtEq, Gt, GtEq,
     And, Or,
     NullCoalesce,
+    Concat,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -57,6 +57,11 @@ pub fn parse_decl(cur: &mut Cursor<'_>) -> Result<S<Decl>, ParseError> {
             let s = d.span;
             Ok(S::new(Decl::View(d), s))
         }
+        Some(Token::Form) => {
+            let d = parse_form(cur)?;
+            let s = d.span;
+            Ok(S::new(Decl::Form(d), s))
+        }
         Some(Token::Test) => {
             let d = parse_test_decl(cur)?;
             let s = d.span;
@@ -475,6 +480,59 @@ fn parse_view(cur: &mut Cursor<'_>) -> Result<ViewDecl, ParseError> {
     let layout = parse_block(cur)?;
     let span = start.to(layout.span);
     Ok(ViewDecl { name: S::new(name, name_span), live: vec![], layout, span })
+}
+
+fn parse_form(cur: &mut Cursor<'_>) -> Result<FormDecl, ParseError> {
+    let start = cur.expect(&Token::Form)?;
+    let (name, name_span) = cur.expect_ident()?;
+    // Optional `-> ModulePath` target
+    let target = if cur.peek() == Some(&Token::Arrow) {
+        cur.bump();
+        parse_module_path(cur)?
+    } else {
+        use certo_ast::{types::ModulePath, span::Span};
+        ModulePath { segments: vec![], span: Span { start: start.start, end: start.end } }
+    };
+    // Optional body block — parse as key: value pairs
+    let mut fields = vec![];
+    let mut on_submit = None;
+    let mut on_success = None;
+    let end_span;
+    if cur.peek() == Some(&Token::LBrace) {
+        let brace_start = cur.expect(&Token::LBrace)?;
+        loop {
+            if cur.peek() == Some(&Token::RBrace) { break; }
+            let (key, key_span) = cur.expect_ident()?;
+            match key.as_str() {
+                "onSubmit" => {
+                    cur.expect(&Token::Colon)?;
+                    on_submit = Some(parse_expr(cur)?);
+                }
+                "onSuccess" => {
+                    cur.expect(&Token::Colon)?;
+                    on_success = Some(parse_expr(cur)?);
+                }
+                _ => {
+                    // field declaration
+                    cur.expect(&Token::Colon)?;
+                    let field_type = Some(parse_expr(cur)?);
+                    fields.push(FormField {
+                        name: S::new(key, key_span),
+                        label: None, placeholder: None,
+                        field_type, options: None, rows: None,
+                        span: key_span,
+                    });
+                }
+            }
+            // optional comma / newline separator
+            cur.eat(|t| matches!(t, Token::Comma));
+        }
+        end_span = cur.expect(&Token::RBrace)?;
+    } else {
+        end_span = name_span;
+    }
+    let span = start.to(end_span);
+    Ok(FormDecl { name: S::new(name, name_span), target, fields, on_submit, on_success, span })
 }
 
 // ------------------------------------------------------------------ //

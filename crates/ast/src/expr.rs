@@ -269,6 +269,8 @@ pub enum BinOp {
     RangeExclusive,   // ...
     // Null-coalesce
     NullCoalesce,     // ??
+    // String concat
+    Concat,           // ++
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

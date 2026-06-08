@@ -156,6 +156,18 @@ void* certo_coalesce(void* opt, void* fallback) {
     return opt ? opt : fallback;
 }
 
+/* ---- text concat ---- */
+certo_text_t certo_text_concat(certo_text_t a, certo_text_t b) {
+    size_t la = a ? strlen(a) : 0;
+    size_t lb = b ? strlen(b) : 0;
+    char* buf = (char*)malloc(la + lb + 1);
+    if (!buf) certo_panic("out of memory");
+    if (la) memcpy(buf, a, la);
+    if (lb) memcpy(buf + la, b, lb);
+    buf[la + lb] = '\0';
+    return buf;
+}
+
 /* ---- stdin ---- */
 
 /* Read one line from stdin (strips trailing newline).

@@ -388,6 +388,7 @@ fn lower_binop(op: &AstBinOp) -> BinOp {
         AstBinOp::And => BinOp::And,
         AstBinOp::Or  => BinOp::Or,
         AstBinOp::NullCoalesce => BinOp::NullCoalesce,
+        AstBinOp::Concat       => BinOp::Concat,
         AstBinOp::RangeInclusive | AstBinOp::RangeExclusive => unreachable!("handled above"),
     }
 }

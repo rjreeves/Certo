@@ -133,6 +133,7 @@ fn binop_result_llty(op: &BinOp, lty: &str) -> String {
         BinOp::LtEq | BinOp::Gt  | BinOp::GtEq   |
         BinOp::And | BinOp::Or                     => "i1".into(),
         BinOp::NullCoalesce                         => "ptr".into(),
+        BinOp::Concat                               => "ptr".into(),
     }
 }
 
@@ -336,6 +337,12 @@ impl<'ctx> FnEmitter<'ctx> {
                     "certo_coalesce".into(), "ptr".into(),
                     vec!["ptr".into(), "ptr".into()]);
                 (format!("  {name} = call ptr @certo_coalesce(ptr {lv}, ptr {rv})"), "ptr")
+            }
+            BinOp::Concat => {
+                self.ctx.declare_extern(
+                    "certo_text_concat".into(), "ptr".into(),
+                    vec!["ptr".into(), "ptr".into()]);
+                (format!("  {name} = call ptr @certo_text_concat(ptr {lv}, ptr {rv})"), "ptr")
             }
         };
         self.w(&line);

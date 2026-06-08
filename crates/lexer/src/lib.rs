@@ -87,6 +87,7 @@ pub enum Token<'src> {
     #[token("validator")]   Validator,
     #[token("migration")]   Migration,
     #[token("view")]        View,
+    #[token("form")]        Form,
     #[token("test")]        Test,
     #[token("property")]    Property,
     #[token("dbTest")]      DbTest,
@@ -125,6 +126,7 @@ pub enum Token<'src> {
     #[token(">=")]  GtEq,
     #[token("**")]  StarStar,       // exponentiation
     #[token("??")]  DoubleQuestion, // null-coalesce (DSL use)
+    #[token("++")]  PlusPlus,       // string concat
     #[token("+")]   Plus,
     #[token("-")]   Minus,
     #[token("*")]   Star,
