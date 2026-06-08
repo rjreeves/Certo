@@ -15,6 +15,7 @@ members = [
     "crates/cli",
     "crates/lsp",
     "crates/fmt",
+    "crates/stdlib",
 ]
 resolver = "2"
 
