@@ -31,8 +31,11 @@ name = "certo"
 version = "0.1.0"
 dependencies = [
  "certo-ast",
+ "certo-codegen",
  "certo-migrate",
  "certo-parser",
+ "certo-stdlib",
+ "tempfile",
 ]
 
 [[package]]
