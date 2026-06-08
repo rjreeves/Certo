@@ -16,6 +16,7 @@ members = [
     "crates/lsp",
     "crates/fmt",
     "crates/stdlib",
+    "crates/testrunner",
 ]
 resolver = "2"
 
