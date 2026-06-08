@@ -1,6 +1,11 @@
 [workspace]
-members = ["crates/ast",
-    "crates/lexer", "crates/parser", "crates/resolve", "crates/typeck",
+members = [
+    "crates/ast",
+    "crates/lexer",
+    "crates/parser",
+    "crates/resolve",
+    "crates/typeck",
+    "crates/traits",
 ]
 resolver = "2"
 

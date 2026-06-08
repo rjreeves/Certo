@@ -39,6 +39,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "certo-traits"
+version = "0.1.0"
+dependencies = [
+ "certo-ast",
+ "certo-parser",
+ "certo-resolve",
+ "certo-typeck",
+]
+
+[[package]]
 name = "certo-typeck"
 version = "0.1.0"
 dependencies = [
