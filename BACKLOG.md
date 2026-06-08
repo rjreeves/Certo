@@ -31,20 +31,20 @@ Tasks are listed in implementation order. Completed tasks have the crate they li
 | 23 | `form` keyword and parser | `crates/lexer`, `crates/parser` |
 | 24 | Pretty error messages with source context | `crates/diagnostics`, `crates/cli`, `crates/testrunner` |
 | 25 | Developer guide and release / dist-package scripts | `docs/GUIDE.md`, `scripts/` |
+| 26 | `for` loops full-stack | `crates/ast`, `crates/parser`, `crates/hir`, `crates/mir`, `crates/typeck`, `crates/resolve`, `crates/effects`, `crates/fmt` |
+| 27 | `match` expressions end-to-end | HIR → MIR → codegen path verified |
+| 28 | String interpolation `f"Hello, {name}!"` | `crates/parser`, `crates/hir` |
+| 29 | `let` destructuring (tuple + record) | `crates/hir` |
+| 32 | README at repo root | `README.md` |
+| 33 | GitHub Actions CI | `.github/workflows/ci.yml` |
+| 34 | `import` resolver (multi-file) | `crates/cli` |
 
 ## Pending
 
 | # | Task | Notes |
 |---|------|-------|
-| 26 | `for` loops / `forEach` syntax | Iteration without explicit recursion; most-wanted language gap |
-| 27 | `match` expressions end-to-end | AST exists; verify HIR → MIR → codegen path works completely |
-| 28 | String interpolation `"Hello, {name}!"` | Parser + codegen; desugars to `++` concat calls |
-| 29 | `let` destructuring | `let (a, b) = pair`, `let { x, y } = record` |
 | 30 | Stdlib-aware name resolver | Pre-load stdlib names so resolve pass can be enabled in the CLI |
 | 31 | Resolve + typeck errors in CLI | Blocked on #30; error types and renderer already ready |
-| 32 | README at repo root | Short README with code sample, install badge, 60-second getting-started |
-| 33 | GitHub Actions CI | `cargo test --workspace` + `scripts/release.ps1` on push |
-| 34 | `import` resolver (multi-file projects) | Read `.certo` files from disk; needed for real projects |
 
 ## Critical path to a running program
 

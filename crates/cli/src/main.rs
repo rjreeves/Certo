@@ -92,7 +92,7 @@ fn cmd_build(args: &[String]) {
     let filename = input.display().to_string();
     let colour   = stderr_is_tty();
 
-    let module = certo_parser::parse(&src).unwrap_or_else(|errs| {
+    let mut module = certo_parser::parse(&src).unwrap_or_else(|errs| {
         let diags: Vec<Diagnostic> = errs.iter().map(|e| {
             Diagnostic::error("", format!("{}", e)).with_span(e.span)
         }).collect();
@@ -100,6 +100,38 @@ fn cmd_build(args: &[String]) {
         eprintln!("aborting due to {} parse error(s)", diags.len());
         process::exit(1);
     });
+
+    // ── Resolve local imports (multi-file) ────────────────────────────
+    let base_dir = input.parent().unwrap_or(Path::new("."));
+    let stdlib_prefixes = ["Stdlib", "Core", "Collections", "Text", "DateTime", "Money"];
+    for imp in &module.imports.clone() {
+        let first_seg = imp.path.segments.first().map(|s| s.node.as_str()).unwrap_or("");
+        if stdlib_prefixes.contains(&first_seg) { continue; }
+        // Build file path: join segments with '/' + ".certo"
+        let rel: PathBuf = imp.path.segments.iter()
+            .map(|s| s.node.as_str())
+            .collect::<Vec<_>>()
+            .join("/")
+            .into();
+        let candidate = base_dir.join(rel).with_extension("certo");
+        if candidate.exists() {
+            let imp_src = std::fs::read_to_string(&candidate).unwrap_or_else(|e| {
+                eprintln!("error: cannot read {}: {}", candidate.display(), e);
+                process::exit(1);
+            });
+            let imp_filename = candidate.display().to_string();
+            let imp_module = certo_parser::parse(&imp_src).unwrap_or_else(|errs| {
+                let diags: Vec<Diagnostic> = errs.iter().map(|e| {
+                    Diagnostic::error("", format!("{}", e)).with_span(e.span)
+                }).collect();
+                eprint!("{}", render_all(&diags, &imp_src, &imp_filename, colour));
+                eprintln!("aborting due to parse errors in {}", imp_filename);
+                process::exit(1);
+            });
+            if verbose { eprintln!("importing {}", candidate.display()); }
+            module.decls.extend(imp_module.decls);
+        }
+    }
 
     // ── Check for entry point ─────────────────────────────────────────
     let has_main = module.decls.iter().any(|d| {
