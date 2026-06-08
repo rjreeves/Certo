@@ -16,6 +16,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "certo-effects"
+version = "0.1.0"
+dependencies = [
+ "certo-ast",
+ "certo-parser",
+ "certo-resolve",
+]
+
+[[package]]
 name = "certo-lexer"
 version = "0.1.0"
 dependencies = [
