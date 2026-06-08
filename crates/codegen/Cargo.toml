@@ -1,0 +1,14 @@
+[package]
+name    = "certo-codegen"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+certo-ast    = { path = "../ast" }
+certo-typeck = { path = "../typeck" }
+certo-hir    = { path = "../hir" }
+certo-mir    = { path = "../mir" }
+
+[dev-dependencies]
+certo-parser  = { path = "../parser" }
+certo-resolve = { path = "../resolve" }

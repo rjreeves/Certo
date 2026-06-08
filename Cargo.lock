@@ -16,6 +16,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "certo-codegen"
+version = "0.1.0"
+dependencies = [
+ "certo-ast",
+ "certo-hir",
+ "certo-mir",
+ "certo-parser",
+ "certo-resolve",
+ "certo-typeck",
+]
+
+[[package]]
 name = "certo-dbschema"
 version = "0.1.0"
 dependencies = [
