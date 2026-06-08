@@ -115,6 +115,19 @@ pub fn emit_module(module: &Module, opts: &CodegenOptions) -> String {
         }
     }
 
+    // If the module has a `main` function, emit a C main() that bootstraps
+    // argv and calls it.
+    let has_main = module.decls.iter().any(|d| {
+        matches!(&d.node, Decl::Fn(f) if f.name.node == "main")
+    });
+    if has_main {
+        writeln!(out, "int main(int argc, const char** argv) {{").unwrap();
+        writeln!(out, "    certo_main_init(argc, argv);").unwrap();
+        writeln!(out, "    certo_main();").unwrap();
+        writeln!(out, "    return 0;").unwrap();
+        writeln!(out, "}}").unwrap();
+    }
+
     out
 }
 
@@ -195,11 +208,8 @@ typedef struct { void* value; } certo_tuple_t;
 typedef void (*certo_fn_t)(void);
 typedef void* certo_error_t;
 
-/* List (dynamic array) */
+/* List (dynamic array) — full signatures are in the stdlib C block. */
 typedef struct { void** data; int64_t len; int64_t cap; } certo_list_base_t;
-void* certo_list_new(int64_t len, void** elems);
-void* certo_list_get(void* list, int64_t idx);
-void  certo_list_push(void* list, void* elem);
 
 /* Arithmetic helpers */
 int64_t certo_pow(int64_t base, int64_t exp);

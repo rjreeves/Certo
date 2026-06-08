@@ -10,22 +10,27 @@ pub const CORE_C: &str = r#"
 #include <math.h>
 
 /* ---- print / println ---- */
+/* Return int64_t so generated code can assign the result to an int64_t temp. */
 
-void certo_print(certo_text_t s) {
+int64_t certo_print(certo_text_t s) {
     fputs(s ? s : "", stdout);
+    return 0;
 }
 
-void certo_println(certo_text_t s) {
+int64_t certo_println(certo_text_t s) {
     puts(s ? s : "");
+    return 0;
 }
 
-void certo_eprint(certo_text_t s) {
+int64_t certo_eprint(certo_text_t s) {
     fputs(s ? s : "", stderr);
+    return 0;
 }
 
-void certo_eprintln(certo_text_t s) {
+int64_t certo_eprintln(certo_text_t s) {
     fputs(s ? s : "", stderr);
     fputc('\n', stderr);
+    return 0;
 }
 
 /* ---- conversions ---- */

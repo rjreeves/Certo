@@ -91,12 +91,28 @@ fn cmd_build(args: &[String]) {
     });
 
     // ── Emit C ────────────────────────────────────────────────────────
-    let runtime_c = certo_stdlib::full_c_runtime();
+    // Order: system includes → runtime typedefs → stdlib impls → user code.
+    let preamble = "#include <stdint.h>\n#include <stdbool.h>\n#include <stddef.h>\n\
+                    #include <inttypes.h>\n#include <stdarg.h>\n\
+                    #define _CRT_SECURE_NO_WARNINGS\n";
+    let runtime_header = certo_codegen::RUNTIME_HEADER;
+    let stdlib_c  = certo_stdlib::full_c_runtime();
     let module_c  = certo_codegen::emit_module(
         &module,
         &certo_codegen::CodegenOptions { inline_runtime: false },
     );
-    let full_c = format!("{}\n{}", runtime_c, module_c);
+    // Strip the `#include "certo_runtime.h"` and duplicate system includes from
+    // emit_module output — types are already supplied by preamble + runtime_header.
+    let module_c = module_c.lines()
+        .filter(|l| {
+            !l.contains("certo_runtime.h") &&
+            !l.contains("#include <stdint.h>") &&
+            !l.contains("#include <stdbool.h>") &&
+            !l.contains("#include <stddef.h>")
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let full_c = format!("{}{}\n{}\n{}", preamble, runtime_header, stdlib_c, module_c);
 
     let stem = input.file_stem()
         .and_then(|s| s.to_str())
@@ -145,7 +161,18 @@ fn cmd_build(args: &[String]) {
     cmd.arg(tmp.path())
        .arg("-o").arg(&out_path)
        .arg("-O2")
-       .arg("-lm");
+       .arg("-Wno-int-to-pointer-cast")
+       .arg("-Wno-pointer-to-int-cast")
+       .arg("-Wno-int-conversion")
+       .arg("-Wno-implicit-function-declaration")
+       .arg("-Wno-deprecated-declarations");
+    // -lm is implicit on Windows (math is part of the UCRT)
+    if !cfg!(windows) {
+        cmd.arg("-lm");
+    } else {
+        // lld-link requires an explicit subsystem for console apps
+        cmd.arg("-Xlinker").arg("/subsystem:console");
+    }
 
     if verbose {
         let display: Vec<_> = std::iter::once(cc.as_str())
@@ -169,19 +196,31 @@ fn cmd_build(args: &[String]) {
 }
 
 fn find_cc() -> Option<String> {
-    for candidate in &["cc", "gcc", "clang", "cl"] {
-        if std::process::Command::new(candidate)
-            .arg("--version")
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false)
-        {
-            return Some(candidate.to_string());
+    // First try names on PATH.
+    for candidate in &["clang", "gcc", "cc", "cl"] {
+        if probe_cc(candidate) { return Some(candidate.to_string()); }
+    }
+    // Fall back to common Windows install locations.
+    let windows_paths = [
+        r"C:\Program Files\LLVM\bin\clang.exe",
+        r"C:\Program Files (x86)\LLVM\bin\clang.exe",
+    ];
+    for path in &windows_paths {
+        if std::path::Path::new(path).exists() && probe_cc(path) {
+            return Some(path.to_string());
         }
     }
     None
+}
+
+fn probe_cc(cmd: &str) -> bool {
+    std::process::Command::new(cmd)
+        .arg("--version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
 }
 
 fn print_top_help() {

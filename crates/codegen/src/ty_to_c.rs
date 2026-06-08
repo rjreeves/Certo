@@ -29,9 +29,11 @@ pub fn ty_to_c(ty: &Ty) -> String {
         Ty::Fn { .. } => "certo_fn_t".into(),
 
         // Inference leftovers — shouldn't reach codegen, but be safe.
+        // Use int64_t (not void*): on 64-bit it can store both integers and
+        // pointers, avoiding hard void-pointer↔integer conversion errors.
         Ty::Var(v)    => format!("certo_var{}_t", v),
         Ty::Forall { body, .. } => ty_to_c(body),
-        Ty::Error     => "certo_error_t".into(),
+        Ty::Error     => "int64_t".into(),
     }
 }
 

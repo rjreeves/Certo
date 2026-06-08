@@ -178,7 +178,20 @@ fn local_name(id: u32) -> String {
 }
 
 pub fn c_fn_name(name: &str) -> String {
-    format!("certo_{}", name.replace('.', "_").replace('-', "_"))
+    // Convert camelCase to snake_case so Certo names match C stdlib conventions.
+    let snake = camel_to_snake(name);
+    format!("certo_{}", snake.replace('.', "_").replace('-', "_"))
+}
+
+fn camel_to_snake(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 4);
+    for (i, c) in s.char_indices() {
+        if c.is_uppercase() && i > 0 {
+            out.push('_');
+        }
+        out.extend(c.to_lowercase());
+    }
+    out
 }
 
 fn escape_str(s: &str) -> String {
