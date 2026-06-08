@@ -30,6 +30,7 @@ pub mod report;
 use std::path::Path;
 
 use certo_parser::parse;
+use certo_diagnostics::{Diagnostic, render_all};
 use tempfile::tempdir;
 
 use compile::binary_path;
@@ -51,9 +52,15 @@ pub fn run_file(
         .map_err(|e| TestRunnerError::Io(e.to_string()))?;
 
     // `parse` returns Result<Module, Vec<ParseError>>
+    let filename = source_path.display().to_string();
+    let colour   = std::env::var_os("NO_COLOR").is_none()
+                && std::env::var("TERM").as_deref() != Ok("dumb");
     let module = parse(&src).map_err(|errs| {
-        let msgs: Vec<String> = errs.iter().map(|e| format!("{:?}", e)).collect();
-        TestRunnerError::ParseError(msgs.join("; "))
+        let diags: Vec<Diagnostic> = errs.iter().map(|e| {
+            Diagnostic::error("", format!("{}", e)).with_span(e.span)
+        }).collect();
+        let rendered = render_all(&diags, &src, &filename, colour);
+        TestRunnerError::ParseError(rendered)
     })?;
 
     // ── Build harness ──────────────────────────────────────────────────────

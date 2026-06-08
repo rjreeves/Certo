@@ -32,6 +32,7 @@ version = "0.1.0"
 dependencies = [
  "certo-ast",
  "certo-codegen",
+ "certo-diagnostics",
  "certo-migrate",
  "certo-parser",
  "certo-stdlib",
@@ -63,6 +64,13 @@ version = "0.1.0"
 dependencies = [
  "certo-ast",
  "certo-parser",
+]
+
+[[package]]
+name = "certo-diagnostics"
+version = "0.1.0"
+dependencies = [
+ "certo-ast",
 ]
 
 [[package]]
@@ -186,6 +194,7 @@ version = "0.1.0"
 dependencies = [
  "certo-ast",
  "certo-codegen",
+ "certo-diagnostics",
  "certo-hir",
  "certo-mir",
  "certo-parser",

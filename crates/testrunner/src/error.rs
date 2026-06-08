@@ -20,7 +20,7 @@ impl fmt::Display for TestRunnerError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             TestRunnerError::ParseError(e)    =>
-                write!(f, "parse error: {}", e),
+                write!(f, "{}", e),
             TestRunnerError::NoTests          =>
                 write!(f, "no test declarations found"),
             TestRunnerError::CompilerNotFound { compiler, detail } =>

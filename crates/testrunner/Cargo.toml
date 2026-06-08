@@ -9,10 +9,11 @@ name = "certo-test"
 path = "src/main.rs"
 
 [dependencies]
-certo-ast     = { path = "../ast" }
-certo-parser  = { path = "../parser" }
-certo-hir     = { path = "../hir" }
-certo-mir     = { path = "../mir" }
-certo-codegen = { path = "../codegen" }
-certo-stdlib  = { path = "../stdlib" }
-tempfile      = "3"
+certo-ast         = { path = "../ast" }
+certo-parser      = { path = "../parser" }
+certo-hir         = { path = "../hir" }
+certo-mir         = { path = "../mir" }
+certo-codegen     = { path = "../codegen" }
+certo-stdlib      = { path = "../stdlib" }
+certo-diagnostics = { path = "../diagnostics" }
+tempfile          = "3"

@@ -64,6 +64,10 @@ fn main() {
             Ok(passed) => {
                 if !passed { all_ok = false; }
             }
+            Err(certo_testrunner::error::TestRunnerError::ParseError(ref msg)) => {
+                eprint!("{}", msg);
+                process::exit(2);
+            }
             Err(e) => {
                 eprintln!("error: {}", e);
                 process::exit(2);

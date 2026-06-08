@@ -2,7 +2,7 @@ use certo_parser::parse;
 use crate::{emit_module, CodegenOptions};
 
 fn opts() -> CodegenOptions {
-    CodegenOptions { inline_runtime: false }
+    CodegenOptions { inline_runtime: false, export_public: false }
 }
 
 fn codegen(src: &str) -> String {
@@ -34,7 +34,7 @@ fn output_includes_c_headers() {
 #[test]
 fn inline_runtime_embeds_types() {
     let module = parse("module A").expect("parse");
-    let c = emit_module(&module, &CodegenOptions { inline_runtime: true });
+    let c = emit_module(&module, &CodegenOptions { inline_runtime: true, export_public: false });
     assert_contains(&c, "certo_decimal_t");
     assert_contains(&c, "certo_uuid_t");
     assert_contains(&c, "CERTO_UNIT");
