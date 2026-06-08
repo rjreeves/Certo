@@ -56,12 +56,23 @@ fn parse_or(cur: &mut Cursor<'_>) -> Result<S<Expr>, ParseError> {
 }
 
 fn parse_and(cur: &mut Cursor<'_>) -> Result<S<Expr>, ParseError> {
-    let mut left = parse_not(cur)?;
+    let mut left = parse_coalesce(cur)?;
     while cur.peek() == Some(&Token::And) {
         cur.bump();
         let right = parse_not(cur)?;
         let span = left.span.to(right.span);
         left = S::new(Expr::BinOp { op: BinOp::And, left: Box::new(left), right: Box::new(right), span }, span);
+    }
+    Ok(left)
+}
+
+fn parse_coalesce(cur: &mut Cursor<'_>) -> Result<S<Expr>, ParseError> {
+    let mut left = parse_not(cur)?;
+    while cur.peek() == Some(&Token::DoubleQuestion) {
+        cur.bump();
+        let right = parse_not(cur)?;
+        let span = left.span.to(right.span);
+        left = S::new(Expr::BinOp { op: BinOp::NullCoalesce, left: Box::new(left), right: Box::new(right), span }, span);
     }
     Ok(left)
 }
@@ -112,9 +123,10 @@ fn parse_add(cur: &mut Cursor<'_>) -> Result<S<Expr>, ParseError> {
     let mut left = parse_mul(cur)?;
     loop {
         let op = match cur.peek() {
-            Some(Token::Plus)  => BinOp::Add,
-            Some(Token::Minus) => BinOp::Sub,
-            _                  => break,
+            Some(Token::Plus)     => BinOp::Add,
+            Some(Token::Minus)    => BinOp::Sub,
+            Some(Token::PlusPlus) => BinOp::Concat,
+            _                     => break,
         };
         cur.bump();
         let right = parse_mul(cur)?;

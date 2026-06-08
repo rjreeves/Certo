@@ -56,5 +56,6 @@ pub fn binop_str(op: &certo_ast::expr::BinOp) -> &'static str {
         BinOp::RangeInclusive => "..",
         BinOp::RangeExclusive => "...",
         BinOp::NullCoalesce   => "??",
+        BinOp::Concat         => "++",
     }
 }

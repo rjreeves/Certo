@@ -183,6 +183,7 @@ fn emit_binop(op: &BinOp, l: &Operand, r: &Operand) -> String {
         BinOp::And  => format!("({} && {})", lhs, rhs),
         BinOp::Or   => format!("({} || {})", lhs, rhs),
         BinOp::NullCoalesce => format!("certo_coalesce({}, {})", lhs, rhs),
+        BinOp::Concat       => format!("certo_text_concat({}, {})", lhs, rhs),
     }
 }
 

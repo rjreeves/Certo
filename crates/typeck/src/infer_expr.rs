@@ -372,6 +372,12 @@ fn infer_binop(op: &BinOp, left: &S<Expr>, right: &S<Expr>, span: Span, ctx: &mu
             ctx.unify(rt, inner.clone(), span);
             inner
         }
+        BinOp::Concat => {
+            // `a ++ b` — both operands and result are Text
+            ctx.unify(lt, Ty::Text, span);
+            ctx.unify(rt, Ty::Text, span);
+            Ty::Text
+        }
     }
 }
 
