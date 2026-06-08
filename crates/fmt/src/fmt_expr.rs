@@ -135,6 +135,15 @@ pub fn fmt_expr(expr: &Expr, indent: usize) -> String {
 
         Expr::Ascribe { expr, ty, .. } =>
             format!("{}: {}", fmt_expr(&expr.node, indent), fmt_type(&ty.node, indent)),
+
+        Expr::For { binding, iter, body, .. } => {
+            format!("for {} in {} {{\n{}{}\n{}}}",
+                binding.node,
+                fmt_expr(&iter.node, indent),
+                ind(indent + 1),
+                fmt_expr(&body.node, indent + 1),
+                ind(indent))
+        }
     }
 }
 

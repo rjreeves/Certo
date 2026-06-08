@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use certo_ast::module::Module;
 use certo_ast::decl::Decl;
-use certo_ast::expr::{Expr, Stmt, Lit, BinOp as AstBinOp, UnOp as AstUnOp};
+use certo_ast::expr::{Expr, Stmt, Lit, BinOp as AstBinOp, UnOp as AstUnOp, FStringPart};
 use certo_ast::pattern::Pattern;
 use certo_ast::span::{S, Span};
 use certo_typeck::Ty;
@@ -145,6 +145,28 @@ pub fn lower_module(module: &Module) -> Result<HirModule, Vec<LowerError>> {
 fn lower_expr(expr: &S<Expr>, cx: &mut Cx) -> HirExpr {
     let span = expr.span;
     match &expr.node {
+        // Desugar f-string to ++ chain before generic lit handling
+        Expr::Lit { value: Lit::FString(parts), .. } => {
+            let mut segments: Vec<HirExpr> = parts.iter().map(|p| match p {
+                FStringPart::Literal(s) => HirExpr {
+                    kind: HirExprKind::Str(s.clone()), ty: Ty::Text, span,
+                },
+                FStringPart::Interpolated(e) => lower_expr(e, cx),
+            }).collect();
+            if segments.is_empty() {
+                return HirExpr { kind: HirExprKind::Str(String::new()), ty: Ty::Text, span };
+            }
+            let first = segments.remove(0);
+            return segments.into_iter().fold(first, |acc, seg| HirExpr {
+                kind: HirExprKind::BinOp {
+                    op:  BinOp::Concat,
+                    lhs: Box::new(acc),
+                    rhs: Box::new(seg),
+                },
+                ty: Ty::Text, span,
+            });
+        }
+
         Expr::Lit { value, .. } => lower_lit(value, span),
 
         Expr::Path { path, .. } => {
@@ -346,6 +368,24 @@ fn lower_expr(expr: &S<Expr>, cx: &mut Cx) -> HirExpr {
         }
 
         Expr::Ascribe { expr, .. } => lower_expr(expr, cx),
+
+        Expr::For { binding, iter, body, .. } => {
+            let iter_hir = lower_expr(iter, cx);
+            cx.push_scope();
+            let local = cx.define_local(&binding.node);
+            let body_hir = lower_expr(body, cx);
+            cx.pop_scope();
+            HirExpr {
+                kind: HirExprKind::For {
+                    binding:      local,
+                    binding_name: binding.node.clone(),
+                    iter:         Box::new(iter_hir),
+                    body:         Box::new(body_hir),
+                },
+                ty: Ty::Unit,
+                span,
+            }
+        }
     }
 }
 
@@ -358,8 +398,8 @@ fn lower_lit(lit: &Lit, span: Span) -> HirExpr {
         Lit::Bool(b)    => (HirExprKind::Bool(*b),          Ty::Bool),
         Lit::String(s)  => (HirExprKind::Str(s.clone()),    Ty::Text),
         Lit::FString(parts) => {
-            // Concatenate literal parts; interpolated parts become string-cast calls.
-            // For now, just join literal segments (full interpolation handled by C backend).
+            // Parts with interpolations are desugared in lower_expr before reaching here.
+            // If we still have interpolated parts, join literal segments as a fallback.
             let joined = parts.iter().filter_map(|p| {
                 if let FStringPart::Literal(s) = p { Some(s.clone()) } else { None }
             }).collect::<Vec<_>>().join("");

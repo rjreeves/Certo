@@ -108,6 +108,11 @@ pub fn resolve_expr(expr: &S<Expr>, scope: &mut ScopeChain) {
         | Expr::Unsafe { body, .. } => resolve_expr(body, scope),
 
         Expr::Ascribe { expr, .. } => resolve_expr(expr, scope),
+
+        Expr::For { iter, body, .. } => {
+            resolve_expr(iter, scope);
+            resolve_expr(body, scope);
+        }
     }
 }
 
