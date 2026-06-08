@@ -1,0 +1,13 @@
+[package]
+name    = "certo-mir"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+certo-ast    = { path = "../ast" }
+certo-hir    = { path = "../hir" }
+certo-typeck = { path = "../typeck" }
+
+[dev-dependencies]
+certo-parser  = { path = "../parser" }
+certo-resolve = { path = "../resolve" }

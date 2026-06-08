@@ -1,0 +1,126 @@
+use certo_typeck::Ty;
+use certo_hir::{LocalId, BinOp, UnOp, HirLitPat};
+
+/// Index into a `MirFn`'s `blocks` vec.
+pub type BlockId = usize;
+
+/// Index into a `MirFn`'s `locals` vec.
+pub type MirLocal = u32;
+
+// ------------------------------------------------------------------ //
+// Function in MIR form
+// ------------------------------------------------------------------ //
+
+#[derive(Debug, Clone)]
+pub struct MirFn {
+    pub name:    String,
+    /// Declared locals (params first, then temporaries).
+    pub locals:  Vec<MirLocalDecl>,
+    /// Basic blocks; block 0 is the entry.
+    pub blocks:  Vec<BasicBlock>,
+}
+
+#[derive(Debug, Clone)]
+pub struct MirLocalDecl {
+    pub id:   MirLocal,
+    pub name: String,
+    pub ty:   Ty,
+}
+
+// ------------------------------------------------------------------ //
+// Basic block
+// ------------------------------------------------------------------ //
+
+#[derive(Debug, Clone, Default)]
+pub struct BasicBlock {
+    pub id:          BlockId,
+    pub stmts:       Vec<MirStmt>,
+    pub terminator:  Option<Terminator>,
+}
+
+// ------------------------------------------------------------------ //
+// Statements
+// ------------------------------------------------------------------ //
+
+#[derive(Debug, Clone)]
+pub enum MirStmt {
+    /// `local = rvalue`
+    Assign { dest: MirLocal, rvalue: Rvalue },
+}
+
+#[derive(Debug, Clone)]
+pub enum Rvalue {
+    /// Copy / move a local.
+    Use(Operand),
+    /// Binary operation.
+    BinOp { op: BinOp, lhs: Operand, rhs: Operand },
+    /// Unary operation.
+    UnOp { op: UnOp, arg: Operand },
+    /// Function call — result stored in `dest`.
+    Call { func: Operand, args: Vec<Operand> },
+    /// Aggregate construction: tuple, record.
+    Aggregate(AggregateKind, Vec<Operand>),
+}
+
+#[derive(Debug, Clone)]
+pub enum AggregateKind {
+    Tuple,
+    Record(Vec<String>),  // field names
+    Array,
+}
+
+#[derive(Debug, Clone)]
+pub enum Operand {
+    /// A local variable.
+    Local(MirLocal),
+    /// A compile-time constant.
+    Const(MirConst),
+    /// Reference to a named global / function.
+    Global(String),
+}
+
+#[derive(Debug, Clone)]
+pub enum MirConst {
+    Int(i64),
+    Float(f64),
+    Decimal(String),
+    Bool(bool),
+    Str(String),
+    Uuid(String),
+    Unit,
+}
+
+// ------------------------------------------------------------------ //
+// Terminators — control flow at the end of each block
+// ------------------------------------------------------------------ //
+
+#[derive(Debug, Clone)]
+pub enum Terminator {
+    /// Unconditional jump.
+    Goto(BlockId),
+    /// Conditional branch: `if cond goto true_bb else false_bb`.
+    If { cond: Operand, true_bb: BlockId, false_bb: BlockId },
+    /// Return the value of `local` from the function.
+    Return(Operand),
+    /// Unreachable (e.g. after a panic).
+    Unreachable,
+    /// Call with a continuation: after the call, jump to `next`.
+    Call {
+        func:   Operand,
+        args:   Vec<Operand>,
+        dest:   MirLocal,
+        next:   BlockId,
+    },
+    /// Switch over a discriminant for match expressions.
+    Switch {
+        discr:    Operand,
+        targets:  Vec<(SwitchTarget, BlockId)>,
+        otherwise: BlockId,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum SwitchTarget {
+    Int(i64),
+    Bool(bool),
+}

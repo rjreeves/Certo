@@ -1,0 +1,302 @@
+use certo_typeck::Ty;
+use certo_hir::{HirFn, HirExpr, HirExprKind, HirStmt, HirPat, HirLitPat, LocalId};
+use crate::mir::*;
+
+// ------------------------------------------------------------------ //
+// Builder
+// ------------------------------------------------------------------ //
+
+struct Builder {
+    locals:      Vec<MirLocalDecl>,
+    blocks:      Vec<BasicBlock>,
+    current:     BlockId,
+    /// Maps HIR LocalId to MirLocal (same indices initially).
+    local_map:   std::collections::HashMap<LocalId, MirLocal>,
+    next_tmp:    MirLocal,
+}
+
+impl Builder {
+    fn new() -> Self {
+        let entry = BasicBlock { id: 0, ..Default::default() };
+        Builder {
+            locals:    Vec::new(),
+            blocks:    vec![entry],
+            current:   0,
+            local_map: std::collections::HashMap::new(),
+            next_tmp:  0,
+        }
+    }
+
+    fn declare_local(&mut self, name: &str, ty: Ty) -> MirLocal {
+        let id = self.next_tmp;
+        self.next_tmp += 1;
+        self.locals.push(MirLocalDecl { id, name: name.to_string(), ty });
+        id
+    }
+
+    fn map_hir_local(&mut self, hir: LocalId, name: &str, ty: Ty) -> MirLocal {
+        let mir = self.declare_local(name, ty);
+        self.local_map.insert(hir, mir);
+        mir
+    }
+
+    fn get_local(&self, hir: LocalId) -> MirLocal {
+        *self.local_map.get(&hir).unwrap_or(&hir)
+    }
+
+    fn push_stmt(&mut self, stmt: MirStmt) {
+        self.blocks[self.current].stmts.push(stmt);
+    }
+
+    fn terminate(&mut self, t: Terminator) {
+        self.blocks[self.current].terminator = Some(t);
+    }
+
+    fn new_block(&mut self) -> BlockId {
+        let id = self.blocks.len();
+        self.blocks.push(BasicBlock { id, ..Default::default() });
+        id
+    }
+
+    fn switch_to(&mut self, block: BlockId) {
+        self.current = block;
+    }
+
+    fn assign(&mut self, dest: MirLocal, rvalue: Rvalue) {
+        self.push_stmt(MirStmt::Assign { dest, rvalue });
+    }
+}
+
+// ------------------------------------------------------------------ //
+// Entry point
+// ------------------------------------------------------------------ //
+
+pub fn lower_fn(f: &HirFn) -> MirFn {
+    let mut b = Builder::new();
+
+    // Declare params as locals (index 0 = return slot).
+    let ret_slot = b.declare_local("_ret", Ty::Error);
+    for p in &f.params {
+        b.map_hir_local(p.local, &p.name, p.ty.clone());
+    }
+
+    let result = if let Some(body) = &f.body {
+        lower_expr(body, &mut b)
+    } else {
+        Operand::Const(MirConst::Unit)
+    };
+
+    // Assign result to return slot and return.
+    b.assign(ret_slot, Rvalue::Use(result.clone()));
+    b.terminate(Terminator::Return(Operand::Local(ret_slot)));
+
+    MirFn { name: f.name.clone(), locals: b.locals, blocks: b.blocks }
+}
+
+// ------------------------------------------------------------------ //
+// Expression lowering — returns the Operand holding the result
+// ------------------------------------------------------------------ //
+
+fn lower_expr(expr: &HirExpr, b: &mut Builder) -> Operand {
+    match &expr.kind {
+        HirExprKind::Int(n)     => Operand::Const(MirConst::Int(*n)),
+        HirExprKind::Float(f)   => Operand::Const(MirConst::Float(*f)),
+        HirExprKind::Decimal(s) => Operand::Const(MirConst::Decimal(s.clone())),
+        HirExprKind::Bool(v)    => Operand::Const(MirConst::Bool(*v)),
+        HirExprKind::Str(s)     => Operand::Const(MirConst::Str(s.clone())),
+        HirExprKind::Uuid(u)    => Operand::Const(MirConst::Uuid(u.clone())),
+        HirExprKind::Unit       => Operand::Const(MirConst::Unit),
+
+        HirExprKind::Local(id)    => Operand::Local(b.get_local(*id)),
+        HirExprKind::Global(name) => Operand::Global(name.clone()),
+
+        HirExprKind::BinOp { op, lhs, rhs } => {
+            let l = lower_expr(lhs, b);
+            let r = lower_expr(rhs, b);
+            let dest = b.declare_local("_binop", expr.ty.clone());
+            b.assign(dest, Rvalue::BinOp { op: op.clone(), lhs: l, rhs: r });
+            Operand::Local(dest)
+        }
+
+        HirExprKind::UnOp { op, arg } => {
+            let a = lower_expr(arg, b);
+            let dest = b.declare_local("_unop", expr.ty.clone());
+            b.assign(dest, Rvalue::UnOp { op: op.clone(), arg: a });
+            Operand::Local(dest)
+        }
+
+        HirExprKind::Call { func, args } => {
+            let func_op = lower_expr(func, b);
+            let arg_ops: Vec<Operand> = args.iter().map(|a| lower_expr(a, b)).collect();
+            let dest = b.declare_local("_call", expr.ty.clone());
+            let next = b.new_block();
+            b.terminate(Terminator::Call { func: func_op, args: arg_ops, dest, next });
+            b.switch_to(next);
+            Operand::Local(dest)
+        }
+
+        HirExprKind::If { cond, then_expr, else_expr } => {
+            let cond_op = lower_expr(cond, b);
+            let then_bb = b.new_block();
+            let else_bb = b.new_block();
+            let join_bb = b.new_block();
+            b.terminate(Terminator::If { cond: cond_op, true_bb: then_bb, false_bb: else_bb });
+
+            let result = b.declare_local("_if", expr.ty.clone());
+
+            b.switch_to(then_bb);
+            let then_op = lower_expr(then_expr, b);
+            b.assign(result, Rvalue::Use(then_op));
+            b.terminate(Terminator::Goto(join_bb));
+
+            b.switch_to(else_bb);
+            let else_op = lower_expr(else_expr, b);
+            b.assign(result, Rvalue::Use(else_op));
+            b.terminate(Terminator::Goto(join_bb));
+
+            b.switch_to(join_bb);
+            Operand::Local(result)
+        }
+
+        HirExprKind::Block { stmts, tail } => {
+            for stmt in stmts { lower_stmt(stmt, b); }
+            lower_expr(tail, b)
+        }
+
+        HirExprKind::Match { scrutinee, arms } => {
+            let scrut_op = lower_expr(scrutinee, b);
+            let join_bb  = b.new_block();
+            let result   = b.declare_local("_match", expr.ty.clone());
+
+            for arm in arms {
+                let arm_bb   = b.new_block();
+                let check_bb = b.current;
+
+                // Emit a simple equality check for literal patterns.
+                // Wildcard / bind patterns always match.
+                match &arm.pat {
+                    HirPat::Lit(lit) => {
+                        let expected = match lit {
+                            HirLitPat::Int(n)  => Operand::Const(MirConst::Int(*n)),
+                            HirLitPat::Bool(v) => Operand::Const(MirConst::Bool(*v)),
+                            HirLitPat::Str(s)  => Operand::Const(MirConst::Str(s.clone())),
+                        };
+                        let cmp = b.declare_local("_cmp", Ty::Bool);
+                        b.assign(cmp, Rvalue::BinOp {
+                            op:  certo_hir::BinOp::Eq,
+                            lhs: scrut_op.clone(),
+                            rhs: expected,
+                        });
+                        let next_arm = b.new_block();
+                        b.terminate(Terminator::If { cond: Operand::Local(cmp), true_bb: arm_bb, false_bb: next_arm });
+                        b.switch_to(next_arm);
+                    }
+                    HirPat::Bind { local, name } => {
+                        // Bind the scrutinee to the local.
+                        let mir_local = b.map_hir_local(*local, name, Ty::Error);
+                        b.assign(mir_local, Rvalue::Use(scrut_op.clone()));
+                        // Unconditional — jump to arm body.
+                        b.terminate(Terminator::Goto(arm_bb));
+                        let dead = b.new_block(); // unreachable fallthrough
+                        b.switch_to(dead);
+                    }
+                    HirPat::Wildcard => {
+                        b.terminate(Terminator::Goto(arm_bb));
+                        let dead = b.new_block();
+                        b.switch_to(dead);
+                    }
+                    _ => {
+                        // Complex patterns — unconditional for now
+                        b.terminate(Terminator::Goto(arm_bb));
+                        let dead = b.new_block();
+                        b.switch_to(dead);
+                    }
+                }
+
+                b.switch_to(arm_bb);
+                let arm_op = lower_expr(&arm.body, b);
+                b.assign(result, Rvalue::Use(arm_op));
+                b.terminate(Terminator::Goto(join_bb));
+            }
+
+            // Any unmatched falls through to Unreachable.
+            b.terminate(Terminator::Unreachable);
+            b.switch_to(join_bb);
+            Operand::Local(result)
+        }
+
+        HirExprKind::Record(fields) => {
+            let ops: Vec<Operand> = fields.iter().map(|(_, v)| lower_expr(v, b)).collect();
+            let names: Vec<String> = fields.iter().map(|(n, _)| n.clone()).collect();
+            let dest = b.declare_local("_rec", expr.ty.clone());
+            b.assign(dest, Rvalue::Aggregate(AggregateKind::Record(names), ops));
+            Operand::Local(dest)
+        }
+
+        HirExprKind::Tuple(elems) => {
+            let ops: Vec<Operand> = elems.iter().map(|e| lower_expr(e, b)).collect();
+            let dest = b.declare_local("_tup", expr.ty.clone());
+            b.assign(dest, Rvalue::Aggregate(AggregateKind::Tuple, ops));
+            Operand::Local(dest)
+        }
+
+        HirExprKind::List(elems) => {
+            let ops: Vec<Operand> = elems.iter().map(|e| lower_expr(e, b)).collect();
+            let dest = b.declare_local("_arr", expr.ty.clone());
+            b.assign(dest, Rvalue::Aggregate(AggregateKind::Array, ops));
+            Operand::Local(dest)
+        }
+
+        HirExprKind::Field { base, field } => {
+            let base_op = lower_expr(base, b);
+            // Model field access as a call to a compiler builtin.
+            let dest = b.declare_local(&format!("_field_{}", field), expr.ty.clone());
+            let field_fn = Operand::Global(format!("__field_{}", field));
+            let next = b.new_block();
+            b.terminate(Terminator::Call { func: field_fn, args: vec![base_op], dest, next });
+            b.switch_to(next);
+            Operand::Local(dest)
+        }
+
+        HirExprKind::Lambda { params, body } => {
+            // Closures — represent as a global reference for now (full closure lifting later).
+            let dest = b.declare_local("_lambda", expr.ty.clone());
+            b.assign(dest, Rvalue::Use(Operand::Global("__lambda".into())));
+            Operand::Local(dest)
+        }
+
+        HirExprKind::Try(inner) => {
+            let inner_op = lower_expr(inner, b);
+            let dest = b.declare_local("_try", expr.ty.clone());
+            let next = b.new_block();
+            b.terminate(Terminator::Call {
+                func: Operand::Global("__try_unwrap".into()),
+                args: vec![inner_op],
+                dest,
+                next,
+            });
+            b.switch_to(next);
+            Operand::Local(dest)
+        }
+
+        HirExprKind::Unsafe(inner) => lower_expr(inner, b),
+    }
+}
+
+fn lower_stmt(stmt: &HirStmt, b: &mut Builder) {
+    match stmt {
+        HirStmt::Let { local, name, ty, init } => {
+            let init_op  = lower_expr(init, b);
+            let mir_local = b.map_hir_local(*local, name, ty.clone());
+            b.assign(mir_local, Rvalue::Use(init_op));
+        }
+        HirStmt::Assign { local, value } => {
+            let val_op   = lower_expr(value, b);
+            let mir_local = b.get_local(*local);
+            b.assign(mir_local, Rvalue::Use(val_op));
+        }
+        HirStmt::Expr(e) => {
+            lower_expr(e, b);
+        }
+    }
+}

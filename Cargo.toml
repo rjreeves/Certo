@@ -8,6 +8,8 @@ members = [
     "crates/traits",
     "crates/effects",
     "crates/dbschema",
+    "crates/hir",
+    "crates/mir",
 ]
 resolver = "2"
 

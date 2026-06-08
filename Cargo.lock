@@ -33,10 +33,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "certo-hir"
+version = "0.1.0"
+dependencies = [
+ "certo-ast",
+ "certo-parser",
+ "certo-resolve",
+ "certo-typeck",
+]
+
+[[package]]
 name = "certo-lexer"
 version = "0.1.0"
 dependencies = [
  "logos",
+]
+
+[[package]]
+name = "certo-mir"
+version = "0.1.0"
+dependencies = [
+ "certo-ast",
+ "certo-hir",
+ "certo-parser",
+ "certo-resolve",
+ "certo-typeck",
 ]
 
 [[package]]
