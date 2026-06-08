@@ -1,0 +1,51 @@
+module Tasks
+
+// Simple CLI task manager — demonstrates argv, stdin/stdout, and the main compiler.
+//
+// Build:   certo tasks.certo -o tasks.exe
+// Run:     tasks add "Buy milk"
+//          tasks list
+//          tasks echo
+
+fn main(): Unit [io] =
+  let cmd = arg(1) ?? "help"
+  match cmd {
+    "add"    => addTask(arg(2) ?? "(untitled)")
+    "list"   => listTasks()
+    "echo"   => echoLoop()
+    "count"  => println("Total args: " ++ intToText(argCount()))
+    "help"   => printHelp()
+    _        => do
+                  eprintln("Unknown command: " ++ cmd)
+                  printHelp()
+  }
+
+fn addTask(name: Text): Unit [io] =
+  println("✓ Added task: " ++ name)
+
+fn listTasks(): Unit [io] =
+  do
+    println("Tasks (demo — no persistent storage):")
+    println("  1. Write Certo compiler")
+    println("  2. Add stdlib I/O")
+    println("  3. Ship it")
+
+// Read lines from stdin until EOF, print each back prefixed with "> ".
+fn echoLoop(): Unit [io] =
+  match readLine() {
+    None    => println("(EOF)")
+    Some(s) => do
+                 println("> " ++ s)
+                 echoLoop()
+  }
+
+fn printHelp(): Unit [io] =
+  do
+    println("Usage: tasks <command> [args]")
+    println("")
+    println("Commands:")
+    println("  add <name>   Record a task")
+    println("  list         Show demo task list")
+    println("  echo         Read stdin and echo each line")
+    println("  count        Print total argv count")
+    println("  help         Show this message")

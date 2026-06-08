@@ -157,7 +157,7 @@ fn emit_endpoint(out: &mut String, ep: &Endpoint, base_url: &str) {
             }
         }
         "post" | "put" | "patch" => {
-            let body_arg = ep.body.as_ref().map(|b| b.ty.to_lowercase()).unwrap_or_else(|| "()".into());
+            let body_arg = if ep.body.is_some() { "body" } else { "()" };
             format!("  http_{}({}, {})", method, url_expr, body_arg)
         }
         other => format!("  http_request(\"{}\", {})", other.to_uppercase(), url_expr),

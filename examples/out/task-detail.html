@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>TaskDetail</title>
+  <script src="https://unpkg.com/htmx.org@2" defer></script>
+  <style>
+    .vstack { display: flex; flex-direction: column; gap: 0.5rem; }
+    .hstack { display: flex; flex-direction: row;    gap: 0.5rem; }
+    .certo-view { padding: 1rem; }
+  </style>
+</head>
+<body>
+<div id="task-detail-view" class="certo-view"
+     hx-get="/task-detail" hx-trigger="load" hx-swap="innerHTML">
+    <div class="vstack">
+      <h2>Task Detail</h2>
+      <p>Loading task…</p>
+      <div class="hstack">
+        <button hx-get="/tasks/complete" hx-swap="outerHTML">Complete</button>
+        <button hx-get="/tasks/delete" hx-swap="outerHTML">Delete</button>
+        <a href="/tasks">Back to list</a>
+      </div>
+    </div>
+</div>
+</body>
+</html>

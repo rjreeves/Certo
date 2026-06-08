@@ -1,0 +1,45 @@
+{
+  "module":   "TaskApi",
+  "base_url": "https://api.example.com",
+  "auth":     "bearer",
+  "endpoints": [
+    {
+      "name":        "listTasks",
+      "method":      "GET",
+      "path":        "/tasks",
+      "query_params": [
+        { "name": "page",     "ty": "Int",  "optional": true },
+        { "name": "done",     "ty": "Bool", "optional": true }
+      ],
+      "response": "List<Task>"
+    },
+    {
+      "name":        "getTask",
+      "method":      "GET",
+      "path":        "/tasks/{id}",
+      "path_params": [{ "name": "id", "ty": "Int" }],
+      "response":    "Task"
+    },
+    {
+      "name":     "createTask",
+      "method":   "POST",
+      "path":     "/tasks",
+      "body":     { "ty": "CreateTaskRequest" },
+      "response": "Task"
+    },
+    {
+      "name":        "completeTask",
+      "method":      "PUT",
+      "path":        "/tasks/{id}/complete",
+      "path_params": [{ "name": "id", "ty": "Int" }],
+      "response":    "Task"
+    },
+    {
+      "name":        "deleteTask",
+      "method":      "DELETE",
+      "path":        "/tasks/{id}",
+      "path_params": [{ "name": "id", "ty": "Int" }],
+      "response":    null
+    }
+  ]
+}

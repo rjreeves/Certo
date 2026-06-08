@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Dashboard</title>
+  <script src="https://unpkg.com/htmx.org@2" defer></script>
+  <style>
+    .vstack { display: flex; flex-direction: column; gap: 0.5rem; }
+    .hstack { display: flex; flex-direction: row;    gap: 0.5rem; }
+    .certo-view { padding: 1rem; }
+  </style>
+</head>
+<body>
+<div id="dashboard-view" class="certo-view"
+     hx-get="/dashboard" hx-trigger="load" hx-swap="innerHTML">
+    <div class="vstack">
+      <h2>Task Dashboard</h2>
+      <div class="hstack">
+        <button hx-get="/tasks/new" hx-swap="outerHTML">New Task</button>
+        <button hx-get="/tasks" hx-swap="outerHTML">Refresh</button>
+      </div>
+      <button hx-get="/tasks" hx-swap="outerHTML">View All Tasks</button>
+    </div>
+</div>
+</body>
+</html>
