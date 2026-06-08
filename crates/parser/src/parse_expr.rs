@@ -67,7 +67,7 @@ fn parse_and(cur: &mut Cursor<'_>) -> Result<S<Expr>, ParseError> {
 }
 
 fn parse_not(cur: &mut Cursor<'_>) -> Result<S<Expr>, ParseError> {
-    if let Some((_, span)) = cur.eat(|t| matches!(t, Token::Not)) {
+    if let Some((_, span)) = cur.eat(|t| matches!(t, Token::Not | Token::Bang)) {
         let expr = parse_not(cur)?;
         let full_span = span.to(expr.span);
         return Ok(S::new(Expr::UnOp { op: UnOp::Not, expr: Box::new(expr), span: full_span }, full_span));

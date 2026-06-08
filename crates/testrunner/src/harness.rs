@@ -15,7 +15,7 @@ use certo_ast::{
     module::Module,
     span::{Span, S},
 };
-use certo_codegen::{emit_module, CodegenOptions};
+use certo_codegen::{emit_module, CodegenOptions, RUNTIME_HEADER, c_fn_name};
 use certo_stdlib::full_c_runtime;
 
 /// Information about a single synthesized test entry point.
@@ -94,15 +94,32 @@ pub fn build_harness(module: &Module) -> (String, Vec<TestEntry>) {
         entries.push(TestEntry {
             display_name,
             kind,
-            c_fn_name: format!("__test__{}_{}", idx, safe),
+            c_fn_name: fn_id.clone(),
         });
     }
 
     // Emit the augmented module (all user functions + test wrappers).
-    let opts = CodegenOptions { inline_runtime: true };
-    let mut c_src = full_c_runtime();
+    // Order must match the CLI: system includes → RUNTIME_HEADER → stdlib C → user code.
+    let opts = CodegenOptions { inline_runtime: false, export_public: false };
+    let preamble = "#include <stdint.h>\n#include <stdbool.h>\n#include <stddef.h>\n\
+                    #include <inttypes.h>\n#include <stdarg.h>\n\
+                    #define _CRT_SECURE_NO_WARNINGS\n\n";
+    let mut c_src = preamble.to_string();
+    c_src.push_str(certo_codegen::RUNTIME_HEADER);
     c_src.push('\n');
-    c_src.push_str(&emit_module(&augmented, &opts));
+    c_src.push_str(&full_c_runtime());
+    c_src.push('\n');
+    // Strip the `#include "certo_runtime.h"` stub and duplicate system includes.
+    let module_out = emit_module(&augmented, &opts);
+    for line in module_out.lines() {
+        if !line.contains("certo_runtime.h") &&
+           !line.contains("#include <stdint.h>") &&
+           !line.contains("#include <stdbool.h>") &&
+           !line.contains("#include <stddef.h>") {
+            c_src.push_str(line);
+            c_src.push('\n');
+        }
+    }
 
     // Append a dispatching main().
     c_src.push_str("\n#include <stdio.h>\n#include <string.h>\n#include <stdlib.h>\n\n");
@@ -123,12 +140,11 @@ pub fn build_harness(module: &Module) -> (String, Vec<TestEntry>) {
     c_src.push_str("    const char* target = argv[1];\n");
     for e in &entries {
         let escaped = e.display_name.replace('"', "\\\"");
-        // Forward-declare the test function.
-        c_src.push_str(&format!("    void {}(void);\n", e.c_fn_name));
+        let mangled = c_fn_name(&e.c_fn_name);
+        // Forward-declare the test function (int64_t because Ty::Error emits int64_t).
+        c_src.push_str(&format!("    int64_t {mangled}(void);\n"));
         c_src.push_str(&format!(
-            "    if (strcmp(target, \"{escaped}\") == 0) {{ {fn}(); return 0; }}\n",
-            escaped = escaped,
-            fn     = e.c_fn_name,
+            "    if (strcmp(target, \"{escaped}\") == 0) {{ {mangled}(); return 0; }}\n",
         ));
     }
 
