@@ -303,6 +303,9 @@ fn parse_atom(cur: &mut Cursor<'_>) -> Result<S<Expr>, ParseError> {
         // `parallel { ... }`
         Some(Token::Parallel) => parse_parallel(cur),
 
+        // `for x in iter { body }`
+        Some(Token::For) => parse_for(cur),
+
         _ => {
             let found = cur.peek().map(|t| format!("{t:?}")).unwrap_or_else(|| "end of file".into());
             Err(ParseError { kind: ParseErrorKind::Expected { expected: "expression".into(), found }, span })
@@ -335,7 +338,7 @@ fn parse_literal(cur: &mut Cursor<'_>) -> Result<S<Expr>, ParseError> {
         Token::Decimal(s)       => Lit::Decimal(s.to_string()),
         Token::StringLit(s)     => Lit::String(s.to_string()),
         Token::MultilineString(s) => Lit::String(s.to_string()),
-        Token::FString(s)       => Lit::FString(vec![FStringPart::Literal(s.to_string())]),
+        Token::FString(s)       => Lit::FString(parse_fstring_parts(s, span)?),
         Token::UuidLit(s)       => Lit::Uuid(s.to_string()),
         Token::True             => Lit::Bool(true),
         Token::False            => Lit::Bool(false),
@@ -607,4 +610,72 @@ fn parse_parallel(cur: &mut Cursor<'_>) -> Result<S<Expr>, ParseError> {
     let end = cur.expect(&Token::RBrace)?;
     let span = start.to(end);
     Ok(S::new(Expr::Parallel { tasks, timeout, span }, span))
+}
+
+/// Split an f-string content string into literal and interpolated parts.
+/// e.g. `"Hello, {name}! You have {count} items."` →
+///   [Literal("Hello, "), Interp(name), Literal("! You have "), Interp(count), Literal(" items.")]
+fn parse_fstring_parts(content: &str, base_span: Span) -> Result<Vec<FStringPart>, ParseError> {
+    use crate::cursor::Cursor as C;
+    let mut parts = Vec::new();
+    let mut rest = content;
+    while !rest.is_empty() {
+        if let Some(open) = rest.find('{') {
+            if open > 0 {
+                parts.push(FStringPart::Literal(rest[..open].to_string()));
+            }
+            rest = &rest[open + 1..];
+            // Find matching `}`, respecting nested braces
+            let mut depth = 1usize;
+            let mut end = 0;
+            for (i, c) in rest.char_indices() {
+                match c {
+                    '{' => depth += 1,
+                    '}' => {
+                        depth -= 1;
+                        if depth == 0 { end = i; break; }
+                    }
+                    _ => {}
+                }
+            }
+            if depth != 0 {
+                return Err(ParseError {
+                    kind: ParseErrorKind::Custom("unclosed `{` in f-string".into()),
+                    span: base_span,
+                });
+            }
+            let inner = &rest[..end];
+            rest = &rest[end + 1..];
+            // Re-lex and parse the embedded expression
+            let tokens = certo_lexer::lex(inner).map_err(|_| ParseError {
+                kind: ParseErrorKind::Custom(format!("invalid token in f-string expression `{{{inner}}}`")),
+                span: base_span,
+            })?;
+            let mut sub = C::new(tokens, inner);
+            let expr = parse_expr(&mut sub)?;
+            parts.push(FStringPart::Interpolated(Box::new(expr)));
+        } else {
+            parts.push(FStringPart::Literal(rest.to_string()));
+            break;
+        }
+    }
+    if parts.is_empty() {
+        parts.push(FStringPart::Literal(String::new()));
+    }
+    Ok(parts)
+}
+
+fn parse_for(cur: &mut Cursor<'_>) -> Result<S<Expr>, ParseError> {
+    let start = cur.expect(&Token::For)?;
+    let (binding, binding_span) = cur.expect_ident()?;
+    cur.expect(&Token::In)?;
+    let iter = parse_expr(cur)?;
+    let body = parse_block(cur)?;
+    let span = start.to(body.span);
+    Ok(S::new(Expr::For {
+        binding: S::new(binding, binding_span),
+        iter:    Box::new(iter),
+        body:    Box::new(body),
+        span,
+    }, span))
 }

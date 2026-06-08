@@ -179,6 +179,14 @@ pub enum Expr {
         ty:   Box<S<TypeExpr>>,
         span: Span,
     },
+
+    /// `for x in iter { body }` — iteration over a list
+    For {
+        binding: S<String>,
+        iter:    Box<S<Expr>>,
+        body:    Box<S<Expr>>,
+        span:    Span,
+    },
 }
 
 // ------------------------------------------------------------------ //
