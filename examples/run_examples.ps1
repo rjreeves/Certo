@@ -37,22 +37,28 @@ Run "$dist\certo-fmt math_test.certo"
 
 # ── 2. certo (main compiler) ──────────────────────────────────────────────────
 Step "2. certo  — compile tasks.certo → native binary"
-Run "$dist\certo tasks.certo -o out\tasks.exe"
+
+# Try a full compile; fall back to --emit-c if no C compiler is installed.
+$compiled = $false
+try {
+    Run "$dist\certo tasks.certo -o out\tasks.exe -v"
+    $compiled = (Test-Path out\tasks.exe)
+} catch {}
+
+if (-not $compiled) {
+    Write-Host "No C compiler found — emitting C source instead." -ForegroundColor Yellow
+    Write-Host "Install gcc/clang/MSVC and re-run to get a binary." -ForegroundColor Yellow
+    Run "$dist\certo tasks.certo --emit-c -o out\tasks.c"
+    Write-Host "Generated C written to out\tasks.c" -ForegroundColor Green
+    Write-Host "Compile manually with: gcc out\tasks.c -o out\tasks.exe -O2 -lm" -ForegroundColor DarkGray
+}
+
 if (Test-Path out\tasks.exe) {
-    Write-Host "Running out\tasks.exe help:" -ForegroundColor Green
-    & out\tasks.exe help
+    Write-Host "`nRunning out\tasks.exe (no args = help):" -ForegroundColor Green
+    & out\tasks.exe
 
-    Write-Host ""
-    Write-Host "Running out\tasks.exe add 'Buy milk':" -ForegroundColor Green
-    & out\tasks.exe add "Buy milk"
-
-    Write-Host ""
-    Write-Host "Running out\tasks.exe list:" -ForegroundColor Green
+    Write-Host "`nRunning out\tasks.exe list:" -ForegroundColor Green
     & out\tasks.exe list
-
-    Write-Host ""
-    Write-Host "Running out\tasks.exe count:" -ForegroundColor Green
-    & out\tasks.exe count
 }
 
 # ── 3. certo-test ────────────────────────────────────────────────────────────

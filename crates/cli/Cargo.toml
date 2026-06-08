@@ -11,3 +11,6 @@ path = "src/main.rs"
 certo-ast     = { path = "../ast" }
 certo-parser  = { path = "../parser" }
 certo-migrate = { path = "../migrate" }
+certo-codegen = { path = "../codegen" }
+certo-stdlib  = { path = "../stdlib" }
+tempfile      = "3"

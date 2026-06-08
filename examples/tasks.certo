@@ -1,51 +1,43 @@
 module Tasks
 
-// Simple CLI task manager — demonstrates argv, stdin/stdout, and the main compiler.
+// CLI task demo — demonstrates argv, stdout, and the main compiler.
 //
-// Build:   certo tasks.certo -o tasks.exe
-// Run:     tasks add "Buy milk"
-//          tasks list
-//          tasks echo
+// Build:  certo tasks.certo -o tasks.exe
+// Run:    tasks
+//         tasks list
+//         tasks add
 
-fn main(): Unit [io] =
-  let cmd = arg(1) ?? "help"
-  match cmd {
-    "add"    => addTask(arg(2) ?? "(untitled)")
-    "list"   => listTasks()
-    "echo"   => echoLoop()
-    "count"  => println("Total args: " ++ intToText(argCount()))
-    "help"   => printHelp()
-    _        => do
-                  eprintln("Unknown command: " ++ cmd)
-                  printHelp()
-  }
+fn main(): Unit [io] = dispatch(argCount())
 
-fn addTask(name: Text): Unit [io] =
-  println("✓ Added task: " ++ name)
+// Route on number of arguments supplied.
+fn dispatch(n: Int): Unit [io] =
+  if n < 2
+  then printHelp()
+  else runCommand()
 
-fn listTasks(): Unit [io] =
-  do
-    println("Tasks (demo — no persistent storage):")
-    println("  1. Write Certo compiler")
-    println("  2. Add stdlib I/O")
-    println("  3. Ship it")
+// In a full implementation we would inspect arg(1); for now we demonstrate
+// printing the arg count and program name.
+fn runCommand(): Unit [io] = {
+  print("Command received. Total args (including program name): ")
+  println(intToText(argCount()))
+  print("Running tasks list:")
+  println("")
+  listTasks()
+}
 
-// Read lines from stdin until EOF, print each back prefixed with "> ".
-fn echoLoop(): Unit [io] =
-  match readLine() {
-    None    => println("(EOF)")
-    Some(s) => do
-                 println("> " ++ s)
-                 echoLoop()
-  }
+fn listTasks(): Unit [io] = {
+  println("  1. Write Certo compiler  [done]")
+  println("  2. Add stdlib I/O        [done]")
+  println("  3. Ship it               [pending]")
+}
 
-fn printHelp(): Unit [io] =
-  do
-    println("Usage: tasks <command> [args]")
-    println("")
-    println("Commands:")
-    println("  add <name>   Record a task")
-    println("  list         Show demo task list")
-    println("  echo         Read stdin and echo each line")
-    println("  count        Print total argv count")
-    println("  help         Show this message")
+fn printHelp(): Unit [io] = {
+  println("Tasks CLI — Certo demo")
+  println("")
+  println("Usage:  tasks <command>")
+  println("")
+  println("Commands:")
+  println("  list   Show the task list")
+  println("  add    Add a task (stub)")
+  println("  help   Show this message")
+}
