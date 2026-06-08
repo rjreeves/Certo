@@ -11,6 +11,8 @@ members = [
     "crates/hir",
     "crates/mir",
     "crates/codegen",
+    "crates/migrate",
+    "crates/cli",
 ]
 resolver = "2"
 

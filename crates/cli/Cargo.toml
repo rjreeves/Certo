@@ -1,0 +1,13 @@
+[package]
+name    = "certo"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "certo"
+path = "src/main.rs"
+
+[dependencies]
+certo-ast     = { path = "../ast" }
+certo-parser  = { path = "../parser" }
+certo-migrate = { path = "../migrate" }
