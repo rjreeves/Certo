@@ -90,6 +90,17 @@ fn cmd_build(args: &[String]) {
         process::exit(1);
     });
 
+    // ── Check for entry point ─────────────────────────────────────────
+    let has_main = module.decls.iter().any(|d| {
+        matches!(&d.node, certo_ast::decl::Decl::Fn(f) if f.name.node == "main")
+    });
+    if !has_main && !emit_c {
+        eprintln!("error: module has no `main` function");
+        eprintln!("       use --emit-c to compile as a library, or add:");
+        eprintln!("       fn main(): Unit [io] = {{ ... }}");
+        process::exit(1);
+    }
+
     // ── Emit C ────────────────────────────────────────────────────────
     // Order: system includes → runtime typedefs → stdlib impls → user code.
     let preamble = "#include <stdint.h>\n#include <stdbool.h>\n#include <stddef.h>\n\
