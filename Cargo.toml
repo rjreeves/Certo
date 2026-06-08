@@ -13,6 +13,7 @@ members = [
     "crates/codegen",
     "crates/migrate",
     "crates/cli",
+    "crates/lsp",
 ]
 resolver = "2"
 
