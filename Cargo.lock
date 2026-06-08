@@ -97,6 +97,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "certo-llvm"
+version = "0.1.0"
+dependencies = [
+ "certo-ast",
+ "certo-hir",
+ "certo-mir",
+ "certo-parser",
+ "certo-typeck",
+]
+
+[[package]]
 name = "certo-lsp"
 version = "0.1.0"
 dependencies = [

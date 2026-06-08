@@ -1,0 +1,16 @@
+[package]
+name        = "certo-llvm"
+version     = "0.1.0"
+edition     = "2021"
+description = "LLVM IR backend for the Certo compiler"
+
+[[bin]]
+name = "certo-llvm"
+path = "src/main.rs"
+
+[dependencies]
+certo-ast     = { path = "../ast" }
+certo-parser  = { path = "../parser" }
+certo-typeck  = { path = "../typeck" }
+certo-hir     = { path = "../hir" }
+certo-mir     = { path = "../mir" }

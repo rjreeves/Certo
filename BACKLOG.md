@@ -19,13 +19,13 @@ Tasks are listed in implementation order. Completed tasks have the crate they li
 | 11 | Test runner (`certo-test`) | `crates/testrunner` |
 | 12 | Migration tool | `crates/migrate`, `crates/cli` |
 | 14 | LSP server | `crates/lsp` |
+| 13 | LLVM backend (`certo-llvm`) | `crates/llvm` |
 | 15 | Formatter (`certo fmt`) | `crates/fmt` |
 
 ## Pending
 
 | # | Task | Blocked by | Notes |
 |---|------|------------|-------|
-| 13 | LLVM backend | #9 | Optional high-performance target via LLVM IR emission |
 | 16 | UI compiler | #9 | Schema-driven view/form generation, Htmx output |
 | 17 | C FFI and REST client generation | #9 | `extern` declarations → C headers; REST schema → typed clients |
 | 18 | WASM target | #13 | Compile to WebAssembly via LLVM wasm32 target |
@@ -37,4 +37,9 @@ AST → Parser → Resolve → Typeck → HIR → MIR → Codegen (C) → gcc/cl
  1       2        3         4       8     8         9
 ```
 
-Tasks #9–#15 are now complete. The core pipeline (parse → resolve → typeck → HIR → MIR → C → binary) is fully operational, with stdlib, test runner, migration tool, LSP, and formatter all in place.
+Tasks #1–#15 are complete. The core pipeline (parse → resolve →
+typeck → HIR → MIR → C → binary) is fully operational. Stdlib, test runner,
+migration tool, LSP server, and formatter are all in place.
+
+Remaining work is the advanced backend / tooling tier: LLVM (13), UI compiler
+(16), C FFI / REST codegen (17), and WASM (18).

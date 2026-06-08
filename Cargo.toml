@@ -17,6 +17,7 @@ members = [
     "crates/fmt",
     "crates/stdlib",
     "crates/testrunner",
+    "crates/llvm",
 ]
 resolver = "2"
 
