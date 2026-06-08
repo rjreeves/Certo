@@ -149,6 +149,14 @@ pub enum HirExprKind {
 
     /// `unsafe { body }`.
     Unsafe(Box<HirExpr>),
+
+    /// `for binding in iter { body }` — desugars to a runtime loop in MIR.
+    For {
+        binding:      LocalId,
+        binding_name: String,
+        iter:         Box<HirExpr>,
+        body:         Box<HirExpr>,
+    },
 }
 
 // ------------------------------------------------------------------ //

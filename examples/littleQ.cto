@@ -1,0 +1,13 @@
+module littleQ
+
+fn main(): Unit = {
+    db.connect("host=localhost dbname=fireworks user=fireworks password=bagels123")
+
+    val sql = "SELECT cust_acctname, cust_name1, cust_name2 FROM fireworks.customer LIMIT 5"
+
+    val results = db.query(sql)
+
+    for row in results {
+        println(f"Account Name: {row.cust_acctname}, Name1: {row.cust_name1}, Name2: {row.cust_name2}")
+    }
+}
