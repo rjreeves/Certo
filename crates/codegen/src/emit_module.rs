@@ -210,6 +210,15 @@ __attribute__((noreturn)) void certo_panic(certo_text_t msg);
 #define certo_unreachable() certo_panic("unreachable")
 #define certo_todo()        certo_panic("not yet implemented")
 
+/* stdin */
+certo_text_t certo_read_line(void);
+certo_text_t certo_read_all(void);
+
+/* argv — call certo_main_init(argc, argv) at the top of main() */
+void    certo_main_init(int argc, const char** argv);
+int64_t certo_arg_count(void);
+certo_text_t certo_arg(int64_t i);
+
 /* DB transaction stub */
 void* __db_transaction(certo_fn_t thunk);
 

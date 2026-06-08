@@ -149,6 +149,77 @@ __attribute__((noreturn)) void certo_panic(certo_text_t msg) {
 void* certo_coalesce(void* opt, void* fallback) {
     return opt ? opt : fallback;
 }
+
+/* ---- stdin ---- */
+
+/* Read one line from stdin (strips trailing newline).
+   Returns a heap-allocated string, or NULL on EOF / error. */
+certo_text_t certo_read_line(void) {
+    char*  buf  = NULL;
+    size_t cap  = 0;
+    size_t len  = 0;
+    int    c;
+
+    while ((c = fgetc(stdin)) != EOF) {
+        if (len + 2 > cap) {
+            cap = cap ? cap * 2 : 128;
+            char* nb = (char*)realloc(buf, cap);
+            if (!nb) { free(buf); certo_panic("out of memory"); }
+            buf = nb;
+        }
+        if (c == '\n') break;
+        buf[len++] = (char)c;
+    }
+
+    if (len == 0 && c == EOF) { free(buf); return NULL; }
+    if (!buf) { buf = (char*)malloc(1); if (!buf) certo_panic("out of memory"); }
+    buf[len] = '\0';
+    return buf;
+}
+
+/* Read all of stdin into a single heap-allocated string. */
+certo_text_t certo_read_all(void) {
+    char*  buf = NULL;
+    size_t cap = 0;
+    size_t len = 0;
+    int    c;
+
+    while ((c = fgetc(stdin)) != EOF) {
+        if (len + 2 > cap) {
+            cap = cap ? cap * 2 : 4096;
+            char* nb = (char*)realloc(buf, cap);
+            if (!nb) { free(buf); certo_panic("out of memory"); }
+            buf = nb;
+        }
+        buf[len++] = (char)c;
+    }
+
+    if (!buf) { buf = (char*)malloc(1); if (!buf) certo_panic("out of memory"); }
+    buf[len] = '\0';
+    return buf;
+}
+
+/* ---- argv ---- */
+
+/* These globals are set by the certo_main_init() bootstrap call that the
+   compiled main() must make before calling user code. */
+static int          __certo_argc = 0;
+static const char** __certo_argv = NULL;
+
+void certo_main_init(int argc, const char** argv) {
+    __certo_argc = argc;
+    __certo_argv = argv;
+}
+
+int64_t certo_arg_count(void) {
+    return (int64_t)__certo_argc;
+}
+
+/* Returns NULL (None) if index is out of range. */
+certo_text_t certo_arg(int64_t i) {
+    if (i < 0 || i >= (int64_t)__certo_argc) return NULL;
+    return __certo_argv[i];
+}
 "#;
 
 /// Certo source declaration of `Stdlib.Core`.
@@ -213,4 +284,18 @@ fn range(start: Int, end: Int): List<Int>
 
 /// Inclusive range [start, end].
 fn rangeInclusive(start: Int, end: Int): List<Int>
+
+/// Read one line from stdin, stripping the trailing newline.
+/// Returns None on EOF.
+fn readLine(): Text? [io]
+
+/// Read all remaining stdin into a single Text value.
+fn readAll(): Text [io]
+
+/// Number of command-line arguments (including the program name at index 0).
+fn argCount(): Int
+
+/// Return the command-line argument at index `i`, or None if out of range.
+/// Index 0 is the program name; user-supplied args start at index 1.
+fn arg(i: Int): Text?
 "#;
