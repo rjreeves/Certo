@@ -20,20 +20,30 @@ pub fn compile_c(c_src: &str, out_path: &Path) -> Result<(), TestRunnerError> {
         .map_err(|e| TestRunnerError::Io(e.to_string()))?;
 
     let compiler = find_compiler();
-    let status = Command::new(&compiler)
-        .args([
-            "-x", "c",
-            "-std=c11",
-            "-O0",
-            "-o", out_path.to_str().unwrap_or("certo_test_bin"),
-            src_file.path().to_str().unwrap_or(""),
-            "-lm",          // math library (needed for stdlib)
-        ])
-        .status()
-        .map_err(|e| TestRunnerError::CompilerNotFound {
-            compiler: compiler.clone(),
-            detail: e.to_string(),
-        })?;
+    let mut cmd = Command::new(&compiler);
+    cmd.args([
+        "-x", "c",
+        "-std=c11",
+        "-O0",
+        "-o", out_path.to_str().unwrap_or("certo_test_bin"),
+        src_file.path().to_str().unwrap_or(""),
+    ]);
+    cmd.args([
+        "-Wno-int-to-pointer-cast",
+        "-Wno-pointer-to-int-cast",
+        "-Wno-int-conversion",
+        "-Wno-implicit-function-declaration",
+        "-Wno-deprecated-declarations",
+    ]);
+    if cfg!(windows) {
+        cmd.arg("-Xlinker").arg("/subsystem:console");
+    } else {
+        cmd.arg("-lm");
+    }
+    let status = cmd.status().map_err(|e| TestRunnerError::CompilerNotFound {
+        compiler: compiler.clone(),
+        detail: e.to_string(),
+    })?;
 
     if status.success() {
         Ok(())
@@ -44,19 +54,30 @@ pub fn compile_c(c_src: &str, out_path: &Path) -> Result<(), TestRunnerError> {
     }
 }
 
-/// Find an available C compiler: prefer `cc`, fall back to `gcc`, then `clang`.
+/// Find an available C compiler.
 fn find_compiler() -> String {
-    for candidate in &["cc", "gcc", "clang"] {
+    for candidate in &["clang", "gcc", "cc"] {
         if Command::new(candidate)
             .arg("--version")
-            .output()
-            .map(|o| o.status.success())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
             .unwrap_or(false)
         {
             return (*candidate).to_string();
         }
     }
-    "cc".to_string() // let the OS give the real error
+    // Fall back to common Windows install paths.
+    for path in &[
+        r"C:\Program Files\LLVM\bin\clang.exe",
+        r"C:\Program Files (x86)\LLVM\bin\clang.exe",
+    ] {
+        if std::path::Path::new(path).exists() {
+            return path.to_string();
+        }
+    }
+    "cc".to_string()
 }
 
 /// Return a suitable path for the test binary given the source file stem.

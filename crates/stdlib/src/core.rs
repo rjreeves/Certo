@@ -97,8 +97,9 @@ void* certo_text_parse_float(certo_text_t s) {
 
 /* ---- assert ---- */
 
-void certo_assert(bool cond, certo_text_t msg) {
+int64_t certo_assert(bool cond, certo_text_t msg) {
     if (!cond) certo_panic(msg ? msg : "assertion failed");
+    return 0;
 }
 
 /* ---- arithmetic ---- */
