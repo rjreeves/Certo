@@ -1,0 +1,14 @@
+[package]
+name    = "certo-ffi"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "certo-ffi"
+path = "src/main.rs"
+
+[dependencies]
+certo-ast    = { path = "../ast" }
+certo-parser = { path = "../parser" }
+serde        = { version = "1", features = ["derive"] }
+serde_json   = "1"

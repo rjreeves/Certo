@@ -22,13 +22,13 @@ Tasks are listed in implementation order. Completed tasks have the crate they li
 | 13 | LLVM backend (`certo-llvm`) | `crates/llvm` |
 | 15 | Formatter (`certo fmt`) | `crates/fmt` |
 | 18 | WASM target (`certo-wasm`) | `crates/wasm` |
+| 17 | C FFI and REST client generation | `crates/ffi` |
 
 ## Pending
 
 | # | Task | Blocked by | Notes |
 |---|------|------------|-------|
 | 16 | UI compiler | #9 | Schema-driven view/form generation, Htmx output |
-| 17 | C FFI and REST client generation | #9 | `extern` declarations → C headers; REST schema → typed clients |
 
 ## Critical path to a running program
 
@@ -37,9 +37,9 @@ AST → Parser → Resolve → Typeck → HIR → MIR → Codegen (C) → gcc/cl
  1       2        3         4       8     8         9
 ```
 
-Tasks #1–#15 and #18 are complete. The core pipeline (parse → resolve →
+Tasks #1–#15, #17, and #18 are complete. The core pipeline (parse → resolve →
 typeck → HIR → MIR → C → binary) is fully operational. Stdlib, test runner,
-migration tool, LSP server, and formatter are all in place.
+migration tool, LSP server, formatter, LLVM backend, WASM target, and C FFI /
+REST codegen are all in place.
 
-Remaining work is the advanced backend / tooling tier: LLVM (13), UI compiler
-(16), C FFI / REST codegen (17), and WASM (18).
+Remaining work: UI compiler (#16) — schema-driven view/form → Htmx output.

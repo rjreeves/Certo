@@ -19,6 +19,7 @@ members = [
     "crates/testrunner",
     "crates/llvm",
     "crates/wasm",
+    "crates/ffi",
 ]
 resolver = "2"
 
