@@ -4,8 +4,21 @@ use certo_hir::{BinOp, UnOp};
 use certo_typeck::Ty;
 use crate::ty_to_c::{ty_to_c, ret_ty_to_c};
 
+/// Emit a single MIR function as a C function definition with an optional prefix
+/// (e.g. `"CERTO_EXPORT "` for shared library builds).
+pub fn emit_fn_with_prefix(f: &MirFn, prefix: &str, out: &mut String) {
+    // Temporarily intercept the signature line to inject the prefix.
+    let mut body = String::new();
+    emit_fn_inner(f, prefix, &mut body);
+    out.push_str(&body);
+}
+
 /// Emit a single MIR function as a C function definition.
 pub fn emit_fn(f: &MirFn, out: &mut String) {
+    emit_fn_inner(f, "", out);
+}
+
+fn emit_fn_inner(f: &MirFn, prefix: &str, out: &mut String) {
     // Determine return type from the _ret local (index 0).
     let ret_ty = f.locals.first().map(|l| &l.ty).unwrap_or(&Ty::Unit);
     let ret_c  = ret_ty_to_c(ret_ty);
@@ -19,7 +32,7 @@ pub fn emit_fn(f: &MirFn, out: &mut String) {
         .collect();
 
     let param_str = if params.is_empty() { "void".to_string() } else { params.join(", ") };
-    writeln!(out, "{} {}({}) {{", ret_c, c_fn_name(&f.name), param_str).unwrap();
+    writeln!(out, "{}{} {}({}) {{", prefix, ret_c, c_fn_name(&f.name), param_str).unwrap();
 
     // Declare all temporaries (locals starting with `_`).
     for local in &f.locals {
