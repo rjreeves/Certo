@@ -263,17 +263,19 @@ fn cmd_build(args: &[String]) {
 
     // Link libpq when the program uses Stdlib.Db
     if uses_db {
-        cmd.arg("-lpq");
-        // On Windows, PostgreSQL installs libpq in a non-standard location.
-        // If PG_LIB is set (e.g. C:\Program Files\PostgreSQL\16\lib), add it.
-        if cfg!(windows) {
-            if let Ok(pg_lib) = std::env::var("PG_LIB") {
-                cmd.arg(format!("-L{}", pg_lib));
-            }
-            if let Ok(pg_inc) = std::env::var("PG_INCLUDE") {
-                cmd.arg(format!("-I{}", pg_inc));
-            }
+        // Resolve PostgreSQL include/lib paths:
+        // 1. Honour PG_LIB / PG_INCLUDE env vars if set.
+        // 2. On Windows, probe common PostgreSQL install locations.
+        // 3. Otherwise assume the system package manager put them on the path.
+        let (pg_inc, pg_lib) = resolve_pg_paths();
+
+        if let Some(inc) = &pg_inc {
+            cmd.arg(format!("-I{}", inc));
         }
+        if let Some(lib) = &pg_lib {
+            cmd.arg(format!("-L{}", lib));
+        }
+        cmd.arg("-lpq");
     }
 
     if verbose {
@@ -323,6 +325,67 @@ fn probe_cc(cmd: &str) -> bool {
         .status()
         .map(|s| s.success())
         .unwrap_or(false)
+}
+
+/// Locate PostgreSQL include and lib directories.
+/// Returns (include_dir, lib_dir), either of which may be None if not needed
+/// (i.e. already on the system search path).
+fn resolve_pg_paths() -> (Option<String>, Option<String>) {
+    // Explicit env vars always win.
+    let env_inc = std::env::var("PG_INCLUDE").ok();
+    let env_lib = std::env::var("PG_LIB").ok();
+    if env_inc.is_some() || env_lib.is_some() {
+        return (env_inc, env_lib);
+    }
+
+    // On Windows, probe common PostgreSQL install locations.
+    if cfg!(windows) {
+        // Try pg_config first (works if PostgreSQL\bin is on PATH)
+        if let Ok(out) = std::process::Command::new("pg_config")
+            .args(["--includedir", "--libdir"])
+            .output()
+        {
+            if out.status.success() {
+                let lines: Vec<&str> = std::str::from_utf8(&out.stdout)
+                    .unwrap_or("")
+                    .lines()
+                    .collect();
+                let inc = lines.first().map(|s| s.trim().to_string());
+                let lib = lines.get(1).map(|s| s.trim().to_string());
+                return (inc, lib);
+            }
+        }
+
+        // Probe common install directories for versions 14-17
+        for ver in (14u32..=17).rev() {
+            let base = format!(r"C:\Program Files\PostgreSQL\{}", ver);
+            let inc = format!(r"{}\include", base);
+            let lib = format!(r"{}\lib", base);
+            if std::path::Path::new(&inc).exists() {
+                return (Some(inc), Some(lib));
+            }
+        }
+    }
+
+    // On Unix pg_config usually works without probing.
+    if !cfg!(windows) {
+        if let Ok(out) = std::process::Command::new("pg_config")
+            .args(["--includedir", "--libdir"])
+            .output()
+        {
+            if out.status.success() {
+                let lines: Vec<&str> = std::str::from_utf8(&out.stdout)
+                    .unwrap_or("")
+                    .lines()
+                    .collect();
+                let inc = lines.first().map(|s| s.trim().to_string());
+                let lib = lines.get(1).map(|s| s.trim().to_string());
+                return (inc, lib);
+            }
+        }
+    }
+
+    (None, None)
 }
 
 fn print_top_help() {
