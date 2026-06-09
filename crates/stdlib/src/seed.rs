@@ -43,6 +43,8 @@ pub fn seed_stdlib(env: &mut TypeEnv, counter: &mut u32) {
     def!("sqrt",    fn1(Ty::Float, Ty::Float));
     def!("range",   fn2(Ty::Int, Ty::Int, Ty::List(Box::new(Ty::Int))));
     def!("rangeInclusive", fn2(Ty::Int, Ty::Int, Ty::List(Box::new(Ty::Int))));
+    def!("shellExec", fn1(Ty::Text, Ty::Int));
+    def!("runPs1",    fn2(Ty::Text, Ty::Text, Ty::Int));
 
     // ---------------------------------------------------------------- //
     // Collections — List<T>

@@ -22,6 +22,7 @@ members = [
     "crates/wasm",
     "crates/ffi",
     "crates/ui",
+    "crates/xeq",
 ]
 resolver = "2"
 
