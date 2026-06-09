@@ -144,13 +144,19 @@ fn cmd_build(args: &[String]) {
         process::exit(1);
     }
 
+    // ── Detect stdlib imports (db, etc.) ─────────────────────────────
+    let uses_db = module.imports.iter().any(|imp| {
+        let segs: Vec<&str> = imp.path.segments.iter().map(|s| s.node.as_str()).collect();
+        segs == ["Stdlib", "Db"] || segs == ["Db"]
+    });
+
     // ── Emit C ────────────────────────────────────────────────────────
     // Order: system includes → runtime typedefs → stdlib impls → user code.
     let preamble = "#include <stdint.h>\n#include <stdbool.h>\n#include <stddef.h>\n\
                     #include <inttypes.h>\n#include <stdarg.h>\n\
                     #define _CRT_SECURE_NO_WARNINGS\n";
     let runtime_header = certo_codegen::RUNTIME_HEADER;
-    let stdlib_c  = certo_stdlib::full_c_runtime();
+    let stdlib_c  = certo_stdlib::full_c_runtime_with_db(uses_db);
     let module_c  = certo_codegen::emit_module(
         &module,
         &certo_codegen::CodegenOptions {
@@ -252,6 +258,21 @@ fn cmd_build(args: &[String]) {
         } else {
             // lld-link requires an explicit subsystem for console apps
             cmd.arg("-Xlinker").arg("/subsystem:console");
+        }
+    }
+
+    // Link libpq when the program uses Stdlib.Db
+    if uses_db {
+        cmd.arg("-lpq");
+        // On Windows, PostgreSQL installs libpq in a non-standard location.
+        // If PG_LIB is set (e.g. C:\Program Files\PostgreSQL\16\lib), add it.
+        if cfg!(windows) {
+            if let Ok(pg_lib) = std::env::var("PG_LIB") {
+                cmd.arg(format!("-L{}", pg_lib));
+            }
+            if let Ok(pg_inc) = std::env::var("PG_INCLUDE") {
+                cmd.arg(format!("-I{}", pg_inc));
+            }
         }
     }
 
