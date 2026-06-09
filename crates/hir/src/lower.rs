@@ -224,8 +224,33 @@ fn lower_expr(expr: &S<Expr>, cx: &mut Cx) -> HirExpr {
         }
 
         Expr::Field { expr, field, .. } => {
-            let base = lower_expr(expr, cx);
-            HirExpr { kind: HirExprKind::Field { base: Box::new(base), field: field.node.clone() }, ty: Ty::Error, span }
+            // If the base is a module/type path (starts with an uppercase letter and
+            // resolves to no local), treat `Module.fn` as a global function reference
+            // rather than a struct field access.
+            let is_module_path = match &expr.node {
+                Expr::Path { path, .. } => {
+                    let first = path.segments.first().map(|s| s.node.as_str()).unwrap_or("");
+                    let is_upper = first.chars().next().map(|c| c.is_uppercase()).unwrap_or(false);
+                    let last = path.segments.last().map(|s| s.node.as_str()).unwrap_or("");
+                    is_upper && cx.lookup_local(last).is_none()
+                }
+                _ => false,
+            };
+            if is_module_path {
+                // Build a dotted name: "Text.indexOf"
+                let base_name = match &expr.node {
+                    Expr::Path { path, .. } => path.segments.iter()
+                        .map(|s| s.node.as_str())
+                        .collect::<Vec<_>>()
+                        .join("."),
+                    _ => unreachable!(),
+                };
+                let global_name = format!("{}.{}", base_name, field.node);
+                HirExpr { kind: HirExprKind::Global(global_name), ty: Ty::Error, span }
+            } else {
+                let base = lower_expr(expr, cx);
+                HirExpr { kind: HirExprKind::Field { base: Box::new(base), field: field.node.clone() }, ty: Ty::Error, span }
+            }
         }
 
         // SafeField `e?.f` → `match e { Some(v) => Some(v.f), None => None }`
