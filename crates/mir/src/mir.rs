@@ -13,11 +13,13 @@ pub type MirLocal = u32;
 
 #[derive(Debug, Clone)]
 pub struct MirFn {
-    pub name:    String,
-    /// Declared locals (params first, then temporaries).
-    pub locals:  Vec<MirLocalDecl>,
+    pub name:        String,
+    /// Number of actual function parameters (locals 1..=param_count after the ret slot).
+    pub param_count: usize,
+    /// Declared locals (ret slot at 0, params 1..=param_count, then temporaries).
+    pub locals:      Vec<MirLocalDecl>,
     /// Basic blocks; block 0 is the entry.
-    pub blocks:  Vec<BasicBlock>,
+    pub blocks:      Vec<BasicBlock>,
 }
 
 #[derive(Debug, Clone)]

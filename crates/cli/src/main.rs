@@ -272,10 +272,21 @@ fn cmd_build(args: &[String]) {
         if let Some(inc) = &pg_inc {
             cmd.arg(format!("-I{}", inc));
         }
-        if let Some(lib) = &pg_lib {
-            cmd.arg(format!("-L{}", lib));
+        if cfg!(windows) {
+            // On Windows, PostgreSQL ships libpq.lib (not pq.lib).
+            // Pass the full path directly so lld-link finds it.
+            if let Some(lib_dir) = &pg_lib {
+                let libpq = format!("{}/libpq.lib", lib_dir);
+                cmd.arg(&libpq);
+            } else {
+                cmd.arg("libpq.lib");
+            }
+        } else {
+            if let Some(lib) = &pg_lib {
+                cmd.arg(format!("-L{}", lib));
+            }
+            cmd.arg("-lpq");
         }
-        cmd.arg("-lpq");
     }
 
     if verbose {

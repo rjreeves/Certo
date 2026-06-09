@@ -23,29 +23,21 @@ fn emit_fn_inner(f: &MirFn, prefix: &str, out: &mut String) {
     let ret_ty = f.locals.first().map(|l| &l.ty).unwrap_or(&Ty::Unit);
     let ret_c  = ret_ty_to_c(ret_ty);
 
-    // Params are locals 1..params.len()+1 (the first local is the return slot).
-    // We reconstruct params by inspecting the HIR fn — here we just emit all
-    // non-ret locals that appear to be params (name not starting with `_`).
-    let params: Vec<String> = f.locals.iter().skip(1)
-        .filter(|l| !l.name.starts_with('_'))
+    // Params are locals 1..=param_count (the first local is the return slot).
+    let params: Vec<String> = f.locals.iter().skip(1).take(f.param_count)
         .map(|l| format!("{} {}", ty_to_c(&l.ty), local_name(l.id)))
         .collect();
 
     let param_str = if params.is_empty() { "void".to_string() } else { params.join(", ") };
     writeln!(out, "{}{} {}({}) {{", prefix, ret_c, c_fn_name(&f.name), param_str).unwrap();
 
-    // Declare all temporaries (locals starting with `_`).
+    // Declare return slot and all non-param locals as temporaries.
     for local in &f.locals {
-        if local.name.starts_with('_') || local.id == 0 {
-            // ret slot declared as the return value type
-            if local.id == 0 {
-                if !matches!(ret_ty, Ty::Unit) {
-                    writeln!(out, "    {} {};", ty_to_c(&local.ty), local_name(local.id)).unwrap();
-                }
-            } else {
-                writeln!(out, "    {} {};", ty_to_c(&local.ty), local_name(local.id)).unwrap();
-            }
-        }
+        let is_ret   = local.id == 0;
+        let is_param = !is_ret && (local.id as usize) <= f.param_count;
+        if is_param { continue; }
+        if is_ret && matches!(ret_ty, Ty::Unit) { continue; }
+        writeln!(out, "    {} {};", ty_to_c(&local.ty), local_name(local.id)).unwrap();
     }
 
     // Emit each basic block as a labeled section.
@@ -70,7 +62,13 @@ fn emit_stmt(stmt: &MirStmt, out: &mut String) {
             writeln!(out, "    {} = {};", lhs, emit_operand(op)).unwrap();
         }
         Rvalue::BinOp { op, lhs: l, rhs: r } => {
-            writeln!(out, "    {} = {};", lhs, emit_binop(op, l, r)).unwrap();
+            let expr = emit_binop(op, l, r);
+            // NullCoalesce returns void* — cast back to the destination's type.
+            if matches!(op, BinOp::NullCoalesce) {
+                writeln!(out, "    {} = (__typeof__({})){};", lhs, lhs, expr).unwrap();
+            } else {
+                writeln!(out, "    {} = {};", lhs, expr).unwrap();
+            }
         }
         Rvalue::UnOp { op, arg } => {
             let sym = match op { UnOp::Neg => "-", UnOp::Not => "!" };
@@ -182,7 +180,7 @@ fn emit_binop(op: &BinOp, l: &Operand, r: &Operand) -> String {
         BinOp::GtEq => format!("({} >= {})", lhs, rhs),
         BinOp::And  => format!("({} && {})", lhs, rhs),
         BinOp::Or   => format!("({} || {})", lhs, rhs),
-        BinOp::NullCoalesce => format!("certo_coalesce({}, {})", lhs, rhs),
+        BinOp::NullCoalesce => format!("certo_coalesce((void*)({lhs}), (void*)({rhs}))"),
         BinOp::Concat       => format!("certo_text_concat({}, {})", lhs, rhs),
     }
 }
