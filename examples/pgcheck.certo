@@ -7,20 +7,25 @@ import Stdlib.Db
 // pgcheck — verify a specific PostgreSQL version is running and connectable
 //
 // Usage:
-//   pgcheck <connstr> <expected_major>
+//   pgcheck <connstr> <expected_version>
 //
 // Example:
-//   pgcheck "host=localhost dbname=postgres user=postgres password=secret" 16
+//   pgcheck "host=localhost dbname=postgres user=postgres port=5432" 9.1
 // ---------------------------------------------------------------------------
 
 fn main(): Unit [io] = {
     // ── Read arguments ────────────────────────────────────────────────────
-    val connstr = arg(1) ?? "host=localhost dbname=postgres user=postgres"
-    val wantMajor = parseInt(arg(2) ?? "16") ?? 16
+    val connstr   = arg(1) ?? "host=localhost dbname=postgres user=postgres port=5432"
+    val verStr    = arg(2) ?? "9.1"
+
+    // Parse "major.minor" by splitting on "." via indexOf + slice
+    val dotPos    = Text.indexOf(verStr, ".") ?? Text.len(verStr)
+    val wantMajor = parseInt(Text.slice(verStr, 0, dotPos)) ?? 9
+    val wantMinor = parseInt(Text.slice(verStr, dotPos + 1, Text.len(verStr))) ?? 1
 
     println(f"Connecting to PostgreSQL...")
     println(f"  connection string : {connstr}")
-    println(f"  expected version  : {intToText(wantMajor)}.x")
+    println(f"  expected version  : {intToText(wantMajor)}.{intToText(wantMinor)}")
     println("")
 
     // ── Connect ───────────────────────────────────────────────────────────
@@ -28,22 +33,24 @@ fn main(): Unit [io] = {
 
     if conn == 0 then {
         eprintln("FAIL  could not connect to server")
-        eprintln(f"      {dbError(conn)}")
+        eprintln(f"      {dbError(0)}")
     } else {
-        // ── Check version ─────────────────────────────────────────────────
-        // dbServerVersion returns e.g. 160004 for PostgreSQL 16.4
-        val versionNum = dbServerVersion(conn)
+        // dbServerVersion returns e.g. 90105 for PostgreSQL 9.1.5
+        val versionNum  = dbServerVersion(conn)
         val actualMajor = versionNum / 10000
+        val actualMinor = (versionNum % 10000) / 100
+        val actualPatch = versionNum % 100
 
         val banner = dbVersionString(conn)
         println(f"  server version    : {banner}")
         println(f"  version number    : {intToText(versionNum)}")
+        println(f"  parsed version    : {intToText(actualMajor)}.{intToText(actualMinor)}.{intToText(actualPatch)}")
         println("")
 
-        if actualMajor == wantMajor then {
-            println(f"OK    PostgreSQL {intToText(actualMajor)} is running and connectable.")
+        if actualMajor == wantMajor and actualMinor == wantMinor then {
+            println(f"OK    PostgreSQL {intToText(actualMajor)}.{intToText(actualMinor)} is running and connectable.")
         } else {
-            eprintln(f"FAIL  expected major version {intToText(wantMajor)}, got {intToText(actualMajor)}.")
+            eprintln(f"FAIL  expected PostgreSQL {intToText(wantMajor)}.{intToText(wantMinor)}, got {intToText(actualMajor)}.{intToText(actualMinor)}.")
         }
 
         dbClose(conn)
