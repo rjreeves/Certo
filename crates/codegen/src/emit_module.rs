@@ -252,6 +252,10 @@ void    certo_main_init(int argc, const char** argv);
 int64_t certo_arg_count(void);
 certo_text_t certo_arg(int64_t i);
 
+/* shell */
+int64_t certo_shell_exec(certo_text_t cmd);
+int64_t certo_run_ps1(certo_text_t path, certo_text_t name);
+
 /* DB transaction stub */
 void* __db_transaction(certo_fn_t thunk);
 
