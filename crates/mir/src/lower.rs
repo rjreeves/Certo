@@ -90,7 +90,7 @@ pub fn lower_fn(f: &HirFn) -> MirFn {
     b.assign(ret_slot, Rvalue::Use(result.clone()));
     b.terminate(Terminator::Return(Operand::Local(ret_slot)));
 
-    MirFn { name: f.name.clone(), locals: b.locals, blocks: b.blocks }
+    MirFn { name: f.name.clone(), param_count: f.params.len(), locals: b.locals, blocks: b.blocks }
 }
 
 // ------------------------------------------------------------------ //

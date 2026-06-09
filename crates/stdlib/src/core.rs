@@ -228,6 +228,28 @@ certo_text_t certo_arg(int64_t i) {
     if (i < 0 || i >= (int64_t)__certo_argc) return NULL;
     return __certo_argv[i];
 }
+
+/* ---- parseInt / parseFloat ---- */
+/* Returns NULL (None) on failure, heap-allocated int64_t* on success. */
+int64_t* certo_parse_int(certo_text_t s) {
+    if (!s) return NULL;
+    char *end;
+    long long v = strtoll(s, &end, 10);
+    if (end == s || *end != '\0') return NULL;
+    int64_t *box = (int64_t*)malloc(sizeof(int64_t));
+    *box = (int64_t)v;
+    return box;
+}
+
+double* certo_parse_float(certo_text_t s) {
+    if (!s) return NULL;
+    char *end;
+    double v = strtod(s, &end);
+    if (end == s || *end != '\0') return NULL;
+    double *box = (double*)malloc(sizeof(double));
+    *box = v;
+    return box;
+}
 "#;
 
 /// Certo source declaration of `Stdlib.Core`.
