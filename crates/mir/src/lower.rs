@@ -312,17 +312,58 @@ fn lower_expr(expr: &HirExpr, b: &mut Builder) -> Operand {
         }
 
         HirExprKind::Try(inner) => {
+            // Desugar `e?` into:
+            //   _result = e
+            //   _is_ok  = __result_is_ok(_result)     // bb: check
+            //   if _is_ok goto bb_ok else goto bb_err  // bb: branch
+            // bb_err:
+            //   return _result                         // propagate Err
+            // bb_ok:
+            //   _val = __result_unwrap(_result)        // extract Ok value
+            //   ... (continue)
+
             let inner_op = lower_expr(inner, b);
-            let dest = b.declare_local("_try", expr.ty.clone());
-            let next = b.new_block();
+
+            // Store the result value so we can reference it in both branches.
+            let result_local = b.declare_local("_result", Ty::Error); // void*
+            b.assign(result_local, Rvalue::Use(inner_op));
+
+            // Call __result_is_ok → bool
+            let is_ok_local  = b.declare_local("_is_ok", Ty::Bool);
+            let after_is_ok  = b.new_block();
             b.terminate(Terminator::Call {
-                func: Operand::Global("__try_unwrap".into()),
-                args: vec![inner_op],
-                dest,
-                next,
+                func: Operand::Global("__result_is_ok".into()),
+                args: vec![Operand::Local(result_local)],
+                dest: is_ok_local,
+                next: after_is_ok,
             });
-            b.switch_to(next);
-            Operand::Local(dest)
+            b.switch_to(after_is_ok);
+
+            // Branch on is_ok.
+            let ok_block  = b.new_block();
+            let err_block = b.new_block();
+            b.terminate(Terminator::If {
+                cond:     Operand::Local(is_ok_local),
+                true_bb:  ok_block,
+                false_bb: err_block,
+            });
+
+            // err_block: propagate the Err by returning it directly.
+            b.switch_to(err_block);
+            b.terminate(Terminator::Return(Operand::Local(result_local)));
+
+            // ok_block: extract the Ok payload.
+            b.switch_to(ok_block);
+            let val_local = b.declare_local("_try_val", expr.ty.clone());
+            let after_unwrap = b.new_block();
+            b.terminate(Terminator::Call {
+                func: Operand::Global("__result_unwrap".into()),
+                args: vec![Operand::Local(result_local)],
+                dest: val_local,
+                next: after_unwrap,
+            });
+            b.switch_to(after_unwrap);
+            Operand::Local(val_local)
         }
 
         HirExprKind::Unsafe(inner) => lower_expr(inner, b),

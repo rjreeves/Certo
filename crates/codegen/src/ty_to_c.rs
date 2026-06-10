@@ -12,7 +12,7 @@ pub fn ty_to_c(ty: &Ty) -> String {
         Ty::Uuid    => "certo_uuid_t".into(),
 
         Ty::Option(inner) => format!("certo_option_{}_t", mangle(inner)),
-        Ty::Result(ok, err) => format!("certo_result_{}_{}_t", mangle(ok), mangle(err)),
+        Ty::Result(_, _) => "void*".into(), // heap-allocated certo_result_t
         Ty::List(elem)  => format!("certo_list_{}_t", mangle(elem)),
         Ty::Map(k, v)   => format!("certo_map_{}_{}_t", mangle(k), mangle(v)),
         Ty::Tuple(ts)   => {
