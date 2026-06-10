@@ -37,8 +37,8 @@ pub(crate) const REPL_PREAMBLE: &str =
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 2 {
-        cmd_repl::cmd_repl();
-        return;
+        print_top_help();
+        process::exit(1);
     }
 
     // Allow `certo <file.certo> [options]` as shorthand for `certo build`.
