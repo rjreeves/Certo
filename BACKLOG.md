@@ -58,19 +58,26 @@ Tasks are listed in implementation order. Completed tasks have the crate they li
 | 50 | `.cto` file extension standardised across all tooling and docs (was `.certo`) | all crates |
 | 51 | LSP keyword completions — added `guard`, `require`, `ensure`, `defer`, `statemachine`, `spawn`, etc. | `crates/lsp` |
 | 52 | `?` error propagation — MIR inline branch, `certo_result_t` runtime, `Ok`/`Err` builtins | `crates/mir`, `crates/codegen`, `crates/typeck` |
+| 53 | Doc gap fixes — duplicate §10 heading, broken cross-refs, Neovim `filetypes`, formatter indentation, `Result<T,E>` in types table | `docs/GUIDE.md`, `editors/neovim/certo.lua` |
+| 54 | Doc additions — §9 project layout, `certo.toml` manifest schema, `--template` options | `docs/GUIDE.md` |
+| 55 | Doc additions — `certo doc`, `certo db/migrate`, `--watch`, `fmt --check`, `test --timeout`, `bench --iterations` | `docs/GUIDE.md`, `README.md` |
+| 56 | Fix import resolver using stale `.certo` extension — multi-file `import` failed to find `.cto` files | `crates/cli` |
+| 57 | Fix migration loader using stale `.certo` extension | `crates/cli` |
+| 58 | `[build].output` from `certo.toml` — `cmd_build` now writes binaries to the configured output directory | `crates/cli` |
+| 59 | `certo build` / bare `certo` reads `entry` from `certo.toml` — no explicit file argument required in a project directory | `crates/cli` |
+| 60 | `certo db` subcommands — `migrate`, `rollback`, `status`, `create`; `certo migrate` kept as alias | `crates/cli` |
 
 ## Pending
 
 | # | Task | Notes |
 |---|------|-------|
-| 53 | `guard` statement in HIR lint pass (L005) | HIR lowering desugars guard to `if !cond { else_expr }` — lint should recognise the guard pattern for better messages |
-| 54 | `?` in REPL two-pass probe | REPL type probe wraps in `Bool` annotation; `?` inside probe expressions may confuse the probe |
-| 55 | `certo build` project-level command | Reads `certo.toml`, compiles `entry` file; currently CLI takes a file path directly |
-| 56 | `certo db` subcommands (`migrate`, `rollback`, `status`, `pull`) | Documented in spec §11.2; migrate exists but db subcommands are not wired |
-| 57 | Multiple integer types (`Int8`, `Int16`, `Int32`, `UInt`) | Spec §4.1 defines these; compiler only has `Int` (Int64) |
-| 58 | `statemachine` declaration lowering | Keyword and AST stub exist; HIR/codegen not implemented |
-| 59 | Named function arguments (`f(page: 2, size: 50)`) | Spec §3.2; parser does not yet support named args at call sites |
-| 60 | `async`/`await` runtime | Keywords and AST nodes exist; coroutine scheduler not implemented |
+| 61 | `guard` statement in HIR lint pass (L005) | HIR lowering desugars guard to `if !cond { else_expr }` — lint should recognise the guard pattern for better messages |
+| 62 | `?` in REPL two-pass probe | REPL type probe wraps in `Bool` annotation; `?` inside probe expressions may confuse the probe |
+| 63 | `certo db pull` — introspect live DB schema | Connect via `DATABASE_URL`, read pg_catalog, emit `db/schema.cto` snapshot; stub currently exits with "coming soon" |
+| 64 | Multiple integer types (`Int8`, `Int16`, `Int32`, `UInt`) | Spec §4.1 defines these; compiler only has `Int` (Int64) |
+| 65 | `statemachine` declaration lowering | Keyword and AST stub exist; HIR/codegen not implemented |
+| 66 | Named function arguments (`f(page: 2, size: 50)`) | Spec §3.2; parser does not yet support named args at call sites |
+| 67 | `async`/`await` runtime | Keywords and AST nodes exist; coroutine scheduler not implemented |
 
 ## Critical path to a running program
 
@@ -81,3 +88,4 @@ AST → Parser → Resolve → Typeck → HIR → MIR → Codegen (C) → clang 
 
 The core pipeline (parse → HIR → MIR → C → binary) is fully operational.
 Stdlib names are pre-seeded into the type environment; `Ok`/`Err` are built-in.
+`certo build` reads `entry` and `output` from `certo.toml`; `certo db` subcommands are wired.
