@@ -37,9 +37,16 @@ pub(crate) const REPL_PREAMBLE: &str =
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+    // Bare `certo` with no args: try certo.toml entry, else show help.
     if args.len() < 2 {
-        print_top_help();
-        process::exit(1);
+        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        if cwd.join("certo.toml").exists() {
+            cmd_build(&[], false);
+        } else {
+            print_top_help();
+            process::exit(1);
+        }
+        return;
     }
 
     // Allow `certo <file.cto> [options]` as shorthand for `certo build`.
@@ -233,8 +240,27 @@ fn cmd_build(args: &[String], quiet: bool) {
     }
 
     let input = input.unwrap_or_else(|| {
-        eprintln!("error: no input file");
-        eprintln!("usage: certo <file.cto> [-o <out>]");
+        // No file argument — try reading `entry` from certo.toml in cwd.
+        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        if let Ok(toml_src) = std::fs::read_to_string(cwd.join("certo.toml")) {
+            for line in toml_src.lines() {
+                let line = line.trim();
+                if let Some(rest) = line.strip_prefix("entry").and_then(|r| {
+                    let r = r.trim_start();
+                    r.strip_prefix('=').map(|v| v.trim().trim_matches('"'))
+                }) {
+                    if !rest.is_empty() {
+                        return cwd.join(rest);
+                    }
+                }
+            }
+            eprintln!("error: certo.toml found but has no `entry` field under [build]");
+            eprintln!("       add:  entry = \"src/main.cto\"");
+        } else {
+            eprintln!("error: no input file and no certo.toml in current directory");
+            eprintln!("usage: certo <file.cto> [-o <out>]");
+            eprintln!("       or run from a project directory containing certo.toml");
+        }
         process::exit(2);
     });
 
