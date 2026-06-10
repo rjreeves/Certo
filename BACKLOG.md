@@ -69,15 +69,14 @@ Tasks are listed in implementation order. Completed tasks have the crate they li
 | 61 | `guard` statement HIR lint pass (L005) — literal bool condition, L004 improvement for terminal guards | `crates/cli` |
 | 62 | `?` operator in REPL two-pass probe — wraps body in `Result`-returning helper when `?` detected | `crates/cli` |
 | 63 | `certo db pull` — introspect live PostgreSQL via `psql`, emit `db/schema.cto` with PascalCase types and camelCase fields | `crates/cli` |
+| 66 | Named function arguments (`f(page: 2, size: 50)`) — parser, HIR reordering, and typeck all wired; stdlib param metadata registered for ~50 functions | `crates/hir`, `crates/stdlib`, `crates/typeck` |
+| 65 | `statemachine` declaration lowering — state enum, struct, constructor, typed transitions with guards, state predicates, `on_enter` hooks inlined | `crates/parser`, `crates/hir`, `crates/typeck`, `crates/codegen` |
+| 67 | `async`/`await`/`spawn`/`parallel` — `spawn` keyword, HIR `Spawn`/`Await` nodes, MIR single-threaded stub, resolve/typeck/effects/fmt all wired; runtime header has pthread scaffolding for future real threading | `crates/lexer`, `crates/parser`, `crates/ast`, `crates/hir`, `crates/mir`, `crates/typeck`, `crates/resolve`, `crates/effects`, `crates/fmt`, `crates/codegen` |
+| 64 | Multiple integer types (`Int8`, `Int16`, `Int32`, `UInt`) — added to `Ty` enum, unification, display, typeck name lookup, C codegen (`int8_t`/`int16_t`/`int32_t`/`uint64_t`), LLVM backend, and REPL auto-print | `crates/typeck`, `crates/codegen`, `crates/llvm`, `crates/cli` |
 
 ## Pending
 
-| # | Task | Notes |
-|---|------|-------|
-| 64 | Multiple integer types (`Int8`, `Int16`, `Int32`, `UInt`) | Spec §4.1 defines these; compiler only has `Int` (Int64) |
-| 65 | `statemachine` declaration lowering | Keyword and AST stub exist; HIR/codegen not implemented |
-| 66 | Named function arguments (`f(page: 2, size: 50)`) | Spec §3.2; parser does not yet support named args at call sites |
-| 67 | `async`/`await` runtime | Keywords and AST nodes exist; coroutine scheduler not implemented |
+_(no pending items)_
 
 ## Critical path to a running program
 

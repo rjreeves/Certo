@@ -4,6 +4,10 @@ use certo_typeck::Ty;
 pub fn ty_to_c(ty: &Ty) -> String {
     match ty {
         Ty::Int     => "int64_t".into(),
+        Ty::Int8    => "int8_t".into(),
+        Ty::Int16   => "int16_t".into(),
+        Ty::Int32   => "int32_t".into(),
+        Ty::UInt    => "uint64_t".into(),
         Ty::Float   => "double".into(),
         Ty::Decimal => "certo_decimal_t".into(),
         Ty::Bool    => "bool".into(),
@@ -41,6 +45,10 @@ pub fn ty_to_c(ty: &Ty) -> String {
 pub fn mangle(ty: &Ty) -> String {
     match ty {
         Ty::Int     => "int".into(),
+        Ty::Int8    => "int8".into(),
+        Ty::Int16   => "int16".into(),
+        Ty::Int32   => "int32".into(),
+        Ty::UInt    => "uint".into(),
         Ty::Float   => "float".into(),
         Ty::Decimal => "decimal".into(),
         Ty::Bool    => "bool".into(),

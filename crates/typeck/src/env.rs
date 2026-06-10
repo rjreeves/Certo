@@ -9,11 +9,13 @@ pub struct TypeEnv {
     /// Parameter metadata for user-defined functions: name → [(param_name, has_default)].
     /// Stored flat (not scope-stacked) since function decls are always at module level.
     pub param_meta: HashMap<String, Vec<(String, bool)>>,
+    /// Record type definitions: type_name → [(field_name, field_type)].
+    pub record_fields: HashMap<String, Vec<(String, Ty)>>,
 }
 
 impl TypeEnv {
     pub fn new() -> Self {
-        TypeEnv { frames: vec![HashMap::new()], param_meta: HashMap::new() }
+        TypeEnv { frames: vec![HashMap::new()], param_meta: HashMap::new(), record_fields: HashMap::new() }
     }
 
     pub fn push(&mut self) {

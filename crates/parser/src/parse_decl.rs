@@ -156,9 +156,18 @@ fn parse_type_decl(cur: &mut Cursor<'_>, is_pub: bool) -> Result<TypeDecl, Parse
     let body = if cur.peek() == Some(&Token::LBrace) {
         TypeBody::Record(parse_record_type_def(cur)?)
     } else if cur.peek() == Some(&Token::Bar) {
+        // `type T = | Variant1 | Variant2` — leading bar present
         TypeBody::Sum(parse_sum_variants(cur)?)
     } else {
-        TypeBody::Alias(parse_type(cur)?)
+        // Peek ahead: if this looks like `Ident | ...` it's a sum type without leading bar.
+        // Detect: first token is uppercase Ident and second is Bar.
+        let is_sum = matches!(cur.peek(), Some(Token::Ident(s)) if s.chars().next().map(|c| c.is_uppercase()).unwrap_or(false))
+            && cur.peek2() == Some(&Token::Bar);
+        if is_sum {
+            TypeBody::Sum(parse_sum_variants_no_leading_bar(cur)?)
+        } else {
+            TypeBody::Alias(parse_type(cur)?)
+        }
     };
 
     let span = start.to(cur.peek_span());
@@ -233,6 +242,36 @@ fn parse_sum_variants(cur: &mut Cursor<'_>) -> Result<Vec<SumVariant>, ParseErro
         variants.push(SumVariant { name: S::new(name, name_span), fields, span });
     }
 
+    Ok(variants)
+}
+
+/// Parse sum variants without a leading `|`: `Red | Green | Blue`
+fn parse_sum_variants_no_leading_bar(cur: &mut Cursor<'_>) -> Result<Vec<SumVariant>, ParseError> {
+    let mut variants = Vec::new();
+    loop {
+        let (name, name_span) = cur.expect_ident()?;
+        let mut fields = Vec::new();
+
+        if cur.eat(|t| matches!(t, Token::LParen)).is_some() {
+            while cur.peek() != Some(&Token::RParen) && !cur.at_end() {
+                let fname = if let Some(Token::Ident(_)) = cur.peek() {
+                    if cur.peek2() == Some(&Token::Colon) {
+                        let (n, ns) = cur.expect_ident()?;
+                        cur.bump(); // eat `:`
+                        Some(S::new(n, ns))
+                    } else { None }
+                } else { None };
+                let ty = parse_type(cur)?;
+                let span = fname.as_ref().map(|n| n.span).unwrap_or(ty.span).to(ty.span);
+                fields.push(VariantField { name: fname, ty, span });
+                if cur.eat(|t| matches!(t, Token::Comma)).is_none() { break; }
+            }
+            cur.expect(&Token::RParen)?;
+        }
+
+        variants.push(SumVariant { name: S::new(name, name_span), fields, span: name_span });
+        if cur.eat(|t| matches!(t, Token::Bar)).is_none() { break; }
+    }
     Ok(variants)
 }
 
@@ -344,8 +383,11 @@ fn parse_statemachine(cur: &mut Cursor<'_>) -> Result<StateMachineDecl, ParseErr
             "transitions" => {
                 cur.expect(&Token::Colon)?;
                 while let Some(Token::Ident(_)) = cur.peek() {
+                    // Peek before consuming — section keywords end the transitions block.
+                    if let Some(Token::Ident(s)) = cur.peek() {
+                        if ["on_enter", "invariant"].contains(&s.as_ref()) { break; }
+                    }
                     let (from, from_span) = cur.expect_ident()?;
-                    if ["on_enter","invariant"].contains(&from.as_str()) { break; }
                     // `→` arrow may be tokenised as `->` or we allow `→` as an ident
                     // Support both Token::Arrow and the Unicode arrow
                     if cur.peek() == Some(&Token::Arrow) {

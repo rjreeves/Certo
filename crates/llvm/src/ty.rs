@@ -11,6 +11,10 @@ use certo_typeck::Ty;
 pub fn llvm_ty(ty: &Ty) -> String {
     match ty {
         Ty::Int        => "i64".into(),
+        Ty::Int8       => "i8".into(),
+        Ty::Int16      => "i16".into(),
+        Ty::Int32      => "i32".into(),
+        Ty::UInt       => "i64".into(),  // LLVM has no unsigned; use i64 with zext where needed
         Ty::Float      => "double".into(),
         Ty::Bool       => "i1".into(),
         Ty::Text       => "ptr".into(),    // const char*
@@ -50,6 +54,10 @@ pub fn ast_ty_to_llvm(te: &certo_ast::types::TypeExpr) -> String {
             let name = path.segments.last().map(|s| s.node.as_str()).unwrap_or("Unit");
             match name {
                 "Int"     => "i64".into(),
+                "Int8"    => "i8".into(),
+                "Int16"   => "i16".into(),
+                "Int32"   => "i32".into(),
+                "UInt"    => "i64".into(),
                 "Float"   => "double".into(),
                 "Bool"    => "i1".into(),
                 "Text"    => "ptr".into(),
@@ -85,6 +93,10 @@ pub fn ast_ret_ty_to_llvm(ret_ty: Option<&certo_ast::types::TypeExpr>) -> String
 pub fn mangle(ty: &Ty) -> String {
     match ty {
         Ty::Int     => "i64".into(),
+        Ty::Int8    => "i8".into(),
+        Ty::Int16   => "i16".into(),
+        Ty::Int32   => "i32".into(),
+        Ty::UInt    => "i64".into(),
         Ty::Float   => "f64".into(),
         Ty::Bool    => "i1".into(),
         Ty::Text    => "ptr".into(),

@@ -236,6 +236,34 @@ fn lower_expr(expr: &HirExpr, b: &mut Builder) -> Operand {
                         b.terminate(Terminator::Goto(after_pat));
                         if arm.guard.is_some() { b.switch_to(after_pat); }
                     }
+                    HirPat::Constructor { name, fields } => {
+                        // Compare scrutinee's tag field to the variant constant.
+                        // Emit: `_tag = scrutinee.tag; if _tag == TypeName_VariantName goto arm else next_arm`
+                        let tag_local = b.declare_local("_tag", Ty::Int);
+                        b.assign(tag_local, Rvalue::Field { base: scrut_op.clone(), field: "tag".into() });
+                        // Bind field locals for payload variants.
+                        for (i, field_pat) in fields.iter().enumerate() {
+                            if let HirPat::Bind { local, name: fname } = field_pat {
+                                let field_name = fname.clone();
+                                let ml = b.map_hir_local(*local, fname, Ty::Error);
+                                // Access payload via `scrutinee.variant_lower.field_name`
+                                let variant_local = b.declare_local("_v", Ty::Error);
+                                let vfield = name.to_lowercase();
+                                b.assign(variant_local, Rvalue::Field { base: scrut_op.clone(), field: vfield });
+                                b.assign(ml, Rvalue::Field { base: Operand::Local(variant_local), field: field_name });
+                                let _ = i;
+                            }
+                        }
+                        let cmp = b.declare_local("_cmp", Ty::Bool);
+                        // Compare tag to variant tag constant stored as a global symbol.
+                        // We use a special marker: Operand::Global("__tag__TypeName__VariantName")
+                        // Codegen emits this as `TypeName_VariantName`.
+                        let variant_tag = Operand::Global(format!("__tag__{}", name));
+                        b.assign(cmp, Rvalue::BinOp { op: certo_hir::BinOp::Eq, lhs: Operand::Local(tag_local), rhs: variant_tag });
+                        let after_pat = if arm.guard.is_some() { b.new_block() } else { arm_bb };
+                        b.terminate(Terminator::If { cond: Operand::Local(cmp), true_bb: after_pat, false_bb: next_arm_bb });
+                        if arm.guard.is_some() { b.switch_to(after_pat); }
+                    }
                     _ => {
                         let after_pat = if arm.guard.is_some() { b.new_block() } else { arm_bb };
                         b.terminate(Terminator::Goto(after_pat));
@@ -295,12 +323,8 @@ fn lower_expr(expr: &HirExpr, b: &mut Builder) -> Operand {
 
         HirExprKind::Field { base, field } => {
             let base_op = lower_expr(base, b);
-            // Model field access as a call to a compiler builtin.
             let dest = b.declare_local(&format!("_field_{}", field), expr.ty.clone());
-            let field_fn = Operand::Global(format!("__field_{}", field));
-            let next = b.new_block();
-            b.terminate(Terminator::Call { func: field_fn, args: vec![base_op], dest, next });
-            b.switch_to(next);
+            b.assign(dest, Rvalue::Field { base: base_op, field: field.clone() });
             Operand::Local(dest)
         }
 
@@ -455,6 +479,28 @@ fn lower_expr(expr: &HirExpr, b: &mut Builder) -> Operand {
 
             b.switch_to(loop_exit_bb);
             Operand::Const(MirConst::Unit)
+        }
+
+        HirExprKind::Spawn { fn_name: _, args } => {
+            // Single-threaded stub: spawn f(a) evaluates immediately, returns the result
+            // cast to int64_t as an opaque "task handle".
+            // args[0] is the lowered inner call expression.
+            let inner_op = if let Some(inner) = args.first() {
+                lower_expr(inner, b)
+            } else {
+                Operand::Const(MirConst::Int(0))
+            };
+            let dest = b.declare_local("__task", certo_typeck::Ty::Error);
+            b.assign(dest, Rvalue::Use(inner_op));
+            Operand::Local(dest)
+        }
+
+        HirExprKind::Await(inner) => {
+            // Single-threaded stub: await task returns the task value directly.
+            let task_op = lower_expr(inner, b);
+            let dest = b.declare_local("__await_result", certo_typeck::Ty::Error);
+            b.assign(dest, Rvalue::Use(task_op));
+            Operand::Local(dest)
         }
     }
 }

@@ -251,7 +251,8 @@ fn eval_expr_or_stmt(input: &str, session: &mut Vec<String>, colour: bool) {
 fn auto_print_for(ty: &Ty, expr: &str) -> Option<String> {
     match ty {
         Ty::Text  => Some(format!("print({})", expr)),
-        Ty::Int   => Some(format!("print(intToText({}))", expr)),
+        Ty::Int | Ty::Int8 | Ty::Int16 | Ty::Int32 | Ty::UInt
+                  => Some(format!("print(intToText({}))", expr)),
         Ty::Float => Some(format!("print(floatToText({}))", expr)),
         Ty::Bool  => Some(format!("print(boolToText({}))", expr)),
         _ => None,

@@ -102,6 +102,7 @@ fn infer_rvalue(map: &HashMap<MirLocal, String>, rv: &Rvalue) -> Option<String> 
             Some(binop_result_llty(op, &lty))
         }
         Rvalue::Call { .. }      => Some("ptr".into()),
+        Rvalue::Field { .. }     => Some("ptr".into()),
         Rvalue::Aggregate(_, _)  => Some("ptr".into()),
     }
 }
@@ -256,6 +257,13 @@ impl<'ctx> FnEmitter<'ctx> {
 
             Rvalue::Call { func, args } => {
                 self.emit_call_store(&func, &args, dest, &dest_lty, &dest_ptr);
+            }
+
+            Rvalue::Field { .. } => {
+                // LLVM backend: field access on structs not yet supported — emit null.
+                let v = self.fresh();
+                self.w(&format!("  %v{v} = inttoptr i64 0 to ptr"));
+                self.w(&format!("  store ptr %v{v}, ptr {dest_ptr}"));
             }
 
             Rvalue::Aggregate(_, _) => {

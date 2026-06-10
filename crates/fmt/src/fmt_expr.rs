@@ -111,6 +111,7 @@ pub fn fmt_expr(expr: &Expr, indent: usize) -> String {
 
         Expr::Try      { expr, .. }  => format!("{}?", fmt_expr(&expr.node, indent)),
         Expr::Await    { expr, .. }  => format!("await {}", fmt_expr(&expr.node, indent)),
+        Expr::Spawn    { expr, .. }  => format!("spawn {}", fmt_expr(&expr.node, indent)),
         Expr::Unsafe   { body, .. }  => format!("unsafe {{\n{}{}\n{}}}", ind(indent + 1), fmt_expr(&body.node, indent + 1), ind(indent)),
         Expr::Transaction { body, .. } => format!("db.transaction {{\n{}{}\n{}}}", ind(indent + 1), fmt_expr(&body.node, indent + 1), ind(indent)),
 
