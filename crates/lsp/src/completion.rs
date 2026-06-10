@@ -1,5 +1,5 @@
 use lsp_types::{CompletionItem, CompletionItemKind, CompletionList, CompletionResponse, Position};
-use crate::analysis::{Analysis, SymbolKind};
+use crate::analysis::{Analysis, Symbol, SymbolKind};
 use crate::pos::position_to_offset;
 
 /// Keywords and built-in names always offered.
@@ -28,24 +28,31 @@ pub fn handle_completion(analysis: &Analysis, pos: Position) -> CompletionRespon
     }
 
     // Symbols from the current document
+    // Top-level decls, params (valid_from == 0), and locals in-scope at cursor.
     for sym in &analysis.symbols {
+        if sym.valid_from > offset { continue; }
         if sym.name.starts_with(prefix) {
-            let kind = match sym.kind {
-                SymbolKind::Function => CompletionItemKind::FUNCTION,
-                SymbolKind::Const    => CompletionItemKind::CONSTANT,
-                SymbolKind::Type     => CompletionItemKind::CLASS,
-                SymbolKind::Param    => CompletionItemKind::VARIABLE,
-            };
-            items.push(CompletionItem {
-                label:          sym.name.clone(),
-                kind:           Some(kind),
-                detail:         Some(sym.detail.clone()),
-                ..Default::default()
-            });
+            items.push(completion_item_for(sym));
         }
     }
 
     CompletionResponse::List(CompletionList { is_incomplete: false, items })
+}
+
+fn completion_item_for(sym: &Symbol) -> CompletionItem {
+    let kind = match sym.kind {
+        SymbolKind::Function => CompletionItemKind::FUNCTION,
+        SymbolKind::Const    => CompletionItemKind::CONSTANT,
+        SymbolKind::Type     => CompletionItemKind::CLASS,
+        SymbolKind::Param    => CompletionItemKind::VARIABLE,
+        SymbolKind::Local    => CompletionItemKind::VARIABLE,
+    };
+    CompletionItem {
+        label:  sym.name.clone(),
+        kind:   Some(kind),
+        detail: Some(sym.detail.clone()),
+        ..Default::default()
+    }
 }
 
 fn word_before(src: &str, offset: u32) -> &str {

@@ -1,6 +1,7 @@
 use certo_ast::module::Module;
 use certo_ast::span::Span;
 use certo_ast::decl::Decl;
+use certo_ast::expr::Expr;
 use certo_resolve::ResolveError;
 use certo_typeck::TypeError;
 use crate::pos::span_contains;
@@ -18,14 +19,16 @@ pub struct Analysis {
 
 #[derive(Debug, Clone)]
 pub struct Symbol {
-    pub name:     String,
-    pub def_span: Span,
-    pub kind:     SymbolKind,
-    pub detail:   String, // hover text
+    pub name:       String,
+    pub def_span:   Span,
+    pub kind:       SymbolKind,
+    pub detail:     String, // hover text
+    /// Byte offset after which this symbol is visible (0 = always; locals = end of decl stmt).
+    pub valid_from: u32,
 }
 
 #[derive(Debug, Clone)]
-pub enum SymbolKind { Function, Const, Type, Param }
+pub enum SymbolKind { Function, Const, Type, Param, Local }
 
 impl Analysis {
     pub fn run(src: &str) -> Self {
@@ -72,6 +75,14 @@ impl Analysis {
     pub fn definition_of(&self, name: &str) -> Option<&Symbol> {
         self.symbols.iter().find(|s| s.name == name)
     }
+
+    /// Return all local variables (val/var in function bodies) that are in scope at `offset`.
+    /// Locals are visible after their declaring statement ends.
+    pub fn locals_at_offset(&self, offset: u32) -> Vec<&Symbol> {
+        self.symbols.iter()
+            .filter(|s| matches!(s.kind, SymbolKind::Local) && s.valid_from <= offset)
+            .collect()
+    }
 }
 
 fn collect_symbols(module: &Module, out: &mut Vec<Symbol>) {
@@ -87,19 +98,25 @@ fn collect_symbols(module: &Module, out: &mut Vec<Symbol>) {
                     .unwrap_or_else(|| "_".to_string());
                 let detail = format!("fn {}({}) -> {}", f.name.node, params.join(", "), ret);
                 out.push(Symbol {
-                    name:     f.name.node.clone(),
-                    def_span: f.name.span,
-                    kind:     SymbolKind::Function,
+                    name:       f.name.node.clone(),
+                    def_span:   f.name.span,
+                    kind:       SymbolKind::Function,
                     detail,
+                    valid_from: 0,
                 });
                 // Params
                 for p in &f.params {
                     out.push(Symbol {
-                        name:     p.name.node.clone(),
-                        def_span: p.name.span,
-                        kind:     SymbolKind::Param,
-                        detail:   format!("param {}: {}", p.name.node, type_expr_hint(&p.ty.node)),
+                        name:       p.name.node.clone(),
+                        def_span:   p.name.span,
+                        kind:       SymbolKind::Param,
+                        detail:     format!("param {}: {}", p.name.node, type_expr_hint(&p.ty.node)),
+                        valid_from: 0,
                     });
+                }
+                // Body locals
+                if let Some(body) = &f.body {
+                    collect_body_locals(&body.node, out);
                 }
             }
             Decl::Val(v) => {
@@ -111,10 +128,11 @@ fn collect_symbols(module: &Module, out: &mut Vec<Symbol>) {
                     _ => "<pattern>".to_string(),
                 };
                 out.push(Symbol {
-                    name:     name.clone(),
-                    def_span: v.pattern.span,
-                    kind:     SymbolKind::Const,
-                    detail:   format!("val {}: {}", name, ty_hint),
+                    name:       name.clone(),
+                    def_span:   v.pattern.span,
+                    kind:       SymbolKind::Const,
+                    detail:     format!("val {}: {}", name, ty_hint),
+                    valid_from: 0,
                 });
             }
             Decl::Type(t) => {
@@ -124,14 +142,78 @@ fn collect_symbols(module: &Module, out: &mut Vec<Symbol>) {
                     TypeBody::Alias(_)  => "alias",
                 };
                 out.push(Symbol {
-                    name:     t.name.node.clone(),
-                    def_span: t.name.span,
-                    kind:     SymbolKind::Type,
-                    detail:   format!("type {} ({})", t.name.node, kind_str),
+                    name:       t.name.node.clone(),
+                    def_span:   t.name.span,
+                    kind:       SymbolKind::Type,
+                    detail:     format!("type {} ({})", t.name.node, kind_str),
+                    valid_from: 0,
                 });
             }
             _ => {}
         }
+    }
+}
+
+/// Walk an expression (typically a function body block) and collect all val/var declarations
+/// as Local symbols. `valid_from` is set to the span end of the declaring statement so
+/// completions only surface locals declared before the cursor position.
+fn collect_body_locals(expr: &Expr, out: &mut Vec<Symbol>) {
+    use certo_ast::expr::Stmt;
+    use certo_ast::pattern::Pattern;
+
+    if let Expr::Block { stmts, .. } = expr {
+        for stmt in stmts {
+            match stmt {
+                Stmt::Val { pattern, ty, value, span } => {
+                    let ty_hint = ty.as_ref()
+                        .map(|t| type_expr_hint(&t.node))
+                        .unwrap_or_else(|| "_".to_string());
+                    let (name, def_span) = match &pattern.node {
+                        Pattern::Ident { name, .. } => (name.node.clone(), name.span),
+                        _ => continue,
+                    };
+                    out.push(Symbol {
+                        name:       name.clone(),
+                        def_span,
+                        kind:       SymbolKind::Local,
+                        detail:     format!("val {}: {}", name, ty_hint),
+                        valid_from: span.end,
+                    });
+                    // Recurse into the value expression for nested blocks.
+                    collect_body_locals(&value.node, out);
+                }
+                Stmt::Var { name, ty, value, span } => {
+                    let ty_hint = ty.as_ref()
+                        .map(|t| type_expr_hint(&t.node))
+                        .unwrap_or_else(|| "_".to_string());
+                    out.push(Symbol {
+                        name:       name.node.clone(),
+                        def_span:   name.span,
+                        kind:       SymbolKind::Local,
+                        detail:     format!("var {}: {}", name.node, ty_hint),
+                        valid_from: span.end,
+                    });
+                    collect_body_locals(&value.node, out);
+                }
+                Stmt::Expr { expr, .. } => {
+                    collect_body_locals(&expr.node, out);
+                }
+                _ => {}
+            }
+        }
+    }
+    // Recurse into non-block expressions that can contain nested blocks.
+    match expr {
+        Expr::If { then_expr, else_expr, .. } => {
+            collect_body_locals(&then_expr.node, out);
+            collect_body_locals(&else_expr.node, out);
+        }
+        Expr::Match { arms, .. } => {
+            for arm in arms {
+                collect_body_locals(&arm.body.node, out);
+            }
+        }
+        _ => {}
     }
 }
 
