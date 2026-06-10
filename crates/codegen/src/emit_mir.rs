@@ -97,9 +97,12 @@ fn emit_stmt(stmt: &MirStmt, out: &mut String) {
                     writeln!(out, "    {} = (typeof({})){{ {} }};", lhs, lhs, fields).unwrap();
                 }
                 AggregateKind::Array => {
-                    let elems = ops.iter().map(emit_operand).collect::<Vec<_>>().join(", ");
-                    writeln!(out, "    {} = certo_list_new({}, (void*[]){{{}}});",
-                        lhs, ops.len(), elems).unwrap();
+                    if ops.is_empty() {
+                        writeln!(out, "    {} = certo_list_new_empty();", lhs).unwrap();
+                    } else {
+                        let elems = ops.iter().map(|o| format!("(void*)({})", emit_operand(o))).collect::<Vec<_>>().join(", ");
+                        writeln!(out, "    {} = certo_list_of({}, {});", lhs, ops.len(), elems).unwrap();
+                    }
                 }
             }
         }

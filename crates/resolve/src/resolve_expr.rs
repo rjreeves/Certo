@@ -110,9 +110,12 @@ pub fn resolve_expr(expr: &S<Expr>, scope: &mut ScopeChain) {
 
         Expr::Ascribe { expr, .. } => resolve_expr(expr, scope),
 
-        Expr::For { iter, body, .. } => {
+        Expr::For { binding, iter, body, .. } => {
             resolve_expr(iter, scope);
+            scope.push();
+            scope.define(&binding.node, Res::Local, binding.span);
             resolve_expr(body, scope);
+            scope.pop();
         }
 
         Expr::While { cond, body, .. } => {

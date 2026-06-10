@@ -504,6 +504,15 @@ fn parse_record_body(
     cur.expect(&Token::LBrace)?;
     let mut fields = Vec::new();
 
+    // `..base_expr` spread — copies all fields from base_expr, overriding those listed below.
+    let spread_base = if cur.eat(|t| matches!(t, Token::DotDot)).is_some() {
+        let b = parse_expr(cur)?;
+        let _ = cur.eat(|t| matches!(t, Token::Comma));
+        Some(b)
+    } else {
+        base
+    };
+
     while cur.peek() != Some(&Token::RBrace) && !cur.at_end() {
         let (name, name_span) = cur.expect_ident()?;
         cur.expect(&Token::Colon)?;
@@ -515,7 +524,7 @@ fn parse_record_body(
 
     let end = cur.expect(&Token::RBrace)?;
     let span = start.to(end);
-    Ok(S::new(Expr::Record { ty_name, base: base.map(Box::new), fields, span }, span))
+    Ok(S::new(Expr::Record { ty_name, base: spread_base.map(Box::new), fields, span }, span))
 }
 
 fn parse_if(cur: &mut Cursor<'_>) -> Result<S<Expr>, ParseError> {

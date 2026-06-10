@@ -385,8 +385,13 @@ pub fn infer(expr: &S<Expr>, ctx: &mut Ctx<'_>) -> Ty {
             if let Some(b) = base {
                 let base_ty = infer(b, ctx);
                 let base_ty = ctx.uf.apply(&base_ty);
-                if let Ty::Record(mut base_fields) = base_ty {
-                    // Override base fields with the update
+                // Accept both structural Ty::Record and nominal Ty::Named (record spread).
+                let resolved = match &base_ty {
+                    Ty::Named { name, .. } => ctx.env.record_fields.get(name.as_str()).cloned()
+                        .map(Ty::Record),
+                    other => Some(other.clone()),
+                };
+                if let Some(Ty::Record(mut base_fields)) = resolved {
                     for (name, ty) in &field_tys {
                         if let Some(bf) = base_fields.iter_mut().find(|(n, _)| n == name) {
                             bf.1 = ty.clone();
@@ -451,12 +456,14 @@ pub fn infer(expr: &S<Expr>, ctx: &mut Ctx<'_>) -> Ty {
             annotated
         }
 
-        Expr::For { iter, body, .. } => {
-            // iter must be a list; body is evaluated for side effects; result is Unit
-            let iter_ty  = infer(iter, ctx);
-            let elem_ty  = ctx.fresh();
-            ctx.unify(iter_ty, Ty::List(Box::new(elem_ty)), iter.span);
+        Expr::For { binding, iter, body, .. } => {
+            let iter_ty = infer(iter, ctx);
+            let elem_ty = ctx.fresh();
+            ctx.unify(iter_ty, Ty::List(Box::new(elem_ty.clone())), iter.span);
+            ctx.env.push();
+            ctx.env.define(binding.node.clone(), elem_ty);
             infer(body, ctx);
+            ctx.env.pop();
             Ty::Unit
         }
 
