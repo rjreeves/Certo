@@ -4,10 +4,18 @@ use crate::pos::position_to_offset;
 
 /// Keywords and built-in names always offered.
 const KEYWORDS: &[&str] = &[
-    "fn", "val", "type", "module", "import", "if", "then", "else",
-    "match", "let", "in", "true", "false", "and", "or", "not",
-    "migration", "up", "down", "trait", "impl", "for",
-    "async", "await", "unsafe", "parallel", "db",
+    "fn", "val", "var", "type", "module", "import", "pub", "priv",
+    "if", "then", "else", "when",
+    "match", "in", "true", "false",
+    "and", "or", "not",
+    "guard", "require", "ensure", "defer",
+    "async", "await", "parallel", "spawn",
+    "trait", "impl", "for", "where",
+    "migration", "up", "down",
+    "statemachine", "validator", "view", "form",
+    "test", "property", "dbTest",
+    "unsafe", "use", "with",
+    "db",
 ];
 
 pub fn handle_completion(analysis: &Analysis, pos: Position) -> CompletionResponse {
