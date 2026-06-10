@@ -65,6 +65,7 @@ fn main() {
             "bench"   => cmd_bench(&args[2..]),
             "new"     => cmd_new(&args[2..]),
             "migrate" => cmd_migrate(&args[2..]),
+            "db"      => cmd_db(&args[2..]),
             "repl"    => cmd_repl::cmd_repl(),
             "help" | "--help" | "-h" => { print_top_help(); }
             other => {
@@ -1537,7 +1538,8 @@ fn print_top_help() {
     eprintln!("  certo test  <file.cto>...      Run test blocks");
     eprintln!("  certo lint  <file.cto>...      Lint for unused params / dead code");
     eprintln!("  certo bench <file.cto>...      Run bench_ functions");
-    eprintln!("  certo migrate <subcommand>       Database migration tools");
+    eprintln!("  certo db <subcommand>            Database tools (migrate, rollback, status, pull)");
+    eprintln!("  certo migrate <subcommand>       Alias for certo db");
     eprintln!();
     eprintln!("Build options:");
     eprintln!("  -o <file>    Output path");
@@ -1546,11 +1548,12 @@ fn print_top_help() {
     eprintln!("  -v           Verbose: print the C compiler command");
     eprintln!("  --watch, -w  Watch source file and rebuild on change");
     eprintln!();
-    eprintln!("Migrate subcommands:");
-    eprintln!("  up [--dry-run]     Apply pending migrations");
-    eprintln!("  down [N]           Roll back N migrations (default 1)");
-    eprintln!("  status             Show applied/pending migrations");
-    eprintln!("  create <name>      Scaffold a new migration file");
+    eprintln!("DB/migrate subcommands:");
+    eprintln!("  migrate [--dry-run]    Apply pending migrations");
+    eprintln!("  rollback [N]           Roll back N migrations (default 1)");
+    eprintln!("  status                 Show applied/pending migrations");
+    eprintln!("  create <name>          Scaffold a new migration file");
+    eprintln!("  pull                   Introspect live DB schema (coming soon)");
 }
 
 fn die(msg: &str, code: i32) -> ! {
@@ -1572,7 +1575,61 @@ pub(crate) fn stderr_is_tty() -> bool {
 }
 
 // ------------------------------------------------------------------ //
-// migrate (unchanged)
+// db
+// ------------------------------------------------------------------ //
+
+fn cmd_db(args: &[String]) {
+    let sub = args.first().map(String::as_str).unwrap_or("");
+    match sub {
+        // certo db migrate [--dry-run]  →  certo migrate up
+        "migrate" => {
+            let mut fwd = vec!["up".to_string()];
+            fwd.extend_from_slice(&args[1..]);
+            cmd_migrate(&fwd);
+        }
+        // certo db rollback [N] [--dry-run]  →  certo migrate down [N]
+        "rollback" => {
+            let mut fwd = vec!["down".to_string()];
+            fwd.extend_from_slice(&args[1..]);
+            cmd_migrate(&fwd);
+        }
+        // certo db status  →  certo migrate status
+        "status" => cmd_migrate(&["status".to_string()]),
+        // certo db create <name>  →  certo migrate create <name>
+        "create" => {
+            let mut fwd = vec!["create".to_string()];
+            fwd.extend_from_slice(&args[1..]);
+            cmd_migrate(&fwd);
+        }
+        // certo db pull  —  introspect live DB schema (not yet implemented)
+        "pull" => {
+            eprintln!("certo db pull: not yet implemented");
+            eprintln!("       This will introspect the live database and generate a");
+            eprintln!("       schema snapshot in db/schema.cto.");
+            process::exit(1);
+        }
+        "--help" | "-h" | "" => {
+            println!("Usage: certo db <subcommand> [options]");
+            println!();
+            println!("Subcommands:");
+            println!("  migrate [--dry-run]    Apply all pending migrations");
+            println!("  rollback [N]           Roll back N migrations (default 1)");
+            println!("  status                 Show applied vs pending migrations");
+            println!("  create <name>          Scaffold a new migration file");
+            println!("  pull                   Introspect live DB → schema snapshot (coming soon)");
+            println!();
+            println!("Set DATABASE_URL in your environment or .env file.");
+        }
+        other => {
+            eprintln!("Unknown db subcommand: {}", other);
+            eprintln!("Usage: certo db migrate | rollback [N] | status | create <name> | pull");
+            process::exit(1);
+        }
+    }
+}
+
+// ------------------------------------------------------------------ //
+// migrate
 // ------------------------------------------------------------------ //
 
 fn cmd_migrate(args: &[String]) {
