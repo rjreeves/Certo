@@ -60,6 +60,8 @@ pub enum Rvalue {
     UnOp { op: UnOp, arg: Operand },
     /// Function call — result stored in `dest`.
     Call { func: Operand, args: Vec<Operand> },
+    /// Struct field access: `base.field`.
+    Field { base: Operand, field: String },
     /// Aggregate construction: tuple, record.
     Aggregate(AggregateKind, Vec<Operand>),
 }

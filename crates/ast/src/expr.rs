@@ -123,9 +123,11 @@ pub enum Expr {
 
     /// `{ field: value, ... }` — record literal or record update
     Record {
-        base:   Option<Box<S<Expr>>>,   // `expr with { ... }` update syntax
-        fields: Vec<RecordField>,
-        span:   Span,
+        /// Present when written as `TypeName { field: value }`.
+        ty_name: Option<String>,
+        base:    Option<Box<S<Expr>>>,   // `expr with { ... }` update syntax
+        fields:  Vec<RecordField>,
+        span:    Span,
     },
 
     /// `e?` — error propagation (equivalent to Rust's `?`)
@@ -134,8 +136,14 @@ pub enum Expr {
         span: Span,
     },
 
-    /// `await expr`
+    /// `await expr` — wait for a Task<T> to complete, yielding T
     Await {
+        expr: Box<S<Expr>>,
+        span: Span,
+    },
+
+    /// `spawn expr` — run expr in a new task (thread), returning Task<T>
+    Spawn {
         expr: Box<S<Expr>>,
         span: Span,
     },

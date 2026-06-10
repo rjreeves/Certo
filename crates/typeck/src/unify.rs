@@ -63,6 +63,10 @@ impl UnionFind {
 
             // Primitives — structural equality.
             (Ty::Int,     Ty::Int)     => Ok(()),
+            (Ty::Int8,    Ty::Int8)    => Ok(()),
+            (Ty::Int16,   Ty::Int16)   => Ok(()),
+            (Ty::Int32,   Ty::Int32)   => Ok(()),
+            (Ty::UInt,    Ty::UInt)    => Ok(()),
             (Ty::Float,   Ty::Float)   => Ok(()),
             (Ty::Decimal, Ty::Decimal) => Ok(()),
             (Ty::Bool,    Ty::Bool)    => Ok(()),

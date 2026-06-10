@@ -23,18 +23,33 @@ struct Cx {
     globals:    HashMap<String, FnId>,
     /// Name → param list for user-defined functions (for labeled/default arg normalization).
     fn_params:  HashMap<String, Vec<FnParam>>,
-    errors:     Vec<LowerError>,
+    /// Full-qualified name → param names for stdlib functions (keyed as "Module.fn").
+    stdlib_params: HashMap<&'static str, &'static [&'static str]>,
+    /// Statemachine-generated function full names → return type.
+    sm_returns:    HashMap<String, Ty>,
+    /// User-defined function names → return type (from AST annotation).
+    fn_ret_types:  HashMap<String, Ty>,
+    /// Global value types — for sum variant constants like `Red`, `Green`.
+    global_types:  HashMap<String, Ty>,
+    /// Sum variant name → parent type name (e.g. "Red" → "Color").
+    variant_to_type: HashMap<String, String>,
+    errors:        Vec<LowerError>,
 }
 
 impl Cx {
     fn new() -> Self {
         Cx {
-            next_local: 0,
-            next_fn:    0,
-            locals:     vec![HashMap::new()],
-            globals:    HashMap::new(),
-            fn_params:  HashMap::new(),
-            errors:     Vec::new(),
+            next_local:    0,
+            next_fn:       0,
+            locals:        vec![HashMap::new()],
+            globals:       HashMap::new(),
+            fn_params:     HashMap::new(),
+            stdlib_params: stdlib_param_names(),
+            sm_returns:    HashMap::new(),
+            fn_ret_types:  HashMap::new(),
+            global_types:    HashMap::new(),
+            variant_to_type: HashMap::new(),
+            errors:          Vec::new(),
         }
     }
 
@@ -71,6 +86,91 @@ impl Cx {
     }
 }
 
+/// Stdlib function parameter names, keyed by fully-qualified name (e.g. "Text.split").
+/// Used to reorder named args at call sites for stdlib functions.
+fn stdlib_param_names() -> HashMap<&'static str, &'static [&'static str]> {
+    let mut m: HashMap<&'static str, &'static [&'static str]> = HashMap::new();
+
+    // Core
+    m.insert("assert",          &["cond", "msg"]);
+    m.insert("pow",             &["base", "exp"]);
+    m.insert("minInt",          &["a", "b"]);
+    m.insert("maxInt",          &["a", "b"]);
+    m.insert("minFloat",        &["a", "b"]);
+    m.insert("maxFloat",        &["a", "b"]);
+    m.insert("range",           &["from", "to"]);
+    m.insert("rangeInclusive",  &["from", "to"]);
+
+    // List
+    m.insert("List.get",        &["list", "index"]);
+    m.insert("List.getOrPanic", &["list", "index"]);
+    m.insert("List.push",       &["list", "item"]);
+    m.insert("List.concat",     &["a", "b"]);
+    m.insert("List.slice",      &["list", "from", "to"]);
+    m.insert("List.contains",   &["list", "item"]);
+    m.insert("List.map",        &["list", "f"]);
+    m.insert("List.filter",     &["list", "pred"]);
+    m.insert("List.fold",       &["list", "init", "f"]);
+    m.insert("List.find",       &["list", "pred"]);
+    m.insert("List.any",        &["list", "pred"]);
+    m.insert("List.all",        &["list", "pred"]);
+    m.insert("List.sort",       &["list", "cmp"]);
+    m.insert("List.zip",        &["a", "b"]);
+
+    // Map
+    m.insert("Map.insert",      &["map", "key", "value"]);
+    m.insert("Map.get",         &["map", "key"]);
+    m.insert("Map.contains",    &["map", "key"]);
+    m.insert("Map.remove",      &["map", "key"]);
+
+    // Text
+    m.insert("Text.concat",     &["a", "b"]);
+    m.insert("Text.contains",   &["text", "sub"]);
+    m.insert("Text.startsWith", &["text", "prefix"]);
+    m.insert("Text.endsWith",   &["text", "suffix"]);
+    m.insert("Text.slice",      &["text", "from", "to"]);
+    m.insert("Text.indexOf",    &["text", "sub"]);
+    m.insert("Text.replace",    &["text", "from", "to"]);
+    m.insert("Text.split",      &["text", "sep"]);
+    m.insert("Text.join",       &["parts", "sep"]);
+    m.insert("Text.repeat",     &["text", "n"]);
+
+    // DateTime
+    m.insert("DateTime.format",      &["dt", "fmt"]);
+    m.insert("DateTime.addSeconds",  &["dt", "secs"]);
+    m.insert("DateTime.addMinutes",  &["dt", "mins"]);
+    m.insert("DateTime.addHours",    &["dt", "hours"]);
+    m.insert("DateTime.addDays",     &["dt", "days"]);
+    m.insert("DateTime.diffSeconds", &["a", "b"]);
+    m.insert("DateTime.diffDays",    &["a", "b"]);
+    m.insert("DateTime.before",      &["a", "b"]);
+    m.insert("DateTime.after",       &["a", "b"]);
+    m.insert("Date.format",          &["date", "fmt"]);
+
+    // Decimal / Money
+    m.insert("Decimal.add",    &["a", "b"]);
+    m.insert("Decimal.sub",    &["a", "b"]);
+    m.insert("Decimal.mul",    &["a", "b"]);
+    m.insert("Decimal.div",    &["a", "b"]);
+    m.insert("Decimal.round",  &["d", "places"]);
+
+    // File / Path / IO
+    m.insert("writeFile",      &["path", "content"]);
+    m.insert("appendFile",     &["path", "content"]);
+    m.insert("Path.join",      &["base", "part"]);
+
+    // Process
+    m.insert("Process.exec",   &["cmd", "args"]);
+
+    // Json
+    m.insert("JsonValue.at",   &["value", "index"]);
+    m.insert("JsonValue.get",  &["value", "key"]);
+    m.insert("JsonValue.push", &["array", "item"]);
+    m.insert("JsonValue.set",  &["obj", "key", "value"]);
+
+    m
+}
+
 // ------------------------------------------------------------------ //
 // Entry point
 // ------------------------------------------------------------------ //
@@ -84,6 +184,40 @@ pub fn lower_module(module: &Module) -> Result<HirModule, Vec<LowerError>> {
             let id = cx.fresh_fn();
             cx.globals.insert(f.name.node.clone(), id);
             cx.fn_params.insert(f.name.node.clone(), f.params.clone());
+            if let Some(ret) = &f.ret_ty {
+                cx.fn_ret_types.insert(f.name.node.clone(), ast_ty_to_ty(&ret.node));
+            }
+        }
+        // Register sum variant constructors and unit values.
+        if let Decl::Type(t) = &sdecl.node {
+            if let certo_ast::decl::TypeBody::Sum(variants) = &t.body {
+                let parent_ty = Ty::Named { name: t.name.node.clone(), args: vec![] };
+                for v in variants {
+                    cx.variant_to_type.insert(v.name.node.clone(), t.name.node.clone());
+                    if v.fields.is_empty() {
+                        cx.global_types.insert(v.name.node.clone(), parent_ty.clone());
+                    } else {
+                        cx.fn_ret_types.insert(v.name.node.clone(), parent_ty.clone());
+                    }
+                }
+            }
+        }
+    }
+
+    // Pre-register statemachine-generated function return types so HIR call
+    // expressions get the correct type (used by MIR for C codegen).
+    for sdecl in &module.decls {
+        if let Decl::StateMachine(sm) = &sdecl.node {
+            let machine_ty = Ty::Named { name: sm.name.node.clone(), args: vec![] };
+            let state_ty   = Ty::Named { name: format!("{}State", sm.name.node), args: vec![] };
+            cx.sm_returns.insert(format!("{}_new",   sm.name.node), machine_ty.clone());
+            cx.sm_returns.insert(format!("{}_state", sm.name.node), state_ty);
+            for t in &sm.transitions {
+                cx.sm_returns.insert(format!("{}_{}", sm.name.node, t.event.node), machine_ty.clone());
+            }
+            for state in &sm.states {
+                cx.sm_returns.insert(format!("{}_is{}", sm.name.node, state.node), Ty::Bool);
+            }
         }
     }
 
@@ -96,7 +230,8 @@ pub fn lower_module(module: &Module) -> Result<HirModule, Vec<LowerError>> {
 
                 let params: Vec<HirParam> = f.params.iter().map(|p| {
                     let local = cx.define_local(&p.name.node);
-                    HirParam { local, name: p.name.node.clone(), ty: Ty::Error, span: p.span }
+                    let ty = ast_ty_to_ty(&p.ty.node);
+                    HirParam { local, name: p.name.node.clone(), ty, span: p.span }
                 }).collect();
 
                 let body = f.body.as_ref().map(|b| lower_expr(b, &mut cx));
@@ -107,7 +242,7 @@ pub fn lower_module(module: &Module) -> Result<HirModule, Vec<LowerError>> {
                     id,
                     name:   f.name.node.clone(),
                     params,
-                    ret_ty: Ty::Error, // filled by type checker later
+                    ret_ty: f.ret_ty.as_ref().map(|t| ast_ty_to_ty(&t.node)).unwrap_or(Ty::Error),
                     body,
                     span:   f.span,
                 }));
@@ -127,7 +262,7 @@ pub fn lower_module(module: &Module) -> Result<HirModule, Vec<LowerError>> {
                 }));
             }
 
-            _ => {} // type decls, migrations, etc. don't lower to HIR items
+            _ => {} // type decls, migrations, on_enter hooks, etc. don't lower to HIR items
         }
     }
 
@@ -178,7 +313,8 @@ fn lower_expr(expr: &S<Expr>, cx: &mut Cx) -> HirExpr {
             if let Some(local) = cx.lookup_local(name) {
                 HirExpr { kind: HirExprKind::Local(local), ty: Ty::Error, span }
             } else {
-                HirExpr { kind: HirExprKind::Global(name.to_string()), ty: Ty::Error, span }
+                let ty = cx.global_types.get(name).cloned().unwrap_or(Ty::Error);
+                HirExpr { kind: HirExprKind::Global(name.to_string()), ty, span }
             }
         }
 
@@ -203,58 +339,82 @@ fn lower_expr(expr: &S<Expr>, cx: &mut Cx) -> HirExpr {
         Expr::App { func, args, .. } => {
             let func_hir = lower_expr(func, cx);
 
-            // Check if we need to normalize labeled args or fill defaults
-            let fn_name = match &func.node {
-                Expr::Path { path, .. } => path.segments.last().map(|s| s.node.clone()),
-                _ => None,
+            // Extract the call target name(s) for param-reordering lookups.
+            let (fn_full_path, fn_short_name) = match &func.node {
+                Expr::Path { path, .. } => {
+                    let full = path.segments.iter()
+                        .map(|s| s.node.as_str())
+                        .collect::<Vec<_>>()
+                        .join(".");
+                    let short = path.segments.last().map(|s| s.node.clone());
+                    (Some(full), short)
+                }
+                _ => (None, None),
             };
             let has_labels = args.iter().any(|a| a.label.is_some());
 
-            let lowered_args = if let Some(ref fname) = fn_name {
-                if let Some(params) = cx.fn_params.get(fname).cloned() {
-                    if has_labels || args.len() < params.len() {
-                        // Normalize: reorder labeled args, insert defaults for missing
-                        let mut slots: Vec<Option<HirExpr>> = vec![None; params.len()];
-                        let mut pos_cursor = 0usize;
-                        for arg in args {
-                            let expr = lower_expr(&arg.value, cx);
-                            if let Some(label) = &arg.label {
-                                if let Some(idx) = params.iter().position(|p| p.name.node == label.node) {
-                                    slots[idx] = Some(expr);
-                                } else {
-                                    while pos_cursor < slots.len() && slots[pos_cursor].is_some() {
-                                        pos_cursor += 1;
-                                    }
-                                    if pos_cursor < slots.len() {
-                                        slots[pos_cursor] = Some(expr);
-                                        pos_cursor += 1;
-                                    }
-                                }
+            // Resolve param names: stdlib (by full path) takes priority, then user-defined (by short name).
+            let stdlib_names: Option<&[&str]> = fn_full_path.as_deref()
+                .and_then(|fp| cx.stdlib_params.get(fp).copied());
+            let user_params: Option<Vec<FnParam>> = fn_short_name.as_ref()
+                .and_then(|s| cx.fn_params.get(s).cloned());
+
+            let lowered_args = if let Some(snames) = stdlib_names {
+                // Stdlib function: only labeled reordering (no defaults).
+                if has_labels {
+                    let mut slots: Vec<Option<HirExpr>> = vec![None; snames.len()];
+                    let mut pos_cursor = 0usize;
+                    for arg in args {
+                        let expr = lower_expr(&arg.value, cx);
+                        if let Some(label) = &arg.label {
+                            if let Some(idx) = snames.iter().position(|&n| n == label.node.as_str()) {
+                                slots[idx] = Some(expr);
                             } else {
-                                while pos_cursor < slots.len() && slots[pos_cursor].is_some() {
-                                    pos_cursor += 1;
-                                }
-                                if pos_cursor < slots.len() {
-                                    slots[pos_cursor] = Some(expr);
-                                    pos_cursor += 1;
-                                }
+                                while pos_cursor < slots.len() && slots[pos_cursor].is_some() { pos_cursor += 1; }
+                                if pos_cursor < slots.len() { slots[pos_cursor] = Some(expr); pos_cursor += 1; }
                             }
+                        } else {
+                            while pos_cursor < slots.len() && slots[pos_cursor].is_some() { pos_cursor += 1; }
+                            if pos_cursor < slots.len() { slots[pos_cursor] = Some(expr); pos_cursor += 1; }
                         }
-                        slots.into_iter().enumerate().map(|(i, maybe)| {
-                            maybe.unwrap_or_else(|| {
-                                if let Some(default_expr) = &params[i].default {
-                                    lower_expr(default_expr, cx)
-                                } else {
-                                    cx.err(LowerErrorKind::Unsupported(
-                                        format!("missing required argument `{}`", params[i].name.node)
-                                    ), span);
-                                    HirExpr { kind: HirExprKind::Unit, ty: Ty::Error, span }
-                                }
-                            })
-                        }).collect()
-                    } else {
-                        args.iter().map(|a| lower_expr(&a.value, cx)).collect()
                     }
+                    slots.into_iter().map(|maybe| {
+                        maybe.unwrap_or_else(|| HirExpr { kind: HirExprKind::Unit, ty: Ty::Error, span })
+                    }).collect()
+                } else {
+                    args.iter().map(|a| lower_expr(&a.value, cx)).collect()
+                }
+            } else if let Some(params) = user_params {
+                if has_labels || args.len() < params.len() {
+                    // Normalize: reorder labeled args, insert defaults for missing
+                    let mut slots: Vec<Option<HirExpr>> = vec![None; params.len()];
+                    let mut pos_cursor = 0usize;
+                    for arg in args {
+                        let expr = lower_expr(&arg.value, cx);
+                        if let Some(label) = &arg.label {
+                            if let Some(idx) = params.iter().position(|p| p.name.node == label.node) {
+                                slots[idx] = Some(expr);
+                            } else {
+                                while pos_cursor < slots.len() && slots[pos_cursor].is_some() { pos_cursor += 1; }
+                                if pos_cursor < slots.len() { slots[pos_cursor] = Some(expr); pos_cursor += 1; }
+                            }
+                        } else {
+                            while pos_cursor < slots.len() && slots[pos_cursor].is_some() { pos_cursor += 1; }
+                            if pos_cursor < slots.len() { slots[pos_cursor] = Some(expr); pos_cursor += 1; }
+                        }
+                    }
+                    slots.into_iter().enumerate().map(|(i, maybe)| {
+                        maybe.unwrap_or_else(|| {
+                            if let Some(default_expr) = &params[i].default {
+                                lower_expr(default_expr, cx)
+                            } else {
+                                cx.err(LowerErrorKind::Unsupported(
+                                    format!("missing required argument `{}`", params[i].name.node)
+                                ), span);
+                                HirExpr { kind: HirExprKind::Unit, ty: Ty::Error, span }
+                            }
+                        })
+                    }).collect()
                 } else {
                     args.iter().map(|a| lower_expr(&a.value, cx)).collect()
                 }
@@ -262,7 +422,14 @@ fn lower_expr(expr: &S<Expr>, cx: &mut Cx) -> HirExpr {
                 args.iter().map(|a| lower_expr(&a.value, cx)).collect()
             };
 
-            HirExpr { kind: HirExprKind::Call { func: Box::new(func_hir), args: lowered_args }, ty: Ty::Error, span }
+            // Look up the return type: statemachine fns first, then user-defined fns.
+            let short = fn_short_name.as_deref().unwrap_or("");
+            let call_ty = fn_full_path.as_deref()
+                .and_then(|fp| cx.sm_returns.get(fp).cloned())
+                .or_else(|| cx.fn_ret_types.get(short).cloned())
+                .unwrap_or(Ty::Error);
+
+            HirExpr { kind: HirExprKind::Call { func: Box::new(func_hir), args: lowered_args }, ty: call_ty, span }
         }
 
         Expr::BinOp { op, left, right, .. } => {
@@ -361,12 +528,13 @@ fn lower_expr(expr: &S<Expr>, cx: &mut Cx) -> HirExpr {
             let cond = lower_expr(cond, cx);
             let then_ = lower_expr(then_expr, cx);
             let else_ = lower_expr(else_expr, cx);
-            HirExpr { kind: HirExprKind::If { cond: Box::new(cond), then_expr: Box::new(then_), else_expr: Box::new(else_) }, ty: Ty::Error, span }
+            let ty = if !matches!(then_.ty, Ty::Error) { then_.ty.clone() } else { else_.ty.clone() };
+            HirExpr { kind: HirExprKind::If { cond: Box::new(cond), then_expr: Box::new(then_), else_expr: Box::new(else_) }, ty, span }
         }
 
         Expr::Match { scrutinee, arms, .. } => {
             let scrut = lower_expr(scrutinee, cx);
-            let arms = arms.iter().map(|arm| {
+            let hir_arms: Vec<HirArm> = arms.iter().map(|arm| {
                 cx.push_scope();
                 let pat   = lower_pat(&arm.pattern, cx);
                 let guard = arm.guard.as_ref().map(|g| lower_expr(g, cx));
@@ -374,7 +542,10 @@ fn lower_expr(expr: &S<Expr>, cx: &mut Cx) -> HirExpr {
                 cx.pop_scope();
                 HirArm { pat, guard, body }
             }).collect();
-            HirExpr { kind: HirExprKind::Match { scrutinee: Box::new(scrut), arms }, ty: Ty::Error, span }
+            let ty = hir_arms.iter().find_map(|a| {
+                if !matches!(a.body.ty, Ty::Error) { Some(a.body.ty.clone()) } else { None }
+            }).unwrap_or(Ty::Error);
+            HirExpr { kind: HirExprKind::Match { scrutinee: Box::new(scrut), arms: hir_arms }, ty, span }
         }
 
         Expr::Block { stmts, .. } => lower_block(stmts, span, cx),
@@ -400,22 +571,23 @@ fn lower_expr(expr: &S<Expr>, cx: &mut Cx) -> HirExpr {
             HirExpr { kind: HirExprKind::Tuple(elems), ty: Ty::Error, span }
         }
 
-        Expr::Record { base, fields, .. } => {
+        Expr::Record { ty_name, base, fields, .. } => {
+            let record_ty = ty_name.as_deref()
+                .map(|n| Ty::Named { name: n.to_string(), args: vec![] })
+                .unwrap_or(Ty::Error);
             let mut hir_fields: Vec<(String, HirExpr)> = fields.iter()
                 .map(|f| (f.name.node.clone(), lower_expr(&f.value, cx)))
                 .collect();
             if let Some(b) = base {
-                // `base with { f: v }` — lower base and prepend as a spread.
-                // In HIR we model this as calling a compiler builtin `record_update`.
                 let base_expr = lower_expr(b, cx);
                 let update_fn = HirExpr { kind: HirExprKind::Global("__record_update".into()), ty: Ty::Error, span };
-                let record_expr = HirExpr { kind: HirExprKind::Record(hir_fields), ty: Ty::Error, span };
+                let record_expr = HirExpr { kind: HirExprKind::Record(hir_fields), ty: record_ty.clone(), span };
                 return HirExpr {
                     kind: HirExprKind::Call { func: Box::new(update_fn), args: vec![base_expr, record_expr] },
-                    ty: Ty::Error, span,
+                    ty: record_ty, span,
                 };
             }
-            HirExpr { kind: HirExprKind::Record(hir_fields), ty: Ty::Error, span }
+            HirExpr { kind: HirExprKind::Record(hir_fields), ty: record_ty, span }
         }
 
         Expr::Try { expr, .. } => {
@@ -428,8 +600,19 @@ fn lower_expr(expr: &S<Expr>, cx: &mut Cx) -> HirExpr {
             HirExpr { kind: HirExprKind::Unsafe(Box::new(inner)), ty: Ty::Error, span }
         }
 
-        // `await expr` — at HIR level async is transparent; scheduling handled by runtime.
-        Expr::Await { expr, .. } => lower_expr(expr, cx),
+        // `await task` — join a spawned task.
+        Expr::Await { expr, .. } => {
+            let inner = lower_expr(expr, cx);
+            HirExpr { kind: HirExprKind::Await(Box::new(inner)), ty: Ty::Error, span }
+        }
+
+        // `spawn expr` — run expr in a new task.
+        // Lower `spawn f(a, b)` as a Call node wrapped in Spawn so MIR can emit the call,
+        // with Spawn being transparent at HIR (the actual threading is done by codegen/runtime).
+        Expr::Spawn { expr, .. } => {
+            let inner = lower_expr(expr, cx);
+            HirExpr { kind: HirExprKind::Spawn { fn_name: String::new(), args: vec![inner] }, ty: Ty::Error, span }
+        }
 
         // `guard cond else e` → `if !cond { e }; unit`
         Expr::Guard { cond, else_expr, .. } => {
@@ -452,9 +635,26 @@ fn lower_expr(expr: &S<Expr>, cx: &mut Cx) -> HirExpr {
         }
 
         Expr::Parallel { tasks, .. } => {
-            // parallel { a, b, c } — lower as tuple construction (runtime handles scheduling)
-            let lowered: Vec<HirExpr> = tasks.iter().map(|t| lower_expr(t, cx)).collect();
-            HirExpr { kind: HirExprKind::Tuple(lowered), ty: Ty::Error, span }
+            // parallel { a, b, c } — spawn each task then await all, yielding a tuple.
+            // Lower as: { val t0 = spawn a; val t1 = spawn b; ...; (await t0, await t1, ...) }
+            let mut stmts: Vec<HirStmt> = Vec::new();
+            let mut task_locals: Vec<LocalId> = Vec::new();
+            for (i, task) in tasks.iter().enumerate() {
+                let spawn_inner = lower_expr(task, cx);
+                let spawn_expr = HirExpr {
+                    kind: HirExprKind::Spawn { fn_name: format!("__parallel_task_{i}"), args: vec![spawn_inner] },
+                    ty: Ty::Error, span,
+                };
+                let local = cx.fresh_local();
+                stmts.push(HirStmt::Let { local, name: format!("__task_{i}"), ty: Ty::Error, init: spawn_expr });
+                task_locals.push(local);
+            }
+            let awaited: Vec<HirExpr> = task_locals.iter().map(|&l| {
+                let local_expr = HirExpr { kind: HirExprKind::Local(l), ty: Ty::Error, span };
+                HirExpr { kind: HirExprKind::Await(Box::new(local_expr)), ty: Ty::Error, span }
+            }).collect();
+            let tail = HirExpr { kind: HirExprKind::Tuple(awaited), ty: Ty::Error, span };
+            HirExpr { kind: HirExprKind::Block { stmts, tail: Box::new(tail) }, ty: Ty::Error, span }
         }
 
         Expr::Transaction { body, .. } => {
@@ -557,7 +757,8 @@ fn lower_block(stmts: &[Stmt], span: Span, cx: &mut Cx) -> HirExpr {
                 match &pattern.node {
                     Pattern::Ident { name, .. } => {
                         let local = cx.define_local(&name.node);
-                        hir_stmts.push(HirStmt::Let { local, name: name.node.clone(), ty: Ty::Error, init });
+                        let ty = init.ty.clone(); // propagate init type (e.g. statemachine return type)
+                        hir_stmts.push(HirStmt::Let { local, name: name.node.clone(), ty, init });
                     }
                     Pattern::Wildcard { .. } => {
                         hir_stmts.push(HirStmt::Expr(init));
@@ -604,8 +805,9 @@ fn lower_block(stmts: &[Stmt], span: Span, cx: &mut Cx) -> HirExpr {
             }
             Stmt::Var { name, value, .. } => {
                 let init = lower_expr(value, cx);
+                let ty = init.ty.clone();
                 let local = cx.define_local(&name.node);
-                hir_stmts.push(HirStmt::Let { local, name: name.node.clone(), ty: Ty::Error, init });
+                hir_stmts.push(HirStmt::Let { local, name: name.node.clone(), ty, init });
             }
             Stmt::Assign { target, value, .. } => {
                 let v = lower_expr(value, cx);
@@ -658,7 +860,13 @@ fn lower_pat(pat: &S<certo_ast::pattern::Pattern>, cx: &mut Cx) -> HirPat {
         }),
         Pattern::Tuple { elements, .. } => HirPat::Tuple(elements.iter().map(|e| lower_pat(e, cx)).collect()),
         Pattern::Constructor { path, fields, .. } => {
-            let name = path.segments.last().map(|s| s.node.clone()).unwrap_or_default();
+            let variant = path.segments.last().map(|s| s.node.clone()).unwrap_or_default();
+            // Build a fully qualified tag name so MIR can emit `TypeName_VariantName`.
+            let name = if let Some(parent) = cx.variant_to_type.get(&variant) {
+                format!("{}__{}", parent, variant)
+            } else {
+                variant
+            };
             HirPat::Constructor { name, fields: fields.iter().map(|f| lower_pat(f, cx)).collect() }
         }
         Pattern::Or { left, right, .. } => HirPat::Or(
@@ -667,5 +875,50 @@ fn lower_pat(pat: &S<certo_ast::pattern::Pattern>, cx: &mut Cx) -> HirPat {
         ),
         // Record / Guard / As — flatten to wildcard for now (full pattern compilation later)
         _ => HirPat::Wildcard,
+    }
+}
+
+// ------------------------------------------------------------------ //
+// AST type expression → Ty (lightweight conversion for HIR param types)
+// ------------------------------------------------------------------ //
+
+fn ast_ty_to_ty(te: &certo_ast::types::TypeExpr) -> Ty {
+    use certo_ast::types::TypeExpr;
+    match te {
+        TypeExpr::Named { path, args, .. } => {
+            let name = path.segments.last().map(|s| s.node.as_str()).unwrap_or("");
+            let targs: Vec<Ty> = args.iter().map(|a| ast_ty_to_ty(&a.node)).collect();
+            match name {
+                "Int"     => Ty::Int,
+                "Int8"    => Ty::Int8,
+                "Int16"   => Ty::Int16,
+                "Int32"   => Ty::Int32,
+                "UInt"    => Ty::UInt,
+                "Float"   => Ty::Float,
+                "Decimal" => Ty::Decimal,
+                "Bool"    => Ty::Bool,
+                "Text"    => Ty::Text,
+                "Unit"    => Ty::Unit,
+                "UUID"    => Ty::Uuid,
+                "List"    => Ty::List(Box::new(targs.into_iter().next().unwrap_or(Ty::Error))),
+                "Option"  => Ty::Option(Box::new(targs.into_iter().next().unwrap_or(Ty::Error))),
+                "Result"  => {
+                    let mut it = targs.into_iter();
+                    Ty::Result(Box::new(it.next().unwrap_or(Ty::Error)), Box::new(it.next().unwrap_or(Ty::Error)))
+                }
+                "Map"     => {
+                    let mut it = targs.into_iter();
+                    Ty::Map(Box::new(it.next().unwrap_or(Ty::Error)), Box::new(it.next().unwrap_or(Ty::Error)))
+                }
+                other     => Ty::Named { name: other.to_string(), args: targs },
+            }
+        }
+        TypeExpr::Option { inner, .. } => Ty::Option(Box::new(ast_ty_to_ty(&inner.node))),
+        TypeExpr::Tuple { elements, .. } => Ty::Tuple(elements.iter().map(|e| ast_ty_to_ty(&e.node)).collect()),
+        TypeExpr::Fn { params, ret, .. } => Ty::Fn {
+            params: params.iter().map(|p| ast_ty_to_ty(&p.node)).collect(),
+            ret:    Box::new(ast_ty_to_ty(&ret.node)),
+        },
+        _ => Ty::Error,
     }
 }

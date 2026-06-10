@@ -583,6 +583,120 @@ pub fn seed_stdlib(env: &mut TypeEnv, counter: &mut u32) {
         def!("Csv.header",    fn1(list_list_text(), list_text()));
         def!("Csv.rows",      fn1(list_list_text(), list_list_text()));
     }
+
+    // ---------------------------------------------------------------- //
+    // Named-arg metadata (full-qualified keys to match call-site lookup)
+    // ---------------------------------------------------------------- //
+
+    macro_rules! pm {
+        ($name:expr, $($p:expr),+) => {
+            env.define_param_meta($name, vec![$( ($p.to_string(), false) ),+]);
+        };
+    }
+
+    // Core
+    pm!("assert",          "cond", "msg");
+    pm!("pow",             "base", "exp");
+    pm!("minInt",          "a", "b");
+    pm!("maxInt",          "a", "b");
+    pm!("minFloat",        "a", "b");
+    pm!("maxFloat",        "a", "b");
+    pm!("range",           "from", "to");
+    pm!("rangeInclusive",  "from", "to");
+
+    // List
+    pm!("List.get",        "list", "index");
+    pm!("List.getOrPanic", "list", "index");
+    pm!("List.push",       "list", "item");
+    pm!("List.concat",     "a", "b");
+    pm!("List.slice",      "list", "from", "to");
+    pm!("List.contains",   "list", "item");
+    pm!("List.map",        "list", "f");
+    pm!("List.filter",     "list", "pred");
+    pm!("List.fold",       "list", "init", "f");
+    pm!("List.find",       "list", "pred");
+    pm!("List.any",        "list", "pred");
+    pm!("List.all",        "list", "pred");
+    pm!("List.sort",       "list", "cmp");
+    pm!("List.zip",        "a", "b");
+
+    // Map
+    pm!("Map.insert",      "map", "key", "value");
+    pm!("Map.get",         "map", "key");
+    pm!("Map.contains",    "map", "key");
+    pm!("Map.remove",      "map", "key");
+
+    // Text
+    pm!("Text.concat",     "a", "b");
+    pm!("Text.contains",   "text", "sub");
+    pm!("Text.startsWith", "text", "prefix");
+    pm!("Text.endsWith",   "text", "suffix");
+    pm!("Text.slice",      "text", "from", "to");
+    pm!("Text.indexOf",    "text", "sub");
+    pm!("Text.replace",    "text", "from", "to");
+    pm!("Text.split",      "text", "sep");
+    pm!("Text.join",       "parts", "sep");
+    pm!("Text.repeat",     "text", "n");
+
+    // DateTime
+    pm!("DateTime.format",      "dt", "fmt");
+    pm!("DateTime.addSeconds",  "dt", "secs");
+    pm!("DateTime.addMinutes",  "dt", "mins");
+    pm!("DateTime.addHours",    "dt", "hours");
+    pm!("DateTime.addDays",     "dt", "days");
+    pm!("DateTime.diffSeconds", "a", "b");
+    pm!("DateTime.diffDays",    "a", "b");
+    pm!("DateTime.before",      "a", "b");
+    pm!("DateTime.after",       "a", "b");
+    pm!("Date.format",          "date", "fmt");
+
+    // Decimal
+    pm!("Decimal.add",    "a", "b");
+    pm!("Decimal.sub",    "a", "b");
+    pm!("Decimal.mul",    "a", "b");
+    pm!("Decimal.div",    "a", "b");
+    pm!("Decimal.round",  "d", "places");
+
+    // File / Path
+    pm!("writeFile",   "path", "content");
+    pm!("appendFile",  "path", "content");
+    pm!("Path.join",   "base", "part");
+
+    // Process
+    pm!("Process.exec", "cmd", "args");
+
+    // Json
+    pm!("JsonValue.at",   "value", "index");
+    pm!("JsonValue.get",  "value", "key");
+    pm!("JsonValue.push", "array", "item");
+    pm!("JsonValue.set",  "obj", "key", "value");
+
+    // Http
+    pm!("Http.post",    "url", "content_type", "body");
+    pm!("Http.put",     "url", "content_type", "body");
+    pm!("Http.respond", "status", "content_type", "body");
+    pm!("Http.ok",      "content_type", "body");
+    pm!("Http.serve",   "port", "handler");
+
+    // Math
+    pm!("Math.atan2",    "y", "x");
+    pm!("Math.clamp",    "value", "min", "max");
+    pm!("Math.clampInt", "value", "min", "max");
+    pm!("Math.pow",      "base", "exp");
+    pm!("Math.hypot",    "x", "y");
+
+    // Regex
+    pm!("Regex.match",    "pattern", "text");
+    pm!("Regex.find",     "pattern", "text");
+    pm!("Regex.captures", "pattern", "text");
+    pm!("Regex.replace",  "pattern", "text", "replacement");
+    pm!("Regex.split",    "pattern", "text");
+
+    // Db
+    pm!("dbConnect",    "url");
+    pm!("dbExec",       "conn", "sql", "params");
+    pm!("dbQuery",      "conn", "sql", "params");
+    pm!("dbQueryRow",   "conn", "sql", "params");
 }
 
 fn fn1(a: Ty, ret: Ty) -> Ty {

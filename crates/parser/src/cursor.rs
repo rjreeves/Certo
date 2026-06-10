@@ -168,6 +168,7 @@ fn token_matches(a: &Token<'_>, b: &Token<'static>) -> bool {
         (When,      When)      |
         (Async,     Async)     |
         (Await,     Await)     |
+        (Spawn,     Spawn)     |
         (Parallel,  Parallel)  |
         (Do,        Do)        |
         (Return,    Return)    |
@@ -179,6 +180,7 @@ fn token_matches(a: &Token<'_>, b: &Token<'static>) -> bool {
         (Trait,     Trait)     |
         (Impl,      Impl)      |
         (For,       For)       |
+        (While,     While)     |
         (Where,     Where)     |
         (As,        As)        |
         (StateMachine, StateMachine) |

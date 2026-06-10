@@ -1,5 +1,5 @@
 use std::fmt::Write as FmtWrite;
-use certo_ast::decl::{Decl, TypeBody};
+use certo_ast::decl::{Decl, TypeBody, StateMachineDecl};
 use certo_ast::module::Module;
 use certo_hir::{HirModule, HirItem, lower_module};
 use certo_mir::lower_fn;
@@ -60,33 +60,71 @@ pub fn emit_module(module: &Module, opts: &CodegenOptions) -> String {
                     writeln!(out).unwrap();
                 }
                 TypeBody::Sum(variants) => {
-                    // Emit as tagged union.
+                    let tname = c_ident(&t.name.node);
+                    // Emit tag enum.
                     writeln!(out, "typedef enum {{").unwrap();
                     for v in variants {
-                        writeln!(out, "    {}_{},", c_ident(&t.name.node), c_ident(&v.name.node)).unwrap();
+                        writeln!(out, "    {}_{},", tname, c_ident(&v.name.node)).unwrap();
                     }
-                    writeln!(out, "}} {}_tag_t;", c_ident(&t.name.node)).unwrap();
+                    writeln!(out, "}} {}_tag_t;", tname).unwrap();
+                    // Emit tagged union struct.
                     writeln!(out, "typedef struct {{").unwrap();
-                    writeln!(out, "    {}_tag_t tag;", c_ident(&t.name.node)).unwrap();
-                    writeln!(out, "    union {{").unwrap();
-                    for v in variants {
-                        if !v.fields.is_empty() {
-                            writeln!(out, "        struct {{").unwrap();
-                            for (i, f) in v.fields.iter().enumerate() {
-                                let fname = f.name.as_ref().map(|n| n.node.clone())
-                                    .unwrap_or_else(|| format!("f{}", i));
-                                let cty = ast_ty_to_c_str(&f.ty.node);
-                                writeln!(out, "            {} {};", cty, fname).unwrap();
+                    writeln!(out, "    {}_tag_t tag;", tname).unwrap();
+                    let has_payload = variants.iter().any(|v| !v.fields.is_empty());
+                    if has_payload {
+                        writeln!(out, "    union {{").unwrap();
+                        for v in variants {
+                            if !v.fields.is_empty() {
+                                writeln!(out, "        struct {{").unwrap();
+                                for (i, f) in v.fields.iter().enumerate() {
+                                    let fname = f.name.as_ref().map(|n| n.node.clone())
+                                        .unwrap_or_else(|| format!("f{}", i));
+                                    let cty = ast_ty_to_c_str(&f.ty.node);
+                                    writeln!(out, "            {} {};", cty, fname).unwrap();
+                                }
+                                writeln!(out, "        }} {};", c_ident(&v.name.node).to_lowercase()).unwrap();
                             }
-                            writeln!(out, "        }} {};", c_ident(&v.name.node).to_lowercase()).unwrap();
+                        }
+                        writeln!(out, "    }};").unwrap();
+                    }
+                    writeln!(out, "}} {};", tname).unwrap();
+                    // Emit unit-variant constants.
+                    // Use snake_case (via c_fn_name logic) to match how the codegen references globals.
+                    for v in variants {
+                        if v.fields.is_empty() {
+                            let vname = c_ident(&v.name.node);
+                            let cname = crate::emit_mir::c_fn_name(&v.name.node); // e.g. certo_red
+                            writeln!(out, "static const {tname} {cname} = {{ .tag = {tname}_{vname} }};").unwrap();
+                        } else {
+                            // Emit constructor function.
+                            let vname = c_ident(&v.name.node);
+                            let params: Vec<String> = v.fields.iter().enumerate().map(|(i, f)| {
+                                let fname = f.name.as_ref().map(|n| n.node.clone()).unwrap_or_else(|| format!("f{i}"));
+                                let cty = ast_ty_to_c_str(&f.ty.node);
+                                format!("{cty} {fname}")
+                            }).collect();
+                            let inits: Vec<String> = v.fields.iter().enumerate().map(|(i, f)| {
+                                let fname = f.name.as_ref().map(|n| n.node.clone()).unwrap_or_else(|| format!("f{i}"));
+                                format!(".{fname} = {fname}")
+                            }).collect();
+                            writeln!(out, "static inline {tname} certo_{vname}({}) {{", params.join(", ")).unwrap();
+                            writeln!(out, "    {tname} _v = {{ .tag = {tname}_{vname}, .{} = {{ {} }} }};",
+                                vname.to_lowercase(), inits.join(", ")).unwrap();
+                            writeln!(out, "    return _v;").unwrap();
+                            writeln!(out, "}}").unwrap();
                         }
                     }
-                    writeln!(out, "    }};").unwrap();
-                    writeln!(out, "}} {};", c_ident(&t.name.node)).unwrap();
                     writeln!(out).unwrap();
                 }
                 TypeBody::Alias(_) => {} // aliases don't generate structs
             }
+        }
+    }
+
+    // --- State machine type and function definitions ---
+    for sdecl in &module.decls {
+        if let Decl::StateMachine(sm) = &sdecl.node {
+            emit_statemachine(sm, &mut out);
         }
     }
 
@@ -163,6 +201,117 @@ pub fn emit_module(module: &Module, opts: &CodegenOptions) -> String {
 }
 
 // ------------------------------------------------------------------ //
+// State machine emission
+// ------------------------------------------------------------------ //
+
+/// Emit C types and functions for a `statemachine` declaration.
+fn emit_statemachine(sm: &StateMachineDecl, out: &mut String) {
+    use std::fmt::Write as FmtWrite;
+    let mname = c_ident(&sm.name.node);
+
+    // 1. State enum.
+    writeln!(out, "typedef enum {{").unwrap();
+    for (i, state) in sm.states.iter().enumerate() {
+        let comma = if i + 1 < sm.states.len() { "," } else { "" };
+        writeln!(out, "    {}_{}{}",  mname, c_ident(&state.node), comma).unwrap();
+    }
+    writeln!(out, "}} {}State;", mname).unwrap();
+    writeln!(out).unwrap();
+
+    // 2. Machine struct — always has `state` field; extra fields from transition params.
+    // Collect unique (name, C-type) pairs across all transitions.
+    let mut fields: Vec<(String, String)> = Vec::new();
+    for t in &sm.transitions {
+        for p in &t.params {
+            let pname = p.name.node.clone();
+            if !fields.iter().any(|(n, _)| n == &pname) {
+                let cty = ast_ty_to_c_str(&p.ty.node);
+                fields.push((pname, cty));
+            }
+        }
+    }
+    writeln!(out, "typedef struct {{").unwrap();
+    writeln!(out, "    {}State state;", mname).unwrap();
+    for (fname, cty) in &fields {
+        writeln!(out, "    {} {};", cty, fname).unwrap();
+    }
+    writeln!(out, "}} {};", mname).unwrap();
+    writeln!(out).unwrap();
+
+    // 3. Constructor: MachineName_new() — initial state is the first state.
+    let init_state = sm.states.first().map(|s| s.node.as_str()).unwrap_or("_Unknown");
+    let ctor_c = c_fn_name(&format!("{}_new", sm.name.node));
+    writeln!(out, "{} {}(void) {{", mname, ctor_c).unwrap();
+    writeln!(out, "    {} _m = {{0}};", mname).unwrap();
+    writeln!(out, "    _m.state = {}_{};", mname, c_ident(init_state)).unwrap();
+    writeln!(out, "    return _m;").unwrap();
+    writeln!(out, "}}").unwrap();
+    writeln!(out).unwrap();
+
+    // 4. Transition functions.
+    for t in &sm.transitions {
+        let from   = c_ident(&t.from.node);
+        let to     = c_ident(&t.to.node);
+        let fn_c   = c_fn_name(&format!("{}_{}", sm.name.node, t.event.node));
+
+        // Build param list: machine first, then event params.
+        let mut param_parts = vec![format!("{} _self", mname)];
+        for p in &t.params {
+            let cty = ast_ty_to_c_str(&p.ty.node);
+            param_parts.push(format!("{} _{}", cty, p.name.node));
+        }
+        let param_str = param_parts.join(", ");
+
+        writeln!(out, "{} {}({}) {{", mname, fn_c, param_str).unwrap();
+        // Guard: must be in `from` state.
+        writeln!(out, "    if (_self.state != {}_{}) {{", mname, from).unwrap();
+        writeln!(out, "        certo_panic(CERTO_STR(\"invalid transition {}: expected state {}\"));",
+            t.event.node, t.from.node).unwrap();
+        writeln!(out, "    }}").unwrap();
+        // Assign transition params into the struct.
+        for p in &t.params {
+            writeln!(out, "    _self.{} = _{};", p.name.node, p.name.node).unwrap();
+        }
+        // Check invariants on the `from` state before leaving (future: emit body).
+        for inv in sm.invariants.iter().filter(|i| i.state.node == t.from.node) {
+            let _ = inv;
+            writeln!(out, "    /* invariant check for {} */", t.from.node).unwrap();
+        }
+        // Set new state.
+        writeln!(out, "    _self.state = {}_{};", mname, to).unwrap();
+        // Inline on_enter hook if one exists for the target state.
+        for hook in sm.on_enter.iter().filter(|h| h.state.node == t.to.node) {
+            if let Some(c) = simple_expr_to_c(&hook.body.node) {
+                writeln!(out, "    {};", c).unwrap();
+            } else {
+                writeln!(out, "    /* on_enter {}: complex expression */", t.to.node).unwrap();
+            }
+        }
+        writeln!(out, "    return _self;").unwrap();
+        writeln!(out, "}}").unwrap();
+        writeln!(out).unwrap();
+    }
+
+    // 5. State predicates: MachineName_isState(m) -> bool
+    for state in &sm.states {
+        let sname    = c_ident(&state.node);
+        let pred_c   = c_fn_name(&format!("{}_is{}", sm.name.node, state.node));
+        writeln!(out, "bool {}({} _self) {{", pred_c, mname).unwrap();
+        writeln!(out, "    return _self.state == {}_{};", mname, sname).unwrap();
+        writeln!(out, "}}").unwrap();
+        writeln!(out).unwrap();
+    }
+
+    // 6. State accessor: MachineName_state(m) -> MachineName_state (as int)
+    let state_acc_c = c_fn_name(&format!("{}_state", sm.name.node));
+    writeln!(out, "{}State {}({} _self) {{", mname, state_acc_c, mname).unwrap();
+    writeln!(out, "    return _self.state;").unwrap();
+    writeln!(out, "}}").unwrap();
+    writeln!(out).unwrap();
+
+}
+
+// ------------------------------------------------------------------ //
 // Helpers
 // ------------------------------------------------------------------ //
 
@@ -200,6 +349,53 @@ fn const_expr_to_c(expr: &certo_hir::HirExpr) -> String {
         HirExprKind::Str(s)     => format!("CERTO_STR(\"{}\")", s),
         HirExprKind::Unit       => "CERTO_UNIT".into(),
         _                       => "/* expr */0".into(),
+    }
+}
+
+/// Attempt to convert a simple Certo AST expression to a C statement string.
+/// Returns `None` for complex expressions that require HIR lowering.
+fn simple_expr_to_c(expr: &certo_ast::expr::Expr) -> Option<String> {
+    use certo_ast::expr::{Expr, Lit};
+    match expr {
+        // fn_name(args...) where args are simple
+        Expr::App { func, args, .. } => {
+            let fname = match &func.node {
+                Expr::Path { path, .. } => {
+                    path.segments.iter()
+                        .map(|s| s.node.as_str())
+                        .collect::<Vec<_>>()
+                        .join(".")
+                }
+                _ => return None,
+            };
+            let c_fn = c_fn_name(&fname);
+            let c_args: Option<Vec<String>> = args.iter()
+                .map(|a| simple_expr_to_c_rvalue(&a.value.node))
+                .collect();
+            Some(format!("{}({})", c_fn, c_args?.join(", ")))
+        }
+        _ => None,
+    }
+}
+
+fn simple_expr_to_c_rvalue(expr: &certo_ast::expr::Expr) -> Option<String> {
+    use certo_ast::expr::{Expr, Lit};
+    match expr {
+        Expr::Lit { value, .. } => match value {
+            Lit::String(s) => Some(format!("CERTO_STR(\"{}\")", s.replace('\\', "\\\\").replace('"', "\\\""))),
+            Lit::Int(n)    => Some(n.to_string()),
+            Lit::Float(f)  => Some(f.to_string()),
+            Lit::Bool(b)   => Some(if *b { "true".into() } else { "false".into() }),
+            _ => None,
+        },
+        Expr::Path { path, .. } => {
+            if path.segments.len() == 1 {
+                Some(path.segments[0].node.clone())
+            } else {
+                None
+            }
+        }
+        _ => None,
     }
 }
 
@@ -290,5 +486,9 @@ void* __db_transaction(certo_fn_t thunk);
 
 /* Record update */
 void* __record_update(void* base, void* updates);
+
+/* Async / spawn — stub runtime (single-threaded; spawn evaluates eagerly) */
+/* Full threading support requires linking with -lpthread on POSIX or using Win32 threads. */
+static inline int64_t __certo_await(int64_t task_handle) { return task_handle; }
 /* ---- end Certo runtime ---- */
 "#;

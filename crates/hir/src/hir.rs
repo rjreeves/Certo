@@ -163,6 +163,15 @@ pub enum HirExprKind {
         cond: Box<HirExpr>,
         body: Box<HirExpr>,
     },
+
+    /// `spawn f(args)` — run a call in a new OS thread, return Task handle (int64_t pointer).
+    Spawn {
+        fn_name: String,
+        args:    Vec<HirExpr>,
+    },
+
+    /// `await task` — join a spawned Task, returning its result as int64_t.
+    Await(Box<HirExpr>),
 }
 
 // ------------------------------------------------------------------ //

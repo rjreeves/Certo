@@ -294,6 +294,14 @@ fn parse_atom(cur: &mut Cursor<'_>) -> Result<S<Expr>, ParseError> {
             Ok(S::new(Expr::Await { expr: Box::new(expr), span: full }, full))
         }
 
+        // `spawn expr`
+        Some(Token::Spawn)    => {
+            cur.bump();
+            let expr = parse_postfix(cur)?;
+            let full = span.to(expr.span);
+            Ok(S::new(Expr::Spawn { expr: Box::new(expr), span: full }, full))
+        }
+
         // `guard cond else expr`
         Some(Token::Guard)    => parse_guard(cur),
 
@@ -363,7 +371,8 @@ fn parse_ident_or_record(cur: &mut Cursor<'_>) -> Result<S<Expr>, ParseError> {
         .unwrap_or(false);
 
     if first_is_upper && cur.peek() == Some(&Token::LBrace) {
-        return parse_record_body(cur, None, span);
+        let name = path.segments.iter().map(|s| s.node.as_str()).collect::<Vec<_>>().join(".");
+        return parse_record_body(cur, Some(name), None, span);
     }
 
     Ok(S::new(Expr::Path { path, span }, span))
@@ -487,9 +496,10 @@ fn parse_stmt(cur: &mut Cursor<'_>) -> Result<Stmt, ParseError> {
 }
 
 fn parse_record_body(
-    cur:   &mut Cursor<'_>,
-    base:  Option<S<Expr>>,
-    start: Span,
+    cur:     &mut Cursor<'_>,
+    ty_name: Option<String>,
+    base:    Option<S<Expr>>,
+    start:   Span,
 ) -> Result<S<Expr>, ParseError> {
     cur.expect(&Token::LBrace)?;
     let mut fields = Vec::new();
@@ -505,7 +515,7 @@ fn parse_record_body(
 
     let end = cur.expect(&Token::RBrace)?;
     let span = start.to(end);
-    Ok(S::new(Expr::Record { base: base.map(Box::new), fields, span }, span))
+    Ok(S::new(Expr::Record { ty_name, base: base.map(Box::new), fields, span }, span))
 }
 
 fn parse_if(cur: &mut Cursor<'_>) -> Result<S<Expr>, ParseError> {

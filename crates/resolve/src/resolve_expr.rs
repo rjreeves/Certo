@@ -87,7 +87,8 @@ pub fn resolve_expr(expr: &S<Expr>, scope: &mut ScopeChain) {
         }
 
         Expr::Try { expr, .. }
-        | Expr::Await { expr, .. } => resolve_expr(expr, scope),
+        | Expr::Await { expr, .. }
+        | Expr::Spawn { expr, .. } => resolve_expr(expr, scope),
 
         Expr::Guard { cond, else_expr, .. } => {
             resolve_expr(cond, scope);

@@ -96,6 +96,79 @@ fn hoist_decl(
         Decl::Type(t) => {
             let ty = Ty::Named { name: t.name.node.clone(), args: vec![] };
             env.define(t.name.node.clone(), ty);
+
+            // Register record fields so field-access typeck can resolve `a.field` on named types.
+            if let certo_ast::decl::TypeBody::Record(rec) = &t.body {
+                let mut ctx = Ctx { env, uf, errors, counter };
+                let fields: Vec<(String, Ty)> = rec.fields.iter()
+                    .map(|f| (f.name.node.clone(), type_expr_to_ty(&f.ty.node, &mut ctx)))
+                    .collect();
+                env.record_fields.insert(t.name.node.clone(), fields);
+            }
+
+            // Register sum variants so constructors are bound in the environment.
+            if let certo_ast::decl::TypeBody::Sum(variants) = &t.body {
+                let parent_ty = Ty::Named { name: t.name.node.clone(), args: vec![] };
+                for v in variants {
+                    if v.fields.is_empty() {
+                        // Unit variant: `Red` — just a value of the parent type.
+                        env.define(v.name.node.clone(), parent_ty.clone());
+                    } else {
+                        // Variant with fields: constructor function.
+                        let mut ctx = Ctx { env, uf, errors, counter };
+                        let param_tys: Vec<Ty> = v.fields.iter()
+                            .map(|f| type_expr_to_ty(&f.ty.node, &mut ctx))
+                            .collect();
+                        env.define(
+                            v.name.node.clone(),
+                            Ty::Fn { params: param_tys, ret: Box::new(parent_ty.clone()) },
+                        );
+                    }
+                }
+            }
+        }
+        // State machine declarations: register generated types and functions.
+        Decl::StateMachine(sm) => {
+            let mname = &sm.name.node;
+            let machine_ty = Ty::Named { name: mname.clone(), args: vec![] };
+            let state_ty   = Ty::Named { name: format!("{}State", mname), args: vec![] };
+
+            // The machine type and its state type.
+            env.define(mname.clone(), machine_ty.clone());
+            env.define(format!("{}State", mname), state_ty.clone());
+
+            // Constructor: MachineName_new() -> MachineName
+            env.define(
+                format!("{}_new", mname),
+                Ty::Fn { params: vec![], ret: Box::new(machine_ty.clone()) },
+            );
+
+            // Transition functions: MachineName_event(MachineName, params...) -> MachineName
+            for t in &sm.transitions {
+                let mut ctx = Ctx { env, uf, errors, counter };
+                let mut param_tys = vec![machine_ty.clone()];
+                for p in &t.params {
+                    param_tys.push(type_expr_to_ty(&p.ty.node, &mut ctx));
+                }
+                env.define(
+                    format!("{}_{}", mname, t.event.node),
+                    Ty::Fn { params: param_tys, ret: Box::new(machine_ty.clone()) },
+                );
+            }
+
+            // State predicate functions: MachineName_isState(MachineName) -> Bool
+            for state in &sm.states {
+                env.define(
+                    format!("{}_is{}", mname, state.node),
+                    Ty::Fn { params: vec![machine_ty.clone()], ret: Box::new(Ty::Bool) },
+                );
+            }
+
+            // Current state accessor: MachineName_state(MachineName) -> MachineName_state
+            env.define(
+                format!("{}_state", mname),
+                Ty::Fn { params: vec![machine_ty.clone()], ret: Box::new(state_ty) },
+            );
         }
         _ => {} // Other decls handled later or not yet
     }

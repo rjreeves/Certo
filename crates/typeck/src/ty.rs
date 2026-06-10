@@ -9,7 +9,11 @@ pub enum Ty {
     // ---------------------------------------------------------------- //
     // Primitives
     // ---------------------------------------------------------------- //
-    Int,
+    Int,    // Int64 — default integer type
+    Int8,
+    Int16,
+    Int32,
+    UInt,   // UInt64
     Float,
     Decimal,
     Bool,
@@ -164,6 +168,10 @@ impl Ty {
     pub fn display_named(&self, names: &HashMap<TyVar, String>) -> String {
         match self {
             Ty::Int     => "Int".into(),
+            Ty::Int8    => "Int8".into(),
+            Ty::Int16   => "Int16".into(),
+            Ty::Int32   => "Int32".into(),
+            Ty::UInt    => "UInt".into(),
             Ty::Float   => "Float".into(),
             Ty::Decimal => "Decimal".into(),
             Ty::Bool    => "Bool".into(),

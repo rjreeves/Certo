@@ -46,6 +46,11 @@ pub fn infer_expr(expr: &S<Expr>, env: &EffectEnv, out: &mut InferredEffects) {
             out.add(Effect::Async, *span);
         }
 
+        Expr::Spawn { expr, span } => {
+            infer_expr(expr, env, out);
+            out.add(Effect::Async, *span);
+        }
+
         Expr::Transaction { body, span } => {
             infer_expr(body, env, out);
             out.add(Effect::DbWrite, *span);

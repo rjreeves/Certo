@@ -78,6 +78,9 @@ fn emit_stmt(stmt: &MirStmt, out: &mut String) {
             let args_str = args.iter().map(emit_operand).collect::<Vec<_>>().join(", ");
             writeln!(out, "    {} = {}({});", lhs, emit_operand(func), args_str).unwrap();
         }
+        Rvalue::Field { base, field } => {
+            writeln!(out, "    {} = {}.{};", lhs, emit_operand(base), field).unwrap();
+        }
         Rvalue::Aggregate(kind, ops) => {
             match kind {
                 AggregateKind::Tuple => {
@@ -190,6 +193,10 @@ fn local_name(id: u32) -> String {
 }
 
 pub fn c_fn_name(name: &str) -> String {
+    // Sum-type variant tag constant: `__tag__TypeName__VariantName` → `TypeName_VariantName`
+    if let Some(rest) = name.strip_prefix("__tag__") {
+        return rest.replacen("__", "_", 1);
+    }
     // Runtime intrinsics (__ prefix) are emitted verbatim — no certo_ wrapper.
     if name.starts_with("__") { return name.to_string(); }
     // Convert camelCase to snake_case so Certo names match C stdlib conventions.

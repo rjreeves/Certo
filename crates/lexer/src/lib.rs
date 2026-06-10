@@ -70,6 +70,7 @@ pub enum Token<'src> {
     #[token("when")]        When,
     #[token("async")]       Async,
     #[token("await")]       Await,
+    #[token("spawn")]       Spawn,
     #[token("parallel")]    Parallel,
     #[token("do")]          Do,
     #[token("return")]      Return,

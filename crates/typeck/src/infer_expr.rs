@@ -46,6 +46,10 @@ pub fn type_expr_to_ty(te: &TypeExpr, ctx: &mut Ctx<'_>) -> Ty {
             let targs: Vec<Ty> = args.iter().map(|a| type_expr_to_ty(&a.node, ctx)).collect();
             match name.as_str() {
                 "Int"     => Ty::Int,
+                "Int8"    => Ty::Int8,
+                "Int16"   => Ty::Int16,
+                "Int32"   => Ty::Int32,
+                "UInt"    => Ty::UInt,
                 "Float"   => Ty::Float,
                 "Decimal" => Ty::Decimal,
                 "Bool"    => Ty::Bool,
@@ -118,11 +122,20 @@ pub fn infer(expr: &S<Expr>, ctx: &mut Ctx<'_>) -> Ty {
             let func_ty = infer(func, ctx);
 
             let has_labels = args.iter().any(|a| a.label.is_some());
-            let fn_name = if let Expr::Path { path, .. } = &func.node {
-                path.segments.last().map(|s| s.node.clone())
+            // Build both a full-qualified path (for stdlib) and a short name (for user-defined).
+            let (fn_full_path, fn_short_name) = if let Expr::Path { path, .. } = &func.node {
+                let full = path.segments.iter().map(|s| s.node.as_str()).collect::<Vec<_>>().join(".");
+                let short = path.segments.last().map(|s| s.node.clone());
+                (Some(full), short)
             } else {
-                None
+                (None, None)
             };
+            // Prefer full-path lookup (stdlib), fall back to short name (user-defined).
+            let fn_name: Option<String> = fn_full_path
+                .as_ref()
+                .filter(|fp| ctx.env.get_param_meta(fp).is_some())
+                .cloned()
+                .or(fn_short_name);
 
             // Collect (inferred_ty, span) per argument slot, respecting labels/defaults.
             let arg_info: Vec<(Ty, Span)> = if has_labels {
@@ -256,6 +269,24 @@ pub fn infer(expr: &S<Expr>, ctx: &mut Ctx<'_>) -> Ty {
                         }
                     }
                 }
+                Ty::Named { name, .. } => {
+                    // Look up the record definition for this named type.
+                    if let Some(fields) = ctx.env.record_fields.get(name.as_str()).cloned() {
+                        match fields.iter().find(|(n, _)| n == &field.node) {
+                            Some((_, ty)) => ty.clone(),
+                            None => {
+                                ctx.errors.push(TypeError {
+                                    kind: TypeErrorKind::UnknownField { field: field.node.clone(), on: obj_ty },
+                                    span: *span,
+                                });
+                                Ty::Error
+                            }
+                        }
+                    } else {
+                        // Named type not registered as a record — may be a statemachine type etc.
+                        ctx.fresh()
+                    }
+                }
                 Ty::Var(_) => {
                     // Not yet resolved — return a fresh var; may be resolved later
                     ctx.fresh()
@@ -345,7 +376,7 @@ pub fn infer(expr: &S<Expr>, ctx: &mut Ctx<'_>) -> Ty {
             Ty::Tuple(elements.iter().map(|e| infer(e, ctx)).collect())
         }
 
-        Expr::Record { base, fields, span } => {
+        Expr::Record { ty_name, base, fields, span } => {
             let mut field_tys: Vec<(String, Ty)> = fields
                 .iter()
                 .map(|f| (f.name.node.clone(), infer(&f.value, ctx)))
@@ -369,7 +400,14 @@ pub fn infer(expr: &S<Expr>, ctx: &mut Ctx<'_>) -> Ty {
                     });
                 }
             }
-            Ty::Record(field_tys)
+            // When written as `TypeName { ... }`, return the named type so callers
+            // that expect `Ty::Named { name: "TypeName" }` unify correctly.
+            if let Some(name) = ty_name {
+                // Still infer field types to surface any errors, but discard the structural type.
+                Ty::Named { name: name.clone(), args: vec![] }
+            } else {
+                Ty::Record(field_tys)
+            }
         }
 
         Expr::Try { expr, span } => {
@@ -382,6 +420,8 @@ pub fn infer(expr: &S<Expr>, ctx: &mut Ctx<'_>) -> Ty {
         }
 
         Expr::Await { expr, .. } => infer(expr, ctx),
+
+        Expr::Spawn { expr, .. } => infer(expr, ctx),
 
         Expr::Guard { cond, else_expr, span } => {
             let cond_ty = infer(cond, ctx);
