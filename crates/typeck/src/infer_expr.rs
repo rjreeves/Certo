@@ -117,7 +117,6 @@ pub fn infer(expr: &S<Expr>, ctx: &mut Ctx<'_>) -> Ty {
         Expr::App { func, args, span } => {
             let func_ty = infer(func, ctx);
 
-            // Determine if any arg is labeled or if fewer args than params (defaults)
             let has_labels = args.iter().any(|a| a.label.is_some());
             let fn_name = if let Expr::Path { path, .. } = &func.node {
                 path.segments.last().map(|s| s.node.clone())
@@ -125,70 +124,63 @@ pub fn infer(expr: &S<Expr>, ctx: &mut Ctx<'_>) -> Ty {
                 None
             };
 
-            let arg_tys: Vec<Ty> = if has_labels {
+            // Collect (inferred_ty, span) per argument slot, respecting labels/defaults.
+            let arg_info: Vec<(Ty, Span)> = if has_labels {
                 if let Some(ref fname) = fn_name {
                     if let Some(params) = ctx.env.get_param_meta(fname).cloned() {
-                        // Reorder labeled args to match param positions
-                        let mut slots: Vec<Option<Ty>> = vec![None; params.len()];
+                        let mut slots: Vec<Option<(Ty, Span)>> = vec![None; params.len()];
                         let mut pos_cursor = 0usize;
                         for arg in args {
                             let ty = infer(&arg.value, ctx);
+                            let sp = arg.value.span;
                             if let Some(label) = &arg.label {
                                 if let Some(idx) = params.iter().position(|(n, _)| n == &label.node) {
-                                    slots[idx] = Some(ty);
+                                    slots[idx] = Some((ty, sp));
                                 } else {
-                                    // Unknown label — fallback to positional
-                                    while pos_cursor < slots.len() && slots[pos_cursor].is_some() {
-                                        pos_cursor += 1;
-                                    }
-                                    if pos_cursor < slots.len() {
-                                        slots[pos_cursor] = Some(ty);
-                                        pos_cursor += 1;
-                                    }
+                                    while pos_cursor < slots.len() && slots[pos_cursor].is_some() { pos_cursor += 1; }
+                                    if pos_cursor < slots.len() { slots[pos_cursor] = Some((ty, sp)); pos_cursor += 1; }
                                 }
                             } else {
-                                while pos_cursor < slots.len() && slots[pos_cursor].is_some() {
-                                    pos_cursor += 1;
-                                }
-                                if pos_cursor < slots.len() {
-                                    slots[pos_cursor] = Some(ty);
-                                    pos_cursor += 1;
-                                }
+                                while pos_cursor < slots.len() && slots[pos_cursor].is_some() { pos_cursor += 1; }
+                                if pos_cursor < slots.len() { slots[pos_cursor] = Some((ty, sp)); pos_cursor += 1; }
                             }
                         }
-                        // Fill missing slots with fresh vars (will unify with param type)
-                        slots.into_iter().map(|s| s.unwrap_or_else(|| ctx.fresh())).collect()
+                        slots.into_iter().map(|s| s.unwrap_or_else(|| (ctx.fresh(), *span))).collect()
                     } else {
-                        args.iter().map(|a| infer(&a.value, ctx)).collect()
+                        args.iter().map(|a| (infer(&a.value, ctx), a.value.span)).collect()
                     }
                 } else {
-                    args.iter().map(|a| infer(&a.value, ctx)).collect()
+                    args.iter().map(|a| (infer(&a.value, ctx), a.value.span)).collect()
                 }
             } else if let Some(ref fname) = fn_name {
-                // No labels — but check if fewer args than params (defaults)
                 if let Some(params) = ctx.env.get_param_meta(fname).cloned() {
                     if args.len() < params.len() {
-                        let mut tys: Vec<Ty> = args.iter().map(|a| infer(&a.value, ctx)).collect();
-                        // Fill remaining with fresh vars for params that have defaults
+                        let mut info: Vec<(Ty, Span)> = args.iter()
+                            .map(|a| (infer(&a.value, ctx), a.value.span)).collect();
                         for (_, has_default) in params.iter().skip(args.len()) {
-                            if *has_default {
-                                tys.push(ctx.fresh());
-                            }
+                            if *has_default { info.push((ctx.fresh(), *span)); }
                         }
-                        tys
+                        info
                     } else {
-                        args.iter().map(|a| infer(&a.value, ctx)).collect()
+                        args.iter().map(|a| (infer(&a.value, ctx), a.value.span)).collect()
                     }
                 } else {
-                    args.iter().map(|a| infer(&a.value, ctx)).collect()
+                    args.iter().map(|a| (infer(&a.value, ctx), a.value.span)).collect()
                 }
             } else {
-                args.iter().map(|a| infer(&a.value, ctx)).collect()
+                args.iter().map(|a| (infer(&a.value, ctx), a.value.span)).collect()
             };
 
             let ret_ty = ctx.fresh();
-            let expected_fn = Ty::Fn { params: arg_tys, ret: Box::new(ret_ty.clone()) };
+            // Build expected fn type with fresh param vars, then unify each arg individually.
+            let param_vars: Vec<Ty> = arg_info.iter().map(|_| ctx.fresh()).collect();
+            let expected_fn = Ty::Fn { params: param_vars.clone(), ret: Box::new(ret_ty.clone()) };
+            // Unify the function itself (catches arity and non-function errors) at the call span.
             ctx.unify(func_ty, expected_fn, *span);
+            // Unify each argument at its own span for precise arrows.
+            for ((arg_ty, arg_span), param_ty) in arg_info.iter().zip(param_vars.iter()) {
+                ctx.unify(arg_ty.clone(), param_ty.clone(), *arg_span);
+            }
             ret_ty
         }
 
@@ -288,12 +280,13 @@ pub fn infer(expr: &S<Expr>, ctx: &mut Ctx<'_>) -> Ty {
             Ty::Option(Box::new(inner))
         }
 
-        Expr::If { cond, then_expr, else_expr, span } => {
+        Expr::If { cond, then_expr, else_expr, .. } => {
             let cond_ty = infer(cond, ctx);
-            ctx.unify(cond_ty, Ty::Bool, *span);
+            ctx.unify(cond_ty, Ty::Bool, cond.span);
             let then_ty = infer(then_expr, ctx);
             let else_ty = infer(else_expr, ctx);
-            ctx.unify(then_ty.clone(), else_ty, *span);
+            // Point at the else branch when branches disagree
+            ctx.unify(then_ty.clone(), else_ty, else_expr.span);
             then_ty
         }
 
@@ -317,9 +310,9 @@ pub fn infer(expr: &S<Expr>, ctx: &mut Ctx<'_>) -> Ty {
             result_ty
         }
 
-        Expr::Block { stmts, span } => {
+        Expr::Block { stmts, .. } => {
             ctx.env.push();
-            let ty = infer_block(stmts, *span, ctx);
+            let ty = infer_block(stmts, ctx);
             ctx.env.pop();
             ty
         }
@@ -339,11 +332,11 @@ pub fn infer(expr: &S<Expr>, ctx: &mut Ctx<'_>) -> Ty {
             Ty::Fn { params: param_tys, ret: Box::new(ret_ty) }
         }
 
-        Expr::List { elements, span } => {
+        Expr::List { elements, .. } => {
             let elem_ty = ctx.fresh();
             for e in elements {
                 let et = infer(e, ctx);
-                ctx.unify(et, elem_ty.clone(), *span);
+                ctx.unify(et, elem_ty.clone(), e.span);
             }
             Ty::List(Box::new(elem_ty))
         }
@@ -497,47 +490,49 @@ fn infer_binop(op: &BinOp, left: &S<Expr>, right: &S<Expr>, span: Span, ctx: &mu
 
 /// Infer the type of a block — the type of the last statement if it's an
 /// expression, otherwise Unit.
-pub fn infer_block(stmts: &[Stmt], span: Span, ctx: &mut Ctx<'_>) -> Ty {
+pub fn infer_block(stmts: &[Stmt], ctx: &mut Ctx<'_>) -> Ty {
     let mut last_ty = Ty::Unit;
     for stmt in stmts {
-        last_ty = infer_stmt(stmt, span, ctx);
+        last_ty = infer_stmt(stmt, ctx);
     }
     last_ty
 }
 
-pub fn infer_stmt(stmt: &Stmt, span: Span, ctx: &mut Ctx<'_>) -> Ty {
+pub fn infer_stmt(stmt: &Stmt, ctx: &mut Ctx<'_>) -> Ty {
     match stmt {
-        Stmt::Val { pattern, ty, value, .. } => {
+        Stmt::Val { pattern, ty, value, span } => {
             let val_ty = infer(value, ctx);
             if let Some(ann) = ty {
                 let ann_ty = type_expr_to_ty(&ann.node, ctx);
-                ctx.unify(val_ty.clone(), ann_ty, span);
+                // Point at the value expression, not the whole statement
+                ctx.unify(val_ty.clone(), ann_ty, value.span);
             }
-            // Generalise and bind pattern
             let generalised = ctx.env.generalise(val_ty, ctx.uf);
             bind_pattern_tys(&pattern.node, generalised, ctx);
+            let _ = span;
             Ty::Unit
         }
-        Stmt::Var { name, ty, value, .. } => {
+        Stmt::Var { name, ty, value, span } => {
             let val_ty = infer(value, ctx);
             if let Some(ann) = ty {
                 let ann_ty = type_expr_to_ty(&ann.node, ctx);
-                ctx.unify(val_ty.clone(), ann_ty, span);
+                ctx.unify(val_ty.clone(), ann_ty, value.span);
             }
             ctx.env.define(name.node.clone(), val_ty);
+            let _ = span;
             Ty::Unit
         }
-        Stmt::Assign { target, value, .. } => {
+        Stmt::Assign { target, value, span } => {
             let val_ty = infer(value, ctx);
             match ctx.env.lookup(&target.node) {
                 Some(existing) => {
                     let existing = existing.clone();
-                    ctx.unify(val_ty, existing, span);
+                    ctx.unify(val_ty, existing, value.span);
                 }
                 None => {
                     ctx.errors.push(TypeError {
                         kind: TypeErrorKind::UnboundName(target.node.clone()),
-                        span,
+                        span: *span,
                     });
                 }
             }

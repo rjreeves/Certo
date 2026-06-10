@@ -163,9 +163,9 @@ fn check_decl(decl: &Decl, ctx: &mut Ctx<'_>) {
 
 fn infer_fn_body(body: &S<Expr>, ctx: &mut Ctx<'_>) -> Ty {
     match &body.node {
-        Expr::Block { stmts, span } => {
+        Expr::Block { stmts, .. } => {
             ctx.env.push();
-            let ty = infer_block(stmts, *span, ctx);
+            let ty = infer_block(stmts, ctx);
             ctx.env.pop();
             ty
         }
