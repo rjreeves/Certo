@@ -421,6 +421,19 @@ fn lower_expr(expr: &S<Expr>, cx: &mut Cx) -> HirExpr {
                 span,
             }
         }
+
+        Expr::While { cond, body, .. } => {
+            let cond_hir = lower_expr(cond, cx);
+            let body_hir = lower_expr(body, cx);
+            HirExpr {
+                kind: HirExprKind::While {
+                    cond: Box::new(cond_hir),
+                    body: Box::new(body_hir),
+                },
+                ty: Ty::Unit,
+                span,
+            }
+        }
     }
 }
 

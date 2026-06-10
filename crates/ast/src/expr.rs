@@ -187,6 +187,13 @@ pub enum Expr {
         body:    Box<S<Expr>>,
         span:    Span,
     },
+
+    /// `while cond { body }` — condition-based loop; evaluates to Unit
+    While {
+        cond: Box<S<Expr>>,
+        body: Box<S<Expr>>,
+        span: Span,
+    },
 }
 
 // ------------------------------------------------------------------ //

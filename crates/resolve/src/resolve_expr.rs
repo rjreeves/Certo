@@ -113,6 +113,11 @@ pub fn resolve_expr(expr: &S<Expr>, scope: &mut ScopeChain) {
             resolve_expr(iter, scope);
             resolve_expr(body, scope);
         }
+
+        Expr::While { cond, body, .. } => {
+            resolve_expr(cond, scope);
+            resolve_expr(body, scope);
+        }
     }
 }
 

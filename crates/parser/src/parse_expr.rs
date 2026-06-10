@@ -306,6 +306,9 @@ fn parse_atom(cur: &mut Cursor<'_>) -> Result<S<Expr>, ParseError> {
         // `for x in iter { body }`
         Some(Token::For) => parse_for(cur),
 
+        // `while cond { body }`
+        Some(Token::While) => parse_while(cur),
+
         _ => {
             let found = cur.peek().map(|t| format!("{t:?}")).unwrap_or_else(|| "end of file".into());
             Err(ParseError { kind: ParseErrorKind::Expected { expected: "expression".into(), found }, span })
@@ -663,6 +666,14 @@ fn parse_fstring_parts(content: &str, base_span: Span) -> Result<Vec<FStringPart
         parts.push(FStringPart::Literal(String::new()));
     }
     Ok(parts)
+}
+
+fn parse_while(cur: &mut Cursor<'_>) -> Result<S<Expr>, ParseError> {
+    let start = cur.expect(&Token::While)?;
+    let cond  = parse_expr(cur)?;
+    let body  = parse_block(cur)?;
+    let span  = start.to(body.span);
+    Ok(S::new(Expr::While { cond: Box::new(cond), body: Box::new(body), span }, span))
 }
 
 fn parse_for(cur: &mut Cursor<'_>) -> Result<S<Expr>, ParseError> {

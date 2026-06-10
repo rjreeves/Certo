@@ -157,6 +157,12 @@ pub enum HirExprKind {
         iter:         Box<HirExpr>,
         body:         Box<HirExpr>,
     },
+
+    /// `while cond { body }` — condition-based loop; evaluates to Unit.
+    While {
+        cond: Box<HirExpr>,
+        body: Box<HirExpr>,
+    },
 }
 
 // ------------------------------------------------------------------ //

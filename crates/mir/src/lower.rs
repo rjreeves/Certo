@@ -361,6 +361,32 @@ fn lower_expr(expr: &HirExpr, b: &mut Builder) -> Operand {
             b.switch_to(loop_exit_bb);
             Operand::Const(MirConst::Unit)
         }
+
+        HirExprKind::While { cond, body } => {
+            // loop_header: cond_val = eval(cond); if cond_val → body_bb else exit_bb
+            // body_bb:     eval(body); goto loop_header
+            // exit_bb:     Unit
+            let loop_header_bb = b.new_block();
+            let loop_body_bb   = b.new_block();
+            let loop_exit_bb   = b.new_block();
+
+            b.terminate(Terminator::Goto(loop_header_bb));
+            b.switch_to(loop_header_bb);
+
+            let cond_op = lower_expr(cond, b);
+            b.terminate(Terminator::If {
+                cond:     cond_op,
+                true_bb:  loop_body_bb,
+                false_bb: loop_exit_bb,
+            });
+
+            b.switch_to(loop_body_bb);
+            lower_expr(body, b); // result discarded — while evaluates to Unit
+            b.terminate(Terminator::Goto(loop_header_bb));
+
+            b.switch_to(loop_exit_bb);
+            Operand::Const(MirConst::Unit)
+        }
     }
 }
 

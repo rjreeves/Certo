@@ -343,6 +343,14 @@ pub fn infer(expr: &S<Expr>, ctx: &mut Ctx<'_>) -> Ty {
             infer(body, ctx);
             Ty::Unit
         }
+
+        Expr::While { cond, body, span } => {
+            // cond must be Bool; body is evaluated for side effects; result is Unit
+            let cond_ty = infer(cond, ctx);
+            ctx.unify(cond_ty, Ty::Bool, *span);
+            infer(body, ctx);
+            Ty::Unit
+        }
     }
 }
 

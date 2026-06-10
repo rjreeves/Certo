@@ -113,6 +113,11 @@ pub fn infer_expr(expr: &S<Expr>, env: &EffectEnv, out: &mut InferredEffects) {
             infer_expr(iter, env, out);
             infer_expr(body, env, out);
         }
+
+        Expr::While { cond, body, .. } => {
+            infer_expr(cond, env, out);
+            infer_expr(body, env, out);
+        }
     }
 }
 
