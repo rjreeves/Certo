@@ -148,6 +148,24 @@ fn pipeline_expr() {
 }
 
 #[test]
+fn pipeline_with_args() {
+    // `xs |> List.filter(pred) |> List.map(f)` — each RHS is an App node
+    let m = ok("module A\nval y = xs |> List.filter(pred) |> List.map(f)");
+    match &m.decls[0].node {
+        Decl::Val(v) => {
+            // Outer node is Pipe (the second |>)
+            assert!(matches!(v.value.node, Expr::Pipe { .. }));
+            // RHS of outer pipe is an App (List.map(f))
+            if let Expr::Pipe { right, .. } = &v.value.node {
+                assert!(matches!(right.node, Expr::App { .. }),
+                    "RHS of pipe with args should parse as App");
+            }
+        }
+        _ => panic!(),
+    }
+}
+
+#[test]
 fn if_then_else() {
     let m = ok("module A\nval x = if true then 1 else 2");
     match &m.decls[0].node {

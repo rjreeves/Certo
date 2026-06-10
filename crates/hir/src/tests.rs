@@ -42,10 +42,25 @@ fn lower_simple_fn() {
 
 #[test]
 fn pipe_desugared_to_call() {
+    // `a |> f` → `f(a)` — single-arg form
     let m = lower("module A\nfn f(x: Int): Int = x |> g\nfn g(x: Int): Int = x");
     if let HirItem::Fn(f) = &m.items[0] {
         let body = f.body.as_ref().unwrap();
         assert!(matches!(&body.kind, HirExprKind::Call { .. }), "pipe should desugar to Call");
+    }
+}
+
+#[test]
+fn pipe_partial_application() {
+    // `a |> f(b)` → `f(a, b)` — LHS inserted as first arg
+    let m = lower("module A\nfn f(x: Int): Int = x |> add(1)\nfn add(a: Int, b: Int): Int = a + b");
+    if let HirItem::Fn(f) = &m.items[0] {
+        let body = f.body.as_ref().unwrap();
+        if let HirExprKind::Call { args, .. } = &body.kind {
+            assert_eq!(args.len(), 2, "pipe with call RHS should produce 2-arg call");
+        } else {
+            panic!("expected Call, got {:?}", body.kind);
+        }
     }
 }
 
