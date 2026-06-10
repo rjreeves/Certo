@@ -20,7 +20,7 @@ pub fn cmd_doc(args: &[String]) {
                 ));
             }
             "--help" | "-h" => {
-                println!("Usage: certo doc <file.certo> [-o <dir>]");
+                println!("Usage: certo doc <file.cto> [-o <dir>]");
                 println!();
                 println!("Generate HTML documentation from /// doc comments.");
                 println!("Output defaults to docs/ next to the source file.");
@@ -40,7 +40,7 @@ pub fn cmd_doc(args: &[String]) {
 
     let input = input.unwrap_or_else(|| {
         eprintln!("error: no input file");
-        eprintln!("usage: certo doc <file.certo>");
+        eprintln!("usage: certo doc <file.cto>");
         process::exit(2);
     });
 

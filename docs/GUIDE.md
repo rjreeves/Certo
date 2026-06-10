@@ -83,7 +83,7 @@ See [§14](#14-building-the-compiler-from-source) for details.
 
 ## 3. Your First Program
 
-Create `hello.certo`:
+Create `hello.cto`:
 
 ```
 module Hello
@@ -94,7 +94,7 @@ fn main(): Unit [io] = println("Hello, world!")
 Compile and run:
 
 ```powershell
-certo hello.certo -o hello.exe
+certo hello.cto -o hello.exe
 .\hello.exe
 # Hello, world!
 ```
@@ -207,7 +207,7 @@ fn sumList(xs: List<Int>): Int =
 
 ## 5. Modules
 
-Each `.certo` file declares exactly one module at the top:
+Each `.cto` file declares exactly one module at the top:
 
 ```
 module MyApp.Utils
@@ -342,7 +342,7 @@ Money.toCents(m): Int
 
 ## 7. Testing
 
-Write test blocks in any `.certo` file:
+Write test blocks in any `.cto` file:
 
 ```
 module MathTest
@@ -365,7 +365,7 @@ test "5 is prime" {
 Run all tests:
 
 ```powershell
-certo-test math_test.certo
+certo-test math_test.cto
 ```
 
 Output:
@@ -396,7 +396,7 @@ property "reverse twice is identity" {
 ## 8. Compiling to a Shared Library (DLL)
 
 ```powershell
-certo math.certo --emit-dll -o math.dll
+certo math.cto --emit-dll -o math.dll
 ```
 
 This produces:
@@ -409,7 +409,7 @@ All `pub fn` declarations are exported with `CERTO_EXPORT`
 Generate a C header for the exported symbols:
 
 ```powershell
-certo-ffi --header math.certo -o math.h
+certo-ffi --header math.cto -o math.h
 ```
 
 ---
@@ -419,7 +419,7 @@ certo-ffi --header math.certo -o math.h
 Format a source file in-place:
 
 ```powershell
-certo-fmt myfile.certo
+certo-fmt myfile.cto
 ```
 
 The formatter is idempotent and enforces the canonical style:
@@ -433,8 +433,8 @@ top-level declarations.
 ### LLVM IR
 
 ```powershell
-certo-llvm math.certo -o math.ll
-certo-llvm math.certo -o math.ll --annotate    # adds type comments
+certo-llvm math.cto -o math.ll
+certo-llvm math.cto -o math.ll --annotate    # adds type comments
 ```
 
 You can then compile the IR with:
@@ -446,7 +446,7 @@ clang math.ll -o math.exe
 ### WebAssembly
 
 ```powershell
-certo-wasm math.certo --emit-ir -o math.wasm.ll
+certo-wasm math.cto --emit-ir -o math.wasm.ll
 ```
 
 Emits LLVM IR with the `wasm32-unknown-unknown` target triple.
@@ -464,7 +464,7 @@ clang --target=wasm32 --no-standard-libraries -Wl,--export-all \
 ### C header from a Certo module
 
 ```powershell
-certo-ffi --header math.certo -o math.h
+certo-ffi --header math.cto -o math.h
 ```
 
 Generates a C header with `extern` declarations for all `pub fn` symbols.
@@ -473,7 +473,7 @@ Include it from C to call into a compiled Certo DLL.
 ### REST client from an OpenAPI schema
 
 ```powershell
-certo-ffi --rest-client api_schema.json -o TaskApi.certo
+certo-ffi --rest-client api_schema.json -o TaskApi.cto
 ```
 
 Reads a JSON schema (`api_schema.json`) and emits a Certo source file
@@ -506,7 +506,7 @@ form NewTask -> Tasks {
 Compile to Htmx HTML:
 
 ```powershell
-certo-ui views.certo -o out\
+certo-ui views.cto -o out\
 ```
 
 Produces one `.html` file per `view` declaration in `out/`.
@@ -530,7 +530,7 @@ Add to `.vscode/settings.json`:
 ### Neovim (nvim-lspconfig)
 
 ```lua
-require('lspconfig').certo.setup {
+require('lspconfig').cto.setup {
   cmd = { 'certo-lsp' },
   filetypes = { 'certo' },
   root_dir = require('lspconfig.util').root_pattern('Cargo.toml', '.git'),
@@ -595,7 +595,7 @@ crates/
   cli/         certo main binary
 dist/          Pre-built release binaries
 docs/          This guide and the language specification
-examples/      Sample .certo files
+examples/      Sample .cto files
 scripts/       Build and release automation
 ```
 
@@ -635,7 +635,7 @@ Pass `-out <dir>` to change the output directory.
 ## 16. Compiler Pipeline Reference
 
 ```
-Source (.certo)
+Source (.cto)
     │
     ▼  crates/lexer      Tokenise
     │
@@ -662,7 +662,7 @@ The `--emit-c` flag stops the pipeline after codegen and prints the
 generated C to stdout:
 
 ```powershell
-certo math.certo --emit-c
+certo math.cto --emit-c
 ```
 
 This is useful for debugging and for understanding how Certo maps to C.
@@ -673,37 +673,37 @@ This is useful for debugging and for understanding how Certo maps to C.
 
 ```
 # Compile to executable
-certo myapp.certo -o myapp.exe
+certo myapp.cto -o myapp.exe
 
 # Compile to DLL + import lib
-certo mylib.certo --emit-dll -o mylib.dll
+certo mylib.cto --emit-dll -o mylib.dll
 
 # Print generated C (no compilation)
-certo myapp.certo --emit-c
+certo myapp.cto --emit-c
 
 # Verbose (shows clang invocation)
-certo myapp.certo -o myapp.exe -v
+certo myapp.cto -o myapp.exe -v
 
 # Run unit tests
-certo-test myapp_test.certo
+certo-test myapp_test.cto
 
 # Format source file
-certo-fmt myfile.certo
+certo-fmt myfile.cto
 
 # Generate C header
-certo-ffi --header mylib.certo -o mylib.h
+certo-ffi --header mylib.cto -o mylib.h
 
 # Generate REST client
-certo-ffi --rest-client schema.json -o Client.certo
+certo-ffi --rest-client schema.json -o Client.cto
 
 # Emit LLVM IR
-certo-llvm mylib.certo -o mylib.ll
+certo-llvm mylib.cto -o mylib.ll
 
 # Emit WASM IR
-certo-wasm mylib.certo --emit-ir -o mylib.wasm.ll
+certo-wasm mylib.cto --emit-ir -o mylib.wasm.ll
 
 # Compile UI views to HTML
-certo-ui views.certo -o out/
+certo-ui views.cto -o out/
 
 # Build all binaries from source
 .\scripts\release.ps1

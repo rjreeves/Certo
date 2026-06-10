@@ -5,7 +5,7 @@
 //!
 //! ```text
 //! error[E0100]: undefined identifier `foo`
-//!   --> tasks.certo:8:5
+//!   --> tasks.cto:8:5
 //!    |
 //!  8 |     foo(x)
 //!    |     ^^^
@@ -289,9 +289,9 @@ mod tests {
         let span = Span::new(16, 19); // "bar"
         let d = Diagnostic::error("E0100", "undefined identifier `bar`")
             .with_span(span);
-        let out = render_one(&d, src, "test.certo", false);
+        let out = render_one(&d, src, "test.cto", false);
         assert!(out.contains("error[E0100]"));
-        assert!(out.contains("test.certo:1:17"));
+        assert!(out.contains("test.cto:1:17"));
         assert!(out.contains("bar"));
         assert!(out.contains("^^^"));
     }
@@ -300,7 +300,7 @@ mod tests {
     fn render_no_span() {
         let d = Diagnostic::error("E0203", "recursive function requires explicit return type")
             .with_note("add a `: ReturnType` annotation");
-        let out = render_one(&d, "", "test.certo", false);
+        let out = render_one(&d, "", "test.cto", false);
         assert!(out.contains("error[E0203]"));
         assert!(out.contains("note: add a"));
     }

@@ -38,13 +38,13 @@ New-Item -ItemType Directory -Force out | Out-Null
 
 # ── 1. certo-fmt ─────────────────────────────────────────────────────────────
 Step "1. certo-fmt  — format source files"
-Run "$dist\certo-fmt math.certo"
-Run "$dist\certo-fmt tasks.certo"
-Run "$dist\certo-fmt math_test.certo"
+Run "$dist\certo-fmt math.cto"
+Run "$dist\certo-fmt tasks.cto"
+Run "$dist\certo-fmt math_test.cto"
 
 # ── 2. certo (compiler) — executable ─────────────────────────────────────────
-Step "2. certo  — compile tasks.certo to a native executable"
-Run "$dist\certo tasks.certo -o out\tasks.exe -v"
+Step "2. certo  — compile tasks.cto to a native executable"
+Run "$dist\certo tasks.cto -o out\tasks.exe -v"
 
 if (Test-Path out\tasks.exe) {
     Write-Host ""
@@ -57,8 +57,8 @@ if (Test-Path out\tasks.exe) {
 }
 
 # ── 3. certo (compiler) — shared library / DLL ───────────────────────────────
-Step "3. certo --emit-dll  — compile math.certo to a shared library"
-Run "$dist\certo math.certo --emit-dll -o out\math.dll -v"
+Step "3. certo --emit-dll  — compile math.cto to a shared library"
+Run "$dist\certo math.cto --emit-dll -o out\math.dll -v"
 
 if (Test-Path out\math.dll) {
     Write-Host ""
@@ -76,27 +76,27 @@ if (Test-Path out\math.dll) {
 
 # ── 4. certo-test ────────────────────────────────────────────────────────────
 Step "4. certo-test  — run math unit tests"
-Run "$dist\certo-test math_test.certo"
+Run "$dist\certo-test math_test.cto"
 
 # ── 5. certo-llvm ────────────────────────────────────────────────────────────
-Step "5. certo-llvm  — emit LLVM IR for math.certo"
-Run "$dist\certo-llvm math.certo -o out\math.ll --annotate"
+Step "5. certo-llvm  — emit LLVM IR for math.cto"
+Run "$dist\certo-llvm math.cto -o out\math.ll --annotate"
 if (Test-Path out\math.ll) {
     Write-Host "First 20 lines of out\math.ll:" -ForegroundColor Green
     Get-Content out\math.ll | Select-Object -First 20
 }
 
 # ── 6. certo-wasm ────────────────────────────────────────────────────────────
-Step "6. certo-wasm  — emit WASM IR for math.certo"
-Run "$dist\certo-wasm math.certo --emit-ir -o out\math.wasm.ll"
+Step "6. certo-wasm  — emit WASM IR for math.cto"
+Run "$dist\certo-wasm math.cto --emit-ir -o out\math.wasm.ll"
 if (Test-Path out\math.wasm.ll) {
     Write-Host "WASM target triple:" -ForegroundColor Green
     Select-String "target triple" out\math.wasm.ll | Select-Object -First 1
 }
 
 # ── 7. certo-ffi (C header) ───────────────────────────────────────────────────
-Step "7. certo-ffi --header  — generate C header from math.certo pub fns"
-Run "$dist\certo-ffi --header math.certo -o out\math.h"
+Step "7. certo-ffi --header  — generate C header from math.cto pub fns"
+Run "$dist\certo-ffi --header math.cto -o out\math.h"
 if (Test-Path out\math.h) {
     Write-Host "out\math.h:" -ForegroundColor Green
     Get-Content out\math.h
@@ -104,15 +104,15 @@ if (Test-Path out\math.h) {
 
 # ── 8. certo-ffi (REST client) ────────────────────────────────────────────────
 Step "8. certo-ffi --rest-client  — generate Certo client from api_schema.json"
-Run "$dist\certo-ffi --rest-client api_schema.json -o out\TaskApi.certo"
-if (Test-Path out\TaskApi.certo) {
-    Write-Host "out\TaskApi.certo:" -ForegroundColor Green
-    Get-Content out\TaskApi.certo
+Run "$dist\certo-ffi --rest-client api_schema.json -o out\TaskApi.cto"
+if (Test-Path out\TaskApi.cto) {
+    Write-Host "out\TaskApi.cto:" -ForegroundColor Green
+    Get-Content out\TaskApi.cto
 }
 
 # ── 9. certo-ui ───────────────────────────────────────────────────────────────
-Step "9. certo-ui  — compile views.certo to Htmx HTML"
-Run "$dist\certo-ui views.certo -o out\"
+Step "9. certo-ui  — compile views.cto to Htmx HTML"
+Run "$dist\certo-ui views.cto -o out\"
 Write-Host "Generated HTML files:" -ForegroundColor Green
 Get-ChildItem out\*.html -ErrorAction SilentlyContinue |
     Select-Object Name, @{N='KB';E={[math]::Round($_.Length/1KB,1)}} |

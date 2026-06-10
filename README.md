@@ -63,10 +63,10 @@ fn main(): Unit = {
 }
 ```
 
-Save as `counter.certo`, then:
+Save as `counter.cto`, then:
 
 ```powershell
-certo run counter.certo
+certo run counter.cto
 ```
 
 ## Language features

@@ -73,7 +73,7 @@ require("certo")   -- if editors/neovim/certo.lua is on your runtimepath
 
 Or paste the contents of `editors/neovim/certo.lua` directly into your config.
 
-The LSP will activate automatically for any file with a `.certo` or `.cto` extension.
+The LSP will activate automatically for any file with a `.cto` or `.cto` extension.
 
 ---
 
@@ -84,5 +84,5 @@ Any editor with LSP support can use `certo-lsp`. The server communicates over st
 Generic LSP client config:
 - **Command:** `certo-lsp`
 - **Transport:** stdio
-- **File types:** `.certo`, `.cto`
+- **File types:** `.cto`, `.cto`
 - **Root pattern:** `certo.toml`

@@ -3,7 +3,7 @@
 //! # Pipeline
 //!
 //! ```text
-//! .certo source
+//! .cto source
 //!      │
 //!      ▼
 //!   parse()          (certo_parser)

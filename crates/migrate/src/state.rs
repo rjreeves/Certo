@@ -63,5 +63,5 @@ fn now_utc() -> String {
 
 /// Default location for the migration manifest relative to a project root.
 pub fn default_manifest_path(project_root: &Path) -> PathBuf {
-    project_root.join(".certo").join("migrations.json")
+    project_root.join(".cto").join("migrations.json")
 }

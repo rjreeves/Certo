@@ -78,7 +78,7 @@ if (Test-Path "docs\Certo_Language_Specification.docx") {
 # Examples (source files only — no out/ artefacts)
 $examplesOut = "$stagingDir\examples"
 New-Item -ItemType Directory -Force $examplesOut | Out-Null
-Get-ChildItem "examples\*.certo" | Copy-Item -Destination $examplesOut
+Get-ChildItem "examples\*.cto" | Copy-Item -Destination $examplesOut
 if (Test-Path "examples\api_schema.json") {
     Copy-Item "examples\api_schema.json" "$examplesOut\" -Force
 }

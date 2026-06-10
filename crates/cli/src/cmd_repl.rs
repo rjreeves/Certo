@@ -1,6 +1,6 @@
 /// Interactive REPL for the Certo language.
 ///
-/// Each iteration synthesises a complete `.certo` source file from the
+/// Each iteration synthesises a complete `.cto` source file from the
 /// accumulated session declarations plus the user's new input, runs the full
 /// compile-to-C pipeline, and executes the result in a temp directory.
 

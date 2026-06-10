@@ -29,7 +29,7 @@ Should produce:
     my-project\
     ├── certo.toml          project manifest with project name filled in
     ├── .env.example        environment variable template
-    ├── .gitignore          ignores dist\ .env .certo\
+    ├── .gitignore          ignores dist\ .env .cto\
     ├── README.md           basic readme with project name
     ├── src\
     │   └── main.cto        hello world entry point
@@ -63,7 +63,7 @@ Should produce:
 
     dist\
     .env
-    .certo\
+    .cto\
     *.log
 
 ## Templates

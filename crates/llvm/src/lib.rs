@@ -15,7 +15,7 @@
 //! The `.ll` file is then passed to `clang`/`llc`:
 //!
 //! ```sh
-//! certo-llvm src/main.certo -o out.ll
+//! certo-llvm src/main.cto -o out.ll
 //! clang -O2 -o myapp out.ll
 //! # or for WebAssembly (#18):
 //! clang --target=wasm32-wasi -O2 -o myapp.wasm out.ll

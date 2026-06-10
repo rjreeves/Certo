@@ -4,21 +4,21 @@
 //!
 //! ## C header  (`--header`)
 //!
-//! Takes a `.certo` source file and emits a `.h` with C prototypes for every
+//! Takes a `.cto` source file and emits a `.h` with C prototypes for every
 //! `pub fn` declaration.  Useful when embedding Certo-compiled code in a C/C++
 //! project or exposing a shared library.
 //!
 //! ```sh
-//! certo-ffi --header src/math.certo -o include/math.h
+//! certo-ffi --header src/math.cto -o include/math.h
 //! ```
 //!
 //! ## REST client  (`--rest-client`)
 //!
-//! Takes a JSON schema file describing a REST API and emits a `.certo` source
+//! Takes a JSON schema file describing a REST API and emits a `.cto` source
 //! file with typed `pub fn` stubs and `[async, io]` effects.
 //!
 //! ```sh
-//! certo-ffi --rest-client api/users.json -o src/UserApi.certo
+//! certo-ffi --rest-client api/users.json -o src/UserApi.cto
 //! ```
 
 pub mod error;

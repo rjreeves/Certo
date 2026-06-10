@@ -57,7 +57,7 @@ pub fn generate_form(f: &FormDecl) -> String {
     writeln!(out, "    .field {{ display: flex; flex-direction: column; gap: 0.25rem; margin-bottom: 1rem; }}").unwrap();
     writeln!(out, "    label {{ font-weight: bold; }}").unwrap();
     writeln!(out, "    input, textarea, select {{ padding: 0.4rem; border: 1px solid #ccc; border-radius: 4px; }}").unwrap();
-    writeln!(out, "    .certo-form {{ max-width: 480px; padding: 1rem; }}").unwrap();
+    writeln!(out, "    .cto-form {{ max-width: 480px; padding: 1rem; }}").unwrap();
     writeln!(out, "  </style>").unwrap();
     writeln!(out, "</head>").unwrap();
     writeln!(out, "<body>").unwrap();
