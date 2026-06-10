@@ -40,8 +40,12 @@ impl Analysis {
                 if let Err(errs) = certo_resolve::resolve(&m) {
                     resolve_errors = errs;
                 }
-                // Type checking
-                if let Err(errs) = certo_typeck::check_module(&m) {
+                // Type checking — seed stdlib so built-ins don't appear unbound
+                let mut env     = certo_typeck::TypeEnv::new();
+                let mut counter = 0u32;
+                env.seed_builtins(&mut counter);
+                certo_stdlib::seed_stdlib(&mut env, &mut counter);
+                if let Err(errs) = certo_typeck::check_module_seeded(&m, env, counter) {
                     type_errors = errs;
                 }
                 // Build symbol table from AST
