@@ -62,5 +62,7 @@ pub fn c_ident(s: &str) -> String {
 
 /// The C return type for a function (Unit → void).
 pub fn ret_ty_to_c(ty: &Ty) -> String {
-    if matches!(ty, Ty::Unit) { "void".into() } else { ty_to_c(ty) }
+    // Unit functions return int64_t(0) so call sites can always capture the result
+    // without needing to know the callee's return type at the call site.
+    if matches!(ty, Ty::Unit) { "int64_t".into() } else { ty_to_c(ty) }
 }

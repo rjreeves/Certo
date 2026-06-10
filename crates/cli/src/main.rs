@@ -1359,22 +1359,179 @@ fn cmd_bench(args: &[String]) {
     }
 }
 
-fn run_bench_module(module: &certo_ast::module::Module, _path: &Path, _src: &str, iterations: u64) {
+fn run_bench_module(module: &certo_ast::module::Module, path: &Path, src: &str, iterations: u64) {
     use certo_ast::decl::Decl;
-    let mut found = 0;
-    for decl in &module.decls {
-        if let Decl::Fn(f) = &decl.node {
-            let name = &f.name.node;
-            if !name.starts_with("bench_") { continue; }
-            found += 1;
-            // For now: report that bench discovery works; full timing harness
-            // requires compiling a C wrapper with clock_gettime around the call.
-            println!("bench  {:<40} {} iterations  (timing harness: pending)", name, iterations);
-        }
-    }
-    if found == 0 {
+
+    // Collect bench function Certo names and their C equivalents.
+    // Only zero-argument bench_ functions are entry points for the harness.
+    // bench_* helpers that take parameters are support functions, not targets.
+    let bench_fns: Vec<(String, String)> = module.decls.iter()
+        .filter_map(|d| if let Decl::Fn(f) = &d.node { Some(f) } else { None })
+        .filter(|f| f.name.node.starts_with("bench_") && f.params.is_empty())
+        .map(|f| {
+            let certo_name = f.name.node.clone();
+            let c_name = certo_codegen::c_fn_name(&certo_name);
+            (certo_name, c_name)
+        })
+        .collect();
+
+    if bench_fns.is_empty() {
         eprintln!("no bench_ functions found (prefix bench functions with `bench_`)");
+        return;
     }
+
+    // Type-check the module.
+    let colour = stderr_is_tty();
+    let filename = path.display().to_string();
+    run_typeck(module, src, &filename, colour);
+
+    // Codegen: emit module C and mask any `main` so our harness can provide it.
+    let preamble   = REPL_PREAMBLE;
+    let runtime    = certo_codegen::RUNTIME_HEADER;
+    let stdlib_c   = certo_stdlib::full_c_runtime_with_db(false);
+    let raw_module = certo_codegen::emit_module(
+        module,
+        &certo_codegen::CodegenOptions { inline_runtime: false, export_public: false },
+    );
+    // Strip duplicate system includes already in preamble.
+    let module_c = raw_module.lines()
+        .filter(|l| {
+            !l.contains("certo_runtime.h") &&
+            !l.contains("#include <stdint.h>") &&
+            !l.contains("#include <stdbool.h>") &&
+            !l.contains("#include <stddef.h>")
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+        // Rename any user `main` so the harness `main` doesn't clash.
+        .replace("\nint main(", "\nint _bench_user_main(");
+
+    // Split the harness: forward declarations + timer code go BEFORE module_c
+    // (so noinline attributes precede the definitions), main() goes after.
+    let (harness_pre, harness_main) = build_bench_harness_c(&bench_fns, iterations);
+
+    let full_c = format!("{}{}\n{}\n{}\n{}\n{}",
+        preamble, runtime, stdlib_c, harness_pre, module_c, harness_main);
+
+    // Write to a temp file, compile, run.
+    let tmp_c = tempfile::Builder::new()
+        .prefix("certo_bench_")
+        .suffix(".c")
+        .tempfile()
+        .unwrap_or_else(|e| { eprintln!("error: {}", e); process::exit(1); });
+    std::fs::write(tmp_c.path(), &full_c)
+        .unwrap_or_else(|e| { eprintln!("error: {}", e); process::exit(1); });
+
+    let cc = find_cc().unwrap_or_else(|| {
+        eprintln!("error: no C compiler found");
+        process::exit(1);
+    });
+    let bin_path = std::env::temp_dir().join(
+        if cfg!(windows) { "certo_bench.exe" } else { "certo_bench" }
+    );
+
+    let mut cmd = std::process::Command::new(&cc);
+    cmd.arg(tmp_c.path())
+       .arg("-o").arg(&bin_path)
+       .arg("-O1")  // O1: preserve real work; O2 can eliminate benchmark loops entirely
+       .arg("-Wno-int-to-pointer-cast")
+       .arg("-Wno-pointer-to-int-cast")
+       .arg("-Wno-int-conversion")
+       .arg("-Wno-implicit-function-declaration")
+       .arg("-Wno-deprecated-declarations");
+    if cfg!(windows) {
+        cmd.arg("-Xlinker").arg("/subsystem:console");
+    } else {
+        cmd.arg("-lm");
+    }
+
+    let status = cmd.status().unwrap_or_else(|e| {
+        eprintln!("error invoking {}: {}", cc, e);
+        process::exit(1);
+    });
+    if !status.success() {
+        eprintln!("error: C compiler failed");
+        process::exit(1);
+    }
+
+    eprintln!("running {} benchmarks ({} iterations each) …", bench_fns.len(), iterations);
+    eprintln!();
+    std::process::Command::new(&bin_path)
+        .status()
+        .unwrap_or_else(|e| { eprintln!("error running bench: {}", e); process::exit(1); });
+}
+
+/// Generate the bench harness split into two C fragments.
+/// Returns `(pre, main_fn)` where `pre` must appear BEFORE the module code
+/// (so noinline attributes precede function definitions) and `main_fn` after.
+fn build_bench_harness_c(bench_fns: &[(String, String)], iterations: u64) -> (String, String) {
+    let mut pre = String::new();
+
+    pre.push_str("\n/* ---- certo bench harness ---- */\n");
+    pre.push_str("#include <stdio.h>\n");
+    pre.push_str("#include <inttypes.h>\n");
+
+    // High-resolution timer — platform specific.
+    pre.push_str(r#"
+#ifdef _WIN32
+static uint64_t bench_now_ns(void) {
+    LARGE_INTEGER freq, count;
+    QueryPerformanceFrequency(&freq);
+    QueryPerformanceCounter(&count);
+    /* freq is ticks/sec (e.g. 10 MHz); multiply count first to avoid truncation */
+    return (uint64_t)(count.QuadPart * 1000000000LL / freq.QuadPart);
+}
+#else
+#include <time.h>
+static uint64_t bench_now_ns(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * UINT64_C(1000000000) + (uint64_t)ts.tv_nsec;
+}
+#endif
+"#);
+
+    // Volatile sink prevents the optimizer from eliminating benchmark calls.
+    pre.push_str(&format!(r#"
+static volatile int64_t _bench_sink = 0;
+
+static void bench_run(const char* name, int64_t (*fn)(void)) {{
+    uint64_t iters  = {iters}ULL;
+    uint64_t warmup = iters / 10 < 1 ? 1 : iters / 10;
+    for (uint64_t i = 0; i < warmup; i++) _bench_sink = fn();
+    uint64_t t0 = bench_now_ns();
+    for (uint64_t i = 0; i < iters; i++) _bench_sink = fn();
+    uint64_t t1 = bench_now_ns();
+    uint64_t ns_per = (t1 > t0) ? (t1 - t0) / iters : 0;
+    printf("bench  %-38s %12" PRIu64 " ns/iter\n", name, ns_per);
+}}
+"#, iters = iterations));
+
+    // noinline forward declarations — must come BEFORE the definitions so the
+    // attribute is applied when the compiler sees the function body.
+    pre.push_str("#if defined(__GNUC__) || defined(__clang__)\n");
+    pre.push_str("#  define BENCH_NOINLINE __attribute__((noinline))\n");
+    pre.push_str("#elif defined(_MSC_VER)\n");
+    pre.push_str("#  define BENCH_NOINLINE __declspec(noinline)\n");
+    pre.push_str("#else\n");
+    pre.push_str("#  define BENCH_NOINLINE\n");
+    pre.push_str("#endif\n");
+    for (_, c_name) in bench_fns {
+        pre.push_str(&format!("BENCH_NOINLINE int64_t {}(void);\n", c_name));
+    }
+
+    // main() — goes after the module code.
+    let mut main_fn = String::new();
+    main_fn.push_str("\nint main(void) {\n");
+    for (certo_name, c_name) in bench_fns {
+        main_fn.push_str(&format!(
+            "    bench_run(\"{}\", {});\n",
+            certo_name, c_name
+        ));
+    }
+    main_fn.push_str("    return 0;\n}\n");
+
+    (pre, main_fn)
 }
 
 fn print_top_help() {
