@@ -154,8 +154,14 @@ impl Ty {
         }
     }
 
-    /// Pretty-print for error messages.
+    /// Pretty-print for error messages (raw — shows `?t3` for unresolved vars).
     pub fn display(&self) -> String {
+        self.display_named(&HashMap::new())
+    }
+
+    /// Pretty-print with a var-name map.  Any `Var(n)` whose id is in `names`
+    /// is shown as the mapped letter; unmapped vars fall back to `?t{n}`.
+    pub fn display_named(&self, names: &HashMap<TyVar, String>) -> String {
         match self {
             Ty::Int     => "Int".into(),
             Ty::Float   => "Float".into(),
@@ -164,27 +170,69 @@ impl Ty {
             Ty::Text    => "Text".into(),
             Ty::Unit    => "Unit".into(),
             Ty::Uuid    => "UUID".into(),
-            Ty::Option(t)    => format!("{}?", t.display()),
-            Ty::Result(t, e) => format!("Result<{}, {}>", t.display(), e.display()),
-            Ty::List(t)      => format!("List<{}>", t.display()),
-            Ty::Map(k, v)    => format!("Map<{}, {}>", k.display(), v.display()),
-            Ty::Tuple(ts)    => format!("({})", ts.iter().map(|t| t.display()).collect::<Vec<_>>().join(", ")),
+            Ty::Option(t)    => format!("{}?", t.display_named(names)),
+            Ty::Result(t, e) => format!("Result<{}, {}>",
+                t.display_named(names), e.display_named(names)),
+            Ty::List(t)      => format!("List<{}>", t.display_named(names)),
+            Ty::Map(k, v)    => format!("Map<{}, {}>",
+                k.display_named(names), v.display_named(names)),
+            Ty::Tuple(ts)    => format!("({})",
+                ts.iter().map(|t| t.display_named(names)).collect::<Vec<_>>().join(", ")),
             Ty::Named { name, args } if args.is_empty() => name.clone(),
-            Ty::Named { name, args } => format!("{}<{}>", name, args.iter().map(|a| a.display()).collect::<Vec<_>>().join(", ")),
+            Ty::Named { name, args } => format!("{}<{}>", name,
+                args.iter().map(|a| a.display_named(names)).collect::<Vec<_>>().join(", ")),
             Ty::Record(fields) => {
-                let fs = fields.iter().map(|(n, t)| format!("{}: {}", n, t.display())).collect::<Vec<_>>().join(", ");
+                let fs = fields.iter()
+                    .map(|(n, t)| format!("{}: {}", n, t.display_named(names)))
+                    .collect::<Vec<_>>().join(", ");
                 format!("{{ {} }}", fs)
             }
             Ty::Fn { params, ret } => {
-                let ps = params.iter().map(|p| p.display()).collect::<Vec<_>>().join(", ");
-                format!("({}) => {}", ps, ret.display())
+                let ps = params.iter().map(|p| p.display_named(names)).collect::<Vec<_>>().join(", ");
+                format!("({}) => {}", ps, ret.display_named(names))
             }
-            Ty::Var(v)       => format!("?t{}", v),
+            Ty::Var(v) => names.get(v)
+                .cloned()
+                .unwrap_or_else(|| format!("?t{}", v)),
             Ty::Forall { vars, body } => {
-                let vs = vars.iter().map(|v| format!("t{}", v)).collect::<Vec<_>>().join(", ");
-                format!("∀{}. {}", vs, body.display())
+                let vs = vars.iter()
+                    .map(|v| names.get(v).cloned().unwrap_or_else(|| format!("t{}", v)))
+                    .collect::<Vec<_>>().join(", ");
+                format!("∀{}. {}", vs, body.display_named(names))
             }
-            Ty::Error        => "<error>".into(),
+            Ty::Error => "<error>".into(),
         }
     }
+
+    /// Returns true if this type contains any unresolved inference variables.
+    pub fn has_vars(&self) -> bool {
+        !self.free_vars().is_empty()
+    }
+
+    /// Returns true if this is a function type.
+    pub fn is_fn(&self) -> bool {
+        matches!(self, Ty::Fn { .. })
+    }
+}
+
+/// Collect all free vars from a slice of types and assign them short readable
+/// names: `T`, `U`, `V`, `W`, `A`, `B`, `C`, …
+/// Vars are assigned in order of first appearance (left-to-right across all tys).
+pub fn assign_var_names(tys: &[&Ty]) -> HashMap<TyVar, String> {
+    const NAMES: &[&str] = &[
+        "T", "U", "V", "W", "A", "B", "C", "D", "E", "F",
+        "G", "H", "I", "J", "K", "L", "M", "N", "P", "Q",
+    ];
+    let mut seen: Vec<TyVar> = Vec::new();
+    for ty in tys {
+        for v in ty.free_vars() {
+            if !seen.contains(&v) { seen.push(v); }
+        }
+    }
+    seen.into_iter().enumerate()
+        .map(|(i, v)| {
+            let name = NAMES.get(i).copied().unwrap_or("?").to_string();
+            (v, name)
+        })
+        .collect()
 }
