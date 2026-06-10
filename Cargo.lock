@@ -33,9 +33,11 @@ dependencies = [
  "certo-ast",
  "certo-codegen",
  "certo-diagnostics",
+ "certo-fmt",
  "certo-migrate",
  "certo-parser",
  "certo-stdlib",
+ "certo-testrunner",
  "certo-typeck",
  "tempfile",
 ]
