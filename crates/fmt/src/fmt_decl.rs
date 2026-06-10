@@ -19,6 +19,7 @@ pub fn fmt_decl(decl: &Decl, indent: usize) -> String {
         Decl::Validator(v)    => fmt_validator(v, indent),
         Decl::View(v)         => fmt_view(v, indent),
         Decl::Form(f)         => fmt_form(f, indent),
+        Decl::Import(i)       => format!("import {}", i.path.join(".")),
     }
 }
 

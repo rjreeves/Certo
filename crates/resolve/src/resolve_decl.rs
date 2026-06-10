@@ -38,6 +38,7 @@ pub fn resolve_decl(decl: &S<Decl>, scope: &mut ScopeChain) {
             scope.pop();
         }
         Decl::Validator(_) => {}
+        Decl::Import(_) => {}
     }
 }
 

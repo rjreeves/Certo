@@ -50,6 +50,9 @@ pub enum Decl {
 
     /// `dbTest "name" { ... }`
     DbTest(DbTestDecl),
+
+    /// `import Stdlib.Text` — import a stdlib module
+    Import(ImportDecl),
 }
 
 // ------------------------------------------------------------------ //
@@ -338,5 +341,12 @@ pub struct PropertyDecl {
 pub struct DbTestDecl {
     pub name: String,
     pub body: S<Expr>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ImportDecl {
+    /// The full import path, e.g. `["Stdlib", "Text"]`
+    pub path: Vec<String>,
     pub span: Span,
 }

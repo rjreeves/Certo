@@ -521,6 +521,30 @@ pub fn seed_stdlib(env: &mut TypeEnv, counter: &mut u32) {
         def!("HttpRequest.headers", fn1(req(), list_hdr));
         let _ = list_text; // may be used later
     }
+
+    // ---------------------------------------------------------------- //
+    // Math
+    // ---------------------------------------------------------------- //
+
+    def!("Math.pi",    Ty::Fn { params: vec![], ret: Box::new(Ty::Float) });
+    def!("Math.e",     Ty::Fn { params: vec![], ret: Box::new(Ty::Float) });
+
+    def!("Math.sin",   fn1(Ty::Float, Ty::Float));
+    def!("Math.cos",   fn1(Ty::Float, Ty::Float));
+    def!("Math.tan",   fn1(Ty::Float, Ty::Float));
+    def!("Math.asin",  fn1(Ty::Float, Ty::Float));
+    def!("Math.acos",  fn1(Ty::Float, Ty::Float));
+    def!("Math.atan",  fn1(Ty::Float, Ty::Float));
+    def!("Math.atan2", fn2(Ty::Float, Ty::Float, Ty::Float));
+
+    def!("Math.log",   fn1(Ty::Float, Ty::Float));
+    def!("Math.log2",  fn1(Ty::Float, Ty::Float));
+    def!("Math.log10", fn1(Ty::Float, Ty::Float));
+    def!("Math.exp",   fn1(Ty::Float, Ty::Float));
+    def!("Math.hypot", fn2(Ty::Float, Ty::Float, Ty::Float));
+
+    def!("Math.clamp",    Ty::Fn { params: vec![Ty::Float, Ty::Float, Ty::Float], ret: Box::new(Ty::Float) });
+    def!("Math.clampInt", Ty::Fn { params: vec![Ty::Int, Ty::Int, Ty::Int],       ret: Box::new(Ty::Int) });
 }
 
 fn fn1(a: Ty, ret: Ty) -> Ty {

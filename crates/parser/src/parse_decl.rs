@@ -77,6 +77,11 @@ pub fn parse_decl(cur: &mut Cursor<'_>) -> Result<S<Decl>, ParseError> {
             let s = d.span;
             Ok(S::new(Decl::DbTest(d), s))
         }
+        Some(Token::Import) => {
+            let d = parse_import_decl(cur)?;
+            let s = d.span;
+            Ok(S::new(Decl::Import(d), s))
+        }
         other => {
             let found = other.map(|t| format!("{t:?}")).unwrap_or_else(|| "end of file".into());
             Err(ParseError {
@@ -564,4 +569,22 @@ fn parse_dbtest_decl(cur: &mut Cursor<'_>) -> Result<DbTestDecl, ParseError> {
     let body = parse_block(cur)?;
     let span = start.to(body.span);
     Ok(DbTestDecl { name, body, span })
+}
+
+// ------------------------------------------------------------------ //
+// Import
+// ------------------------------------------------------------------ //
+
+fn parse_import_decl(cur: &mut Cursor<'_>) -> Result<ImportDecl, ParseError> {
+    let start = cur.expect(&Token::Import)?;
+    // Parse a dot-separated path: `Stdlib.Text`, `Stdlib.Math`, etc.
+    let (first, first_span) = cur.expect_ident()?;
+    let mut path = vec![first.to_string()];
+    let mut end = first_span;
+    while cur.eat(|t| matches!(t, Token::Dot)).is_some() {
+        let (seg, seg_span) = cur.expect_ident()?;
+        path.push(seg.to_string());
+        end = seg_span;
+    }
+    Ok(ImportDecl { path, span: start.to(end) })
 }

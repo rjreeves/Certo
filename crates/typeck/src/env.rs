@@ -6,11 +6,14 @@ use crate::unify::UnionFind;
 #[derive(Default, Clone)]
 pub struct TypeEnv {
     frames: Vec<HashMap<String, Ty>>,
+    /// Parameter metadata for user-defined functions: name → [(param_name, has_default)].
+    /// Stored flat (not scope-stacked) since function decls are always at module level.
+    pub param_meta: HashMap<String, Vec<(String, bool)>>,
 }
 
 impl TypeEnv {
     pub fn new() -> Self {
-        TypeEnv { frames: vec![HashMap::new()] }
+        TypeEnv { frames: vec![HashMap::new()], param_meta: HashMap::new() }
     }
 
     pub fn push(&mut self) {
@@ -66,6 +69,16 @@ impl TypeEnv {
         out.sort_unstable();
         out.dedup();
         out
+    }
+
+    /// Register parameter metadata for a function (names + whether each has a default).
+    pub fn define_param_meta(&mut self, fn_name: impl Into<String>, params: Vec<(String, bool)>) {
+        self.param_meta.insert(fn_name.into(), params);
+    }
+
+    /// Retrieve parameter metadata for a function, if available.
+    pub fn get_param_meta(&self, fn_name: &str) -> Option<&Vec<(String, bool)>> {
+        self.param_meta.get(fn_name)
     }
 
     /// Seed the environment with built-in types/values.
