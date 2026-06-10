@@ -1554,7 +1554,7 @@ fn print_top_help() {
     eprintln!("  rollback [N]           Roll back N migrations (default 1)");
     eprintln!("  status                 Show applied/pending migrations");
     eprintln!("  create <name>          Scaffold a new migration file");
-    eprintln!("  pull                   Introspect live DB schema (coming soon)");
+    eprintln!("  pull [-o <file>]       Introspect live DB schema → db/schema.cto");
 }
 
 fn die(msg: &str, code: i32) -> ! {
@@ -1573,6 +1573,280 @@ pub(crate) fn stderr_is_tty() -> bool {
     { std::env::var_os("TERM").is_some() || std::env::var_os("WT_SESSION").is_some() }
     #[cfg(not(windows))]
     { std::env::var_os("TERM").is_some() }
+}
+
+// ------------------------------------------------------------------ //
+// db pull
+// ------------------------------------------------------------------ //
+
+fn cmd_db_pull(args: &[String]) {
+    let mut out_path: Option<PathBuf> = None;
+    let mut schema_name = "public".to_string();
+
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "-o" | "--out" => {
+                i += 1;
+                out_path = Some(PathBuf::from(
+                    args.get(i).unwrap_or_else(|| die("-o requires a path", 2))
+                ));
+            }
+            "--schema" => {
+                i += 1;
+                schema_name = args.get(i)
+                    .unwrap_or_else(|| die("--schema requires a name", 2))
+                    .clone();
+            }
+            "--help" | "-h" => {
+                println!("Usage: certo db pull [-o <file>] [--schema <name>]");
+                println!();
+                println!("Introspect the live PostgreSQL database and write a Certo");
+                println!("schema snapshot to db/schema.cto (default).");
+                println!();
+                println!("Options:");
+                println!("  -o <file>        Output path (default: db/schema.cto)");
+                println!("  --schema <name>  PostgreSQL schema to introspect (default: public)");
+                println!();
+                println!("Reads DATABASE_URL from the environment or .env file.");
+                println!("Requires psql on PATH.");
+                return;
+            }
+            other if other.starts_with('-') => {
+                eprintln!("Unknown option: {}", other);
+                process::exit(2);
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+
+    // Resolve DATABASE_URL — env var first, then .env file.
+    let db_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| {
+        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        if let Ok(contents) = std::fs::read_to_string(cwd.join(".env")) {
+            for line in contents.lines() {
+                let line = line.trim();
+                if let Some(val) = line.strip_prefix("DATABASE_URL=") {
+                    return val.trim().trim_matches('"').to_string();
+                }
+            }
+        }
+        eprintln!("error: DATABASE_URL is not set");
+        eprintln!("       Set it in your environment or .env file:");
+        eprintln!("       DATABASE_URL=host=localhost dbname=mydb user=myuser password=secret");
+        process::exit(1);
+    });
+
+    // Verify psql is available.
+    let psql_ok = std::process::Command::new("psql")
+        .arg("--version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if !psql_ok {
+        eprintln!("error: psql not found on PATH");
+        eprintln!("       Install PostgreSQL client tools to use certo db pull.");
+        process::exit(1);
+    }
+
+    // Query columns from information_schema.
+    let col_query = format!(
+        "SELECT table_name, column_name, data_type, is_nullable \
+         FROM information_schema.columns \
+         WHERE table_schema = '{}' \
+         ORDER BY table_name, ordinal_position;",
+        schema_name.replace('\'', "")
+    );
+
+    let col_out = std::process::Command::new("psql")
+        .arg(&db_url)
+        .arg("--no-align")
+        .arg("--tuples-only")
+        .arg("--field-separator=|")
+        .arg("--command").arg(&col_query)
+        .output()
+        .unwrap_or_else(|e| { eprintln!("error running psql: {}", e); process::exit(1); });
+
+    if !col_out.status.success() {
+        let stderr = String::from_utf8_lossy(&col_out.stderr);
+        eprintln!("error: psql failed: {}", stderr.trim());
+        process::exit(1);
+    }
+
+    // Query primary key columns.
+    let pk_query = format!(
+        "SELECT kcu.table_name, kcu.column_name \
+         FROM information_schema.key_column_usage kcu \
+         JOIN information_schema.table_constraints tc \
+           ON kcu.constraint_name = tc.constraint_name \
+          AND kcu.table_schema    = tc.table_schema \
+         WHERE tc.constraint_type = 'PRIMARY KEY' \
+           AND tc.table_schema    = '{}' \
+         ORDER BY kcu.table_name, kcu.ordinal_position;",
+        schema_name.replace('\'', "")
+    );
+
+    let pk_out = std::process::Command::new("psql")
+        .arg(&db_url)
+        .arg("--no-align")
+        .arg("--tuples-only")
+        .arg("--field-separator=|")
+        .arg("--command").arg(&pk_query)
+        .output()
+        .unwrap_or_else(|e| { eprintln!("error running psql: {}", e); process::exit(1); });
+
+    // Parse primary keys into a set of (table, column).
+    let pk_text = String::from_utf8_lossy(&pk_out.stdout);
+    let mut primary_keys: std::collections::HashSet<(String, String)> = std::collections::HashSet::new();
+    for line in pk_text.lines() {
+        let parts: Vec<&str> = line.splitn(2, '|').collect();
+        if parts.len() == 2 {
+            primary_keys.insert((parts[0].trim().to_string(), parts[1].trim().to_string()));
+        }
+    }
+
+    // Parse columns and group by table.
+    let col_text = String::from_utf8_lossy(&col_out.stdout);
+    let mut tables: Vec<String> = Vec::new();
+    let mut columns: std::collections::HashMap<String, Vec<(String, String, bool)>> =
+        std::collections::HashMap::new();
+
+    for line in col_text.lines() {
+        let line = line.trim();
+        if line.is_empty() { continue; }
+        let parts: Vec<&str> = line.splitn(4, '|').collect();
+        if parts.len() < 4 { continue; }
+        let table   = parts[0].trim();
+        let col     = parts[1].trim();
+        let pg_type = parts[2].trim();
+        let nullable = parts[3].trim().eq_ignore_ascii_case("YES");
+        let certo_type = pg_type_to_certo(pg_type);
+        if !tables.contains(&table.to_string()) {
+            tables.push(table.to_string());
+        }
+        columns.entry(table.to_string())
+            .or_default()
+            .push((col.to_string(), certo_type, nullable));
+    }
+
+    if tables.is_empty() {
+        eprintln!("warning: no tables found in schema '{}'", schema_name);
+        eprintln!("         Check that DATABASE_URL points to the right database.");
+        return;
+    }
+
+    // Emit db/schema.cto.
+    let out = out_path.unwrap_or_else(|| {
+        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let dir = cwd.join("db");
+        std::fs::create_dir_all(&dir).ok();
+        dir.join("schema.cto")
+    });
+
+    let mut src = String::new();
+    src.push_str("module DbSchema\n\n");
+    src.push_str("// Generated by `certo db pull` — do not edit manually.\n");
+    src.push_str(&format!("// Schema: {}  Database: {}\n\n", schema_name, redact_url(&db_url)));
+
+    for table in &tables {
+        let type_name = snake_to_pascal(table);
+        src.push_str(&format!("type {} {{\n", type_name));
+        if let Some(cols) = columns.get(table) {
+            for (col_name, certo_ty, nullable) in cols {
+                let field_name = snake_to_camel(col_name);
+                let is_pk = primary_keys.contains(&(table.clone(), col_name.clone()));
+                let ty_str = if *nullable {
+                    format!("{}?", certo_ty)
+                } else {
+                    certo_ty.clone()
+                };
+                if is_pk {
+                    src.push_str(&format!("    {}: {}  // PK\n", field_name, ty_str));
+                } else {
+                    src.push_str(&format!("    {}: {}\n", field_name, ty_str));
+                }
+            }
+        }
+        src.push_str("}\n\n");
+    }
+
+    std::fs::write(&out, &src).unwrap_or_else(|e| {
+        eprintln!("error writing {}: {}", out.display(), e);
+        process::exit(1);
+    });
+
+    eprintln!("wrote {} ({} table(s))", out.display(), tables.len());
+    for table in &tables {
+        let col_count = columns.get(table).map(|c| c.len()).unwrap_or(0);
+        eprintln!("  {}  ({} column(s))", snake_to_pascal(table), col_count);
+    }
+}
+
+/// Map a PostgreSQL type name to the closest Certo type.
+fn pg_type_to_certo(pg: &str) -> String {
+    match pg {
+        "integer" | "int" | "int4" | "bigint" | "int8" | "smallint" | "int2"
+            | "serial" | "bigserial" | "smallserial"   => "Int",
+        "text" | "character varying" | "varchar" | "char"
+            | "bpchar" | "name" | "citext"             => "Text",
+        "boolean" | "bool"                             => "Bool",
+        "real" | "float4" | "double precision" | "float8" => "Float",
+        "numeric" | "decimal" | "money"                => "Decimal",
+        "uuid"                                         => "UUID",
+        "date" | "timestamp" | "timestamp without time zone"
+            | "timestamp with time zone" | "timestamptz" => "DateTime",
+        "json" | "jsonb"                               => "Text",
+        "bytea"                                        => "Text",
+        other => return snake_to_pascal(other),
+    }.to_string()
+}
+
+/// `users_table` → `UsersTable`
+fn snake_to_pascal(s: &str) -> String {
+    s.split('_')
+        .map(|w| {
+            let mut c = w.chars();
+            match c.next() {
+                None => String::new(),
+                Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
+            }
+        })
+        .collect()
+}
+
+/// `created_at` → `createdAt`
+fn snake_to_camel(s: &str) -> String {
+    let mut parts = s.split('_');
+    let first = parts.next().unwrap_or("").to_string();
+    let rest: String = parts.map(|w| {
+        let mut c = w.chars();
+        match c.next() {
+            None => String::new(),
+            Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
+        }
+    }).collect();
+    first + &rest
+}
+
+/// Redact the password from a connection URL for display.
+fn redact_url(url: &str) -> String {
+    // Handle URL format: postgres://user:pass@host/db
+    if let Some(at) = url.find('@') {
+        if let Some(colon) = url[..at].rfind(':') {
+            return format!("{}:****{}", &url[..colon], &url[at..]);
+        }
+    }
+    // Keyword format: just hide the password= value.
+    url.split_whitespace()
+        .map(|kv| {
+            if kv.to_lowercase().starts_with("password=") { "password=****".to_string() }
+            else { kv.to_string() }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 // ------------------------------------------------------------------ //
@@ -1602,13 +1876,7 @@ fn cmd_db(args: &[String]) {
             fwd.extend_from_slice(&args[1..]);
             cmd_migrate(&fwd);
         }
-        // certo db pull  —  introspect live DB schema (not yet implemented)
-        "pull" => {
-            eprintln!("certo db pull: not yet implemented");
-            eprintln!("       This will introspect the live database and generate a");
-            eprintln!("       schema snapshot in db/schema.cto.");
-            process::exit(1);
-        }
+        "pull" => cmd_db_pull(&args[1..]),
         "--help" | "-h" | "" => {
             println!("Usage: certo db <subcommand> [options]");
             println!();
@@ -1617,7 +1885,7 @@ fn cmd_db(args: &[String]) {
             println!("  rollback [N]           Roll back N migrations (default 1)");
             println!("  status                 Show applied vs pending migrations");
             println!("  create <name>          Scaffold a new migration file");
-            println!("  pull                   Introspect live DB → schema snapshot (coming soon)");
+            println!("  pull [-o <file>]       Introspect live DB → db/schema.cto");
             println!();
             println!("Set DATABASE_URL in your environment or .env file.");
         }
