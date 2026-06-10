@@ -11,7 +11,7 @@ use certo_migrate::{
     default_manifest_path, RunOptions,
 };
 use certo_diagnostics::{Diagnostic, render_all};
-use certo_typeck::{TypeError, TypeErrorKind, TypeEnv};
+use certo_typeck::{TypeError, TypeErrorKind, TypeEnv, assign_var_names};
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -492,56 +492,180 @@ fn run_typeck(module: &Module, src: &str, filename: &str, colour: bool) {
 
 /// Convert a `TypeError` into a human-friendly `Diagnostic` with labels and notes.
 fn type_error_to_diagnostic(e: &TypeError) -> Diagnostic {
+    use certo_typeck::Ty;
+
     match &e.kind {
         TypeErrorKind::Mismatch { expected, found } => {
-            Diagnostic::error("E0200",
-                format!("type mismatch: expected `{}`, found `{}`",
-                    expected.display(), found.display()))
+            let names = assign_var_names(&[expected, found]);
+            let exp_s = expected.display_named(&names);
+            let fnd_s = found.display_named(&names);
+
+            let mut d = Diagnostic::error("E0200",
+                format!("type mismatch: expected `{}`, found `{}`", exp_s, fnd_s))
                 .with_span(e.span)
-                .with_label(format!("expected `{}`", expected.display()))
-                .with_note(format!(
+                .with_label(format!("this has type `{}`", fnd_s));
+
+            // Context-sensitive hints
+            d = match (expected, found) {
+                // Unresolved var — user needs an annotation
+                (_, Ty::Var(_)) | (Ty::Var(_), _) => d
+                    .with_note("the compiler could not infer this type; add an explicit type annotation"),
+
+                // Passed a plain value where a function was expected
+                (Ty::Fn { params, .. }, _) if !found.is_fn() => d
+                    .with_note(format!(
+                        "`{}` is not a function — expected a function that takes {} argument(s)",
+                        fnd_s, params.len())),
+
+                // Passed a function where a plain value was expected
+                (_, Ty::Fn { .. }) if !expected.is_fn() => d
+                    .with_note(format!(
+                        "you passed a function, but `{}` is required here — did you mean to call it?",
+                        exp_s)),
+
+                // Option unwrap mismatch: expected T, found T?
+                (inner, Ty::Option(opt_inner)) if inner == opt_inner.as_ref() => d
+                    .with_note(format!(
+                        "`{}` is optional — use `match` or `?` to unwrap it before using it as `{}`",
+                        fnd_s, exp_s)),
+
+                // Missing ? on result
+                (inner, Ty::Result(ok, _)) if inner == ok.as_ref() => d
+                    .with_note(format!(
+                        "`{}` is a Result — use `match` to handle the error case",
+                        fnd_s)),
+
+                // Int/Float confusion
+                (Ty::Int, Ty::Float) => d
+                    .with_note("use `floatToInt(x)` to convert a Float to Int"),
+                (Ty::Float, Ty::Int) => d
+                    .with_note("use `intToFloat(x)` to convert an Int to Float"),
+
+                // Int/Text confusion
+                (Ty::Text, Ty::Int) => d
+                    .with_note("use `intToText(n)` to convert an Int to Text"),
+                (Ty::Int, Ty::Text) => d
+                    .with_note("use `parseInt(s)` to parse Text as an Int? (returns Option<Int>)"),
+
+                // Float/Text confusion
+                (Ty::Text, Ty::Float) => d
+                    .with_note("use `floatToText(x)` to convert a Float to Text"),
+
+                // Bool expected, non-bool found
+                (Ty::Bool, _) => d
+                    .with_note(format!(
+                        "conditions must be `Bool`; `{}` is not a boolean value",
+                        fnd_s)),
+
+                // Unit return — function returns nothing but result used
+                (_, Ty::Unit) => d
+                    .with_note("this expression returns Unit (no value) — remove the assignment or use a different function"),
+
+                _ => d.with_note(format!(
                     "the expression has type `{}` but `{}` is required here",
-                    found.display(), expected.display()))
+                    fnd_s, exp_s)),
+            };
+            d
         }
+
         TypeErrorKind::CannotUnify { left, right } => {
-            Diagnostic::error("E0201",
-                format!("cannot unify `{}` with `{}`", left.display(), right.display()))
+            let names = assign_var_names(&[left, right]);
+            let l = left.display_named(&names);
+            let r = right.display_named(&names);
+            Diagnostic::error("E0201", format!("cannot unify `{}` with `{}`", l, r))
                 .with_span(e.span)
-                .with_label(format!("types `{}` and `{}` are incompatible", left.display(), right.display()))
+                .with_label(format!("incompatible types `{}` and `{}`", l, r))
+                .with_note("these two types must match but they have different shapes")
         }
-        TypeErrorKind::OccursCheck { var, ty } => {
+
+        TypeErrorKind::OccursCheck { var: _, ty } => {
+            let names = assign_var_names(&[ty]);
             Diagnostic::error("E0202",
-                format!("infinite type: type variable ?t{} would contain itself in `{}`",
-                    var, ty.display()))
+                format!("infinite type: a type variable appears within its own inferred type `{}`",
+                    ty.display_named(&names)))
                 .with_span(e.span)
                 .with_note("this usually means a recursive type alias without a base case")
+                .with_note("if you meant a recursive function, make sure it has an explicit return type")
         }
+
         TypeErrorKind::MissingAnnotation { name } => {
             Diagnostic::error("E0203",
                 format!("recursive function `{}` needs an explicit return type", name))
                 .with_span(e.span)
                 .with_label("return type required here")
-                .with_note(format!("add `: ReturnType` after the parameter list, e.g.  fn {}(...): Int = ...", name))
-        }
-        TypeErrorKind::ArityMismatch { expected, found } => {
-            Diagnostic::error("E0204",
-                format!("wrong number of arguments: expected {}, found {}", expected, found))
-                .with_span(e.span)
-                .with_label(format!("this call has {} argument(s)", found))
-        }
-        TypeErrorKind::UnknownField { field, on } => {
-            Diagnostic::error("E0205",
-                format!("no field `{}` on type `{}`", field, on.display()))
-                .with_span(e.span)
-                .with_label(format!("`{}` has no such field", on.display()))
-        }
-        TypeErrorKind::UnboundName(name) => {
-            Diagnostic::error("E0206", format!("undefined name `{}`", name))
-                .with_span(e.span)
-                .with_label("not found in this scope")
                 .with_note(format!(
-                    "if `{}` is a stdlib function, make sure to `import` the module",
+                    "add `: ReturnType` after the parameter list — for example:\n  fn {}(...): Int = ...",
                     name))
+        }
+
+        TypeErrorKind::ArityMismatch { expected, found } => {
+            let (exp, fnd) = (expected, found);
+            let hint = if fnd > exp {
+                format!("remove {} extra argument(s)", fnd - exp)
+            } else {
+                format!("add {} missing argument(s)", exp - fnd)
+            };
+            Diagnostic::error("E0204",
+                format!("wrong number of arguments: expected {}, found {}", exp, fnd))
+                .with_span(e.span)
+                .with_label(format!("this call passes {} argument(s)", fnd))
+                .with_note(hint)
+        }
+
+        TypeErrorKind::UnknownField { field, on } => {
+            let names = assign_var_names(&[on]);
+            let on_s = on.display_named(&names);
+            let mut d = Diagnostic::error("E0205",
+                format!("no field `{}` on type `{}`", field, on_s))
+                .with_span(e.span)
+                .with_label(format!("`{}` has no field named `{}`", on_s, field));
+            // Hint for common module-style access on wrong receiver
+            if on_s == "Unit" || on_s == "Int" || on_s == "Float" || on_s == "Bool" || on_s == "Text" {
+                d = d.with_note(format!(
+                    "primitive type `{}` has no fields — did you mean a function like `{}.someFunc(...)`?",
+                    on_s, on_s));
+            }
+            d
+        }
+
+        TypeErrorKind::UnboundName(name) => {
+            let mut d = Diagnostic::error("E0206", format!("undefined name `{}`", name))
+                .with_span(e.span)
+                .with_label("not defined in this scope");
+
+            // Module-qualified names: suggest the module
+            if let Some(dot) = name.find('.') {
+                let module = &name[..dot];
+                d = d.with_note(format!(
+                    "`{}` looks like a module function — make sure `Stdlib.{}` is available",
+                    name, module));
+            } else {
+                // Check for common casing mistakes
+                let lower = name.to_lowercase();
+                let suggestion: Option<&str> = match lower.as_str() {
+                    "true"  => Some("`true` is already correct (lowercase)"),
+                    "false" => Some("`false` is already correct (lowercase)"),
+                    "int"   => Some("the type is `Int` (capital I), but values are just integer literals like `42`"),
+                    "float" => Some("the type is `Float` (capital F), but values are float literals like `3.14`"),
+                    "text"  => Some("the type is `Text` (capital T), but string literals are just `\"hello\"`"),
+                    "bool"  => Some("the type is `Bool` (capital B), but values are `true` / `false`"),
+                    "print"     => Some("`print` is a built-in function — no import needed"),
+                    "println"   => Some("`println` is a built-in function — no import needed"),
+                    "list"      => Some("try `List.empty` to start an empty list"),
+                    "none"      => Some("use `None` (capital N) for the absent optional value"),
+                    "some"      => Some("use `Some(value)` (capital S) to wrap an optional value"),
+                    "ok"        => Some("use `Ok(value)` (capital O) to construct a Result"),
+                    "err"       => Some("use `Err(value)` (capital E) to construct an error Result"),
+                    _ => None,
+                };
+                if let Some(s) = suggestion {
+                    d = d.with_note(s);
+                } else {
+                    d = d.with_note(format!(
+                        "check the spelling; stdlib functions are accessed as `Module.function`, e.g. `Text.len`"));
+                }
+            }
+            d
         }
     }
 }
