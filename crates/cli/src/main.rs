@@ -1,3 +1,6 @@
+mod cmd_doc;
+mod cmd_watch;
+
 use std::path::{Path, PathBuf};
 use std::process;
 use certo_ast::decl::{Decl, MigrationDecl};
@@ -25,6 +28,7 @@ fn main() {
         match first {
             "check"   => cmd_check(&args[2..]),
             "run"     => cmd_run(&args[2..]),
+            "doc"     => cmd_doc::cmd_doc(&args[2..]),
             "new"     => cmd_new(&args[2..]),
             "migrate" => cmd_migrate(&args[2..]),
             "help" | "--help" | "-h" => { print_top_help(); }
@@ -161,6 +165,7 @@ fn cmd_build(args: &[String], quiet: bool) {
     let mut verbose  = false;
     let mut emit_c   = false;
     let mut emit_dll = false;
+    let mut watch    = false;
 
     let mut i = 0;
     while i < args.len() {
@@ -171,18 +176,20 @@ fn cmd_build(args: &[String], quiet: bool) {
                     args.get(i).unwrap_or_else(|| die("-o requires a path", 2))
                 ));
             }
-            "--emit-c"   => emit_c   = true,
-            "--emit-dll" => emit_dll = true,
+            "--emit-c"        => emit_c   = true,
+            "--emit-dll"      => emit_dll = true,
             "--verbose" | "-v" => verbose = true,
+            "--watch" | "-w"  => watch    = true,
             "--help" | "-h" => {
-                println!("Usage: certo <file.certo> [-o <out>] [--emit-c] [--emit-dll] [-v]");
-                println!("       certo build <file.certo> [-o <out>] [--emit-c] [--emit-dll] [-v]");
+                println!("Usage: certo <file.certo> [-o <out>] [--emit-c] [--emit-dll] [-v] [--watch]");
+                println!("       certo build <file.certo> [-o <out>] [--emit-c] [--emit-dll] [-v] [--watch]");
                 println!();
                 println!("Options:");
                 println!("  -o <file>    Output path");
                 println!("  --emit-c     Write the generated C to <stem>.c and stop");
                 println!("  --emit-dll   Compile to a shared library (.dll/.so) instead of an exe");
                 println!("  -v           Verbose: print the C compiler command");
+                println!("  --watch, -w  Watch the source file and rebuild on change");
                 return;
             }
             other if other.starts_with('-') => {
@@ -202,6 +209,23 @@ fn cmd_build(args: &[String], quiet: bool) {
         eprintln!("usage: certo <file.certo> [-o <out>]");
         process::exit(2);
     });
+
+    // Watch mode: re-invoke this binary (minus --watch) on each change.
+    if watch {
+        let watch_files = vec![input.clone()];
+        let self_exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("certo"));
+        let build_args: Vec<String> = std::iter::once("build".to_string())
+            .chain(args.iter().filter(|a| *a != "--watch" && *a != "-w").cloned())
+            .collect();
+        cmd_watch::watch_loop(watch_files, move || {
+            std::process::Command::new(&self_exe)
+                .args(&build_args)
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false)
+        });
+        return;
+    }
 
     let colour   = stderr_is_tty();
     let filename = input.display().to_string();
@@ -730,6 +754,7 @@ fn print_top_help() {
     eprintln!("  certo run   <file.certo> [-- args]  Compile and run");
     eprintln!("  certo <file.certo> [-o <out>]    Compile a Certo source file");
     eprintln!("  certo build <file.certo> ...     Same with explicit subcommand");
+    eprintln!("  certo doc   <file.certo>         Generate HTML documentation");
     eprintln!("  certo migrate <subcommand>       Database migration tools");
     eprintln!();
     eprintln!("Build options:");
@@ -737,6 +762,7 @@ fn print_top_help() {
     eprintln!("  --emit-c     Stop after emitting C; write <stem>.c");
     eprintln!("  --emit-dll   Compile to a shared library (.dll / .so)");
     eprintln!("  -v           Verbose: print the C compiler command");
+    eprintln!("  --watch, -w  Watch source file and rebuild on change");
     eprintln!();
     eprintln!("Migrate subcommands:");
     eprintln!("  up [--dry-run]     Apply pending migrations");
