@@ -74,7 +74,7 @@ pub fn generate_view(v: &ViewDecl) -> String {
     writeln!(out, "  <style>").unwrap();
     writeln!(out, "    .vstack {{ display: flex; flex-direction: column; gap: 0.5rem; }}").unwrap();
     writeln!(out, "    .hstack {{ display: flex; flex-direction: row;    gap: 0.5rem; }}").unwrap();
-    writeln!(out, "    .certo-view {{ padding: 1rem; }}").unwrap();
+    writeln!(out, "    .cto-view {{ padding: 1rem; }}").unwrap();
     writeln!(out, "  </style>").unwrap();
     writeln!(out, "</head>").unwrap();
     writeln!(out, "<body>").unwrap();

@@ -2,7 +2,7 @@
 //!
 //! # Usage
 //!
-//!   certo-ui [OPTIONS] <file.certo>
+//!   certo-ui [OPTIONS] <file.cto>
 //!
 //! # Options
 //!
@@ -49,7 +49,7 @@ fn main() {
     }
 
     let input = input.unwrap_or_else(|| {
-        eprintln!("usage: certo-ui [OPTIONS] <file.certo>");
+        eprintln!("usage: certo-ui [OPTIONS] <file.cto>");
         process::exit(2);
     });
 

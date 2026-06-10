@@ -1,7 +1,7 @@
 //! `certo-test` — run test blocks in Certo source files.
 //!
 //! Usage:
-//!   certo-test [OPTIONS] <file.certo>...
+//!   certo-test [OPTIONS] <file.cto>...
 //!
 //! Options:
 //!   --filter <pattern>   Only run tests whose name contains <pattern>
@@ -38,7 +38,7 @@ fn main() {
             }
             other if other.starts_with('-') => {
                 eprintln!("error: unknown option '{}'", other);
-                eprintln!("usage: certo-test [--filter <pattern>] [--no-color] <file.certo>...");
+                eprintln!("usage: certo-test [--filter <pattern>] [--no-color] <file.cto>...");
                 process::exit(2);
             }
             path => files.push(PathBuf::from(path)),
@@ -46,7 +46,7 @@ fn main() {
     }
 
     if files.is_empty() {
-        eprintln!("usage: certo-test [--filter <pattern>] [--no-color] <file.certo>...");
+        eprintln!("usage: certo-test [--filter <pattern>] [--no-color] <file.cto>...");
         process::exit(2);
     }
 

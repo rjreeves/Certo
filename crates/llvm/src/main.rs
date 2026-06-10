@@ -1,7 +1,7 @@
 //! `certo-llvm` — emit LLVM IR from a Certo source file.
 //!
 //! Usage:
-//!   certo-llvm [OPTIONS] <file.certo>
+//!   certo-llvm [OPTIONS] <file.cto>
 //!
 //! Options:
 //!   -o <file>                   Output file (default: <stem>.ll, or stdout if -)
@@ -68,7 +68,7 @@ fn main() {
     }
 
     let input = input.unwrap_or_else(|| {
-        eprintln!("usage: certo-llvm [OPTIONS] <file.certo>");
+        eprintln!("usage: certo-llvm [OPTIONS] <file.cto>");
         process::exit(2);
     });
 

@@ -2,8 +2,8 @@
 //!
 //! # Usage
 //!
-//!   certo-ffi --header <file.certo> [-o <out.h>] [--guard <GUARD_H>]
-//!   certo-ffi --rest-client <schema.json> [-o <out.certo>]
+//!   certo-ffi --header <file.cto> [-o <out.h>] [--guard <GUARD_H>]
+//!   certo-ffi --rest-client <schema.json> [-o <out.cto>]
 //!
 //! # Options
 //!
@@ -51,8 +51,8 @@ fn main() {
     }
 
     let mode = mode.unwrap_or_else(|| {
-        eprintln!("usage: certo-ffi --header <file.certo> [-o <out.h>]");
-        eprintln!("       certo-ffi --rest-client <schema.json> [-o <out.certo>]");
+        eprintln!("usage: certo-ffi --header <file.cto> [-o <out.h>]");
+        eprintln!("       certo-ffi --rest-client <schema.json> [-o <out.cto>]");
         process::exit(2);
     });
 

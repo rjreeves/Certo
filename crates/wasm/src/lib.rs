@@ -3,7 +3,7 @@
 //! # Pipeline
 //!
 //! ```text
-//! .certo source
+//! .cto source
 //!     │
 //!     ▼ certo_parser::parse()
 //!     │ Module
@@ -18,10 +18,10 @@
 //! # Usage
 //!
 //! ```sh
-//! certo-wasm src/main.certo -o out/main.wasm --bindings
+//! certo-wasm src/main.cto -o out/main.wasm --bindings
 //!
 //! # If no toolchain is installed, emit IR for manual compilation:
-//! certo-wasm src/main.certo --emit-ir -o out/main.ll
+//! certo-wasm src/main.cto --emit-ir -o out/main.ll
 //! ```
 
 pub mod error;

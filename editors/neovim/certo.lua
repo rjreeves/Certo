@@ -10,8 +10,8 @@ local lspconfig = require("lspconfig")
 local configs   = require("lspconfig.configs")
 
 -- Register certo-lsp if not already known to lspconfig
-if not configs.certo_lsp then
-    configs.certo_lsp = {
+if not configs.cto_lsp then
+    configs.cto_lsp = {
         default_config = {
             cmd          = { "certo-lsp" },
             filetypes    = { "certo" },
@@ -21,7 +21,7 @@ if not configs.certo_lsp then
     }
 end
 
-lspconfig.certo_lsp.setup({
+lspconfig.cto_lsp.setup({
     on_attach = function(_, bufnr)
         local opts = { buffer = bufnr, noremap = true, silent = true }
         vim.keymap.set("n", "gd",       vim.lsp.buf.definition,     opts)
@@ -33,7 +33,7 @@ lspconfig.certo_lsp.setup({
     capabilities = require("cmp_nvim_lsp").default_capabilities(),  -- optional: nvim-cmp
 })
 
--- Filetype detection for .certo and .cto files
+-- Filetype detection for .cto and .cto files
 vim.filetype.add({
     extension = {
         certo = "certo",

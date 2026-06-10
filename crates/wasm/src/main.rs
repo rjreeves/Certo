@@ -2,7 +2,7 @@
 //!
 //! # Usage
 //!
-//!   certo-wasm [OPTIONS] <file.certo>
+//!   certo-wasm [OPTIONS] <file.cto>
 //!
 //! # Options
 //!
@@ -84,7 +84,7 @@ fn main() {
     }
 
     let input = input.unwrap_or_else(|| {
-        eprintln!("usage: certo-wasm [OPTIONS] <file.certo>");
+        eprintln!("usage: certo-wasm [OPTIONS] <file.cto>");
         eprintln!("       certo-wasm --help for option list");
         process::exit(2);
     });

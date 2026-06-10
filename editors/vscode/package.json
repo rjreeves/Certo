@@ -17,14 +17,14 @@
       {
         "id": "certo",
         "aliases": ["Certo", "certo"],
-        "extensions": [".certo", ".cto"],
+        "extensions": [".cto", ".cto"],
         "configuration": "./language-configuration.json"
       }
     ],
     "grammars": [
       {
         "language": "certo",
-        "scopeName": "source.certo",
+        "scopeName": "source.cto",
         "path": "./syntaxes/certo.tmLanguage.json"
       }
     ],

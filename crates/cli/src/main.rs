@@ -42,9 +42,9 @@ fn main() {
         process::exit(1);
     }
 
-    // Allow `certo <file.certo> [options]` as shorthand for `certo build`.
+    // Allow `certo <file.cto> [options]` as shorthand for `certo build`.
     let first = args[1].as_str();
-    if first.ends_with(".certo") || first == "build" {
+    if first.ends_with(".cto") || first == "build" {
         let build_args = if first == "build" { &args[2..] } else { &args[1..] };
         cmd_build(build_args, false);
     } else {
@@ -86,7 +86,7 @@ fn cmd_check(args: &[String]) {
         match args[i].as_str() {
             "--verbose" | "-v" => verbose = true,
             "--help" | "-h" => {
-                println!("Usage: certo check <file.certo> [-v]");
+                println!("Usage: certo check <file.cto> [-v]");
                 println!();
                 println!("Type-check a Certo source file without compiling.");
                 println!("Exits 0 on success, 1 if there are parse or type errors.");
@@ -106,7 +106,7 @@ fn cmd_check(args: &[String]) {
 
     let input = input.unwrap_or_else(|| {
         eprintln!("error: no input file");
-        eprintln!("usage: certo check <file.certo>");
+        eprintln!("usage: certo check <file.cto>");
         process::exit(2);
     });
 
@@ -142,11 +142,11 @@ fn cmd_run(args: &[String]) {
 
     // Find the input file from build_args so we can derive the exe name.
     let input_path = build_args.iter()
-        .find(|a| a.ends_with(".certo") || (!a.starts_with('-') && !a.starts_with("build")))
+        .find(|a| a.ends_with(".cto") || (!a.starts_with('-') && !a.starts_with("build")))
         .cloned()
         .unwrap_or_else(|| {
             eprintln!("error: no input file");
-            eprintln!("usage: certo run <file.certo> [build-opts] [-- prog-args]");
+            eprintln!("usage: certo run <file.cto> [build-opts] [-- prog-args]");
             process::exit(2);
         });
 
@@ -209,8 +209,8 @@ fn cmd_build(args: &[String], quiet: bool) {
             "--verbose" | "-v" => verbose = true,
             "--watch" | "-w"  => watch    = true,
             "--help" | "-h" => {
-                println!("Usage: certo <file.certo> [-o <out>] [--emit-c] [--emit-dll] [-v] [--watch]");
-                println!("       certo build <file.certo> [-o <out>] [--emit-c] [--emit-dll] [-v] [--watch]");
+                println!("Usage: certo <file.cto> [-o <out>] [--emit-c] [--emit-dll] [-v] [--watch]");
+                println!("       certo build <file.cto> [-o <out>] [--emit-c] [--emit-dll] [-v] [--watch]");
                 println!();
                 println!("Options:");
                 println!("  -o <file>    Output path");
@@ -234,7 +234,7 @@ fn cmd_build(args: &[String], quiet: bool) {
 
     let input = input.unwrap_or_else(|| {
         eprintln!("error: no input file");
-        eprintln!("usage: certo <file.certo> [-o <out>]");
+        eprintln!("usage: certo <file.cto> [-o <out>]");
         process::exit(2);
     });
 
@@ -490,7 +490,7 @@ fn cmd_build(args: &[String], quiet: bool) {
 // Shared helpers
 // ------------------------------------------------------------------ //
 
-/// Parse a `.certo` file, resolving its imports and exiting on parse errors.
+/// Parse a `.cto` file, resolving its imports and exiting on parse errors.
 /// Returns (Module, source_text).
 fn parse_file_or_exit(path: &Path, colour: bool) -> (Module, String) {
     let src = std::fs::read_to_string(path).unwrap_or_else(|e| {
@@ -974,7 +974,7 @@ fn cmd_new(args: &[String]) {
     write_file(&root.join(".gitignore"),
         "dist\\\n\
          .env\n\
-         .certo\\\n\
+         .cto\\\n\
          *.log\n"
     );
 
@@ -1072,7 +1072,7 @@ fn cmd_fmt(args: &[String]) {
         match args[i].as_str() {
             "--check" => check_only = true,
             "--help" | "-h" => {
-                println!("Usage: certo fmt [--check] <file.certo>...");
+                println!("Usage: certo fmt [--check] <file.cto>...");
                 println!();
                 println!("Format Certo source files in place.");
                 println!("  --check   Exit 1 if any file would be reformatted (no writes).");
@@ -1137,7 +1137,7 @@ fn cmd_test(args: &[String]) {
         match args[i].as_str() {
             "--no-color" => color = false,
             "--help" | "-h" => {
-                println!("Usage: certo test <file.certo>...");
+                println!("Usage: certo test <file.cto>...");
                 println!();
                 println!("Compile and run all `test` blocks in the given source files.");
                 println!("Exits 0 if all tests pass, 1 otherwise.");
@@ -1197,7 +1197,7 @@ fn cmd_lint(args: &[String]) {
         match args[i].as_str() {
             "--no-color" => color = false,
             "--help" | "-h" => {
-                println!("Usage: certo lint <file.certo>...");
+                println!("Usage: certo lint <file.cto>...");
                 println!();
                 println!("Run lint checks on Certo source files (HIR dataflow pass).");
                 println!("  L001  unused parameter");
@@ -1261,7 +1261,7 @@ fn cmd_bench(args: &[String]) {
     while i < args.len() {
         match args[i].as_str() {
             "--help" | "-h" => {
-                println!("Usage: certo bench <file.certo> [--iterations=N]");
+                println!("Usage: certo bench <file.cto> [--iterations=N]");
                 println!();
                 println!("Compile and run all `bench` blocks in the source file.");
                 println!("  --iterations=N   Number of iterations per benchmark (default 1000).");
@@ -1486,15 +1486,15 @@ fn print_top_help() {
     eprintln!("  certo                            Start the interactive REPL");
     eprintln!("  certo repl                       Start the interactive REPL");
     eprintln!("  certo new <project-name>         Scaffold a new project");
-    eprintln!("  certo check <file.certo>         Type-check without compiling");
-    eprintln!("  certo run   <file.certo> [-- args]  Compile and run");
-    eprintln!("  certo <file.certo> [-o <out>]    Compile a Certo source file");
-    eprintln!("  certo build <file.certo> ...     Same with explicit subcommand");
-    eprintln!("  certo doc   <file.certo>         Generate HTML documentation");
-    eprintln!("  certo fmt   <file.certo>...      Format source files in place");
-    eprintln!("  certo test  <file.certo>...      Run test blocks");
-    eprintln!("  certo lint  <file.certo>...      Lint for unused params / dead code");
-    eprintln!("  certo bench <file.certo>...      Run bench_ functions");
+    eprintln!("  certo check <file.cto>         Type-check without compiling");
+    eprintln!("  certo run   <file.cto> [-- args]  Compile and run");
+    eprintln!("  certo <file.cto> [-o <out>]    Compile a Certo source file");
+    eprintln!("  certo build <file.cto> ...     Same with explicit subcommand");
+    eprintln!("  certo doc   <file.cto>         Generate HTML documentation");
+    eprintln!("  certo fmt   <file.cto>...      Format source files in place");
+    eprintln!("  certo test  <file.cto>...      Run test blocks");
+    eprintln!("  certo lint  <file.cto>...      Lint for unused params / dead code");
+    eprintln!("  certo bench <file.cto>...      Run bench_ functions");
     eprintln!("  certo migrate <subcommand>       Database migration tools");
     eprintln!();
     eprintln!("Build options:");
@@ -1605,7 +1605,7 @@ fn cmd_migrate(args: &[String]) {
             std::fs::create_dir_all(&migrations_dir).unwrap_or_else(|e| {
                 eprintln!("error creating migrations/: {}", e); process::exit(1);
             });
-            let filename = migrations_dir.join(format!("{}.certo", name));
+            let filename = migrations_dir.join(format!("{}.cto", name));
             let template = format!(
                 "migration \"{}\" {{\n    up {{\n        // TODO: add operations\n    }}\n    down {{\n        // TODO: add rollback operations\n    }}\n}}\n",
                 name
