@@ -101,5 +101,26 @@ impl TypeEnv {
                 body: Box::new(Ty::Fn { params: vec![Ty::Text], ret: Box::new(ret) }),
             });
         }
+
+        // Ok  :: ∀T E. T → Result<T, E>
+        // Err :: ∀T E. E → Result<T, E>
+        {
+            *counter += 1; let t = *counter;
+            *counter += 1; let e = *counter;
+            let result_te = Ty::Result(Box::new(Ty::Var(t)), Box::new(Ty::Var(e)));
+            self.define("Ok", Ty::Forall {
+                vars: vec![t, e],
+                body: Box::new(Ty::Fn { params: vec![Ty::Var(t)], ret: Box::new(result_te) }),
+            });
+        }
+        {
+            *counter += 1; let t = *counter;
+            *counter += 1; let e = *counter;
+            let result_te = Ty::Result(Box::new(Ty::Var(t)), Box::new(Ty::Var(e)));
+            self.define("Err", Ty::Forall {
+                vars: vec![t, e],
+                body: Box::new(Ty::Fn { params: vec![Ty::Var(e)], ret: Box::new(result_te) }),
+            });
+        }
     }
 }

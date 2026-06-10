@@ -190,6 +190,8 @@ fn local_name(id: u32) -> String {
 }
 
 pub fn c_fn_name(name: &str) -> String {
+    // Runtime intrinsics (__ prefix) are emitted verbatim — no certo_ wrapper.
+    if name.starts_with("__") { return name.to_string(); }
     // Convert camelCase to snake_case so Certo names match C stdlib conventions.
     let snake = camel_to_snake(name);
     format!("certo_{}", snake.replace('.', "_").replace('-', "_"))

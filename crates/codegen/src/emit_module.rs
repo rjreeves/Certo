@@ -208,6 +208,7 @@ fn const_expr_to_c(expr: &certo_hir::HirExpr) -> String {
 // ------------------------------------------------------------------ //
 
 pub const RUNTIME_HEADER: &str = r#"
+#include <stdlib.h>
 /* ---- DLL export attribute ---- */
 #ifdef _WIN32
 #  define CERTO_EXPORT __declspec(dllexport)
@@ -249,6 +250,23 @@ typedef void* certo_error_t;
 /* List (dynamic array) — full signatures are in the stdlib C block. */
 typedef struct { void** data; int64_t len; int64_t cap; } certo_list_base_t;
 
+/* Result<T,E> — heap-allocated tagged value.
+   payload stores any scalar (int/float/bool) or pointer cast to intptr_t.
+   On 64-bit platforms intptr_t == int64_t, so all Certo value types fit. */
+typedef struct { bool is_ok; intptr_t payload; } certo_result_t;
+
+static inline void* certo_ok(intptr_t v) {
+    certo_result_t* r = (certo_result_t*)malloc(sizeof(certo_result_t));
+    r->is_ok = true;  r->payload = v; return r;
+}
+static inline void* certo_err(intptr_t e) {
+    certo_result_t* r = (certo_result_t*)malloc(sizeof(certo_result_t));
+    r->is_ok = false; r->payload = e; return r;
+}
+/* Intrinsics used by the ? desugaring in compiled code. */
+static inline bool     __result_is_ok(void* r) { return ((certo_result_t*)r)->is_ok; }
+static inline intptr_t __result_unwrap(void* r) { return ((certo_result_t*)r)->payload; }
+
 /* Arithmetic helpers */
 int64_t certo_pow(int64_t base, int64_t exp);
 void*   certo_coalesce(void* opt, void* fallback);
@@ -267,12 +285,8 @@ void    certo_main_init(int argc, const char** argv);
 int64_t certo_arg_count(void);
 certo_text_t certo_arg(int64_t i);
 
-
 /* DB transaction stub */
 void* __db_transaction(certo_fn_t thunk);
-
-/* Try/unwrap (Result<T,E> → T, or propagate) */
-void* __try_unwrap(void* result);
 
 /* Record update */
 void* __record_update(void* base, void* updates);
