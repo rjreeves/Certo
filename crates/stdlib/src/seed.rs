@@ -545,6 +545,44 @@ pub fn seed_stdlib(env: &mut TypeEnv, counter: &mut u32) {
 
     def!("Math.clamp",    Ty::Fn { params: vec![Ty::Float, Ty::Float, Ty::Float], ret: Box::new(Ty::Float) });
     def!("Math.clampInt", Ty::Fn { params: vec![Ty::Int, Ty::Int, Ty::Int],       ret: Box::new(Ty::Int) });
+
+    def!("Math.pow",     fn2(Ty::Float, Ty::Float, Ty::Float));
+    def!("Math.sign",    fn1(Ty::Float, Ty::Float));
+    def!("Math.signInt", fn1(Ty::Int,   Ty::Int));
+    def!("Math.trunc",   fn1(Ty::Float, Ty::Float));
+    def!("Math.random",  Ty::Fn { params: vec![], ret: Box::new(Ty::Float) });
+
+    // ---------------------------------------------------------------- //
+    // Crypto
+    // ---------------------------------------------------------------- //
+
+    def!("Crypto.sha256",       fn1(Ty::Text, Ty::Text));
+    def!("Crypto.md5",          fn1(Ty::Text, Ty::Text));
+    def!("Crypto.base64Encode", fn1(Ty::Text, Ty::Text));
+    def!("Crypto.base64Decode", fn1(Ty::Text, Ty::Text));
+
+    // ---------------------------------------------------------------- //
+    // Regex
+    // ---------------------------------------------------------------- //
+
+    def!("Regex.match",    fn2(Ty::Text, Ty::Text, Ty::Bool));
+    def!("Regex.find",     fn2(Ty::Text, Ty::Text, Ty::Text));
+    def!("Regex.captures", fn2(Ty::Text, Ty::Text, Ty::List(Box::new(Ty::Text))));
+    def!("Regex.replace",  Ty::Fn { params: vec![Ty::Text, Ty::Text, Ty::Text], ret: Box::new(Ty::Text) });
+    def!("Regex.split",    fn2(Ty::Text, Ty::Text, Ty::List(Box::new(Ty::Text))));
+
+    // ---------------------------------------------------------------- //
+    // Csv
+    // ---------------------------------------------------------------- //
+
+    {
+        let list_text      = || Ty::List(Box::new(Ty::Text));
+        let list_list_text = || Ty::List(Box::new(list_text()));
+        def!("Csv.parse",     fn1(Ty::Text,        list_list_text()));
+        def!("Csv.serialize", fn1(list_list_text(), Ty::Text));
+        def!("Csv.header",    fn1(list_list_text(), list_text()));
+        def!("Csv.rows",      fn1(list_list_text(), list_list_text()));
+    }
 }
 
 fn fn1(a: Ty, ret: Ty) -> Ty {

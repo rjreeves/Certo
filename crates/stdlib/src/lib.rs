@@ -11,6 +11,9 @@ mod process;
 mod json;
 mod http;
 mod math;
+mod crypto;
+mod regex;
+mod csv;
 pub mod seed;
 
 pub use seed::seed_stdlib;
@@ -28,11 +31,15 @@ pub use process::{PROCESS_C, PROCESS_CERTO};
 pub use json::{JSON_C, JSON_CERTO};
 pub use http::{HTTP_C, HTTP_CERTO};
 pub use math::{MATH_C, MATH_CERTO};
+pub use crypto::{CRYPTO_C, CRYPTO_CERTO};
+pub use regex::{REGEX_C, REGEX_CERTO};
+pub use csv::{CSV_C, CSV_CERTO};
 
 /// The full C runtime header: base types + all stdlib implementations.
 pub fn full_c_runtime() -> String {
     [CORE_C, COLLECTIONS_C, TEXT_C, DATETIME_C, MONEY_C,
-     ENV_C, FILE_C, PATH_C, PROCESS_C, JSON_C, HTTP_C, MATH_C].concat()
+     ENV_C, FILE_C, PATH_C, PROCESS_C, JSON_C, HTTP_C, MATH_C,
+     CRYPTO_C, REGEX_C, CSV_C].concat()
 }
 
 /// Full C runtime including optional PostgreSQL support.
@@ -57,6 +64,9 @@ pub fn certo_sources() -> Vec<(&'static str, &'static str)> {
         ("Stdlib.Json",        JSON_CERTO),
         ("Stdlib.Http",        HTTP_CERTO),
         ("Stdlib.Math",        MATH_CERTO),
+        ("Stdlib.Crypto",      CRYPTO_CERTO),
+        ("Stdlib.Regex",       REGEX_CERTO),
+        ("Stdlib.Csv",         CSV_CERTO),
     ]
 }
 

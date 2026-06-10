@@ -9,6 +9,8 @@ path = "src/main.rs"
 
 [dependencies]
 certo-ast         = { path = "../ast" }
+certo-fmt         = { path = "../fmt" }
+certo-testrunner  = { path = "../testrunner" }
 certo-parser      = { path = "../parser" }
 certo-migrate     = { path = "../migrate" }
 certo-codegen     = { path = "../codegen" }

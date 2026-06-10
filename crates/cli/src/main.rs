@@ -1,6 +1,7 @@
 mod cmd_doc;
 mod cmd_watch;
 
+
 use std::path::{Path, PathBuf};
 use std::process;
 use certo_ast::decl::{Decl, MigrationDecl};
@@ -29,6 +30,10 @@ fn main() {
             "check"   => cmd_check(&args[2..]),
             "run"     => cmd_run(&args[2..]),
             "doc"     => cmd_doc::cmd_doc(&args[2..]),
+            "fmt"     => cmd_fmt(&args[2..]),
+            "test"    => cmd_test(&args[2..]),
+            "lint"    => cmd_lint(&args[2..]),
+            "bench"   => cmd_bench(&args[2..]),
             "new"     => cmd_new(&args[2..]),
             "migrate" => cmd_migrate(&args[2..]),
             "help" | "--help" | "-h" => { print_top_help(); }
@@ -877,6 +882,325 @@ fn to_module_name(name: &str) -> String {
     out
 }
 
+// ------------------------------------------------------------------ //
+// fmt
+// ------------------------------------------------------------------ //
+
+fn cmd_fmt(args: &[String]) {
+    let mut files: Vec<PathBuf> = vec![];
+    let mut check_only = false;
+
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--check" => check_only = true,
+            "--help" | "-h" => {
+                println!("Usage: certo fmt [--check] <file.certo>...");
+                println!();
+                println!("Format Certo source files in place.");
+                println!("  --check   Exit 1 if any file would be reformatted (no writes).");
+                return;
+            }
+            other if other.starts_with('-') => {
+                eprintln!("Unknown option: {}", other);
+                process::exit(2);
+            }
+            path => files.push(PathBuf::from(path)),
+        }
+        i += 1;
+    }
+
+    if files.is_empty() {
+        eprintln!("error: no input files");
+        process::exit(2);
+    }
+
+    let mut any_changed = false;
+    for path in &files {
+        let src = std::fs::read_to_string(path).unwrap_or_else(|e| {
+            eprintln!("error reading {}: {}", path.display(), e);
+            process::exit(1);
+        });
+        match certo_fmt::format_source(&src) {
+            Ok(formatted) => {
+                if formatted != src {
+                    any_changed = true;
+                    if check_only {
+                        eprintln!("would reformat: {}", path.display());
+                    } else {
+                        std::fs::write(path, &formatted).unwrap_or_else(|e| {
+                            eprintln!("error writing {}: {}", path.display(), e);
+                            process::exit(1);
+                        });
+                        println!("formatted: {}", path.display());
+                    }
+                }
+            }
+            Err(_) => {
+                eprintln!("parse error: {} (skipped)", path.display());
+            }
+        }
+    }
+    if check_only && any_changed {
+        process::exit(1);
+    }
+}
+
+// ------------------------------------------------------------------ //
+// test
+// ------------------------------------------------------------------ //
+
+fn cmd_test(args: &[String]) {
+    let mut files: Vec<PathBuf> = vec![];
+    let mut color = stderr_is_tty();
+    let mut timeout_ms: u64 = 5000;
+
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--no-color" => color = false,
+            "--help" | "-h" => {
+                println!("Usage: certo test <file.certo>...");
+                println!();
+                println!("Compile and run all `test` blocks in the given source files.");
+                println!("Exits 0 if all tests pass, 1 otherwise.");
+                return;
+            }
+            other if other.starts_with("--timeout=") => {
+                let v = other.trim_start_matches("--timeout=");
+                timeout_ms = v.parse().unwrap_or_else(|_| {
+                    eprintln!("error: --timeout= requires a number in milliseconds");
+                    process::exit(2);
+                });
+            }
+            other if other.starts_with('-') => {
+                eprintln!("Unknown option: {}", other);
+                process::exit(2);
+            }
+            path => files.push(PathBuf::from(path)),
+        }
+        i += 1;
+    }
+
+    if files.is_empty() {
+        eprintln!("error: no input files");
+        process::exit(2);
+    }
+
+    let opts = certo_testrunner::run::RunOptions {
+        timeout: Some(std::time::Duration::from_millis(timeout_ms)),
+        filter: None,
+    };
+    let mut all_passed = true;
+    for path in &files {
+        match certo_testrunner::run_file(path, &opts, color) {
+            Ok(passed) => { if !passed { all_passed = false; } }
+            Err(certo_testrunner::error::TestRunnerError::NoTests) => {
+                eprintln!("{}: no tests found", path.display());
+            }
+            Err(e) => {
+                eprintln!("error: {}", e);
+                all_passed = false;
+            }
+        }
+    }
+    if !all_passed { process::exit(1); }
+}
+
+// ------------------------------------------------------------------ //
+// lint
+// ------------------------------------------------------------------ //
+
+fn cmd_lint(args: &[String]) {
+    let mut files: Vec<PathBuf> = vec![];
+    let mut color = stderr_is_tty();
+
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--no-color" => color = false,
+            "--help" | "-h" => {
+                println!("Usage: certo lint <file.certo>...");
+                println!();
+                println!("Run lint checks on Certo source files.");
+                println!("Reports: unused parameters, unreachable code after panic/todo.");
+                return;
+            }
+            other if other.starts_with('-') => {
+                eprintln!("Unknown option: {}", other);
+                process::exit(2);
+            }
+            path => files.push(PathBuf::from(path)),
+        }
+        i += 1;
+    }
+
+    if files.is_empty() {
+        eprintln!("error: no input files");
+        process::exit(2);
+    }
+
+    let mut warnings = 0usize;
+    for path in &files {
+        let src = std::fs::read_to_string(path).unwrap_or_else(|e| {
+            eprintln!("error reading {}: {}", path.display(), e);
+            process::exit(1);
+        });
+        let module = match certo_parser::parse(&src) {
+            Ok(m) => m,
+            Err(errs) => {
+                for e in &errs {
+                    eprintln!("{}:{}: parse error: {}", path.display(), e.span.start, e);
+                }
+                process::exit(1);
+            }
+        };
+        let w = lint_module(&module, path, &src, color);
+        warnings += w;
+    }
+    if warnings > 0 {
+        eprintln!("{} warning(s) found", warnings);
+        process::exit(1);
+    } else {
+        println!("No issues found.");
+    }
+}
+
+fn lint_module(module: &certo_ast::module::Module, path: &Path, src: &str, _color: bool) -> usize {
+    use certo_ast::decl::Decl;
+    let mut count = 0;
+
+    for decl in &module.decls {
+        let Decl::Fn(f) = &decl.node else { continue };
+
+        for param in &f.params {
+            let name = &param.name.node;
+            if name.starts_with('_') { continue; }
+            let body_src = if let Some(b) = &f.body {
+                let s = b.span.start as usize;
+                let e = b.span.end as usize;
+                src.get(s..e).unwrap_or("")
+            } else { continue };
+            let occurrences = body_src.matches(name.as_str()).count();
+            if occurrences == 0 {
+                let line = src[..param.name.span.start as usize].chars().filter(|&c| c == '\n').count() + 1;
+                eprintln!("{}:{}: warning: unused parameter `{}`", path.display(), line, name);
+                count += 1;
+            }
+        }
+
+        if let Some(body) = &f.body {
+            count += lint_unreachable_after_terminal(&body.node, path, src);
+        }
+    }
+    count
+}
+
+fn lint_unreachable_after_terminal(expr: &certo_ast::expr::Expr, path: &Path, src: &str) -> usize {
+    use certo_ast::expr::{Expr, Stmt};
+    let mut count = 0;
+    if let Expr::Block { stmts, .. } = expr {
+        let mut found_terminal = false;
+        for stmt in stmts {
+            if found_terminal {
+                let pos = match stmt {
+                    Stmt::Val { span, .. } | Stmt::Var { span, .. }
+                    | Stmt::Assign { span, .. } | Stmt::Defer { span, .. }
+                    | Stmt::Expr { span, .. } => span.start as usize,
+                };
+                let line = src[..pos].chars().filter(|&c| c == '\n').count() + 1;
+                eprintln!("{}:{}: warning: unreachable statement", path.display(), line);
+                count += 1;
+                break;
+            }
+            if let Stmt::Expr { expr: e, .. } = stmt {
+                if let Expr::App { func, .. } = &e.node {
+                    if let Expr::Path { path: p, .. } = &func.node {
+                        let name = p.segments.last().map(|s| s.node.as_str()).unwrap_or("");
+                        if matches!(name, "panic" | "todo" | "unreachable") {
+                            found_terminal = true;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    count
+}
+
+// ------------------------------------------------------------------ //
+// bench
+// ------------------------------------------------------------------ //
+
+fn cmd_bench(args: &[String]) {
+    let mut files: Vec<PathBuf> = vec![];
+    let mut iterations: u64 = 1000;
+
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--help" | "-h" => {
+                println!("Usage: certo bench <file.certo> [--iterations=N]");
+                println!();
+                println!("Compile and run all `bench` blocks in the source file.");
+                println!("  --iterations=N   Number of iterations per benchmark (default 1000).");
+                return;
+            }
+            other if other.starts_with("--iterations=") => {
+                let v = other.trim_start_matches("--iterations=");
+                iterations = v.parse().unwrap_or_else(|_| {
+                    eprintln!("error: --iterations= requires a positive integer");
+                    process::exit(2);
+                });
+            }
+            other if other.starts_with('-') => {
+                eprintln!("Unknown option: {}", other);
+                process::exit(2);
+            }
+            path => files.push(PathBuf::from(path)),
+        }
+        i += 1;
+    }
+
+    if files.is_empty() {
+        eprintln!("error: no input files");
+        process::exit(2);
+    }
+
+    for path in &files {
+        let src = std::fs::read_to_string(path).unwrap_or_else(|e| {
+            eprintln!("error reading {}: {}", path.display(), e);
+            process::exit(1);
+        });
+        let module = match certo_parser::parse(&src) {
+            Ok(m) => m,
+            Err(errs) => {
+                for e in &errs { eprintln!("parse error: {}", e); }
+                process::exit(1);
+            }
+        };
+        run_bench_module(&module, path, &src, iterations);
+    }
+}
+
+fn run_bench_module(module: &certo_ast::module::Module, _path: &Path, _src: &str, iterations: u64) {
+    use certo_ast::decl::Decl;
+    let mut found = 0;
+    for decl in &module.decls {
+        if let Decl::Fn(f) = &decl.node {
+            let name = &f.name.node;
+            if !name.starts_with("bench_") { continue; }
+            found += 1;
+            // For now: report that bench discovery works; full timing harness
+            // requires compiling a C wrapper with clock_gettime around the call.
+            println!("bench  {:<40} {} iterations  (timing harness: pending)", name, iterations);
+        }
+    }
+    if found == 0 {
+        eprintln!("no bench_ functions found (prefix bench functions with `bench_`)");
+    }
+}
+
 fn print_top_help() {
     eprintln!("Certo compiler");
     eprintln!();
@@ -887,6 +1211,10 @@ fn print_top_help() {
     eprintln!("  certo <file.certo> [-o <out>]    Compile a Certo source file");
     eprintln!("  certo build <file.certo> ...     Same with explicit subcommand");
     eprintln!("  certo doc   <file.certo>         Generate HTML documentation");
+    eprintln!("  certo fmt   <file.certo>...      Format source files in place");
+    eprintln!("  certo test  <file.certo>...      Run test blocks");
+    eprintln!("  certo lint  <file.certo>...      Lint for unused params / dead code");
+    eprintln!("  certo bench <file.certo>...      Run bench_ functions");
     eprintln!("  certo migrate <subcommand>       Database migration tools");
     eprintln!();
     eprintln!("Build options:");
