@@ -21,6 +21,7 @@ fn main() {
         cmd_build(build_args);
     } else {
         match first {
+            "new"     => cmd_new(&args[2..]),
             "migrate" => cmd_migrate(&args[2..]),
             "help" | "--help" | "-h" => { print_top_help(); }
             other => {
@@ -399,11 +400,137 @@ fn resolve_pg_paths() -> (Option<String>, Option<String>) {
     (None, None)
 }
 
+// ------------------------------------------------------------------ //
+// new
+// ------------------------------------------------------------------ //
+
+fn cmd_new(args: &[String]) {
+    let name = args.first().unwrap_or_else(|| {
+        eprintln!("error: missing project name");
+        eprintln!("usage: certo new <project-name>");
+        process::exit(1);
+    });
+
+    let root = PathBuf::from(name);
+    if root.exists() {
+        eprintln!("error: directory '{}' already exists", name);
+        process::exit(1);
+    }
+
+    // Directories to create
+    let dirs = [
+        root.join("src"),
+        root.join("db").join("migrations"),
+        root.join("tests"),
+        root.join("dist"),
+    ];
+    for dir in &dirs {
+        std::fs::create_dir_all(dir).unwrap_or_else(|e| {
+            eprintln!("error: cannot create {}: {}", dir.display(), e);
+            process::exit(1);
+        });
+    }
+
+    // certo.toml
+    write_file(&root.join("certo.toml"), &format!(
+        "[project]\n\
+         name    = \"{name}\"\n\
+         version = \"0.1.0\"\n\
+         entry   = \"src/main.cto\"\n"
+    ));
+
+    // src/main.cto
+    write_file(&root.join("src").join("main.cto"), &format!(
+        "module {module}\n\
+         \n\
+         import Stdlib.Core\n\
+         \n\
+         fn main(): Unit [io] = {{\n\
+             println(\"Hello from {name}!\")\n\
+         }}\n",
+        module = to_module_name(name),
+    ));
+
+    // .env.example
+    write_file(&root.join(".env.example"),
+        "# Database\n\
+         DATABASE_URL=host=localhost dbname=mydb user=myuser password=secret\n\
+         \n\
+         # App\n\
+         APP_ENV=development\n"
+    );
+
+    // .gitignore
+    write_file(&root.join(".gitignore"),
+        "dist/\n\
+         *.exe\n\
+         *.dll\n\
+         *.so\n\
+         .env\n"
+    );
+
+    // README.md
+    write_file(&root.join("README.md"), &format!(
+        "# {name}\n\
+         \n\
+         A Certo project.\n\
+         \n\
+         ## Build\n\
+         \n\
+         ```\n\
+         certo src/main.cto -o dist/{name}.exe\n\
+         ```\n"
+    ));
+
+    eprintln!("Created project '{name}'");
+    eprintln!();
+    eprintln!("  {name}/");
+    eprintln!("  ├── certo.toml");
+    eprintln!("  ├── .env.example");
+    eprintln!("  ├── .gitignore");
+    eprintln!("  ├── README.md");
+    eprintln!("  ├── src/");
+    eprintln!("  │   └── main.cto");
+    eprintln!("  ├── db/");
+    eprintln!("  │   └── migrations/");
+    eprintln!("  ├── tests/");
+    eprintln!("  └── dist/");
+    eprintln!();
+    eprintln!("  Next: certo {name}\\src\\main.cto -o {name}\\dist\\{name}.exe");
+}
+
+fn write_file(path: &Path, contents: &str) {
+    std::fs::write(path, contents).unwrap_or_else(|e| {
+        eprintln!("error: cannot write {}: {}", path.display(), e);
+        process::exit(1);
+    });
+}
+
+/// Convert a project name like "Lattice-Project" to a module name "latticeProject".
+fn to_module_name(name: &str) -> String {
+    let mut out = String::new();
+    let mut cap_next = false;
+    for (i, c) in name.chars().enumerate() {
+        if c == '-' || c == '_' {
+            cap_next = true;
+        } else if cap_next {
+            out.extend(c.to_uppercase());
+            cap_next = false;
+        } else if i == 0 {
+            out.extend(c.to_lowercase());
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
 fn print_top_help() {
     eprintln!("Certo compiler");
     eprintln!();
     eprintln!("Usage:");
-    eprintln!("  certo <file.certo> [-o <out>]   Compile a Certo source file");
+    eprintln!("  certo new <project-name>         Scaffold a new project");
+    eprintln!("  certo <file.certo> [-o <out>]    Compile a Certo source file");
     eprintln!("  certo build <file.certo> ...     Same with explicit subcommand");
     eprintln!("  certo migrate <subcommand>       Database migration tools");
     eprintln!();

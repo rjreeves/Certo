@@ -41,10 +41,12 @@ pub fn seed_stdlib(env: &mut TypeEnv, counter: &mut u32) {
     def!("ceil",    fn1(Ty::Float, Ty::Float));
     def!("round",   fn1(Ty::Float, Ty::Float));
     def!("sqrt",    fn1(Ty::Float, Ty::Float));
-    def!("range",   fn2(Ty::Int, Ty::Int, Ty::List(Box::new(Ty::Int))));
-    def!("rangeInclusive", fn2(Ty::Int, Ty::Int, Ty::List(Box::new(Ty::Int))));
-    def!("shellExec", fn1(Ty::Text, Ty::Int));
-    def!("runPs1",    fn2(Ty::Text, Ty::Text, Ty::Int));
+    def!("range",         fn2(Ty::Int, Ty::Int, Ty::List(Box::new(Ty::Int))));
+    def!("rangeInclusive",fn2(Ty::Int, Ty::Int, Ty::List(Box::new(Ty::Int))));
+    def!("readLine",  Ty::Fn { params: vec![], ret: Box::new(Ty::Option(Box::new(Ty::Text))) });
+    def!("readAll",   Ty::Fn { params: vec![], ret: Box::new(Ty::Text) });
+    def!("argCount",  Ty::Fn { params: vec![], ret: Box::new(Ty::Int) });
+    def!("arg",       fn1(Ty::Int, Ty::Option(Box::new(Ty::Text))));
 
     // ---------------------------------------------------------------- //
     // Collections — List<T>
@@ -135,6 +137,56 @@ pub fn seed_stdlib(env: &mut TypeEnv, counter: &mut u32) {
         let a = fresh();
         env.define("List.contains", poly1(a,
             fn2(Ty::List(Box::new(Ty::Var(a))), Ty::Var(a), Ty::Bool)));
+    }
+    {
+        let a = fresh();
+        let pred = fn1(Ty::Var(a), Ty::Bool);
+        env.define("List.find", poly1(a, fn2(
+            Ty::List(Box::new(Ty::Var(a))),
+            pred,
+            Ty::Option(Box::new(Ty::Var(a))),
+        )));
+    }
+    {
+        let a = fresh();
+        let pred = fn1(Ty::Var(a), Ty::Bool);
+        env.define("List.any", poly1(a,
+            fn2(Ty::List(Box::new(Ty::Var(a))), pred, Ty::Bool)));
+    }
+    {
+        let a = fresh();
+        let pred = fn1(Ty::Var(a), Ty::Bool);
+        env.define("List.all", poly1(a,
+            fn2(Ty::List(Box::new(Ty::Var(a))), pred, Ty::Bool)));
+    }
+    {
+        let a = fresh();
+        let list_a = Ty::List(Box::new(Ty::Var(a)));
+        let cmp    = Ty::Fn { params: vec![Ty::Var(a), Ty::Var(a)], ret: Box::new(Ty::Int) };
+        env.define("List.sort", poly1(a, fn2(list_a.clone(), cmp, list_a)));
+    }
+    {
+        let a = fresh(); let b = fresh();
+        let pair = Ty::Tuple(vec![Ty::Var(a), Ty::Var(b)]);
+        env.define("List.zip", Ty::Forall {
+            vars: vec![a, b],
+            body: Box::new(fn2(
+                Ty::List(Box::new(Ty::Var(a))),
+                Ty::List(Box::new(Ty::Var(b))),
+                Ty::List(Box::new(pair)),
+            )),
+        });
+    }
+    {
+        let k = fresh(); let v = fresh();
+        let pair = Ty::Tuple(vec![Ty::Var(k), Ty::Var(v)]);
+        env.define("Map.fromList", Ty::Forall {
+            vars: vec![k, v],
+            body: Box::new(fn1(
+                Ty::List(Box::new(pair)),
+                Ty::Map(Box::new(Ty::Var(k)), Box::new(Ty::Var(v))),
+            )),
+        });
     }
 
     // ---------------------------------------------------------------- //
@@ -295,11 +347,52 @@ pub fn seed_stdlib(env: &mut TypeEnv, counter: &mut u32) {
     def!("Money.fromCents",    fn1(Ty::Int, Ty::Decimal));
     def!("Money.toCents",      fn1(Ty::Decimal, Ty::Int));
     def!("Money.fromDecimal",  fn1(Ty::Decimal, Ty::Decimal));
-}
 
-// ---------------------------------------------------------------- //
-// Helpers for building Ty values
-// ---------------------------------------------------------------- //
+    // ---------------------------------------------------------------- //
+    // Env
+    // ---------------------------------------------------------------- //
+
+    def!("getEnv",   fn1(Ty::Text, Ty::Option(Box::new(Ty::Text))));
+    def!("setEnv",   fn2(Ty::Text, Ty::Text, Ty::Unit));
+    def!("unsetEnv", fn1(Ty::Text, Ty::Unit));
+
+    // ---------------------------------------------------------------- //
+    // File
+    // ---------------------------------------------------------------- //
+
+    def!("readFile",   fn1(Ty::Text, Ty::Option(Box::new(Ty::Text))));
+    def!("writeFile",  fn2(Ty::Text, Ty::Text, Ty::Bool));
+    def!("appendFile", fn2(Ty::Text, Ty::Text, Ty::Bool));
+    def!("fileExists", fn1(Ty::Text, Ty::Bool));
+    def!("deleteFile", fn1(Ty::Text, Ty::Bool));
+    {
+        let list_text = Ty::List(Box::new(Ty::Text));
+        def!("listDir", fn1(Ty::Text, Ty::Option(Box::new(list_text))));
+    }
+
+    // ---------------------------------------------------------------- //
+    // Path
+    // ---------------------------------------------------------------- //
+
+    def!("Path.join",      fn2(Ty::Text, Ty::Text, Ty::Text));
+    def!("Path.basename",  fn1(Ty::Text, Ty::Text));
+    def!("Path.dirname",   fn1(Ty::Text, Ty::Text));
+    def!("Path.extension", fn1(Ty::Text, Ty::Option(Box::new(Ty::Text))));
+    def!("Path.stem",      fn1(Ty::Text, Ty::Text));
+
+    // ---------------------------------------------------------------- //
+    // Process
+    // ---------------------------------------------------------------- //
+
+    {
+        let pr = Ty::Named { name: "ProcessResult".into(), args: vec![] };
+        let list_text = Ty::List(Box::new(Ty::Text));
+        def!("Process.exec",           fn2(Ty::Text, list_text, pr.clone()));
+        def!("ProcessResult.exitCode", fn1(pr.clone(), Ty::Int));
+        def!("ProcessResult.stdout",   fn1(pr.clone(), Ty::Text));
+        def!("ProcessResult.stderr",   fn1(pr.clone(), Ty::Text));
+    }
+}
 
 fn fn1(a: Ty, ret: Ty) -> Ty {
     Ty::Fn { params: vec![a], ret: Box::new(ret) }

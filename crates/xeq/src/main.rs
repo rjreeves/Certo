@@ -92,7 +92,7 @@ fn parse_config(raw: &str) -> Option<Config> {
         if let Some((key, val)) = line.split_once('=') {
             let val = val.trim();
             match key.trim() {
-                "script"   => script   = Some(val.to_string()),
+                "script"   => script   = Some(strip_quotes(val).to_string()),
                 "minimize" => minimize = matches!(val, "true" | "1" | "yes"),
                 "hide"     => hide     = matches!(val, "true" | "1" | "yes"),
                 _          => {}
@@ -101,4 +101,15 @@ fn parse_config(raw: &str) -> Option<Config> {
     }
 
     Some(Config { script: script?, minimize, hide })
+}
+
+fn strip_quotes(s: &str) -> &str {
+    let s = s.trim();
+    if (s.starts_with('"') && s.ends_with('"'))
+        || (s.starts_with('\'') && s.ends_with('\''))
+    {
+        &s[1..s.len() - 1]
+    } else {
+        s
+    }
 }

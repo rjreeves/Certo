@@ -142,6 +142,72 @@ bool certo_list_contains_ptr(CertoList* l, void* item) {
     return false;
 }
 
+void* certo_list_find(CertoList* l, CertoPred pred) {
+    if (!l) return NULL;
+    for (int64_t i = 0; i < l->len; i++)
+        if (pred(l->data[i])) return l->data[i];
+    return NULL;
+}
+
+bool certo_list_any(CertoList* l, CertoPred pred) {
+    if (!l) return false;
+    for (int64_t i = 0; i < l->len; i++)
+        if (pred(l->data[i])) return true;
+    return false;
+}
+
+bool certo_list_all(CertoList* l, CertoPred pred) {
+    if (!l) return true;
+    for (int64_t i = 0; i < l->len; i++)
+        if (!pred(l->data[i])) return false;
+    return true;
+}
+
+/* ---- sort (merge sort, stable) ---- */
+
+typedef int64_t (*CertoCmp)(void*, void*);
+
+static CertoList* list_merge(CertoList* a, CertoList* b, CertoCmp cmp) {
+    CertoList* n = list_alloc(a->len + b->len);
+    int64_t i = 0, j = 0;
+    while (i < a->len && j < b->len) {
+        if (cmp(a->data[i], b->data[j]) <= 0)
+            n->data[n->len++] = a->data[i++];
+        else
+            n->data[n->len++] = b->data[j++];
+    }
+    while (i < a->len) n->data[n->len++] = a->data[i++];
+    while (j < b->len) n->data[n->len++] = b->data[j++];
+    return n;
+}
+
+CertoList* certo_list_sort(CertoList* l, CertoCmp cmp) {
+    if (!l || l->len <= 1) return l ? l : list_alloc(0);
+    int64_t mid = l->len / 2;
+    CertoList* left  = certo_list_slice(l, 0,   mid);
+    CertoList* right = certo_list_slice(l, mid, l->len);
+    return list_merge(certo_list_sort(left, cmp),
+                      certo_list_sort(right, cmp), cmp);
+}
+
+/* ---- zip (pairs stored as heap-allocated {fst, snd}) ---- */
+
+typedef struct { void* fst; void* snd; } CertoPair;
+
+CertoList* certo_list_zip(CertoList* a, CertoList* b) {
+    if (!a || !b) return list_alloc(0);
+    int64_t len = a->len < b->len ? a->len : b->len;
+    CertoList* n = list_alloc(len);
+    for (int64_t i = 0; i < len; i++) {
+        CertoPair* p = (CertoPair*)malloc(sizeof(CertoPair));
+        if (!p) certo_panic("out of memory");
+        p->fst = a->data[i];
+        p->snd = b->data[i];
+        n->data[n->len++] = p;
+    }
+    return n;
+}
+
 /* ---- Map (open-addressing, pointer-equality keys) ---- */
 
 typedef struct {
@@ -228,6 +294,18 @@ CertoList* certo_map_values(CertoMap* m) {
     return out;
 }
 
+CertoMap* certo_map_from_list(CertoList* l) {
+    if (!l) return map_alloc(16);
+    CertoMap* m = map_alloc(l->len > 0 ? l->len * 2 : 16);
+    for (int64_t i = 0; i < l->len; i++) {
+        CertoPair* p = (CertoPair*)l->data[i];
+        int64_t h = map_probe(m, p->fst);
+        if (!m->entries[h].occupied) m->len++;
+        m->entries[h] = (MapEntry){ .key = p->fst, .value = p->snd, .occupied = true };
+    }
+    return m;
+}
+
 CertoMap* certo_map_remove(CertoMap* m, void* key) {
     if (!m) return map_alloc(16);
     CertoMap* n = map_alloc(m->len > 0 ? m->len * 2 : 16);
@@ -261,6 +339,11 @@ fn List.map<A, B>(list: List<A>, f: A => B): List<B>
 fn List.filter<T>(list: List<T>, pred: T => Bool): List<T>
 fn List.fold<T, A>(list: List<T>, init: A, f: (A, T) => A): A
 fn List.contains<T>(list: List<T>, item: T): Bool
+fn List.find<T>(list: List<T>, pred: T => Bool): T?
+fn List.any<T>(list: List<T>, pred: T => Bool): Bool
+fn List.all<T>(list: List<T>, pred: T => Bool): Bool
+fn List.sort<T>(list: List<T>, cmp: (T, T) => Int): List<T>
+fn List.zip<A, B>(a: List<A>, b: List<B>): List<(A, B)>
 
 /* ---- Map<K, V> ---- */
 
@@ -272,4 +355,5 @@ fn Map.remove<K, V>(map: Map<K, V>, key: K): Map<K, V>
 fn Map.len<K, V>(map: Map<K, V>): Int
 fn Map.keys<K, V>(map: Map<K, V>): List<K>
 fn Map.values<K, V>(map: Map<K, V>): List<V>
+fn Map.fromList<K, V>(pairs: List<(K, V)>): Map<K, V>
 "#;
