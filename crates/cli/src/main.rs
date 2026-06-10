@@ -290,7 +290,20 @@ fn cmd_build(args: &[String], quiet: bool) {
 
     // ── Emit C ────────────────────────────────────────────────────────
     // Order: system includes → runtime typedefs → stdlib impls → user code.
-    let preamble = "#include <stdint.h>\n#include <stdbool.h>\n#include <stddef.h>\n\
+    // Windows: winsock2.h before windows.h avoids IPPROTO_* redefinition.
+    // _USE_MATH_DEFINES exposes M_PI / M_E from <math.h> on MSVC/clang-cl.
+    let preamble = "#ifdef _WIN32\n\
+                    #  ifndef WIN32_LEAN_AND_MEAN\n\
+                    #    define WIN32_LEAN_AND_MEAN\n\
+                    #  endif\n\
+                    #  ifndef _USE_MATH_DEFINES\n\
+                    #    define _USE_MATH_DEFINES\n\
+                    #  endif\n\
+                    #  include <winsock2.h>\n\
+                    #  include <ws2tcpip.h>\n\
+                    #  pragma comment(lib, \"ws2_32.lib\")\n\
+                    #endif\n\
+                    #include <stdint.h>\n#include <stdbool.h>\n#include <stddef.h>\n\
                     #include <inttypes.h>\n#include <stdarg.h>\n\
                     #define _CRT_SECURE_NO_WARNINGS\n";
     let runtime_header = certo_codegen::RUNTIME_HEADER;
