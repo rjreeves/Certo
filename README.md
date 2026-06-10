@@ -82,6 +82,11 @@ certo run counter.certo
 - **DLL output** with `--emit-dll` for embedding in other apps
 - **WASM target** via `certo-wasm`
 
+## Editor support
+
+Certo ships a language server with diagnostics, hover, completion, and go-to-definition.
+See [editors/README.md](editors/README.md) for VS Code and Neovim setup instructions.
+
 ## Documentation
 
 See [docs/GUIDE.md](docs/GUIDE.md) for the full developer guide, including:
