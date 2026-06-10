@@ -13,17 +13,18 @@
 5. [Modules](#5-modules)
 6. [Standard Library](#6-standard-library)
 7. [Testing](#7-testing)
-8. [Linting, Benchmarking, and the REPL](#8-linting-benchmarking-and-the-repl)
+8. [Linting, Benchmarking, Docs, and the REPL](#8-linting-benchmarking-docs-and-the-repl)
 9. [Project Layout & certo new](#9-project-layout--certo-new)
-10. [Compiling to a Shared Library (DLL)](#10-compiling-to-a-shared-library-dll)
-11. [Code Formatting](#11-code-formatting)
-12. [LLVM IR & WebAssembly](#12-llvm-ir--webassembly)
-13. [FFI — C Headers & REST Clients](#13-ffi--c-headers--rest-clients)
-14. [UI Views & Forms](#14-ui-views--forms)
-15. [Language Server (LSP)](#15-language-server-lsp)
-16. [Building the Compiler from Source](#16-building-the-compiler-from-source)
-17. [Release & Distribution Scripts](#17-release--distribution-scripts)
-18. [Compiler Pipeline Reference](#18-compiler-pipeline-reference)
+10. [Database Migrations](#10-database-migrations)
+11. [Compiling to a Shared Library (DLL)](#11-compiling-to-a-shared-library-dll)
+12. [Code Formatting](#12-code-formatting)
+13. [LLVM IR & WebAssembly](#13-llvm-ir--webassembly)
+14. [FFI — C Headers & REST Clients](#14-ffi--c-headers--rest-clients)
+15. [UI Views & Forms](#15-ui-views--forms)
+16. [Language Server (LSP)](#16-language-server-lsp)
+17. [Building the Compiler from Source](#17-building-the-compiler-from-source)
+18. [Release & Distribution Scripts](#18-release--distribution-scripts)
+19. [Compiler Pipeline Reference](#19-compiler-pipeline-reference)
 
 ---
 
@@ -79,7 +80,7 @@ cd certo
 .\scripts\release.ps1          # builds & copies all binaries to dist/
 ```
 
-See [§16](#16-building-the-compiler-from-source) for details.
+See [§17](#17-building-the-compiler-from-source) for details.
 
 ---
 
@@ -99,6 +100,12 @@ Compile and run:
 certo hello.cto -o hello.exe
 .\hello.exe
 # Hello, world!
+```
+
+Pass `--watch` / `-w` to rebuild automatically whenever the source file changes:
+
+```powershell
+certo hello.cto -o hello.exe --watch
 ```
 
 ### Anatomy of a program
@@ -426,7 +433,8 @@ test "5 is prime" {
 Run all tests:
 
 ```powershell
-certo-test math_test.cto
+certo test math_test.cto
+certo test math_test.cto --timeout=10000   # per-test timeout in ms (default 5000)
 ```
 
 Output:
@@ -454,7 +462,7 @@ property "reverse twice is identity" {
 
 ---
 
-## 8. Linting, Benchmarking, and the REPL
+## 8. Linting, Benchmarking, Docs, and the REPL
 
 ### `certo lint` — static analysis
 
@@ -484,9 +492,29 @@ fn bench_concat(): Text =
 ```
 
 ```powershell
-certo bench myapp.cto
+certo bench myapp.cto                   # 1000 iterations (default)
+certo bench myapp.cto --iterations=5000 # override iteration count
 # bench_concat   42 ns/iter
 ```
+
+### `certo doc` — HTML documentation
+
+Generate HTML documentation from `///` doc comments:
+
+```
+module Math
+
+/// Raise `base` to the power of `exp`. Both must be non-negative.
+pub fn pow(base: Int, exp: Int): Int = ...
+```
+
+```powershell
+certo doc mylib.cto           # writes to docs/ next to the source file
+certo doc mylib.cto -o out/   # write to a specific directory
+```
+
+Each `pub fn` with a `///` comment gets its own HTML page with its signature,
+description, and parameter list.
 
 ### `certo repl` — interactive session
 
@@ -559,7 +587,51 @@ Run `certo build` (reads `certo.toml`) instead of passing a file directly once
 
 ---
 
-## 10. Compiling to a Shared Library (DLL)
+## 10. Database Migrations
+
+Certo ships a migration runner that applies numbered SQL files tracked in a
+`migrations/` directory.
+
+### Commands
+
+```powershell
+certo migrate up              # apply all pending migrations
+certo migrate up --dry-run    # preview SQL without executing
+certo migrate down            # roll back the most recent migration
+certo migrate down 3          # roll back the last 3 migrations
+certo migrate status          # show applied vs pending migrations
+certo migrate create add_users_table   # scaffold a new migration file
+```
+
+### Migration files
+
+`certo migrate create <name>` scaffolds a `.cto` file in `migrations/`:
+
+```
+migration "add_users_table" {
+    up {
+        // TODO: add operations
+    }
+    down {
+        // TODO: add rollback operations
+    }
+}
+```
+
+Files are applied in alphabetical order — prefix names with a sequence number
+(e.g. `001_create_users.cto`) to control the order.
+
+### Database connection
+
+Set the `DATABASE_URL` environment variable (or put it in `.env`):
+
+```
+DATABASE_URL=host=localhost dbname=mydb user=myuser password=secret
+```
+
+---
+
+## 11. Compiling to a Shared Library (DLL)
 
 ```powershell
 certo math.cto --emit-dll -o math.dll
@@ -580,21 +652,27 @@ certo-ffi --header math.cto -o math.h
 
 ---
 
-## 11. Code Formatting
+## 12. Code Formatting
 
 Format a source file in-place:
 
 ```powershell
-certo-fmt myfile.cto
+certo fmt myfile.cto
 ```
 
 The formatter is idempotent and enforces the canonical style:
 four-space indentation, operators spaced, one blank line between
 top-level declarations.
 
+Use `--check` to verify formatting without writing (useful in CI):
+
+```powershell
+certo fmt --check myfile.cto   # exits 1 if the file would be reformatted
+```
+
 ---
 
-## 12. LLVM IR & WebAssembly
+## 13. LLVM IR & WebAssembly
 
 ### LLVM IR
 
@@ -625,7 +703,7 @@ clang --target=wasm32 --no-standard-libraries -Wl,--export-all \
 
 ---
 
-## 13. FFI — C Headers & REST Clients
+## 14. FFI — C Headers & REST Clients
 
 ### C header from a Certo module
 
@@ -647,7 +725,7 @@ with typed function stubs for every endpoint.
 
 ---
 
-## 14. UI Views & Forms
+## 15. UI Views & Forms
 
 `view` declarations describe server-rendered UI pages.
 `form` declarations describe HTML forms bound to a module endpoint.
@@ -679,7 +757,7 @@ Produces one `.html` file per `view` declaration in `out/`.
 
 ---
 
-## 15. Language Server (LSP)
+## 16. Language Server (LSP)
 
 `certo-lsp` implements the Language Server Protocol.
 
@@ -704,7 +782,7 @@ completion (including position-aware local variable completions), and formatting
 
 ---
 
-## 16. Building the Compiler from Source
+## 17. Building the Compiler from Source
 
 ### Clone and build
 
@@ -723,7 +801,7 @@ Binaries land in `target\release\`.
 ```
 
 This runs `cargo build --release --bins` and copies the 8 executables
-to `dist\`.  See [§17](#17-release--distribution-scripts).
+to `dist\`.  See [§18](#18-release--distribution-scripts).
 
 ### Running tests
 
@@ -763,7 +841,7 @@ scripts/       Build and release automation
 
 ---
 
-## 17. Release & Distribution Scripts
+## 18. Release & Distribution Scripts
 
 All scripts live in `scripts\` and are run from the **repo root**.
 
@@ -794,7 +872,7 @@ Pass `-out <dir>` to change the output directory.
 
 ---
 
-## 18. Compiler Pipeline Reference
+## 19. Compiler Pipeline Reference
 
 ```
 Source (.cto)
@@ -855,20 +933,37 @@ certo myapp.cto --emit-c
 # Verbose (shows clang invocation)
 certo myapp.cto -o myapp.exe -v
 
+# Watch mode — rebuild on file change
+certo myapp.cto -o myapp.exe --watch
+
 # Interactive REPL
 certo repl
 
 # Run unit tests
-certo-test myapp_test.cto
+certo test myapp_test.cto
+certo test myapp_test.cto --timeout=10000
 
 # Lint for unused variables and dead code
 certo lint myapp.cto
 
 # Run bench_ functions and report ns/iter
 certo bench myapp.cto
+certo bench myapp.cto --iterations=5000
 
-# Format source file
-certo-fmt myfile.cto
+# Format source file (in place)
+certo fmt myfile.cto
+
+# Check formatting without writing (for CI)
+certo fmt --check myfile.cto
+
+# Generate HTML documentation from /// comments
+certo doc mylib.cto -o docs/
+
+# Database migrations
+certo migrate status
+certo migrate up
+certo migrate down
+certo migrate create add_users_table
 
 # Generate C header
 certo-ffi --header mylib.cto -o mylib.h
