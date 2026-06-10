@@ -14,15 +14,16 @@
 6. [Standard Library](#6-standard-library)
 7. [Testing](#7-testing)
 8. [Linting, Benchmarking, and the REPL](#8-linting-benchmarking-and-the-repl)
-9. [Compiling to a Shared Library (DLL)](#9-compiling-to-a-shared-library-dll)
-10. [Code Formatting](#10-code-formatting)
-11. [LLVM IR & WebAssembly](#11-llvm-ir--webassembly)
-12. [FFI — C Headers & REST Clients](#12-ffi--c-headers--rest-clients)
-13. [UI Views & Forms](#13-ui-views--forms)
-14. [Language Server (LSP)](#14-language-server-lsp)
-15. [Building the Compiler from Source](#15-building-the-compiler-from-source)
-16. [Release & Distribution Scripts](#16-release--distribution-scripts)
-17. [Compiler Pipeline Reference](#17-compiler-pipeline-reference)
+9. [Project Layout & certo new](#9-project-layout--certo-new)
+10. [Compiling to a Shared Library (DLL)](#10-compiling-to-a-shared-library-dll)
+11. [Code Formatting](#11-code-formatting)
+12. [LLVM IR & WebAssembly](#12-llvm-ir--webassembly)
+13. [FFI — C Headers & REST Clients](#13-ffi--c-headers--rest-clients)
+14. [UI Views & Forms](#14-ui-views--forms)
+15. [Language Server (LSP)](#15-language-server-lsp)
+16. [Building the Compiler from Source](#16-building-the-compiler-from-source)
+17. [Release & Distribution Scripts](#17-release--distribution-scripts)
+18. [Compiler Pipeline Reference](#18-compiler-pipeline-reference)
 
 ---
 
@@ -78,7 +79,7 @@ cd certo
 .\scripts\release.ps1          # builds & copies all binaries to dist/
 ```
 
-See [§14](#14-building-the-compiler-from-source) for details.
+See [§16](#16-building-the-compiler-from-source) for details.
 
 ---
 
@@ -125,6 +126,7 @@ certo hello.cto -o hello.exe
 | `Map<K,V>` | hash map | Key-value store |
 | `DateTime` | `struct tm` | Calendar date-time |
 | `Decimal` | scaled int64 | Exact decimal arithmetic |
+| `Result<T,E>` | `void*` → `certo_result_t*` | Either `Ok(T)` or `Err(E)`; `?` propagates errors |
 
 ### Functions
 
@@ -138,8 +140,7 @@ Single-expression functions use `=`.  Block functions use `{ }`:
 
 ```
 fn describe(n: Int): Unit [io] = {
-    print("The number is: ")
-    println(intToText(n))
+    println("The number is: " ++ intToText(n))
 }
 ```
 
@@ -507,6 +508,57 @@ name
 
 ---
 
+## 9. Project Layout & certo new
+
+### Scaffolding a new project
+
+```powershell
+certo new my-project
+certo new my-api --template api
+certo new my-lib --template lib
+```
+
+Available templates: `cli` (default), `api`, `lib`.
+
+This creates the canonical project structure:
+
+```
+my-project/
+  certo.toml          project manifest
+  src/
+    main.cto          entry point
+  tests/
+    unit/             unit test files
+    integration/      integration test files
+  db/
+    migrations/       numbered SQL migration files
+```
+
+### certo.toml manifest
+
+```toml
+[project]
+name    = "my-project"
+version = "0.1.0"
+entry   = "src/main.cto"
+authors = ["Your Name"]
+
+[build]
+target  = "native"   # native | wasm | llvm-ir
+opt     = "release"  # debug | release
+
+[database]
+url     = "postgres://localhost/mydb"
+
+[dependencies]
+# future use — package dependencies go here
+```
+
+Run `certo build` (reads `certo.toml`) instead of passing a file directly once
+`certo.toml` is present.
+
+---
+
 ## 10. Compiling to a Shared Library (DLL)
 
 ```powershell
@@ -528,7 +580,7 @@ certo-ffi --header math.cto -o math.h
 
 ---
 
-## 10. Code Formatting
+## 11. Code Formatting
 
 Format a source file in-place:
 
@@ -537,12 +589,12 @@ certo-fmt myfile.cto
 ```
 
 The formatter is idempotent and enforces the canonical style:
-two-space indentation, operators spaced, one blank line between
+four-space indentation, operators spaced, one blank line between
 top-level declarations.
 
 ---
 
-## 11. LLVM IR & WebAssembly
+## 12. LLVM IR & WebAssembly
 
 ### LLVM IR
 
@@ -573,7 +625,7 @@ clang --target=wasm32 --no-standard-libraries -Wl,--export-all \
 
 ---
 
-## 12. FFI — C Headers & REST Clients
+## 13. FFI — C Headers & REST Clients
 
 ### C header from a Certo module
 
@@ -595,7 +647,7 @@ with typed function stubs for every endpoint.
 
 ---
 
-## 13. UI Views & Forms
+## 14. UI Views & Forms
 
 `view` declarations describe server-rendered UI pages.
 `form` declarations describe HTML forms bound to a module endpoint.
@@ -627,7 +679,7 @@ Produces one `.html` file per `view` declaration in `out/`.
 
 ---
 
-## 14. Language Server (LSP)
+## 15. Language Server (LSP)
 
 `certo-lsp` implements the Language Server Protocol.
 
@@ -643,20 +695,16 @@ Add to `.vscode/settings.json`:
 
 ### Neovim (nvim-lspconfig)
 
-```lua
-require('lspconfig').cto.setup {
-  cmd = { 'certo-lsp' },
-  filetypes = { 'certo' },
-  root_dir = require('lspconfig.util').root_pattern('Cargo.toml', '.git'),
-}
-```
+Copy `editors/neovim/certo.lua` from the repo into your Neovim config and
+`require("certo")` from `init.lua`. It registers `cto_lsp` for `.cto` files
+with go-to-definition, hover, completion, and diagnostics keybindings.
 
 The LSP provides: hover documentation, go-to-definition, diagnostics,
 completion (including position-aware local variable completions), and formatting.
 
 ---
 
-## 15. Building the Compiler from Source
+## 16. Building the Compiler from Source
 
 ### Clone and build
 
@@ -675,7 +723,7 @@ Binaries land in `target\release\`.
 ```
 
 This runs `cargo build --release --bins` and copies the 8 executables
-to `dist\`.  See [§15](#15-release--distribution-scripts).
+to `dist\`.  See [§17](#17-release--distribution-scripts).
 
 ### Running tests
 
@@ -715,7 +763,7 @@ scripts/       Build and release automation
 
 ---
 
-## 16. Release & Distribution Scripts
+## 17. Release & Distribution Scripts
 
 All scripts live in `scripts\` and are run from the **repo root**.
 
@@ -746,7 +794,7 @@ Pass `-out <dir>` to change the output directory.
 
 ---
 
-## 17. Compiler Pipeline Reference
+## 18. Compiler Pipeline Reference
 
 ```
 Source (.cto)

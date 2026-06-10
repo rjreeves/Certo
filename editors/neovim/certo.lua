@@ -14,7 +14,7 @@ if not configs.cto_lsp then
     configs.cto_lsp = {
         default_config = {
             cmd          = { "certo-lsp" },
-            filetypes    = { "certo" },
+            filetypes    = { "cto" },
             root_dir     = lspconfig.util.root_pattern("certo.toml", ".git"),
             settings     = {},
         },
@@ -33,10 +33,9 @@ lspconfig.cto_lsp.setup({
     capabilities = require("cmp_nvim_lsp").default_capabilities(),  -- optional: nvim-cmp
 })
 
--- Filetype detection for .cto and .cto files
+-- Filetype detection for .cto files
 vim.filetype.add({
     extension = {
-        certo = "certo",
-        cto   = "certo",
+        cto = "cto",
     },
 })
