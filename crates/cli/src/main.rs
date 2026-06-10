@@ -255,12 +255,27 @@ fn cmd_build(args: &[String], quiet: bool) {
         return;
     }
 
-    // Auto-detect lib type from certo.toml if present
-    if !emit_dll {
+    // Read certo.toml if present: auto-detect lib type and output directory.
+    let mut toml_output_dir: Option<PathBuf> = None;
+    {
         let project_root = input.parent().unwrap_or(Path::new("."));
         if let Ok(toml_src) = std::fs::read_to_string(project_root.join("certo.toml")) {
-            if toml_src.lines().any(|l| l.trim() == "type   = \"lib\"" || l.trim() == "type = \"lib\"") {
-                emit_dll = true;
+            for line in toml_src.lines() {
+                let line = line.trim();
+                if !emit_dll && (line == "type   = \"lib\"" || line == "type = \"lib\"") {
+                    emit_dll = true;
+                }
+                // output = "dist/"  or  output = "dist"
+                if let Some(rest) = line.strip_prefix("output").and_then(|r| {
+                    let r = r.trim_start();
+                    r.strip_prefix('=').map(|v| v.trim().trim_matches('"'))
+                }) {
+                    if !rest.is_empty() {
+                        let dir = project_root.join(rest);
+                        std::fs::create_dir_all(&dir).ok();
+                        toml_output_dir = Some(dir);
+                    }
+                }
             }
         }
     }
@@ -386,18 +401,19 @@ fn cmd_build(args: &[String], quiet: bool) {
 
     // ── Default output path ───────────────────────────────────────────
     let out_path = output.unwrap_or_else(|| {
+        let base = toml_output_dir.as_deref().unwrap_or(Path::new("."));
         if emit_dll {
             if cfg!(windows) {
-                PathBuf::from(format!("{}.dll", stem))
+                base.join(format!("{}.dll", stem))
             } else if cfg!(target_os = "macos") {
-                PathBuf::from(format!("lib{}.dylib", stem))
+                base.join(format!("lib{}.dylib", stem))
             } else {
-                PathBuf::from(format!("lib{}.so", stem))
+                base.join(format!("lib{}.so", stem))
             }
         } else if cfg!(windows) {
-            PathBuf::from(format!("{}.exe", stem))
+            base.join(format!("{}.exe", stem))
         } else {
-            PathBuf::from(stem)
+            base.join(stem)
         }
     });
 
