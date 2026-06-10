@@ -1,0 +1,124 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Certo",
+  "scopeName": "source.certo",
+  "patterns": [
+    { "include": "#comments" },
+    { "include": "#strings" },
+    { "include": "#keywords" },
+    { "include": "#types" },
+    { "include": "#numbers" },
+    { "include": "#operators" },
+    { "include": "#functions" },
+    { "include": "#identifiers" }
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [
+        {
+          "name": "comment.line.documentation.certo",
+          "match": "///.*$"
+        },
+        {
+          "name": "comment.line.double-slash.certo",
+          "match": "//.*$"
+        },
+        {
+          "name": "comment.block.certo",
+          "begin": "/\\*",
+          "end": "\\*/"
+        }
+      ]
+    },
+    "strings": {
+      "patterns": [
+        {
+          "name": "string.quoted.double.interpolated.certo",
+          "begin": "f\"",
+          "end": "\"",
+          "patterns": [
+            {
+              "name": "punctuation.section.embedded.certo",
+              "begin": "\\{",
+              "end": "\\}",
+              "patterns": [{ "include": "$self" }]
+            },
+            { "name": "constant.character.escape.certo", "match": "\\\\." }
+          ]
+        },
+        {
+          "name": "string.quoted.double.certo",
+          "begin": "\"",
+          "end": "\"",
+          "patterns": [
+            { "name": "constant.character.escape.certo", "match": "\\\\." }
+          ]
+        }
+      ]
+    },
+    "keywords": {
+      "patterns": [
+        {
+          "name": "keyword.control.certo",
+          "match": "\\b(if|then|else|match|for|in|while|return|guard|defer|require|parallel|transaction|unsafe|async|await)\\b"
+        },
+        {
+          "name": "keyword.declaration.certo",
+          "match": "\\b(fn|val|var|type|module|import|pub|extern|migration|up|down|test|bench)\\b"
+        },
+        {
+          "name": "keyword.operator.certo",
+          "match": "\\b(and|or|not|true|false|None|Some|Ok|Err)\\b"
+        },
+        {
+          "name": "constant.language.certo",
+          "match": "\\b(true|false|None|Unit)\\b"
+        }
+      ]
+    },
+    "types": {
+      "patterns": [
+        {
+          "name": "entity.name.type.certo",
+          "match": "\\b(Int|Float|Decimal|Bool|Text|Unit|UUID|List|Map|Option|Result|DateTime|Date|Money|Decimal)\\b"
+        }
+      ]
+    },
+    "numbers": {
+      "patterns": [
+        {
+          "name": "constant.numeric.decimal.certo",
+          "match": "\\b[0-9]+\\.[0-9]+([eE][+-]?[0-9]+)?[mM]?\\b"
+        },
+        {
+          "name": "constant.numeric.integer.certo",
+          "match": "\\b[0-9]+\\b"
+        }
+      ]
+    },
+    "operators": {
+      "patterns": [
+        {
+          "name": "keyword.operator.certo",
+          "match": "(\\+\\+|\\?\\?|=>|->|\\|>|::|==|!=|<=|>=|<|>|&&|\\|\\||\\+|-|\\*|/|%|=|:)"
+        }
+      ]
+    },
+    "functions": {
+      "patterns": [
+        {
+          "name": "entity.name.function.certo",
+          "match": "\\b([a-z_][a-zA-Z0-9_]*)(?=\\s*\\()"
+        }
+      ]
+    },
+    "identifiers": {
+      "patterns": [
+        {
+          "name": "variable.other.certo",
+          "match": "\\b[a-z_][a-zA-Z0-9_]*\\b"
+        }
+      ]
+    }
+  }
+}
