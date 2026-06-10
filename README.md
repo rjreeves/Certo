@@ -87,15 +87,20 @@ certo run counter.cto
 ## CLI commands
 
 ```powershell
-certo run counter.cto          # compile and run
-certo counter.cto -o out.exe   # compile to executable
-certo check counter.cto        # type-check only
-certo fmt counter.cto          # format in place
-certo lint counter.cto         # unused-variable and dead-code warnings
-certo bench counter.cto        # run bench_ functions, report ns/iter
-certo test counter.cto         # run test blocks
-certo new my-project           # scaffold a new project
-certo repl                     # interactive REPL
+certo run counter.cto                   # compile and run
+certo counter.cto -o out.exe            # compile to executable
+certo counter.cto -o out.exe --watch    # rebuild on file change
+certo check counter.cto                 # type-check only
+certo fmt counter.cto                   # format in place
+certo fmt --check counter.cto          # check formatting (CI-friendly)
+certo lint counter.cto                  # unused-variable and dead-code warnings
+certo bench counter.cto                 # run bench_ functions, report ns/iter
+certo test counter.cto                  # run test blocks
+certo doc mylib.cto -o docs/            # generate HTML docs from /// comments
+certo migrate up                        # apply pending DB migrations
+certo migrate status                    # show migration state
+certo new my-project                    # scaffold a new project
+certo repl                              # interactive REPL
 ```
 
 ## Editor support
