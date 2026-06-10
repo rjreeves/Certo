@@ -179,8 +179,9 @@ pub enum HirStmt {
 
 #[derive(Debug, Clone)]
 pub struct HirArm {
-    pub pat:  HirPat,
-    pub body: HirExpr,
+    pub pat:   HirPat,
+    pub guard: Option<HirExpr>,
+    pub body:  HirExpr,
 }
 
 #[derive(Debug, Clone)]

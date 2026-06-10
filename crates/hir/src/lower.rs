@@ -267,6 +267,7 @@ fn lower_expr(expr: &S<Expr>, cx: &mut Cx) -> HirExpr {
             };
             let some_arm = HirArm {
                 pat: bind,
+                guard: None,
                 body: HirExpr {
                     kind: HirExprKind::Call {
                         func: Box::new(HirExpr { kind: HirExprKind::Global("Some".into()), ty: Ty::Error, span }),
@@ -276,8 +277,9 @@ fn lower_expr(expr: &S<Expr>, cx: &mut Cx) -> HirExpr {
                 },
             };
             let none_arm = HirArm {
-                pat: HirPat::Constructor { name: "None".into(), fields: vec![] },
-                body: HirExpr { kind: HirExprKind::Global("None".into()), ty: Ty::Error, span },
+                pat:   HirPat::Constructor { name: "None".into(), fields: vec![] },
+                guard: None,
+                body:  HirExpr { kind: HirExprKind::Global("None".into()), ty: Ty::Error, span },
             };
             HirExpr {
                 kind: HirExprKind::Match { scrutinee: Box::new(base), arms: vec![some_arm, none_arm] },
@@ -296,10 +298,11 @@ fn lower_expr(expr: &S<Expr>, cx: &mut Cx) -> HirExpr {
             let scrut = lower_expr(scrutinee, cx);
             let arms = arms.iter().map(|arm| {
                 cx.push_scope();
-                let pat = lower_pat(&arm.pattern, cx);
-                let body = lower_expr(&arm.body, cx);
+                let pat   = lower_pat(&arm.pattern, cx);
+                let guard = arm.guard.as_ref().map(|g| lower_expr(g, cx));
+                let body  = lower_expr(&arm.body, cx);
                 cx.pop_scope();
-                HirArm { pat, body }
+                HirArm { pat, guard, body }
             }).collect();
             HirExpr { kind: HirExprKind::Match { scrutinee: Box::new(scrut), arms }, ty: Ty::Error, span }
         }

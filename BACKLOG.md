@@ -45,6 +45,7 @@ Tasks are listed in implementation order. Completed tasks have the crate they li
 | 37 | Richer type error messages with labels and notes | `crates/cli`, `crates/diagnostics` |
 | 38 | Stdlib.Db — parameterized queries, multi-row results, transactions | `crates/stdlib` |
 | 39 | Stdlib.Http — server (Windows/WinSock2, POSIX stub) | `crates/stdlib` |
+| 40 | Match guards (`x if x > 0 => ...`) full-stack | `crates/hir`, `crates/mir` |
 
 ## Pending
 

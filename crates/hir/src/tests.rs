@@ -1,6 +1,6 @@
 use certo_parser::parse;
 use crate::lower_module;
-use crate::hir::{HirItem, HirExprKind, BinOp};
+use crate::hir::{HirItem, HirExprKind, BinOp, HirArm};
 
 fn lower(src: &str) -> crate::HirModule {
     let module = parse(src).expect("parse error");
@@ -86,5 +86,35 @@ fn lower_match_expr() {
     let m = lower("module A\nfn describe(n: Int): Text = match n {\n    0 => \"zero\"\n    _ => \"other\"\n}");
     if let HirItem::Fn(f) = &m.items[0] {
         assert!(matches!(f.body.as_ref().unwrap().kind, HirExprKind::Match { .. }));
+    }
+}
+
+#[test]
+fn lower_match_guard_is_preserved() {
+    let src = "module A\nfn classify(n: Int): Text = match n {\n    x if x > 0 => \"positive\"\n    x if x < 0 => \"negative\"\n    _ => \"zero\"\n}";
+    let m = lower(src);
+    if let HirItem::Fn(f) = &m.items[0] {
+        if let HirExprKind::Match { arms, .. } = &f.body.as_ref().unwrap().kind {
+            // First two arms have guards; third (wildcard) does not.
+            assert!(arms[0].guard.is_some(), "first arm should have a guard");
+            assert!(arms[1].guard.is_some(), "second arm should have a guard");
+            assert!(arms[2].guard.is_none(), "wildcard arm should have no guard");
+        } else {
+            panic!("expected Match");
+        }
+    }
+}
+
+#[test]
+fn lower_match_guard_no_guard_arms() {
+    // Plain match without guards should still work with guard: None on all arms.
+    let src = "module A\nfn f(n: Int): Int = match n {\n    0 => 1\n    _ => 2\n}";
+    let m = lower(src);
+    if let HirItem::Fn(f) = &m.items[0] {
+        if let HirExprKind::Match { arms, .. } = &f.body.as_ref().unwrap().kind {
+            for arm in arms {
+                assert!(arm.guard.is_none());
+            }
+        }
     }
 }
