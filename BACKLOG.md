@@ -35,11 +35,11 @@ Tasks are listed in implementation order. Completed tasks have the crate they li
 | 27 | `match` expressions end-to-end | HIR → MIR → codegen path verified |
 | 28 | String interpolation `f"Hello, {name}!"` | `crates/parser`, `crates/hir` |
 | 29 | `let` destructuring (tuple + record) | `crates/hir` |
+| 30 | Stdlib-aware name resolver | `certo_stdlib::seed_stdlib` wired into CLI via `TypeEnv` |
+| 31 | Typeck errors in CLI (`certo build` + `certo check`) | `crates/cli`, `crates/typeck` |
 | 32 | README at repo root | `README.md` |
 | 33 | GitHub Actions CI | `.github/workflows/ci.yml` |
 | 34 | `import` resolver (multi-file) | `crates/cli` |
-| 30 | Stdlib-aware name resolver | `certo_stdlib::seed_stdlib` wired into CLI via `TypeEnv` |
-| 31 | Typeck errors in CLI (`certo build` + `certo check`) | `crates/cli`, `crates/typeck` |
 | 35 | `certo check` — type-check without compiling | `crates/cli` |
 | 36 | `certo run` — compile and execute in one command | `crates/cli` |
 | 37 | Richer type error messages with labels and notes | `crates/cli`, `crates/diagnostics` |
@@ -47,19 +47,37 @@ Tasks are listed in implementation order. Completed tasks have the crate they li
 | 39 | Stdlib.Http — server (Windows/WinSock2, POSIX stub) | `crates/stdlib` |
 | 40 | Match guards (`x if x > 0 => ...`) full-stack | `crates/hir`, `crates/mir` |
 | 41 | Pipe operator partial application (`a \|> f(b)` → `f(a, b)`) | `crates/hir`, `crates/typeck` |
+| 42 | `certo new` — project scaffolding with folder structure and starter files | `crates/cli` |
+| 43 | `certo repl` — interactive REPL with banner, two-pass type inference, meta-commands | `crates/cli` |
+| 44 | `certo bench` — timing harness for `bench_` functions, reports ns/iter | `crates/cli` |
+| 45 | `certo lint` — HIR dataflow pass (unused params/vars, dead writes, unreachable) | `crates/cli`, `crates/hir` |
+| 46 | `certo bench` — build number tracking (`CERTO_BUILD_DATE`, `CERTO_BUILD_NUM`) | `crates/cli` |
+| 47 | Unit return type fix — `HirFn.ret_ty` inferred from MIR result operand | `crates/mir`, `crates/codegen` |
+| 48 | LSP stdlib seeding — `check_module_seeded` so builtins don't appear unbound | `crates/lsp` |
+| 49 | LSP position-aware local variable completions — `val`/`var` bindings in function bodies | `crates/lsp` |
+| 50 | `.cto` file extension standardised across all tooling and docs (was `.certo`) | all crates |
+| 51 | LSP keyword completions — added `guard`, `require`, `ensure`, `defer`, `statemachine`, `spawn`, etc. | `crates/lsp` |
+| 52 | `?` error propagation — MIR inline branch, `certo_result_t` runtime, `Ok`/`Err` builtins | `crates/mir`, `crates/codegen`, `crates/typeck` |
 
 ## Pending
 
 | # | Task | Notes |
 |---|------|-------|
+| 53 | `guard` statement in HIR lint pass (L005) | HIR lowering desugars guard to `if !cond { else_expr }` — lint should recognise the guard pattern for better messages |
+| 54 | `?` in REPL two-pass probe | REPL type probe wraps in `Bool` annotation; `?` inside probe expressions may confuse the probe |
+| 55 | `certo build` project-level command | Reads `certo.toml`, compiles `entry` file; currently CLI takes a file path directly |
+| 56 | `certo db` subcommands (`migrate`, `rollback`, `status`, `pull`) | Documented in spec §11.2; migrate exists but db subcommands are not wired |
+| 57 | Multiple integer types (`Int8`, `Int16`, `Int32`, `UInt`) | Spec §4.1 defines these; compiler only has `Int` (Int64) |
+| 58 | `statemachine` declaration lowering | Keyword and AST stub exist; HIR/codegen not implemented |
+| 59 | Named function arguments (`f(page: 2, size: 50)`) | Spec §3.2; parser does not yet support named args at call sites |
+| 60 | `async`/`await` runtime | Keywords and AST nodes exist; coroutine scheduler not implemented |
 
 ## Critical path to a running program
 
 ```
-AST → Parser → Resolve → Typeck → HIR → MIR → Codegen (C) → gcc/clang → binary
+AST → Parser → Resolve → Typeck → HIR → MIR → Codegen (C) → clang → binary
  1       2        3         4       8     8         9
 ```
 
 The core pipeline (parse → HIR → MIR → C → binary) is fully operational.
-Resolve and typeck run but are not yet gated in the CLI build path (stdlib
-names not yet pre-loaded — task #30).
+Stdlib names are pre-seeded into the type environment; `Ok`/`Err` are built-in.

@@ -13,15 +13,16 @@
 5. [Modules](#5-modules)
 6. [Standard Library](#6-standard-library)
 7. [Testing](#7-testing)
-8. [Compiling to a Shared Library (DLL)](#8-compiling-to-a-shared-library-dll)
-9. [Code Formatting](#9-code-formatting)
-10. [LLVM IR & WebAssembly](#10-llvm-ir--webassembly)
-11. [FFI — C Headers & REST Clients](#11-ffi--c-headers--rest-clients)
-12. [UI Views & Forms](#12-ui-views--forms)
-13. [Language Server (LSP)](#13-language-server-lsp)
-14. [Building the Compiler from Source](#14-building-the-compiler-from-source)
-15. [Release & Distribution Scripts](#15-release--distribution-scripts)
-16. [Compiler Pipeline Reference](#16-compiler-pipeline-reference)
+8. [Linting, Benchmarking, and the REPL](#8-linting-benchmarking-and-the-repl)
+9. [Compiling to a Shared Library (DLL)](#9-compiling-to-a-shared-library-dll)
+10. [Code Formatting](#10-code-formatting)
+11. [LLVM IR & WebAssembly](#11-llvm-ir--webassembly)
+12. [FFI — C Headers & REST Clients](#12-ffi--c-headers--rest-clients)
+13. [UI Views & Forms](#13-ui-views--forms)
+14. [Language Server (LSP)](#14-language-server-lsp)
+15. [Building the Compiler from Source](#15-building-the-compiler-from-source)
+16. [Release & Distribution Scripts](#16-release--distribution-scripts)
+17. [Compiler Pipeline Reference](#17-compiler-pipeline-reference)
 
 ---
 
@@ -158,13 +159,25 @@ fn sign(n: Int): Text =
     else "zero"
 ```
 
-### Let bindings
+### Val / var bindings
 
 ```
 fn hypotenuse(a: Float, b: Float): Float = {
-    let a2 = a * a
-    let b2 = b * b
+    val a2 = a * a
+    val b2 = b * b
     sqrt(a2 + b2)
+}
+```
+
+Use `val` for immutable bindings and `var` for mutable ones:
+
+```
+fn countDown(n: Int): Unit = {
+    var i = n
+    while i > 0 {
+        println(intToText(i))
+        i = i - 1
+    }
 }
 ```
 
@@ -178,6 +191,7 @@ fn hypotenuse(a: Float, b: Float): Float = {
 | `==` `!=` `<` `<=` `>` `>=` | Comparison |
 | `and` `or` `not` / `!` | Boolean logic |
 | `??` | Null coalesce — `a ?? b` returns `a` if non-null, else `b` |
+| `?` | Result propagation — `expr?` unwraps `Ok` or returns `Err` early |
 | `\|>` | Pipe — `x \|> f` is `f(x)` |
 | `..` `...` | Range (inclusive / exclusive) |
 
@@ -193,14 +207,60 @@ fn readName(): Text [io] = readLine() ?? "anonymous"
 
 Common effects: `[io]`, `[db]`, `[fallible]`.
 
-### Recursion
+### Loops and iteration
 
-Certo does not have loops — use tail-recursive functions or higher-order
-functions from the standard library:
+Certo has `for` loops over lists and `while` loops:
+
+```
+fn printAll(items: List<Text>): Unit = {
+    for item in items {
+        println(item)
+    }
+}
+
+fn countdown(n: Int): Unit = {
+    var i = n
+    while i > 0 {
+        println(intToText(i))
+        i = i - 1
+    }
+}
+```
+
+Higher-order functions are also available for functional style:
 
 ```
 fn sumList(xs: List<Int>): Int =
     List.fold(xs, 0, (acc, x) => acc + x)
+```
+
+### Error handling with Result and ?
+
+Functions that can fail return `Result<T, E>`. Use `Ok` and `Err` to construct
+results, and `?` to propagate errors early:
+
+```
+fn divide(a: Int, b: Int): Result<Int, Text> =
+    if b == 0 then Err("division by zero")
+    else Ok(a / b)
+
+fn compute(a: Int, b: Int): Result<Int, Text> = {
+    val x = divide(a, b)?   // returns Err early if divide fails
+    Ok(x * 2)
+}
+```
+
+### Guard clauses
+
+`guard` validates a condition and returns early if it fails — useful for
+precondition checks at the top of a function:
+
+```
+fn processRefund(amount: Int, max: Int): Result<Int, Text> = {
+    guard amount > 0 else Err("amount must be positive")
+    guard amount <= max else Err("amount exceeds maximum")
+    Ok(amount)
+}
 ```
 
 ---
@@ -393,7 +453,61 @@ property "reverse twice is identity" {
 
 ---
 
-## 8. Compiling to a Shared Library (DLL)
+## 8. Linting, Benchmarking, and the REPL
+
+### `certo lint` — static analysis
+
+`certo lint` runs a dataflow pass over the HIR and reports:
+
+- **L001** unused parameter — parameter never read in the function body
+- **L002** unused variable — `val`/`var` declared but never read
+- **L003** assigned but never read — variable written but the value discarded before the next write
+- **L004** unreachable statement — code after a call to `panic`/`todo`/`unreachable`
+
+```powershell
+certo lint myapp.cto
+```
+
+Names prefixed with `_` suppress all lint warnings for that binding.
+
+### `certo bench` — micro-benchmarks
+
+Declare functions named `bench_*` with no parameters; `certo bench` compiles and
+runs each one N times (default 1000) and reports the median time in ns/iter:
+
+```
+module MyBench
+
+fn bench_concat(): Text =
+    "Hello" ++ ", " ++ "world!"
+```
+
+```powershell
+certo bench myapp.cto
+# bench_concat   42 ns/iter
+```
+
+### `certo repl` — interactive session
+
+`certo repl` starts an interactive session. Expressions are evaluated and their
+values printed automatically. Declarations (`fn`, `val`, `type`) accumulate in
+the session.
+
+```
+Certo v1.0.2.260610.52 (c) SyntrA 2026
+> 1 + 1
+2 : Int
+> val name = "Alice"
+name
+> f"Hello, {name}!"
+"Hello, Alice!" : Text
+> :help      -- show meta-commands
+> :quit
+```
+
+---
+
+## 10. Compiling to a Shared Library (DLL)
 
 ```powershell
 certo math.cto --emit-dll -o math.dll
@@ -414,7 +528,7 @@ certo-ffi --header math.cto -o math.h
 
 ---
 
-## 9. Code Formatting
+## 10. Code Formatting
 
 Format a source file in-place:
 
@@ -428,7 +542,7 @@ top-level declarations.
 
 ---
 
-## 10. LLVM IR & WebAssembly
+## 11. LLVM IR & WebAssembly
 
 ### LLVM IR
 
@@ -459,7 +573,7 @@ clang --target=wasm32 --no-standard-libraries -Wl,--export-all \
 
 ---
 
-## 11. FFI — C Headers & REST Clients
+## 12. FFI — C Headers & REST Clients
 
 ### C header from a Certo module
 
@@ -481,7 +595,7 @@ with typed function stubs for every endpoint.
 
 ---
 
-## 12. UI Views & Forms
+## 13. UI Views & Forms
 
 `view` declarations describe server-rendered UI pages.
 `form` declarations describe HTML forms bound to a module endpoint.
@@ -513,7 +627,7 @@ Produces one `.html` file per `view` declaration in `out/`.
 
 ---
 
-## 13. Language Server (LSP)
+## 14. Language Server (LSP)
 
 `certo-lsp` implements the Language Server Protocol.
 
@@ -538,11 +652,11 @@ require('lspconfig').cto.setup {
 ```
 
 The LSP provides: hover documentation, go-to-definition, diagnostics,
-completion, and formatting.
+completion (including position-aware local variable completions), and formatting.
 
 ---
 
-## 14. Building the Compiler from Source
+## 15. Building the Compiler from Source
 
 ### Clone and build
 
@@ -601,7 +715,7 @@ scripts/       Build and release automation
 
 ---
 
-## 15. Release & Distribution Scripts
+## 16. Release & Distribution Scripts
 
 All scripts live in `scripts\` and are run from the **repo root**.
 
@@ -632,7 +746,7 @@ Pass `-out <dir>` to change the output directory.
 
 ---
 
-## 16. Compiler Pipeline Reference
+## 17. Compiler Pipeline Reference
 
 ```
 Source (.cto)
@@ -672,11 +786,20 @@ This is useful for debugging and for understanding how Certo maps to C.
 ## Quick-reference cheat sheet
 
 ```
+# Scaffold a new project
+certo new my-project
+
 # Compile to executable
 certo myapp.cto -o myapp.exe
 
+# Compile and run immediately
+certo run myapp.cto
+
 # Compile to DLL + import lib
 certo mylib.cto --emit-dll -o mylib.dll
+
+# Type-check only (no compilation)
+certo check myapp.cto
 
 # Print generated C (no compilation)
 certo myapp.cto --emit-c
@@ -684,8 +807,17 @@ certo myapp.cto --emit-c
 # Verbose (shows clang invocation)
 certo myapp.cto -o myapp.exe -v
 
+# Interactive REPL
+certo repl
+
 # Run unit tests
 certo-test myapp_test.cto
+
+# Lint for unused variables and dead code
+certo lint myapp.cto
+
+# Run bench_ functions and report ns/iter
+certo bench myapp.cto
 
 # Format source file
 certo-fmt myfile.cto

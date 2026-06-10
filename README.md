@@ -1,7 +1,7 @@
 # Certo
 
-A statically typed, compiled programming language designed for safety, clarity, and performance.
-Certo compiles to C (via an intermediate MIR) and runs anywhere a C compiler does.
+A statically typed, compiled programming language for business applications — correct by construction.
+Certo compiles to native code via C and runs anywhere a C compiler does.
 
 ```
 module Hello
@@ -10,7 +10,7 @@ fn greet(name: Text): Text = f"Hello, {name}!"
 
 fn main(): Unit = {
     val message = greet("world")
-    print(message)
+    println(message)
 }
 ```
 
@@ -37,7 +37,7 @@ On Windows, install [LLVM](https://releases.llvm.org/) or use MinGW/MSYS2.
 cargo install --git https://github.com/rjreeves/Certo --bin certo
 ```
 
-Requires Rust 1.75+ (`rustup` recommended). The binary is installed to `~/.cargo/bin/certo`.
+Requires Rust 1.77+ (`rustup` recommended). The binary is installed to `~/.cargo/bin/certo`.
 
 ### Option 3 — Build manually
 
@@ -50,7 +50,7 @@ cargo build --release
 
 ## 60-second getting started
 
-```certo
+```
 module Counter
 
 fn main(): Unit = {
@@ -59,7 +59,7 @@ fn main(): Unit = {
     for n in items {
         total = total + n
     }
-    print(f"Sum: {total}")
+    println(f"Sum: {total}")
 }
 ```
 
@@ -73,18 +73,35 @@ certo run counter.cto
 
 - **Static types** with Hindley-Milner inference
 - **Pattern matching** with exhaustiveness checking
+- **Result types** — `Ok`/`Err` constructors, `?` propagation operator
+- **Guard clauses** — `guard cond else Err(...)` for early-exit validation
 - **String interpolation** via `f"Hello, {name}!"`
 - **For loops** over lists
 - **`++` string concat**, `??` null-coalesce
-- **Records, tuples, sum types**
+- **Records, tuples, sum types** (ADTs)
 - **Effect types** — async, DB, IO tracked at compile time
 - **Stdlib** — Core, Text, Collections, DateTime, Money, Json, Http, Math, Crypto, Regex, Csv
 - **DLL output** with `--emit-dll` for embedding in other apps
 - **WASM target** via `certo-wasm`
 
+## CLI commands
+
+```powershell
+certo run counter.cto          # compile and run
+certo counter.cto -o out.exe   # compile to executable
+certo check counter.cto        # type-check only
+certo fmt counter.cto          # format in place
+certo lint counter.cto         # unused-variable and dead-code warnings
+certo bench counter.cto        # run bench_ functions, report ns/iter
+certo test counter.cto         # run test blocks
+certo new my-project           # scaffold a new project
+certo repl                     # interactive REPL
+```
+
 ## Editor support
 
-Certo ships a language server with diagnostics, hover, completion, and go-to-definition.
+Certo ships a language server (`certo-lsp`) with diagnostics, hover, completion (including
+position-aware local variable completions), and go-to-definition.
 See [editors/README.md](editors/README.md) for VS Code and Neovim setup instructions.
 
 ## Documentation
