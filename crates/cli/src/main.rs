@@ -833,7 +833,24 @@ fn cmd_new(args: &[String]) {
 
     // certo.toml
     let toml_type = if template == "lib" { "lib" } else { "app" };
-    let toml_entry = if template == "lib" { "" } else { "entry  = \"src\\\\main.cto\"\n" };
+    let toml_entry = if template == "lib" { "" } else { "entry  = \"src/main.cto\"\n" };
+    let toml_deps = match template {
+        "api" =>
+            "\n[dependencies]\n\
+             \"Stdlib.Http\" = \"*\"\n\
+             \"Stdlib.Json\" = \"*\"\n",
+        "cli" =>
+            "\n[dependencies]\n\
+             \"Stdlib.Text\" = \"*\"\n",
+        "lib" =>
+            "\n[dependencies]\n\
+             # add stdlib modules your library uses, e.g.\n\
+             # \"Stdlib.Text\" = \"*\"\n",
+        _ =>
+            "\n[dependencies]\n\
+             # add stdlib modules your project uses, e.g.\n\
+             # \"Stdlib.Http\" = \"*\"\n",
+    };
     write_file(&root.join("certo.toml"), &format!(
         "[project]\n\
          name    = \"{name}\"\n\
@@ -843,8 +860,8 @@ fn cmd_new(args: &[String]) {
          [build]\n\
          type   = \"{toml_type}\"\n\
          target = \"native\"\n\
-         output = \"dist\\\\\"\n\
-         {toml_entry}"
+         output = \"dist/\"\n\
+         {toml_entry}{toml_deps}"
     ));
 
     // src/main.cto — template-specific
