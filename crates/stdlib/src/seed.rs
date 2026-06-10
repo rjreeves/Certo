@@ -392,6 +392,65 @@ pub fn seed_stdlib(env: &mut TypeEnv, counter: &mut u32) {
         def!("ProcessResult.stdout",   fn1(pr.clone(), Ty::Text));
         def!("ProcessResult.stderr",   fn1(pr.clone(), Ty::Text));
     }
+
+    // ---------------------------------------------------------------- //
+    // Json
+    // ---------------------------------------------------------------- //
+
+    {
+        let jv   = || Ty::Named { name: "JsonValue".into(), args: vec![] };
+        let list_text = Ty::List(Box::new(Ty::Text));
+
+        def!("Json.parse",     fn1(Ty::Text, jv()));
+        def!("Json.stringify", fn1(jv(), Ty::Text));
+
+        def!("Json.null",   Ty::Fn { params: vec![], ret: Box::new(jv()) });
+        def!("Json.bool",   fn1(Ty::Bool,  jv()));
+        def!("Json.int",    fn1(Ty::Int,   jv()));
+        def!("Json.float",  fn1(Ty::Float, jv()));
+        def!("Json.string", fn1(Ty::Text,  jv()));
+        def!("Json.array",  Ty::Fn { params: vec![], ret: Box::new(jv()) });
+        def!("Json.object", Ty::Fn { params: vec![], ret: Box::new(jv()) });
+
+        def!("JsonValue.isNull",   fn1(jv(), Ty::Bool));
+        def!("JsonValue.isBool",   fn1(jv(), Ty::Bool));
+        def!("JsonValue.isInt",    fn1(jv(), Ty::Bool));
+        def!("JsonValue.isFloat",  fn1(jv(), Ty::Bool));
+        def!("JsonValue.isString", fn1(jv(), Ty::Bool));
+        def!("JsonValue.isArray",  fn1(jv(), Ty::Bool));
+        def!("JsonValue.isObject", fn1(jv(), Ty::Bool));
+
+        def!("JsonValue.asBool",   fn1(jv(), Ty::Bool));
+        def!("JsonValue.asInt",    fn1(jv(), Ty::Int));
+        def!("JsonValue.asFloat",  fn1(jv(), Ty::Float));
+        def!("JsonValue.asText",   fn1(jv(), Ty::Text));
+
+        def!("JsonValue.length", fn1(jv(), Ty::Int));
+        def!("JsonValue.at",     fn2(jv(), Ty::Int,  jv()));
+        def!("JsonValue.get",    fn2(jv(), Ty::Text, jv()));
+        def!("JsonValue.keys",   fn1(jv(), list_text));
+
+        def!("JsonValue.push", fn2(jv(), jv(), Ty::Unit));
+        def!("JsonValue.set",  Ty::Fn { params: vec![jv(), Ty::Text, jv()], ret: Box::new(Ty::Unit) });
+    }
+
+    // ---------------------------------------------------------------- //
+    // Http
+    // ---------------------------------------------------------------- //
+
+    {
+        let hr = || Ty::Named { name: "HttpResponse".into(), args: vec![] };
+
+        def!("Http.get",    fn1(Ty::Text, hr()));
+        def!("Http.delete", fn1(Ty::Text, hr()));
+        def!("Http.post",   Ty::Fn { params: vec![Ty::Text, Ty::Text, Ty::Text], ret: Box::new(hr()) });
+        def!("Http.put",    Ty::Fn { params: vec![Ty::Text, Ty::Text, Ty::Text], ret: Box::new(hr()) });
+
+        def!("HttpResponse.status",      fn1(hr(), Ty::Int));
+        def!("HttpResponse.body",        fn1(hr(), Ty::Text));
+        def!("HttpResponse.contentType", fn1(hr(), Ty::Text));
+        def!("HttpResponse.ok",          fn1(hr(), Ty::Bool));
+    }
 }
 
 fn fn1(a: Ty, ret: Ty) -> Ty {

@@ -1,7 +1,7 @@
 use certo_typeck::{Ty, TypeEnv};
 use crate::seed::seed_stdlib;
 use crate::{CORE_C, COLLECTIONS_C, TEXT_C, DATETIME_C, MONEY_C,
-            ENV_C, FILE_C, PATH_C, PROCESS_C,
+            ENV_C, FILE_C, PATH_C, PROCESS_C, JSON_C, HTTP_C,
             full_c_runtime, certo_sources};
 
 fn seeded_env() -> TypeEnv {
@@ -783,4 +783,221 @@ fn money_to_cents_type() {
         }
         other => panic!("expected Fn, got {:?}", other),
     }
+}
+
+// ------------------------------------------------------------------ //
+// Json
+// ------------------------------------------------------------------ //
+
+#[test]
+fn json_parse_stringify_registered() {
+    let env = seeded_env();
+    assert!(env.lookup("Json.parse").is_some(),     "missing Json.parse");
+    assert!(env.lookup("Json.stringify").is_some(), "missing Json.stringify");
+}
+
+#[test]
+fn json_parse_returns_json_value() {
+    let env = seeded_env();
+    match env.lookup("Json.parse").unwrap() {
+        Ty::Fn { params, ret } => {
+            assert_eq!(params, &[Ty::Text]);
+            assert!(matches!(ret.as_ref(), Ty::Named { name, .. } if name == "JsonValue"));
+        }
+        other => panic!("expected Fn, got {:?}", other),
+    }
+}
+
+#[test]
+fn json_stringify_takes_json_value() {
+    let env = seeded_env();
+    match env.lookup("Json.stringify").unwrap() {
+        Ty::Fn { params, ret } => {
+            assert!(matches!(&params[0], Ty::Named { name, .. } if name == "JsonValue"));
+            assert_eq!(ret.as_ref(), &Ty::Text);
+        }
+        other => panic!("expected Fn, got {:?}", other),
+    }
+}
+
+#[test]
+fn json_constructors_registered() {
+    let env = seeded_env();
+    for name in &["Json.null", "Json.bool", "Json.int", "Json.float",
+                  "Json.string", "Json.array", "Json.object"] {
+        assert!(env.lookup(name).is_some(), "missing: {}", name);
+    }
+}
+
+#[test]
+fn json_type_predicates_registered() {
+    let env = seeded_env();
+    for name in &["JsonValue.isNull", "JsonValue.isBool", "JsonValue.isInt",
+                  "JsonValue.isFloat", "JsonValue.isString",
+                  "JsonValue.isArray", "JsonValue.isObject"] {
+        assert!(env.lookup(name).is_some(), "missing: {}", name);
+    }
+}
+
+#[test]
+fn json_value_extractors_registered() {
+    let env = seeded_env();
+    for name in &["JsonValue.asBool", "JsonValue.asInt",
+                  "JsonValue.asFloat", "JsonValue.asText"] {
+        assert!(env.lookup(name).is_some(), "missing: {}", name);
+    }
+}
+
+#[test]
+fn json_as_int_returns_int() {
+    let env = seeded_env();
+    let jv = Ty::Named { name: "JsonValue".into(), args: vec![] };
+    match env.lookup("JsonValue.asInt").unwrap() {
+        Ty::Fn { params, ret } => {
+            assert_eq!(params, &[jv]);
+            assert_eq!(ret.as_ref(), &Ty::Int);
+        }
+        other => panic!("expected Fn, got {:?}", other),
+    }
+}
+
+#[test]
+fn json_structural_accessors_registered() {
+    let env = seeded_env();
+    assert!(env.lookup("JsonValue.length").is_some(), "missing length");
+    assert!(env.lookup("JsonValue.at").is_some(),     "missing at");
+    assert!(env.lookup("JsonValue.get").is_some(),    "missing get");
+    assert!(env.lookup("JsonValue.keys").is_some(),   "missing keys");
+}
+
+#[test]
+fn json_at_takes_int_index() {
+    let env = seeded_env();
+    match env.lookup("JsonValue.at").unwrap() {
+        Ty::Fn { params, .. } => {
+            assert!(matches!(&params[0], Ty::Named { name, .. } if name == "JsonValue"));
+            assert_eq!(&params[1], &Ty::Int);
+        }
+        other => panic!("expected Fn, got {:?}", other),
+    }
+}
+
+#[test]
+fn json_get_takes_text_key() {
+    let env = seeded_env();
+    match env.lookup("JsonValue.get").unwrap() {
+        Ty::Fn { params, .. } => {
+            assert!(matches!(&params[0], Ty::Named { name, .. } if name == "JsonValue"));
+            assert_eq!(&params[1], &Ty::Text);
+        }
+        other => panic!("expected Fn, got {:?}", other),
+    }
+}
+
+#[test]
+fn json_mutation_functions_registered() {
+    let env = seeded_env();
+    assert!(env.lookup("JsonValue.push").is_some(), "missing push");
+    assert!(env.lookup("JsonValue.set").is_some(),  "missing set");
+}
+
+#[test]
+fn json_c_contains_key_functions() {
+    assert!(JSON_C.contains("certo_json_parse"),      "missing json_parse");
+    assert!(JSON_C.contains("certo_json_stringify"),  "missing json_stringify");
+    assert!(JSON_C.contains("certo_json_get"),        "missing json_get");
+    assert!(JSON_C.contains("certo_json_at"),         "missing json_at");
+    assert!(JSON_C.contains("certo_json_array_push"), "missing json_array_push");
+    assert!(JSON_C.contains("certo_json_object_set"), "missing json_object_set");
+}
+
+// ------------------------------------------------------------------ //
+// Http
+// ------------------------------------------------------------------ //
+
+#[test]
+fn http_functions_registered() {
+    let env = seeded_env();
+    for name in &["Http.get", "Http.post", "Http.put", "Http.delete"] {
+        assert!(env.lookup(name).is_some(), "missing: {}", name);
+    }
+}
+
+#[test]
+fn http_get_returns_http_response() {
+    let env = seeded_env();
+    match env.lookup("Http.get").unwrap() {
+        Ty::Fn { params, ret } => {
+            assert_eq!(params, &[Ty::Text]);
+            assert!(matches!(ret.as_ref(), Ty::Named { name, .. } if name == "HttpResponse"));
+        }
+        other => panic!("expected Fn, got {:?}", other),
+    }
+}
+
+#[test]
+fn http_post_takes_three_text_args() {
+    let env = seeded_env();
+    match env.lookup("Http.post").unwrap() {
+        Ty::Fn { params, ret } => {
+            assert_eq!(params, &[Ty::Text, Ty::Text, Ty::Text]);
+            assert!(matches!(ret.as_ref(), Ty::Named { name, .. } if name == "HttpResponse"));
+        }
+        other => panic!("expected Fn, got {:?}", other),
+    }
+}
+
+#[test]
+fn http_response_accessors_registered() {
+    let env = seeded_env();
+    for name in &["HttpResponse.status", "HttpResponse.body",
+                  "HttpResponse.contentType", "HttpResponse.ok"] {
+        assert!(env.lookup(name).is_some(), "missing: {}", name);
+    }
+}
+
+#[test]
+fn http_response_status_returns_int() {
+    let env = seeded_env();
+    let hr = Ty::Named { name: "HttpResponse".into(), args: vec![] };
+    match env.lookup("HttpResponse.status").unwrap() {
+        Ty::Fn { params, ret } => {
+            assert_eq!(params, &[hr]);
+            assert_eq!(ret.as_ref(), &Ty::Int);
+        }
+        other => panic!("expected Fn, got {:?}", other),
+    }
+}
+
+#[test]
+fn http_response_ok_returns_bool() {
+    let env = seeded_env();
+    match env.lookup("HttpResponse.ok").unwrap() {
+        Ty::Fn { ret, .. } => assert_eq!(ret.as_ref(), &Ty::Bool),
+        other => panic!("expected Fn, got {:?}", other),
+    }
+}
+
+#[test]
+fn http_c_contains_key_functions() {
+    assert!(HTTP_C.contains("certo_http_get"),             "missing http_get");
+    assert!(HTTP_C.contains("certo_http_post"),            "missing http_post");
+    assert!(HTTP_C.contains("certo_http_response_status"), "missing response_status");
+    assert!(HTTP_C.contains("certo_http_response_body"),   "missing response_body");
+    assert!(HTTP_C.contains("certo_http_response_ok"),     "missing response_ok");
+}
+
+#[test]
+fn full_c_runtime_includes_json_and_http() {
+    let rt = full_c_runtime();
+    assert!(rt.contains("certo_json_parse"), "missing json in runtime");
+    assert!(rt.contains("certo_http_get"),   "missing http in runtime");
+}
+
+#[test]
+fn certo_sources_includes_json_and_http() {
+    let srcs = certo_sources();
+    let names: Vec<&str> = srcs.iter().map(|(n, _)| *n).collect();
+    assert!(names.contains(&"Stdlib.Json"), "missing Stdlib.Json");
+    assert!(names.contains(&"Stdlib.Http"), "missing Stdlib.Http");
 }
