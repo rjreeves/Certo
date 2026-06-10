@@ -74,7 +74,7 @@ impl Builder {
 pub fn lower_fn(f: &HirFn) -> MirFn {
     let mut b = Builder::new();
 
-    // Declare params as locals (index 0 = return slot).
+    // Declare params as locals (index 0 = return slot, type patched below).
     let ret_slot = b.declare_local("_ret", Ty::Error);
     for p in &f.params {
         b.map_hir_local(p.local, &p.name, p.ty.clone());
@@ -86,11 +86,39 @@ pub fn lower_fn(f: &HirFn) -> MirFn {
         Operand::Const(MirConst::Unit)
     };
 
-    // Assign result to return slot and return.
-    b.assign(ret_slot, Rvalue::Use(result.clone()));
+    // Infer the actual return type from the result operand and patch slot 0.
+    // HirFn.ret_ty is Ty::Error (placeholder), so we derive it here instead.
+    let ret_ty = infer_operand_ty(&result, &b);
+    b.locals[ret_slot as usize].ty = ret_ty.clone();
+
+    // For Unit functions, skip the return-slot assignment entirely — the
+    // terminator emits `return;` and there is no `_l0` variable to write.
+    if !matches!(ret_ty, Ty::Unit) {
+        b.assign(ret_slot, Rvalue::Use(result.clone()));
+    }
     b.terminate(Terminator::Return(Operand::Local(ret_slot)));
 
     MirFn { name: f.name.clone(), param_count: f.params.len(), locals: b.locals, blocks: b.blocks }
+}
+
+/// Derive the Certo type of a MIR operand from its constant or declared local type.
+fn infer_operand_ty(op: &Operand, b: &Builder) -> Ty {
+    match op {
+        Operand::Const(c) => match c {
+            MirConst::Unit       => Ty::Unit,
+            MirConst::Int(_)     => Ty::Int,
+            MirConst::Float(_)   => Ty::Float,
+            MirConst::Bool(_)    => Ty::Bool,
+            MirConst::Str(_)     => Ty::Text,
+            MirConst::Decimal(_) => Ty::Float, // Decimal compiles as double
+            MirConst::Uuid(_)    => Ty::Text,
+        },
+        Operand::Local(id) => b.locals
+            .get(*id as usize)
+            .map(|l| l.ty.clone())
+            .unwrap_or(Ty::Error),
+        Operand::Global(_) => Ty::Error,
+    }
 }
 
 // ------------------------------------------------------------------ //

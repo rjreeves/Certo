@@ -114,7 +114,7 @@ fn emit_terminator(term: &Terminator, ret_ty: &Ty, out: &mut String) {
         }
         Terminator::Return(op) => {
             if matches!(ret_ty, Ty::Unit) {
-                writeln!(out, "    return;").unwrap();
+                writeln!(out, "    return 0;").unwrap();
             } else {
                 writeln!(out, "    return {};", emit_operand(op)).unwrap();
             }

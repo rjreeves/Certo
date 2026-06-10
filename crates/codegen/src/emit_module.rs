@@ -99,34 +99,49 @@ pub fn emit_module(module: &Module, opts: &CodegenOptions) -> String {
         }
     };
 
-    // Forward declarations.
-    for item in &hir.items {
-        if let HirItem::Fn(f) = item {
-            let ret_c = ret_ty_to_c(&f.ret_ty);
-            let params: Vec<String> = f.params.iter()
-                .map(|p| format!("{} _l{}", ty_to_c(&p.ty), p.local))
-                .collect();
-            let param_str = if params.is_empty() { "void".into() } else { params.join(", ") };
-            let pfx = if pub_fns.contains(f.name.as_str()) { export(&f.name) } else { "" };
-            writeln!(out, "{}{} {}({});", pfx, ret_c, c_fn_name(&f.name), param_str).unwrap();
-        }
+    // Lower all functions to MIR once so the actual return types are known.
+    // HirFn.ret_ty is Ty::Error (a placeholder) — the MIR return slot (local 0)
+    // holds the real type after lower_fn() infers it from the function body.
+    let fn_mirs: Vec<(certo_mir::MirFn, &str)> = hir.items.iter()
+        .filter_map(|item| if let HirItem::Fn(f) = item {
+            Some((lower_fn(f), f.name.as_str()))
+        } else {
+            None
+        })
+        .collect();
+
+    // Forward declarations — use MIR local[0].ty for the return type.
+    for (mir, _) in &fn_mirs {
+        let ret_ty = mir.locals.first().map(|l| &l.ty).unwrap_or(&certo_typeck::Ty::Unit);
+        let ret_c  = ret_ty_to_c(ret_ty);
+        let params: Vec<String> = mir.locals.iter().skip(1).take(mir.param_count)
+            .map(|l| format!("{} _l{}", ty_to_c(&l.ty), l.id))
+            .collect();
+        let param_str = if params.is_empty() { "void".into() } else { params.join(", ") };
+        let pfx = if pub_fns.contains(mir.name.as_str()) { export(&mir.name) } else { "" };
+        writeln!(out, "{}{} {}({});", pfx, ret_c, c_fn_name(&mir.name), param_str).unwrap();
     }
     writeln!(out).unwrap();
 
-    // Function bodies.
-    for item in &hir.items {
-        match item {
-            HirItem::Fn(f) => {
-                let pfx = if pub_fns.contains(f.name.as_str()) { export(&f.name) } else { "" };
-                let mir = lower_fn(f);
-                emit_fn_with_prefix(&mir, pfx, &mut out);
-                writeln!(out).unwrap();
+    // Emit function bodies from cached MIR.
+    // Interleave any non-Fn HIR items (Const) at the right position.
+    {
+        let mut mir_iter = fn_mirs.into_iter();
+        for item in &hir.items {
+            match item {
+            HirItem::Fn(_) => {
+                if let Some((mir, name)) = mir_iter.next() {
+                    let pfx = if pub_fns.contains(name) { export(name) } else { "" };
+                    emit_fn_with_prefix(&mir, pfx, &mut out);
+                    writeln!(out).unwrap();
+                }
             }
             HirItem::Const(c) => {
                 // Module-level constants become static C globals.
                 let cty = ty_to_c(&c.ty);
                 writeln!(out, "static {} {} = {};", cty, c_ident(&c.name),
                     const_expr_to_c(&c.value)).unwrap();
+            }
             }
         }
     }
