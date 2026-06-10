@@ -1,5 +1,6 @@
 mod cmd_doc;
 mod cmd_watch;
+mod cmd_repl;
 
 
 use std::path::{Path, PathBuf};
@@ -13,11 +14,31 @@ use certo_migrate::{
 use certo_diagnostics::{Diagnostic, render_all};
 use certo_typeck::{TypeError, TypeErrorKind, TypeEnv, assign_var_names};
 
+/// C preamble shared by the build pipeline and the REPL.
+pub(crate) const REPL_PREAMBLE: &str =
+    "#ifdef _WIN32\n\
+     #  ifndef WIN32_LEAN_AND_MEAN\n\
+     #    define WIN32_LEAN_AND_MEAN\n\
+     #  endif\n\
+     #  ifndef _USE_MATH_DEFINES\n\
+     #    define _USE_MATH_DEFINES\n\
+     #  endif\n\
+     #  include <winsock2.h>\n\
+     #  include <ws2tcpip.h>\n\
+     #  pragma comment(lib, \"ws2_32.lib\")\n\
+     #endif\n\
+     #include <stdint.h>\n\
+     #include <stdbool.h>\n\
+     #include <stddef.h>\n\
+     #include <inttypes.h>\n\
+     #include <stdarg.h>\n\
+     #define _CRT_SECURE_NO_WARNINGS\n";
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 2 {
-        print_top_help();
-        process::exit(1);
+        cmd_repl::cmd_repl();
+        return;
     }
 
     // Allow `certo <file.certo> [options]` as shorthand for `certo build`.
@@ -36,6 +57,7 @@ fn main() {
             "bench"   => cmd_bench(&args[2..]),
             "new"     => cmd_new(&args[2..]),
             "migrate" => cmd_migrate(&args[2..]),
+            "repl"    => cmd_repl::cmd_repl(),
             "help" | "--help" | "-h" => { print_top_help(); }
             other => {
                 eprintln!("Unknown command: {}", other);
@@ -504,7 +526,7 @@ fn run_typeck(module: &Module, src: &str, filename: &str, colour: bool) {
 }
 
 /// Convert a `TypeError` into a human-friendly `Diagnostic` with labels and notes.
-fn type_error_to_diagnostic(e: &TypeError) -> Diagnostic {
+pub(crate) fn type_error_to_diagnostic(e: &TypeError) -> Diagnostic {
     use certo_typeck::Ty;
 
     match &e.kind {
@@ -683,7 +705,7 @@ fn type_error_to_diagnostic(e: &TypeError) -> Diagnostic {
     }
 }
 
-fn find_cc() -> Option<String> {
+pub(crate) fn find_cc() -> Option<String> {
     // First try names on PATH.
     for candidate in &["clang", "gcc", "cc", "cl"] {
         if probe_cc(candidate) { return Some(candidate.to_string()); }
@@ -701,7 +723,7 @@ fn find_cc() -> Option<String> {
     None
 }
 
-fn probe_cc(cmd: &str) -> bool {
+pub(crate) fn probe_cc(cmd: &str) -> bool {
     std::process::Command::new(cmd)
         .arg("--version")
         .stdout(std::process::Stdio::null())
@@ -1359,6 +1381,8 @@ fn print_top_help() {
     eprintln!("Certo compiler");
     eprintln!();
     eprintln!("Usage:");
+    eprintln!("  certo                            Start the interactive REPL");
+    eprintln!("  certo repl                       Start the interactive REPL");
     eprintln!("  certo new <project-name>         Scaffold a new project");
     eprintln!("  certo check <file.certo>         Type-check without compiling");
     eprintln!("  certo run   <file.certo> [-- args]  Compile and run");
@@ -1392,7 +1416,7 @@ fn die(msg: &str, code: i32) -> ! {
 
 /// Returns true when colour output is appropriate for stderr.
 /// Respects the `NO_COLOR` env var and `TERM=dumb` convention.
-fn stderr_is_tty() -> bool {
+pub(crate) fn stderr_is_tty() -> bool {
     if std::env::var_os("NO_COLOR").is_some() { return false; }
     if std::env::var("TERM").as_deref() == Ok("dumb") { return false; }
     // On Windows the console supports ANSI escapes from Windows 10+.
