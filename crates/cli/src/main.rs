@@ -227,6 +227,16 @@ fn cmd_build(args: &[String], quiet: bool) {
         return;
     }
 
+    // Auto-detect lib type from certo.toml if present
+    if !emit_dll {
+        let project_root = input.parent().unwrap_or(Path::new("."));
+        if let Ok(toml_src) = std::fs::read_to_string(project_root.join("certo.toml")) {
+            if toml_src.lines().any(|l| l.trim() == "type   = \"lib\"" || l.trim() == "type = \"lib\"") {
+                emit_dll = true;
+            }
+        }
+    }
+
     let colour   = stderr_is_tty();
     let filename = input.display().to_string();
 
@@ -693,6 +703,8 @@ fn cmd_new(args: &[String]) {
     let module_name = to_module_name(name);
 
     // certo.toml
+    let toml_type = if template == "lib" { "lib" } else { "app" };
+    let toml_entry = if template == "lib" { "" } else { "entry  = \"src\\\\main.cto\"\n" };
     write_file(&root.join("certo.toml"), &format!(
         "[project]\n\
          name    = \"{name}\"\n\
@@ -700,9 +712,10 @@ fn cmd_new(args: &[String]) {
          edition = \"2026\"\n\
          \n\
          [build]\n\
+         type   = \"{toml_type}\"\n\
          target = \"native\"\n\
          output = \"dist\\\\\"\n\
-         entry  = \"src\\\\main.cto\"\n"
+         {toml_entry}"
     ));
 
     // src/main.cto — template-specific
