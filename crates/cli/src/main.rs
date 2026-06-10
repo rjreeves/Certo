@@ -625,9 +625,44 @@ fn resolve_pg_paths() -> (Option<String>, Option<String>) {
 // ------------------------------------------------------------------ //
 
 fn cmd_new(args: &[String]) {
-    let name = args.first().unwrap_or_else(|| {
+    let mut name: Option<&String> = None;
+    let mut template = "default";
+
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--template" | "-t" => {
+                i += 1;
+                template = args.get(i).map(String::as_str).unwrap_or_else(|| {
+                    eprintln!("error: --template requires a name (api, lib, cli)");
+                    process::exit(2);
+                });
+            }
+            "--help" | "-h" => {
+                println!("Usage: certo new <project-name> [--template <template>]");
+                println!();
+                println!("Templates:");
+                println!("  default   Hello-world entry point (default)");
+                println!("  api       HTTP JSON API with Stdlib.Http");
+                println!("  lib       Library with public exports, no main");
+                println!("  cli       CLI tool with argument parsing");
+                return;
+            }
+            other if other.starts_with('-') => {
+                eprintln!("Unknown option: {}", other);
+                process::exit(2);
+            }
+            n => {
+                if name.is_some() { eprintln!("error: unexpected argument '{}'", n); process::exit(2); }
+                name = Some(&args[i]);
+            }
+        }
+        i += 1;
+    }
+
+    let name = name.unwrap_or_else(|| {
         eprintln!("error: missing project name");
-        eprintln!("usage: certo new <project-name>");
+        eprintln!("usage: certo new <project-name> [--template api|lib|cli]");
         process::exit(1);
     });
 
@@ -637,13 +672,17 @@ fn cmd_new(args: &[String]) {
         process::exit(1);
     }
 
-    // Directories to create
-    let dirs = [
+    // Directories
+    let mut dirs: Vec<PathBuf> = vec![
         root.join("src"),
         root.join("db").join("migrations"),
-        root.join("tests"),
+        root.join("tests").join("unit"),
+        root.join("tests").join("integration"),
         root.join("dist"),
     ];
+    if template == "api" {
+        dirs.push(root.join("src").join("handlers"));
+    }
     for dir in &dirs {
         std::fs::create_dir_all(dir).unwrap_or_else(|e| {
             eprintln!("error: cannot create {}: {}", dir.display(), e);
@@ -651,25 +690,80 @@ fn cmd_new(args: &[String]) {
         });
     }
 
+    let module_name = to_module_name(name);
+
     // certo.toml
     write_file(&root.join("certo.toml"), &format!(
         "[project]\n\
          name    = \"{name}\"\n\
          version = \"0.1.0\"\n\
-         entry   = \"src/main.cto\"\n"
+         edition = \"2026\"\n\
+         \n\
+         [build]\n\
+         target = \"native\"\n\
+         output = \"dist\\\\\"\n\
+         entry  = \"src\\\\main.cto\"\n"
     ));
 
-    // src/main.cto
-    write_file(&root.join("src").join("main.cto"), &format!(
-        "module {module}\n\
-         \n\
-         import Stdlib.Core\n\
-         \n\
-         fn main(): Unit [io] = {{\n\
-             println(\"Hello from {name}!\")\n\
-         }}\n",
-        module = to_module_name(name),
-    ));
+    // src/main.cto — template-specific
+    let main_src = match template {
+        "api" => format!(
+            "module {module_name}\n\
+             \n\
+             import Stdlib.Http\n\
+             \n\
+             fn handleHealth(req: HttpRequest): HttpResponse {{\n\
+                 Http.ok(\"application/json\", \"{{\\\"status\\\": \\\"ok\\\"}}\")\n\
+             }}\n\
+             \n\
+             fn main(): Unit {{\n\
+                 println(\"Listening on :8080\")\n\
+                 Http.serve(8080, fn(req) {{\n\
+                     if req.path == \"/health\" then handleHealth(req)\n\
+                     else Http.notFound(\"not found\")\n\
+                 }})\n\
+             }}\n"
+        ),
+        "lib" => format!(
+            "module {module_name}\n\
+             \n\
+             /// The public API of this library.\n\
+             pub fn greet(name: Text): Text {{\n\
+                 \"Hello, \" ++ name ++ \"!\"\n\
+             }}\n"
+        ),
+        "cli" => format!(
+            "module {module_name}\n\
+             \n\
+             fn printUsage(): Unit {{\n\
+                 println(\"Usage: {name} <command>\")\n\
+                 println(\"\")\n\
+                 println(\"Commands:\")\n\
+                 println(\"  help    Show this message\")\n\
+             }}\n\
+             \n\
+             fn main(): Unit {{\n\
+                 val cmd = arg(1)\n\
+                 match cmd {{\n\
+                     None    => printUsage()\n\
+                     Some(c) => match c {{\n\
+                         \"help\" => printUsage()\n\
+                         other  => println(\"Unknown command: \" ++ other)\n\
+                     }}\n\
+                 }}\n\
+             }}\n",
+            name = name,
+        ),
+        _ => format!(
+            "module {module_name}\n\
+             \n\
+             fn main(): Unit {{\n\
+                 println(\"Hello from {name}!\")\n\
+             }}\n",
+            name = name,
+        ),
+    };
+    write_file(&root.join("src").join("main.cto"), &main_src);
 
     // .env.example
     write_file(&root.join(".env.example"),
@@ -677,19 +771,23 @@ fn cmd_new(args: &[String]) {
          DATABASE_URL=host=localhost dbname=mydb user=myuser password=secret\n\
          \n\
          # App\n\
-         APP_ENV=development\n"
+         APP_ENV=development\n\
+         PORT=8080\n"
     );
 
     // .gitignore
     write_file(&root.join(".gitignore"),
-        "dist/\n\
-         *.exe\n\
-         *.dll\n\
-         *.so\n\
-         .env\n"
+        "dist\\\n\
+         .env\n\
+         .certo\\\n\
+         *.log\n"
     );
 
     // README.md
+    let readme_build = match template {
+        "lib"  => format!("certo build src/main.cto --emit-dll -o dist/{name}.dll"),
+        _      => format!("certo build src/main.cto -o dist/{name}.exe"),
+    };
     write_file(&root.join("README.md"), &format!(
         "# {name}\n\
          \n\
@@ -698,11 +796,24 @@ fn cmd_new(args: &[String]) {
          ## Build\n\
          \n\
          ```\n\
-         certo src/main.cto -o dist/{name}.exe\n\
+         {readme_build}\n\
+         ```\n\
+         \n\
+         ## Run\n\
+         \n\
+         ```\n\
+         certo run src/main.cto\n\
+         ```\n\
+         \n\
+         ## Docs\n\
+         \n\
+         ```\n\
+         certo doc src/main.cto\n\
          ```\n"
     ));
 
-    eprintln!("Created project '{name}'");
+    // Print tree
+    eprintln!("Created '{}' (template: {})", name, template);
     eprintln!();
     eprintln!("  {name}/");
     eprintln!("  ├── certo.toml");
@@ -710,13 +821,21 @@ fn cmd_new(args: &[String]) {
     eprintln!("  ├── .gitignore");
     eprintln!("  ├── README.md");
     eprintln!("  ├── src/");
-    eprintln!("  │   └── main.cto");
+    if template == "api" {
+        eprintln!("  │   ├── main.cto");
+        eprintln!("  │   └── handlers/");
+    } else {
+        eprintln!("  │   └── main.cto");
+    }
     eprintln!("  ├── db/");
     eprintln!("  │   └── migrations/");
     eprintln!("  ├── tests/");
+    eprintln!("  │   ├── unit/");
+    eprintln!("  │   └── integration/");
     eprintln!("  └── dist/");
     eprintln!();
-    eprintln!("  Next: certo {name}\\src\\main.cto -o {name}\\dist\\{name}.exe");
+    eprintln!("  cd {name}");
+    eprintln!("  certo run src/main.cto");
 }
 
 fn write_file(path: &Path, contents: &str) {
