@@ -213,20 +213,25 @@ fn decl_label(input: &str) -> String {
 fn eval_expr_or_stmt(input: &str, session: &mut Vec<String>, colour: bool) {
     // Probe the type of the input as an expression first.
     // If it's a print-able primitive, auto-wrap it so the value is displayed.
-    if let Some(ty) = infer_type(input, session) {
-        if let Some(print_stmt) = auto_print_for(&ty, input) {
-            let src2 = make_module_src(session, Some(&print_stmt));
-            match try_compile_and_run(&src2, colour) {
-                EvalResult::Ok => return,
-                EvalResult::TypeError(_) => {} // fall through to plain run
-                EvalResult::ParseError(msg) => { eprintln!("parse error: {}", msg); return; }
-                EvalResult::CompileError => return,
-                EvalResult::RuntimeError(code) => { eprintln!("exited with code {}", code); return; }
+    // Skip the probe when the input uses `?` — the probe context is Unit-returning
+    // and would produce a spurious type error before we get a chance to run it.
+    if !body_uses_try(input) {
+        if let Some(ty) = infer_type(input, session) {
+            if let Some(print_stmt) = auto_print_for(&ty, input) {
+                let src2 = make_module_src(session, Some(&print_stmt));
+                match try_compile_and_run(&src2, colour) {
+                    EvalResult::Ok => return,
+                    EvalResult::TypeError(_) => {} // fall through to plain run
+                    EvalResult::ParseError(msg) => { eprintln!("parse error: {}", msg); return; }
+                    EvalResult::CompileError => return,
+                    EvalResult::RuntimeError(code) => { eprintln!("exited with code {}", code); return; }
+                }
             }
         }
     }
 
-    // Plain run — statement, Unit expression, or complex type.
+    // Plain run — statement, Unit expression, complex type, or ?-containing expr.
+    // make_module_src detects ? and switches to a Result-returning wrapper.
     let src = make_module_src(session, Some(input));
     match try_compile_and_run(&src, colour) {
         EvalResult::Ok => {}
@@ -429,7 +434,11 @@ fn try_compile_and_run(src: &str, _colour: bool) -> EvalResult {
 // ------------------------------------------------------------------ //
 
 /// Build a complete module source string.
-/// If `main_body` is Some, appends a `fn main(): Unit [io] = { <body> }`.
+/// If `main_body` is Some, appends a main function containing the body.
+///
+/// When the body contains `?`, the body is placed inside a helper that returns
+/// `Result<Unit, Text>` so the `?` operator can early-return on Err. The
+/// helper's result is matched in main() and any Err is printed to stderr.
 fn make_module_src(session: &[String], main_body: Option<&str>) -> String {
     let mut out = String::from("module Repl\n\nimport Stdlib.Core\n\n");
     for decl in session {
@@ -437,15 +446,61 @@ fn make_module_src(session: &[String], main_body: Option<&str>) -> String {
         out.push_str("\n\n");
     }
     if let Some(body) = main_body {
-        out.push_str("fn main(): Unit [io] = {\n");
-        for line in body.lines() {
-            out.push_str("    ");
-            out.push_str(line);
-            out.push('\n');
+        if body_uses_try(body) {
+            // Wrap in a Result-returning helper so ? can early-return on Err.
+            out.push_str("fn _repl_try(): Result<Unit, Text> [io] = {\n");
+            for line in body.lines() {
+                out.push_str("    ");
+                out.push_str(line);
+                out.push('\n');
+            }
+            out.push_str("    Ok(())\n");
+            out.push_str("}\n");
+            out.push_str("fn main(): Unit [io] = {\n");
+            out.push_str("    match _repl_try() {\n");
+            out.push_str("        Ok(_)  => ()\n");
+            out.push_str("        Err(e) => println(\"Error: \" ++ e)\n");
+            out.push_str("    }\n");
+            out.push_str("}\n");
+        } else {
+            out.push_str("fn main(): Unit [io] = {\n");
+            for line in body.lines() {
+                out.push_str("    ");
+                out.push_str(line);
+                out.push('\n');
+            }
+            out.push_str("}\n");
         }
-        out.push_str("}\n");
     }
     out
+}
+
+/// True when the body text contains a bare `?` operator — the Result
+/// propagation operator — as opposed to `??` (null-coalesce).
+fn body_uses_try(body: &str) -> bool {
+    let chars: Vec<char> = body.chars().collect();
+    let mut in_str = false;
+    let mut in_line_comment = false;
+    let mut i = 0;
+    while i < chars.len() {
+        match chars[i] {
+            '\n' => { in_line_comment = false; }
+            '/' if !in_str && i + 1 < chars.len() && chars[i + 1] == '/' => {
+                in_line_comment = true;
+            }
+            '"' if !in_line_comment => { in_str = !in_str; }
+            '?' if !in_str && !in_line_comment => {
+                let next = chars.get(i + 1).copied();
+                let prev = if i > 0 { chars.get(i - 1).copied() } else { None };
+                if next != Some('?') && prev != Some('?') {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    false
 }
 
 /// Return true when the input has more `{`/`(` than `}`/`)`, meaning
