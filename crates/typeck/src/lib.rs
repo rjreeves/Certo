@@ -7,7 +7,7 @@ mod error;
 
 pub use ty::Ty;
 pub use error::{TypeError, TypeErrorKind};
-pub use infer_decl::check_module;
+pub use infer_decl::{check_module, check_module_seeded};
 pub use env::TypeEnv;
 
 #[cfg(test)]

@@ -38,13 +38,18 @@ Tasks are listed in implementation order. Completed tasks have the crate they li
 | 32 | README at repo root | `README.md` |
 | 33 | GitHub Actions CI | `.github/workflows/ci.yml` |
 | 34 | `import` resolver (multi-file) | `crates/cli` |
+| 30 | Stdlib-aware name resolver | `certo_stdlib::seed_stdlib` wired into CLI via `TypeEnv` |
+| 31 | Typeck errors in CLI (`certo build` + `certo check`) | `crates/cli`, `crates/typeck` |
+| 35 | `certo check` — type-check without compiling | `crates/cli` |
+| 36 | `certo run` — compile and execute in one command | `crates/cli` |
+| 37 | Richer type error messages with labels and notes | `crates/cli`, `crates/diagnostics` |
+| 38 | Stdlib.Db — parameterized queries, multi-row results, transactions | `crates/stdlib` |
+| 39 | Stdlib.Http — server (Windows/WinSock2, POSIX stub) | `crates/stdlib` |
 
 ## Pending
 
 | # | Task | Notes |
 |---|------|-------|
-| 30 | Stdlib-aware name resolver | Pre-load stdlib names so resolve pass can be enabled in the CLI |
-| 31 | Resolve + typeck errors in CLI | Blocked on #30; error types and renderer already ready |
 
 ## Critical path to a running program
 

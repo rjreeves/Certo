@@ -11,11 +11,22 @@ use crate::infer_expr::{infer, infer_block, type_expr_to_ty, Ctx};
 /// Entry point: check all declarations in a module.
 pub fn check_module(module: &Module) -> Result<(), Vec<TypeError>> {
     let mut env     = TypeEnv::new();
+    let mut counter = 0u32;
+    env.seed_builtins(&mut counter);
+    check_module_seeded(module, env, counter)
+}
+
+/// Like `check_module` but accepts a pre-seeded environment and counter.
+/// Use this when you want to inject stdlib types before checking.
+pub fn check_module_seeded(
+    module:  &Module,
+    env:     TypeEnv,
+    counter: u32,
+) -> Result<(), Vec<TypeError>> {
+    let mut env     = env;
     let mut uf      = UnionFind::default();
     let mut errors  = Vec::new();
-    let mut counter = 0u32;
-
-    env.seed_builtins(&mut counter);
+    let mut counter = counter;
 
     // Pass 1 — hoist function signatures so mutually-recursive calls work.
     for sdecl in &module.decls {
