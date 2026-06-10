@@ -435,21 +435,91 @@ pub fn seed_stdlib(env: &mut TypeEnv, counter: &mut u32) {
     }
 
     // ---------------------------------------------------------------- //
+    // Db (PostgreSQL via libpq)
+    // ---------------------------------------------------------------- //
+
+    {
+        let conn      = Ty::Int; // connection handle
+        let list_text = Ty::List(Box::new(Ty::Text));
+        let list_row  = Ty::List(Box::new(list_text.clone()));
+
+        // Connection
+        def!("dbConnect",       fn1(Ty::Text, conn.clone()));
+        def!("dbClose",         fn1(conn.clone(), Ty::Unit));
+        def!("dbError",         fn1(conn.clone(), Ty::Text));
+
+        // Server info
+        def!("dbServerVersion", fn1(conn.clone(), Ty::Int));
+        def!("dbVersionString", fn1(conn.clone(), Ty::Text));
+
+        // Exec
+        def!("dbExec", Ty::Fn {
+            params: vec![conn.clone(), Ty::Text, list_text.clone()],
+            ret: Box::new(Ty::Int),
+        });
+
+        // Query
+        def!("dbQuery", Ty::Fn {
+            params: vec![conn.clone(), Ty::Text, list_text.clone()],
+            ret: Box::new(list_row.clone()),
+        });
+        def!("dbQueryRow", Ty::Fn {
+            params: vec![conn.clone(), Ty::Text, list_text.clone()],
+            ret: Box::new(Ty::Option(Box::new(list_text.clone()))),
+        });
+        def!("dbQueryOne",  fn2(conn.clone(), Ty::Text, Ty::Text));
+        def!("dbColumns",   fn2(conn.clone(), Ty::Text, list_text.clone()));
+
+        // Transactions
+        def!("dbBegin",    fn1(conn.clone(), Ty::Int));
+        def!("dbCommit",   fn1(conn.clone(), Ty::Int));
+        def!("dbRollback", fn1(conn.clone(), Ty::Int));
+    }
+
+    // ---------------------------------------------------------------- //
     // Http
     // ---------------------------------------------------------------- //
 
     {
-        let hr = || Ty::Named { name: "HttpResponse".into(), args: vec![] };
+        let hr  = || Ty::Named { name: "HttpResponse".into(), args: vec![] };
+        let req = || Ty::Named { name: "HttpRequest".into(),  args: vec![] };
+        let list_text = Ty::List(Box::new(Ty::Text));
+        let list_hdr  = Ty::List(Box::new(Ty::List(Box::new(Ty::Text))));
 
+        // Client
         def!("Http.get",    fn1(Ty::Text, hr()));
         def!("Http.delete", fn1(Ty::Text, hr()));
         def!("Http.post",   Ty::Fn { params: vec![Ty::Text, Ty::Text, Ty::Text], ret: Box::new(hr()) });
         def!("Http.put",    Ty::Fn { params: vec![Ty::Text, Ty::Text, Ty::Text], ret: Box::new(hr()) });
 
+        // HttpResponse accessors
         def!("HttpResponse.status",      fn1(hr(), Ty::Int));
         def!("HttpResponse.body",        fn1(hr(), Ty::Text));
         def!("HttpResponse.contentType", fn1(hr(), Ty::Text));
         def!("HttpResponse.ok",          fn1(hr(), Ty::Bool));
+
+        // Server
+        let handler_ty = Ty::Fn { params: vec![req()], ret: Box::new(hr()) };
+        def!("Http.serve", Ty::Fn {
+            params: vec![Ty::Int, handler_ty],
+            ret:    Box::new(Ty::Unit),
+        });
+
+        // Response constructors
+        def!("Http.respond",     Ty::Fn { params: vec![Ty::Int, Ty::Text, Ty::Text], ret: Box::new(hr()) });
+        def!("Http.ok",          fn2(Ty::Text, Ty::Text, hr()));
+        def!("Http.notFound",    fn1(Ty::Text, hr()));
+        def!("Http.badRequest",  fn1(Ty::Text, hr()));
+        def!("Http.serverError", fn1(Ty::Text, hr()));
+
+        // HttpRequest accessors
+        def!("HttpRequest.method",  fn1(req(), Ty::Text));
+        def!("HttpRequest.path",    fn1(req(), Ty::Text));
+        def!("HttpRequest.query",   fn1(req(), Ty::Text));
+        def!("HttpRequest.body",    fn1(req(), Ty::Text));
+        def!("HttpRequest.header",  fn2(req(), Ty::Text, Ty::Text));
+        def!("HttpRequest.headers", fn1(req(), list_hdr));
+        let _ = list_text; // may be used later
     }
 }
 

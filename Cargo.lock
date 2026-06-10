@@ -36,6 +36,7 @@ dependencies = [
  "certo-migrate",
  "certo-parser",
  "certo-stdlib",
+ "certo-typeck",
  "tempfile",
 ]
 

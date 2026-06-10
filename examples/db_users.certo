@@ -1,0 +1,116 @@
+module db_users
+
+import Stdlib.Core
+import Stdlib.Db
+
+// ---------------------------------------------------------------------------
+// db_users — demonstrates parameterized queries and transactions
+//
+// Usage:
+//   db_users <connstr>
+//
+// Expects a table:
+//   CREATE TABLE users (
+//     id    SERIAL PRIMARY KEY,
+//     name  TEXT NOT NULL,
+//     email TEXT NOT NULL UNIQUE,
+//     age   INT  NOT NULL
+//   );
+// ---------------------------------------------------------------------------
+
+fn main(): Unit [io] = {
+    val connstr = arg(1) ?? "host=localhost dbname=postgres user=postgres"
+
+    val conn = dbConnect(connstr)
+    if conn == 0 then {
+        eprintln(f"could not connect: {dbError(0)}")
+    } else {
+        // ── Schema ────────────────────────────────────────────────────
+        val created = dbExec(conn,
+            "CREATE TABLE IF NOT EXISTS users (" ++
+            "  id    SERIAL PRIMARY KEY," ++
+            "  name  TEXT NOT NULL," ++
+            "  email TEXT NOT NULL UNIQUE," ++
+            "  age   INT  NOT NULL" ++
+            ")", [])
+        println("table ready")
+
+        // ── Insert with parameterized query ───────────────────────────
+        val ok = dbBegin(conn)
+
+        dbExec(conn,
+            "INSERT INTO users(name, email, age) VALUES ($1, $2, $3)" ++
+            " ON CONFLICT (email) DO NOTHING",
+            ["Alice", "alice@example.com", "30"])
+
+        dbExec(conn,
+            "INSERT INTO users(name, email, age) VALUES ($1, $2, $3)" ++
+            " ON CONFLICT (email) DO NOTHING",
+            ["Bob", "bob@example.com", "25"])
+
+        dbExec(conn,
+            "INSERT INTO users(name, email, age) VALUES ($1, $2, $3)" ++
+            " ON CONFLICT (email) DO NOTHING",
+            ["Carol", "carol@example.com", "35"])
+
+        dbCommit(conn)
+        println("inserted sample rows")
+
+        // ── Query all users ───────────────────────────────────────────
+        val cols = dbColumns(conn, "SELECT id, name, email, age FROM users")
+        val rows = dbQuery(conn, "SELECT id, name, email, age FROM users ORDER BY id", [])
+
+        println(f"\nAll users ({intToText(List.len(rows))} rows):")
+
+        // Print header
+        val header = List.fold(cols, "", fn(acc: Text, col: Text): Text =
+            if acc == "" then col else acc ++ " | " ++ col)
+        println(header)
+        println("-----------------------------")
+
+        for row in rows {
+            val line = List.fold(row, "", fn(acc: Text, cell: Text): Text =
+                if acc == "" then cell else acc ++ " | " ++ cell)
+            println(line)
+        }
+
+        // ── Parameterized lookup ──────────────────────────────────────
+        val minAge = "28"
+        val older = dbQuery(conn,
+            "SELECT name, age FROM users WHERE age >= $1 ORDER BY age",
+            [minAge])
+        println(f"\nUsers aged {minAge} or older:")
+        for row in older {
+            val name = List.getOrPanic(row, 0)
+            val age  = List.getOrPanic(row, 1)
+            println(f"  {name} (age {age})")
+        }
+
+        // ── Single-row lookup ─────────────────────────────────────────
+        val found = dbQueryRow(conn,
+            "SELECT name, email FROM users WHERE email = $1",
+            ["alice@example.com"])
+        if found == null then {
+            println("\nalice not found")
+        } else {
+            val name  = List.getOrPanic(found, 0)
+            val email = List.getOrPanic(found, 1)
+            println(f"\nFound: {name} <{email}>")
+        }
+
+        // ── Scalar query ──────────────────────────────────────────────
+        val total = dbQueryOne(conn, "SELECT COUNT(*) FROM users")
+        println(f"\nTotal users: {total}")
+
+        // ── Transaction rollback demo ─────────────────────────────────
+        dbBegin(conn)
+        dbExec(conn, "DELETE FROM users WHERE name = $1", ["Bob"])
+        val afterDelete = dbQueryOne(conn, "SELECT COUNT(*) FROM users")
+        println(f"After DELETE inside txn: {afterDelete} users")
+        dbRollback(conn)
+        val afterRollback = dbQueryOne(conn, "SELECT COUNT(*) FROM users")
+        println(f"After ROLLBACK: {afterRollback} users (Bob is back)")
+
+        dbClose(conn)
+    }
+}

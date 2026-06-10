@@ -1,11 +1,13 @@
 use std::path::{Path, PathBuf};
 use std::process;
 use certo_ast::decl::{Decl, MigrationDecl};
+use certo_ast::module::Module;
 use certo_migrate::{
     plan_up, plan_down, run_steps, status,
     default_manifest_path, RunOptions,
 };
 use certo_diagnostics::{Diagnostic, render_all};
+use certo_typeck::{TypeError, TypeErrorKind, TypeEnv};
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -18,9 +20,11 @@ fn main() {
     let first = args[1].as_str();
     if first.ends_with(".certo") || first == "build" {
         let build_args = if first == "build" { &args[2..] } else { &args[1..] };
-        cmd_build(build_args);
+        cmd_build(build_args, false);
     } else {
         match first {
+            "check"   => cmd_check(&args[2..]),
+            "run"     => cmd_run(&args[2..]),
             "new"     => cmd_new(&args[2..]),
             "migrate" => cmd_migrate(&args[2..]),
             "help" | "--help" | "-h" => { print_top_help(); }
@@ -37,7 +41,121 @@ fn main() {
 // build
 // ------------------------------------------------------------------ //
 
-fn cmd_build(args: &[String]) {
+// ------------------------------------------------------------------ //
+// check
+// ------------------------------------------------------------------ //
+
+fn cmd_check(args: &[String]) {
+    let mut input: Option<PathBuf> = None;
+    let mut verbose = false;
+
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--verbose" | "-v" => verbose = true,
+            "--help" | "-h" => {
+                println!("Usage: certo check <file.certo> [-v]");
+                println!();
+                println!("Type-check a Certo source file without compiling.");
+                println!("Exits 0 on success, 1 if there are parse or type errors.");
+                return;
+            }
+            other if other.starts_with('-') => {
+                eprintln!("Unknown option: {}", other);
+                process::exit(2);
+            }
+            path => {
+                if input.is_some() { die("only one input file supported", 2); }
+                input = Some(PathBuf::from(path));
+            }
+        }
+        i += 1;
+    }
+
+    let input = input.unwrap_or_else(|| {
+        eprintln!("error: no input file");
+        eprintln!("usage: certo check <file.certo>");
+        process::exit(2);
+    });
+
+    let colour = stderr_is_tty();
+    let module = parse_file_or_exit(&input, colour);
+    let filename = input.display().to_string();
+
+    if verbose { eprintln!("checking {}...", filename); }
+
+    let (module, src) = module;
+    run_typeck(&module, &src, &filename, colour);
+
+    eprintln!("ok");
+}
+
+// ------------------------------------------------------------------ //
+// run
+// ------------------------------------------------------------------ //
+
+fn cmd_run(args: &[String]) {
+    // Split args at `--`: everything before is build args, after is program args.
+    let (build_args, prog_args) = if let Some(sep) = args.iter().position(|a| a == "--") {
+        (&args[..sep], &args[sep + 1..])
+    } else {
+        (args, [].as_slice())
+    };
+
+    // Build to a temp directory.
+    let tmp_dir = tempfile::TempDir::new().unwrap_or_else(|e| {
+        eprintln!("error creating temp dir: {}", e);
+        process::exit(1);
+    });
+
+    // Find the input file from build_args so we can derive the exe name.
+    let input_path = build_args.iter()
+        .find(|a| a.ends_with(".certo") || (!a.starts_with('-') && !a.starts_with("build")))
+        .cloned()
+        .unwrap_or_else(|| {
+            eprintln!("error: no input file");
+            eprintln!("usage: certo run <file.certo> [build-opts] [-- prog-args]");
+            process::exit(2);
+        });
+
+    let stem = PathBuf::from(&input_path)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("out")
+        .to_string();
+
+    let exe_name = if cfg!(windows) {
+        format!("{}.exe", stem)
+    } else {
+        stem.clone()
+    };
+    let exe_path = tmp_dir.path().join(&exe_name);
+
+    // Synthesise build args with our temp output path.
+    let mut full_build_args: Vec<String> = build_args.to_vec();
+    full_build_args.push("-o".into());
+    full_build_args.push(exe_path.display().to_string());
+
+    cmd_build(&full_build_args, true);
+
+    // Execute the compiled binary.
+    let status = std::process::Command::new(&exe_path)
+        .args(prog_args)
+        .status()
+        .unwrap_or_else(|e| {
+            eprintln!("error: could not run {}: {}", exe_path.display(), e);
+            process::exit(1);
+        });
+
+    process::exit(status.code().unwrap_or(1));
+}
+
+// ------------------------------------------------------------------ //
+// build
+// ------------------------------------------------------------------ //
+
+/// `quiet`: suppress the "wrote <path>" line (used by `certo run`).
+fn cmd_build(args: &[String], quiet: bool) {
     let mut input:   Option<PathBuf> = None;
     let mut output:  Option<PathBuf> = None;
     let mut verbose  = false;
@@ -64,7 +182,7 @@ fn cmd_build(args: &[String]) {
                 println!("  -o <file>    Output path");
                 println!("  --emit-c     Write the generated C to <stem>.c and stop");
                 println!("  --emit-dll   Compile to a shared library (.dll/.so) instead of an exe");
-                println!("  -v           Print the compiler command before running it");
+                println!("  -v           Verbose: print the C compiler command");
                 return;
             }
             other if other.starts_with('-') => {
@@ -85,22 +203,10 @@ fn cmd_build(args: &[String]) {
         process::exit(2);
     });
 
-    // ── Parse ─────────────────────────────────────────────────────────
-    let src = std::fs::read_to_string(&input).unwrap_or_else(|e| {
-        eprintln!("error: cannot read {}: {}", input.display(), e);
-        process::exit(1);
-    });
-    let filename = input.display().to_string();
     let colour   = stderr_is_tty();
+    let filename = input.display().to_string();
 
-    let mut module = certo_parser::parse(&src).unwrap_or_else(|errs| {
-        let diags: Vec<Diagnostic> = errs.iter().map(|e| {
-            Diagnostic::error("", format!("{}", e)).with_span(e.span)
-        }).collect();
-        eprint!("{}", render_all(&diags, &src, &filename, colour));
-        eprintln!("aborting due to {} parse error(s)", diags.len());
-        process::exit(1);
-    });
+    let (mut module, src) = parse_file_or_exit(&input, colour);
 
     // ── Resolve local imports (multi-file) ────────────────────────────
     let base_dir = input.parent().unwrap_or(Path::new("."));
@@ -108,7 +214,6 @@ fn cmd_build(args: &[String]) {
     for imp in &module.imports.clone() {
         let first_seg = imp.path.segments.first().map(|s| s.node.as_str()).unwrap_or("");
         if stdlib_prefixes.contains(&first_seg) { continue; }
-        // Build file path: join segments with '/' + ".certo"
         let rel: PathBuf = imp.path.segments.iter()
             .map(|s| s.node.as_str())
             .collect::<Vec<_>>()
@@ -116,23 +221,16 @@ fn cmd_build(args: &[String]) {
             .into();
         let candidate = base_dir.join(rel).with_extension("certo");
         if candidate.exists() {
-            let imp_src = std::fs::read_to_string(&candidate).unwrap_or_else(|e| {
-                eprintln!("error: cannot read {}: {}", candidate.display(), e);
-                process::exit(1);
-            });
+            let (imp_module, imp_src) = parse_file_or_exit(&candidate, colour);
             let imp_filename = candidate.display().to_string();
-            let imp_module = certo_parser::parse(&imp_src).unwrap_or_else(|errs| {
-                let diags: Vec<Diagnostic> = errs.iter().map(|e| {
-                    Diagnostic::error("", format!("{}", e)).with_span(e.span)
-                }).collect();
-                eprint!("{}", render_all(&diags, &imp_src, &imp_filename, colour));
-                eprintln!("aborting due to parse errors in {}", imp_filename);
-                process::exit(1);
-            });
+            let _ = (imp_src, imp_filename); // already reported inside helper
             if verbose { eprintln!("importing {}", candidate.display()); }
             module.decls.extend(imp_module.decls);
         }
     }
+
+    // ── Type-check ────────────────────────────────────────────────────
+    run_typeck(&module, &src, &filename, colour);
 
     // ── Check for entry point ─────────────────────────────────────────
     let has_main = module.decls.iter().any(|d| {
@@ -308,7 +406,105 @@ fn cmd_build(args: &[String]) {
         process::exit(1);
     }
 
-    eprintln!("wrote {}", out_path.display());
+    if !quiet {
+        eprintln!("wrote {}", out_path.display());
+    }
+}
+
+// ------------------------------------------------------------------ //
+// Shared helpers
+// ------------------------------------------------------------------ //
+
+/// Parse a `.certo` file, resolving its imports and exiting on parse errors.
+/// Returns (Module, source_text).
+fn parse_file_or_exit(path: &Path, colour: bool) -> (Module, String) {
+    let src = std::fs::read_to_string(path).unwrap_or_else(|e| {
+        eprintln!("error: cannot read {}: {}", path.display(), e);
+        process::exit(1);
+    });
+    let filename = path.display().to_string();
+    let module = certo_parser::parse(&src).unwrap_or_else(|errs| {
+        let diags: Vec<Diagnostic> = errs.iter().map(|e| {
+            Diagnostic::error("", format!("{}", e)).with_span(e.span)
+        }).collect();
+        eprint!("{}", render_all(&diags, &src, &filename, colour));
+        eprintln!("aborting due to {} parse error(s)", diags.len());
+        process::exit(1);
+    });
+    (module, src)
+}
+
+/// Run typeck with stdlib builtins seeded. Exits on type errors.
+fn run_typeck(module: &Module, src: &str, filename: &str, colour: bool) {
+    let mut env     = TypeEnv::new();
+    let mut counter = 0u32;
+    env.seed_builtins(&mut counter);
+    certo_stdlib::seed_stdlib(&mut env, &mut counter);
+
+    if let Err(errs) = certo_typeck::check_module_seeded(module, env, counter) {
+        let diags: Vec<Diagnostic> = errs.iter()
+            .map(|e| type_error_to_diagnostic(e))
+            .collect();
+        eprint!("{}", render_all(&diags, src, filename, colour));
+        eprintln!("aborting due to {} type error(s)", diags.len());
+        process::exit(1);
+    }
+}
+
+/// Convert a `TypeError` into a human-friendly `Diagnostic` with labels and notes.
+fn type_error_to_diagnostic(e: &TypeError) -> Diagnostic {
+    match &e.kind {
+        TypeErrorKind::Mismatch { expected, found } => {
+            Diagnostic::error("E0200",
+                format!("type mismatch: expected `{}`, found `{}`",
+                    expected.display(), found.display()))
+                .with_span(e.span)
+                .with_label(format!("expected `{}`", expected.display()))
+                .with_note(format!(
+                    "the expression has type `{}` but `{}` is required here",
+                    found.display(), expected.display()))
+        }
+        TypeErrorKind::CannotUnify { left, right } => {
+            Diagnostic::error("E0201",
+                format!("cannot unify `{}` with `{}`", left.display(), right.display()))
+                .with_span(e.span)
+                .with_label(format!("types `{}` and `{}` are incompatible", left.display(), right.display()))
+        }
+        TypeErrorKind::OccursCheck { var, ty } => {
+            Diagnostic::error("E0202",
+                format!("infinite type: type variable ?t{} would contain itself in `{}`",
+                    var, ty.display()))
+                .with_span(e.span)
+                .with_note("this usually means a recursive type alias without a base case")
+        }
+        TypeErrorKind::MissingAnnotation { name } => {
+            Diagnostic::error("E0203",
+                format!("recursive function `{}` needs an explicit return type", name))
+                .with_span(e.span)
+                .with_label("return type required here")
+                .with_note(format!("add `: ReturnType` after the parameter list, e.g.  fn {}(...): Int = ...", name))
+        }
+        TypeErrorKind::ArityMismatch { expected, found } => {
+            Diagnostic::error("E0204",
+                format!("wrong number of arguments: expected {}, found {}", expected, found))
+                .with_span(e.span)
+                .with_label(format!("this call has {} argument(s)", found))
+        }
+        TypeErrorKind::UnknownField { field, on } => {
+            Diagnostic::error("E0205",
+                format!("no field `{}` on type `{}`", field, on.display()))
+                .with_span(e.span)
+                .with_label(format!("`{}` has no such field", on.display()))
+        }
+        TypeErrorKind::UnboundName(name) => {
+            Diagnostic::error("E0206", format!("undefined name `{}`", name))
+                .with_span(e.span)
+                .with_label("not found in this scope")
+                .with_note(format!(
+                    "if `{}` is a stdlib function, make sure to `import` the module",
+                    name))
+        }
+    }
 }
 
 fn find_cc() -> Option<String> {
@@ -530,6 +726,8 @@ fn print_top_help() {
     eprintln!();
     eprintln!("Usage:");
     eprintln!("  certo new <project-name>         Scaffold a new project");
+    eprintln!("  certo check <file.certo>         Type-check without compiling");
+    eprintln!("  certo run   <file.certo> [-- args]  Compile and run");
     eprintln!("  certo <file.certo> [-o <out>]    Compile a Certo source file");
     eprintln!("  certo build <file.certo> ...     Same with explicit subcommand");
     eprintln!("  certo migrate <subcommand>       Database migration tools");
@@ -538,7 +736,7 @@ fn print_top_help() {
     eprintln!("  -o <file>    Output path");
     eprintln!("  --emit-c     Stop after emitting C; write <stem>.c");
     eprintln!("  --emit-dll   Compile to a shared library (.dll / .so)");
-    eprintln!("  -v           Verbose: print the compiler command");
+    eprintln!("  -v           Verbose: print the C compiler command");
     eprintln!();
     eprintln!("Migrate subcommands:");
     eprintln!("  up [--dry-run]     Apply pending migrations");
@@ -671,19 +869,9 @@ fn load_migrations(project_root: &Path) -> Vec<MigrationDecl> {
         .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("certo"))
         .collect();
     paths.sort();
+    let colour = stderr_is_tty();
     for path in paths {
-        let src = std::fs::read_to_string(&path).unwrap_or_else(|e| {
-            eprintln!("error reading {}: {}", path.display(), e); process::exit(1);
-        });
-        let filename_m = path.display().to_string();
-        let colour_m   = stderr_is_tty();
-        let module = certo_parser::parse(&src).unwrap_or_else(|errs| {
-            let diags: Vec<Diagnostic> = errs.iter().map(|e| {
-                Diagnostic::error("", format!("{}", e)).with_span(e.span)
-            }).collect();
-            eprint!("{}", render_all(&diags, &src, &filename_m, colour_m));
-            process::exit(1);
-        });
+        let (module, _) = parse_file_or_exit(&path, colour);
         for decl in &module.decls {
             if let Decl::Migration(m) = &decl.node { result.push(m.clone()); }
         }

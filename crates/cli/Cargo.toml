@@ -14,4 +14,5 @@ certo-migrate     = { path = "../migrate" }
 certo-codegen     = { path = "../codegen" }
 certo-stdlib      = { path = "../stdlib" }
 certo-diagnostics = { path = "../diagnostics" }
+certo-typeck      = { path = "../typeck" }
 tempfile          = "3"
