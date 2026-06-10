@@ -33,6 +33,10 @@ static CertoList* list_alloc(int64_t cap) {
 CertoList* certo_list_new_empty(void) {
     return list_alloc(8);
 }
+/* Alias used by stdlib modules (csv, regex, json). */
+CertoList* certo_list_new(void) {
+    return list_alloc(8);
+}
 
 CertoList* certo_list_of(int64_t n, ...) {
     va_list ap;

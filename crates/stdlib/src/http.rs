@@ -281,10 +281,6 @@ certo_text_t certo_http_request_header(CertoHttpRequest* r, certo_text_t name) {
 }
 
 #ifdef _WIN32
-#include <winsock2.h>
-#include <ws2tcpip.h>
-#pragma comment(lib, "ws2_32.lib")
-
 /* ---- internal: heap-duplicate a string -------------------------- */
 static char* http_srv_strdup(const char* s) {
     if (!s) { char* e = (char*)malloc(1); e[0]='\0'; return e; }
