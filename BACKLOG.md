@@ -66,14 +66,14 @@ Tasks are listed in implementation order. Completed tasks have the crate they li
 | 58 | `[build].output` from `certo.toml` — `cmd_build` now writes binaries to the configured output directory | `crates/cli` |
 | 59 | `certo build` / bare `certo` reads `entry` from `certo.toml` — no explicit file argument required in a project directory | `crates/cli` |
 | 60 | `certo db` subcommands — `migrate`, `rollback`, `status`, `create`; `certo migrate` kept as alias | `crates/cli` |
+| 61 | `guard` statement HIR lint pass (L005) — literal bool condition, L004 improvement for terminal guards | `crates/cli` |
+| 62 | `?` operator in REPL two-pass probe — wraps body in `Result`-returning helper when `?` detected | `crates/cli` |
+| 63 | `certo db pull` — introspect live PostgreSQL via `psql`, emit `db/schema.cto` with PascalCase types and camelCase fields | `crates/cli` |
 
 ## Pending
 
 | # | Task | Notes |
 |---|------|-------|
-| 61 | `guard` statement in HIR lint pass (L005) | HIR lowering desugars guard to `if !cond { else_expr }` — lint should recognise the guard pattern for better messages |
-| 62 | `?` in REPL two-pass probe | REPL type probe wraps in `Bool` annotation; `?` inside probe expressions may confuse the probe |
-| 63 | `certo db pull` — introspect live DB schema | Connect via `DATABASE_URL`, read pg_catalog, emit `db/schema.cto` snapshot; stub currently exits with "coming soon" |
 | 64 | Multiple integer types (`Int8`, `Int16`, `Int32`, `UInt`) | Spec §4.1 defines these; compiler only has `Int` (Int64) |
 | 65 | `statemachine` declaration lowering | Keyword and AST stub exist; HIR/codegen not implemented |
 | 66 | Named function arguments (`f(page: 2, size: 50)`) | Spec §3.2; parser does not yet support named args at call sites |
