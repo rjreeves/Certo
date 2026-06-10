@@ -8,9 +8,6 @@ pub const CORE_C: &str = r#"
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
-#ifndef _WIN32
-#include <sys/wait.h>
-#endif
 
 /* ---- print / println ---- */
 /* Return int64_t so generated code can assign the result to an int64_t temp. */
@@ -232,42 +229,6 @@ certo_text_t certo_arg(int64_t i) {
     return __certo_argv[i];
 }
 
-/* ---- shell exec ---- */
-
-/* Run `cmd` via the system shell; returns the exit code (or -1 on error). */
-int64_t certo_shell_exec(certo_text_t cmd) {
-    if (!cmd) return -1;
-    int rc = system(cmd);
-#ifdef _WIN32
-    return (int64_t)rc;
-#else
-    if (rc == -1) return -1;
-    return (int64_t)(WIFEXITED(rc) ? WEXITSTATUS(rc) : -1);
-#endif
-}
-
-/* Run a PowerShell .ps1 script given its directory path and script name
-   (without extension).  Quotes the full path to handle spaces.
-   Returns the process exit code (or -1 on error). */
-int64_t certo_run_ps1(certo_text_t path, certo_text_t name) {
-    if (!path || !name) return -1;
-    /* Build: powershell.exe -ExecutionPolicy Bypass -File "<path>\<name>.ps1" */
-    size_t len = strlen(path) + strlen(name) + 80;
-    char* cmd = (char*)malloc(len);
-    if (!cmd) certo_panic("out of memory");
-    snprintf(cmd, len,
-        "powershell.exe -ExecutionPolicy Bypass -File \"%s\\%s.ps1\"",
-        path, name);
-    int rc = system(cmd);
-    free(cmd);
-#ifdef _WIN32
-    return (int64_t)rc;
-#else
-    if (rc == -1) return -1;
-    return (int64_t)(WIFEXITED(rc) ? WEXITSTATUS(rc) : -1);
-#endif
-}
-
 /* ---- parseInt / parseFloat ---- */
 /* Returns NULL (None) on failure, heap-allocated int64_t* on success. */
 int64_t* certo_parse_int(certo_text_t s) {
@@ -368,11 +329,4 @@ fn argCount(): Int
 /// Index 0 is the program name; user-supplied args start at index 1.
 fn arg(i: Int): Text?
 
-/// Run `cmd` through the system shell and return its exit code.
-/// On Windows this calls cmd.exe; build your own powershell prefix if needed.
-fn shellExec(cmd: Text): Int [io]
-
-/// Run a PowerShell script at `path\name.ps1` and return its exit code.
-/// Handles path quoting automatically so spaces in the path are safe.
-fn runPs1(path: Text, name: Text): Int [io]
 "#;
