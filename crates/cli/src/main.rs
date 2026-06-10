@@ -281,7 +281,7 @@ fn cmd_build(args: &[String], quiet: bool) {
             .collect::<Vec<_>>()
             .join("/")
             .into();
-        let candidate = base_dir.join(rel).with_extension("certo");
+        let candidate = base_dir.join(rel).with_extension("cto");
         if candidate.exists() {
             let (imp_module, imp_src) = parse_file_or_exit(&candidate, colour);
             let imp_filename = candidate.display().to_string();
@@ -1632,7 +1632,7 @@ fn load_migrations(project_root: &Path) -> Vec<MigrationDecl> {
         .unwrap_or_else(|e| { eprintln!("error reading migrations/: {}", e); process::exit(1); })
         .filter_map(|e| e.ok())
         .map(|e| e.path())
-        .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("certo"))
+        .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("cto"))
         .collect();
     paths.sort();
     let colour = stderr_is_tty();
