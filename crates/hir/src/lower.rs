@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use certo_ast::module::Module;
-use certo_ast::decl::Decl;
+use certo_ast::decl::{Decl, FnParam};
 use certo_ast::expr::{Expr, Stmt, Lit, BinOp as AstBinOp, UnOp as AstUnOp, FStringPart};
 use certo_ast::pattern::Pattern;
 use certo_ast::span::{S, Span};
@@ -21,6 +21,8 @@ struct Cx {
     locals:     Vec<HashMap<String, LocalId>>,
     /// Name → FnId for top-level functions.
     globals:    HashMap<String, FnId>,
+    /// Name → param list for user-defined functions (for labeled/default arg normalization).
+    fn_params:  HashMap<String, Vec<FnParam>>,
     errors:     Vec<LowerError>,
 }
 
@@ -31,6 +33,7 @@ impl Cx {
             next_fn:    0,
             locals:     vec![HashMap::new()],
             globals:    HashMap::new(),
+            fn_params:  HashMap::new(),
             errors:     Vec::new(),
         }
     }
@@ -80,6 +83,7 @@ pub fn lower_module(module: &Module) -> Result<HirModule, Vec<LowerError>> {
         if let Decl::Fn(f) = &sdecl.node {
             let id = cx.fresh_fn();
             cx.globals.insert(f.name.node.clone(), id);
+            cx.fn_params.insert(f.name.node.clone(), f.params.clone());
         }
     }
 
@@ -197,9 +201,68 @@ fn lower_expr(expr: &S<Expr>, cx: &mut Cx) -> HirExpr {
         }
 
         Expr::App { func, args, .. } => {
-            let func = lower_expr(func, cx);
-            let args = args.iter().map(|a| lower_expr(&a.value, cx)).collect();
-            HirExpr { kind: HirExprKind::Call { func: Box::new(func), args }, ty: Ty::Error, span }
+            let func_hir = lower_expr(func, cx);
+
+            // Check if we need to normalize labeled args or fill defaults
+            let fn_name = match &func.node {
+                Expr::Path { path, .. } => path.segments.last().map(|s| s.node.clone()),
+                _ => None,
+            };
+            let has_labels = args.iter().any(|a| a.label.is_some());
+
+            let lowered_args = if let Some(ref fname) = fn_name {
+                if let Some(params) = cx.fn_params.get(fname).cloned() {
+                    if has_labels || args.len() < params.len() {
+                        // Normalize: reorder labeled args, insert defaults for missing
+                        let mut slots: Vec<Option<HirExpr>> = vec![None; params.len()];
+                        let mut pos_cursor = 0usize;
+                        for arg in args {
+                            let expr = lower_expr(&arg.value, cx);
+                            if let Some(label) = &arg.label {
+                                if let Some(idx) = params.iter().position(|p| p.name.node == label.node) {
+                                    slots[idx] = Some(expr);
+                                } else {
+                                    while pos_cursor < slots.len() && slots[pos_cursor].is_some() {
+                                        pos_cursor += 1;
+                                    }
+                                    if pos_cursor < slots.len() {
+                                        slots[pos_cursor] = Some(expr);
+                                        pos_cursor += 1;
+                                    }
+                                }
+                            } else {
+                                while pos_cursor < slots.len() && slots[pos_cursor].is_some() {
+                                    pos_cursor += 1;
+                                }
+                                if pos_cursor < slots.len() {
+                                    slots[pos_cursor] = Some(expr);
+                                    pos_cursor += 1;
+                                }
+                            }
+                        }
+                        slots.into_iter().enumerate().map(|(i, maybe)| {
+                            maybe.unwrap_or_else(|| {
+                                if let Some(default_expr) = &params[i].default {
+                                    lower_expr(default_expr, cx)
+                                } else {
+                                    cx.err(LowerErrorKind::Unsupported(
+                                        format!("missing required argument `{}`", params[i].name.node)
+                                    ), span);
+                                    HirExpr { kind: HirExprKind::Unit, ty: Ty::Error, span }
+                                }
+                            })
+                        }).collect()
+                    } else {
+                        args.iter().map(|a| lower_expr(&a.value, cx)).collect()
+                    }
+                } else {
+                    args.iter().map(|a| lower_expr(&a.value, cx)).collect()
+                }
+            } else {
+                args.iter().map(|a| lower_expr(&a.value, cx)).collect()
+            };
+
+            HirExpr { kind: HirExprKind::Call { func: Box::new(func_hir), args: lowered_args }, ty: Ty::Error, span }
         }
 
         Expr::BinOp { op, left, right, .. } => {

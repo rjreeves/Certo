@@ -1,0 +1,16 @@
+// Named and optional parameters
+
+fn connect(host: Text, port: Int = 5432, ssl: Bool = false): Text {
+  f"${host}:${intToText(port)} ssl=${boolToText(ssl)}"
+}
+
+fn main(): Unit {
+  // Positional (classic)
+  print(connect("localhost", 5432, false))
+
+  // Named args — any order
+  print(connect(host: "db.prod.example.com", ssl: true))
+
+  // Mix: positional first, then named
+  print(connect("localhost", ssl: true))
+}

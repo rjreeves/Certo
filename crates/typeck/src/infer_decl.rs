@@ -68,6 +68,10 @@ fn hoist_decl(
             };
             let fn_ty = Ty::Fn { params: param_tys, ret: Box::new(ret_ty) };
             ctx.env.define(f.name.node.clone(), fn_ty);
+            let meta: Vec<(String, bool)> = f.params.iter()
+                .map(|p| (p.name.node.clone(), p.default.is_some()))
+                .collect();
+            ctx.env.define_param_meta(f.name.node.clone(), meta);
         }
         Decl::Val(v) => {
             let mut ctx = Ctx { env, uf, errors, counter };

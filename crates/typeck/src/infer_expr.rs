@@ -116,7 +116,76 @@ pub fn infer(expr: &S<Expr>, ctx: &mut Ctx<'_>) -> Ty {
 
         Expr::App { func, args, span } => {
             let func_ty = infer(func, ctx);
-            let arg_tys: Vec<Ty> = args.iter().map(|a| infer(&a.value, ctx)).collect();
+
+            // Determine if any arg is labeled or if fewer args than params (defaults)
+            let has_labels = args.iter().any(|a| a.label.is_some());
+            let fn_name = if let Expr::Path { path, .. } = &func.node {
+                path.segments.last().map(|s| s.node.clone())
+            } else {
+                None
+            };
+
+            let arg_tys: Vec<Ty> = if has_labels {
+                if let Some(ref fname) = fn_name {
+                    if let Some(params) = ctx.env.get_param_meta(fname).cloned() {
+                        // Reorder labeled args to match param positions
+                        let mut slots: Vec<Option<Ty>> = vec![None; params.len()];
+                        let mut pos_cursor = 0usize;
+                        for arg in args {
+                            let ty = infer(&arg.value, ctx);
+                            if let Some(label) = &arg.label {
+                                if let Some(idx) = params.iter().position(|(n, _)| n == &label.node) {
+                                    slots[idx] = Some(ty);
+                                } else {
+                                    // Unknown label — fallback to positional
+                                    while pos_cursor < slots.len() && slots[pos_cursor].is_some() {
+                                        pos_cursor += 1;
+                                    }
+                                    if pos_cursor < slots.len() {
+                                        slots[pos_cursor] = Some(ty);
+                                        pos_cursor += 1;
+                                    }
+                                }
+                            } else {
+                                while pos_cursor < slots.len() && slots[pos_cursor].is_some() {
+                                    pos_cursor += 1;
+                                }
+                                if pos_cursor < slots.len() {
+                                    slots[pos_cursor] = Some(ty);
+                                    pos_cursor += 1;
+                                }
+                            }
+                        }
+                        // Fill missing slots with fresh vars (will unify with param type)
+                        slots.into_iter().map(|s| s.unwrap_or_else(|| ctx.fresh())).collect()
+                    } else {
+                        args.iter().map(|a| infer(&a.value, ctx)).collect()
+                    }
+                } else {
+                    args.iter().map(|a| infer(&a.value, ctx)).collect()
+                }
+            } else if let Some(ref fname) = fn_name {
+                // No labels — but check if fewer args than params (defaults)
+                if let Some(params) = ctx.env.get_param_meta(fname).cloned() {
+                    if args.len() < params.len() {
+                        let mut tys: Vec<Ty> = args.iter().map(|a| infer(&a.value, ctx)).collect();
+                        // Fill remaining with fresh vars for params that have defaults
+                        for (_, has_default) in params.iter().skip(args.len()) {
+                            if *has_default {
+                                tys.push(ctx.fresh());
+                            }
+                        }
+                        tys
+                    } else {
+                        args.iter().map(|a| infer(&a.value, ctx)).collect()
+                    }
+                } else {
+                    args.iter().map(|a| infer(&a.value, ctx)).collect()
+                }
+            } else {
+                args.iter().map(|a| infer(&a.value, ctx)).collect()
+            };
+
             let ret_ty = ctx.fresh();
             let expected_fn = Ty::Fn { params: arg_tys, ret: Box::new(ret_ty.clone()) };
             ctx.unify(func_ty, expected_fn, *span);
@@ -166,6 +235,20 @@ pub fn infer(expr: &S<Expr>, ctx: &mut Ctx<'_>) -> Ty {
         }
 
         Expr::Field { expr, field, span } => {
+            // Check if this is a module-qualified call: Text.join, List.map, etc.
+            // (upper-case single-segment path not bound as a local)
+            if let Expr::Path { path, .. } = &expr.node {
+                let first = path.segments.first().map(|s| s.node.as_str()).unwrap_or("");
+                let is_upper = first.chars().next().map(|c| c.is_uppercase()).unwrap_or(false);
+                if is_upper {
+                    let qualified = format!("{}.{}", first, field.node);
+                    if let Some(ty) = ctx.env.lookup(&qualified) {
+                        let ty = ty.clone();
+                        return ctx.instantiate(ty);
+                    }
+                }
+            }
+
             let obj_ty = infer(expr, ctx);
             let obj_ty = ctx.uf.apply(&obj_ty);
             match &obj_ty {
