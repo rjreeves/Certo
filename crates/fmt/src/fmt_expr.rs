@@ -144,6 +144,14 @@ pub fn fmt_expr(expr: &Expr, indent: usize) -> String {
                 fmt_expr(&body.node, indent + 1),
                 ind(indent))
         }
+
+        Expr::While { cond, body, .. } => {
+            format!("while {} {{\n{}{}\n{}}}",
+                fmt_expr(&cond.node, indent),
+                ind(indent + 1),
+                fmt_expr(&body.node, indent + 1),
+                ind(indent))
+        }
     }
 }
 

@@ -81,6 +81,7 @@ pub enum Token<'src> {
     #[token("trait")]       Trait,
     #[token("impl")]        Impl,
     #[token("for")]         For,
+    #[token("while")]       While,
     #[token("where")]       Where,
     #[token("as")]          As,
     #[token("statemachine")] StateMachine,
