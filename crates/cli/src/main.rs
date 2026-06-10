@@ -1,6 +1,7 @@
 mod cmd_doc;
 mod cmd_watch;
 mod cmd_repl;
+mod cmd_lint;
 
 
 use std::path::{Path, PathBuf};
@@ -1198,8 +1199,13 @@ fn cmd_lint(args: &[String]) {
             "--help" | "-h" => {
                 println!("Usage: certo lint <file.certo>...");
                 println!();
-                println!("Run lint checks on Certo source files.");
-                println!("Reports: unused parameters, unreachable code after panic/todo.");
+                println!("Run lint checks on Certo source files (HIR dataflow pass).");
+                println!("  L001  unused parameter");
+                println!("  L002  unused variable (val/var declared but never read)");
+                println!("  L003  assigned but never read (value written then overwritten)");
+                println!("  L004  unreachable statement (after panic/todo/unreachable)");
+                println!();
+                println!("Prefix a name with `_` to suppress all L001/L002 warnings for it.");
                 return;
             }
             other if other.starts_with('-') => {
@@ -1231,7 +1237,7 @@ fn cmd_lint(args: &[String]) {
                 process::exit(1);
             }
         };
-        let w = lint_module(&module, path, &src, color);
+        let w = cmd_lint::lint_hir(&module, path, &src, color);
         warnings += w;
     }
     if warnings > 0 {
@@ -1242,67 +1248,6 @@ fn cmd_lint(args: &[String]) {
     }
 }
 
-fn lint_module(module: &certo_ast::module::Module, path: &Path, src: &str, _color: bool) -> usize {
-    use certo_ast::decl::Decl;
-    let mut count = 0;
-
-    for decl in &module.decls {
-        let Decl::Fn(f) = &decl.node else { continue };
-
-        for param in &f.params {
-            let name = &param.name.node;
-            if name.starts_with('_') { continue; }
-            let body_src = if let Some(b) = &f.body {
-                let s = b.span.start as usize;
-                let e = b.span.end as usize;
-                src.get(s..e).unwrap_or("")
-            } else { continue };
-            let occurrences = body_src.matches(name.as_str()).count();
-            if occurrences == 0 {
-                let line = src[..param.name.span.start as usize].chars().filter(|&c| c == '\n').count() + 1;
-                eprintln!("{}:{}: warning: unused parameter `{}`", path.display(), line, name);
-                count += 1;
-            }
-        }
-
-        if let Some(body) = &f.body {
-            count += lint_unreachable_after_terminal(&body.node, path, src);
-        }
-    }
-    count
-}
-
-fn lint_unreachable_after_terminal(expr: &certo_ast::expr::Expr, path: &Path, src: &str) -> usize {
-    use certo_ast::expr::{Expr, Stmt};
-    let mut count = 0;
-    if let Expr::Block { stmts, .. } = expr {
-        let mut found_terminal = false;
-        for stmt in stmts {
-            if found_terminal {
-                let pos = match stmt {
-                    Stmt::Val { span, .. } | Stmt::Var { span, .. }
-                    | Stmt::Assign { span, .. } | Stmt::Defer { span, .. }
-                    | Stmt::Expr { span, .. } => span.start as usize,
-                };
-                let line = src[..pos].chars().filter(|&c| c == '\n').count() + 1;
-                eprintln!("{}:{}: warning: unreachable statement", path.display(), line);
-                count += 1;
-                break;
-            }
-            if let Stmt::Expr { expr: e, .. } = stmt {
-                if let Expr::App { func, .. } = &e.node {
-                    if let Expr::Path { path: p, .. } = &func.node {
-                        let name = p.segments.last().map(|s| s.node.as_str()).unwrap_or("");
-                        if matches!(name, "panic" | "todo" | "unreachable") {
-                            found_terminal = true;
-                        }
-                    }
-                }
-            }
-        }
-    }
-    count
-}
 
 // ------------------------------------------------------------------ //
 // bench
