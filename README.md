@@ -97,8 +97,9 @@ certo lint counter.cto                  # unused-variable and dead-code warnings
 certo bench counter.cto                 # run bench_ functions, report ns/iter
 certo test counter.cto                  # run test blocks
 certo doc mylib.cto -o docs/            # generate HTML docs from /// comments
-certo migrate up                        # apply pending DB migrations
-certo migrate status                    # show migration state
+certo db migrate                        # apply pending DB migrations
+certo db rollback                       # roll back last migration
+certo db status                         # show migration state
 certo new my-project                    # scaffold a new project
 certo repl                              # interactive REPL
 ```

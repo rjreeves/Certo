@@ -595,13 +595,16 @@ Certo ships a migration runner that applies numbered SQL files tracked in a
 ### Commands
 
 ```powershell
-certo migrate up              # apply all pending migrations
-certo migrate up --dry-run    # preview SQL without executing
-certo migrate down            # roll back the most recent migration
-certo migrate down 3          # roll back the last 3 migrations
-certo migrate status          # show applied vs pending migrations
-certo migrate create add_users_table   # scaffold a new migration file
+certo db migrate              # apply all pending migrations
+certo db migrate --dry-run    # preview SQL without executing
+certo db rollback             # roll back the most recent migration
+certo db rollback 3           # roll back the last 3 migrations
+certo db status               # show applied vs pending migrations
+certo db create add_users_table        # scaffold a new migration file
+certo db pull                 # introspect live DB schema (coming soon)
 ```
+
+`certo migrate` is an alias for `certo db` and accepts the same subcommands.
 
 ### Migration files
 
@@ -960,10 +963,11 @@ certo fmt --check myfile.cto
 certo doc mylib.cto -o docs/
 
 # Database migrations
-certo migrate status
-certo migrate up
-certo migrate down
-certo migrate create add_users_table
+certo db status
+certo db migrate
+certo db migrate --dry-run
+certo db rollback
+certo db create add_users_table
 
 # Generate C header
 certo-ffi --header mylib.cto -o mylib.h
