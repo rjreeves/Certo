@@ -33,6 +33,8 @@ struct Cx {
     global_types:  HashMap<String, Ty>,
     /// Sum variant name → parent type name (e.g. "Red" → "Color").
     variant_to_type: HashMap<String, String>,
+    /// Record type name → ordered field names (for spread desugar).
+    record_field_names: HashMap<String, Vec<String>>,
     errors:        Vec<LowerError>,
 }
 
@@ -47,9 +49,10 @@ impl Cx {
             stdlib_params: stdlib_param_names(),
             sm_returns:    HashMap::new(),
             fn_ret_types:  HashMap::new(),
-            global_types:    HashMap::new(),
-            variant_to_type: HashMap::new(),
-            errors:          Vec::new(),
+            global_types:        HashMap::new(),
+            variant_to_type:     HashMap::new(),
+            record_field_names:  HashMap::new(),
+            errors:              Vec::new(),
         }
     }
 
@@ -186,6 +189,13 @@ pub fn lower_module(module: &Module) -> Result<HirModule, Vec<LowerError>> {
             cx.fn_params.insert(f.name.node.clone(), f.params.clone());
             if let Some(ret) = &f.ret_ty {
                 cx.fn_ret_types.insert(f.name.node.clone(), ast_ty_to_ty(&ret.node));
+            }
+        }
+        // Register record field names for spread desugar.
+        if let Decl::Type(t) = &sdecl.node {
+            if let certo_ast::decl::TypeBody::Record(rec) = &t.body {
+                let names: Vec<String> = rec.fields.iter().map(|f| f.name.node.clone()).collect();
+                cx.record_field_names.insert(t.name.node.clone(), names);
             }
         }
         // Register sum variant constructors and unit values.
@@ -575,18 +585,52 @@ fn lower_expr(expr: &S<Expr>, cx: &mut Cx) -> HirExpr {
             let record_ty = ty_name.as_deref()
                 .map(|n| Ty::Named { name: n.to_string(), args: vec![] })
                 .unwrap_or(Ty::Error);
-            let mut hir_fields: Vec<(String, HirExpr)> = fields.iter()
+            let explicit: Vec<(String, HirExpr)> = fields.iter()
                 .map(|f| (f.name.node.clone(), lower_expr(&f.value, cx)))
                 .collect();
-            if let Some(b) = base {
-                let base_expr = lower_expr(b, cx);
-                let update_fn = HirExpr { kind: HirExprKind::Global("__record_update".into()), ty: Ty::Error, span };
-                let record_expr = HirExpr { kind: HirExprKind::Record(hir_fields), ty: record_ty.clone(), span };
-                return HirExpr {
-                    kind: HirExprKind::Call { func: Box::new(update_fn), args: vec![base_expr, record_expr] },
-                    ty: record_ty, span,
+            let hir_fields = if let Some(b) = base {
+                // Spread: `TypeName { ..base, field: val }`.
+                // Desugar into a full record literal by emitting base.field for every
+                // field not explicitly listed, using the explicit value for listed ones.
+                let base_hir = lower_expr(b, cx);
+                // Stash the base expression in a fresh local so it's evaluated once.
+                let base_local = cx.fresh_local();
+                // We'll reference the base via HirExprKind::Local for each field access.
+                let base_ty = record_ty.clone();
+                let all_fields: Vec<String> = ty_name.as_deref()
+                    .and_then(|n| cx.record_field_names.get(n).cloned())
+                    .unwrap_or_else(|| explicit.iter().map(|(n, _)| n.clone()).collect());
+
+                // Build a block: let _base = base_expr; TypeName { f1: _base.f1, ..overrides }
+                let base_let = HirStmt::Let {
+                    local: base_local,
+                    name:  "_spread_base".into(),
+                    ty:    base_ty.clone(),
+                    init:  base_hir,
                 };
-            }
+                let merged: Vec<(String, HirExpr)> = all_fields.iter().map(|field_name| {
+                    // Use explicit override if present, else read from base.
+                    if let Some(pos) = explicit.iter().position(|(n, _)| n == field_name) {
+                        (field_name.clone(), explicit[pos].1.clone())
+                    } else {
+                        let base_ref = HirExpr { kind: HirExprKind::Local(base_local), ty: base_ty.clone(), span };
+                        let field_access = HirExpr {
+                            kind: HirExprKind::Field { base: Box::new(base_ref), field: field_name.clone() },
+                            ty: Ty::Error,
+                            span,
+                        };
+                        (field_name.clone(), field_access)
+                    }
+                }).collect();
+                let record_expr = HirExpr { kind: HirExprKind::Record(merged), ty: record_ty.clone(), span };
+                return HirExpr {
+                    kind: HirExprKind::Block { stmts: vec![base_let], tail: Box::new(record_expr) },
+                    ty: record_ty,
+                    span,
+                };
+            } else {
+                explicit
+            };
             HirExpr { kind: HirExprKind::Record(hir_fields), ty: record_ty, span }
         }
 
@@ -677,6 +721,7 @@ fn lower_expr(expr: &S<Expr>, cx: &mut Cx) -> HirExpr {
                 kind: HirExprKind::For {
                     binding:      local,
                     binding_name: binding.node.clone(),
+                    binding_ty:   Ty::Error,
                     iter:         Box::new(iter_hir),
                     body:         Box::new(body_hir),
                 },

@@ -392,9 +392,14 @@ fn lower_expr(expr: &HirExpr, b: &mut Builder) -> Operand {
 
         HirExprKind::Unsafe(inner) => lower_expr(inner, b),
 
-        HirExprKind::For { binding, binding_name, iter, body } => {
+        HirExprKind::For { binding, binding_name, binding_ty, iter, body } => {
             // Evaluate the iterable once.
             let iter_op = lower_expr(iter, b);
+            // Derive element type from the list type if available, otherwise use binding_ty.
+            let elem_ty = match &iter.ty {
+                Ty::List(inner) => *inner.clone(),
+                _ => binding_ty.clone(),
+            };
 
             // Obtain the length: _len = List.len(iter)
             let len_local = b.declare_local("_len", Ty::Int);
@@ -432,7 +437,7 @@ fn lower_expr(expr: &HirExpr, b: &mut Builder) -> Operand {
 
             // loop_body: binding = List.getOrPanic(iter, _i); body; _i = _i + 1
             b.switch_to(loop_body_bb);
-            let binding_local = b.map_hir_local(*binding, binding_name, Ty::Error);
+            let binding_local = b.map_hir_local(*binding, binding_name, elem_ty);
             let elem_done = b.new_block();
             b.terminate(Terminator::Call {
                 func: Operand::Global("List.getOrPanic".into()),

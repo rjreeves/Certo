@@ -62,6 +62,11 @@ void* certo_list_get(CertoList* l, int64_t i) {
     return l->data[i];
 }
 
+/* Alias used by for-loop codegen (List.getOrPanic desugars to this). */
+static inline void* certo_list_get_or_panic(CertoList* l, int64_t i) {
+    return certo_list_get(l, i);
+}
+
 CertoList* certo_list_push(CertoList* l, void* item) {
     /* Returns a new list (functional update). */
     CertoList* n = list_alloc(l ? l->len + 1 : 1);

@@ -154,6 +154,7 @@ pub enum HirExprKind {
     For {
         binding:      LocalId,
         binding_name: String,
+        binding_ty:   certo_typeck::Ty,
         iter:         Box<HirExpr>,
         body:         Box<HirExpr>,
     },
