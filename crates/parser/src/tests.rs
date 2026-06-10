@@ -166,6 +166,23 @@ fn match_expr() {
 }
 
 #[test]
+fn match_guard() {
+    let src = "module A\nfn f(n: Int): Text = match n {\n    x if x > 0 => \"pos\"\n    _ => \"other\"\n}";
+    let m = ok(src);
+    match &m.decls[0].node {
+        Decl::Fn(f) => {
+            if let Expr::Match { arms, .. } = &f.body.as_ref().unwrap().node {
+                assert!(arms[0].guard.is_some(), "first arm should have a guard");
+                assert!(arms[1].guard.is_none(), "wildcard arm should have no guard");
+            } else {
+                panic!("expected Match");
+            }
+        }
+        _ => panic!(),
+    }
+}
+
+#[test]
 fn block_with_val() {
     let m = ok("module A\nfn f(): Int = { val x = 1 x }");
     match &m.decls[0].node {

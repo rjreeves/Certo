@@ -169,11 +169,13 @@ fn lower_expr(expr: &HirExpr, b: &mut Builder) -> Operand {
             let result   = b.declare_local("_match", expr.ty.clone());
 
             for arm in arms {
-                let arm_bb   = b.new_block();
-                let check_bb = b.current;
+                let arm_bb = b.new_block();
+                // next_arm_bb: where to go if this arm's pattern or guard fails.
+                // Filled in below; starts as a fresh block that becomes the
+                // entry point of the next arm's pattern check.
+                let next_arm_bb = b.new_block();
 
-                // Emit a simple equality check for literal patterns.
-                // Wildcard / bind patterns always match.
+                // ── Pattern check ────────────────────────────────────
                 match &arm.pat {
                     HirPat::Lit(lit) => {
                         let expected = match lit {
@@ -187,36 +189,52 @@ fn lower_expr(expr: &HirExpr, b: &mut Builder) -> Operand {
                             lhs: scrut_op.clone(),
                             rhs: expected,
                         });
-                        let next_arm = b.new_block();
-                        b.terminate(Terminator::If { cond: Operand::Local(cmp), true_bb: arm_bb, false_bb: next_arm });
-                        b.switch_to(next_arm);
+                        // On pattern match → check guard (or go straight to arm).
+                        // On pattern fail → try next arm.
+                        let after_pat = if arm.guard.is_some() { b.new_block() } else { arm_bb };
+                        b.terminate(Terminator::If { cond: Operand::Local(cmp), true_bb: after_pat, false_bb: next_arm_bb });
+                        if arm.guard.is_some() { b.switch_to(after_pat); }
                     }
                     HirPat::Bind { local, name } => {
-                        // Bind the scrutinee to the local.
                         let mir_local = b.map_hir_local(*local, name, Ty::Error);
                         b.assign(mir_local, Rvalue::Use(scrut_op.clone()));
-                        // Unconditional — jump to arm body.
-                        b.terminate(Terminator::Goto(arm_bb));
-                        let dead = b.new_block(); // unreachable fallthrough
-                        b.switch_to(dead);
+                        // Pattern always matches — still need to check guard.
+                        let after_pat = if arm.guard.is_some() { b.new_block() } else { arm_bb };
+                        b.terminate(Terminator::Goto(after_pat));
+                        if arm.guard.is_some() { b.switch_to(after_pat); }
                     }
                     HirPat::Wildcard => {
-                        b.terminate(Terminator::Goto(arm_bb));
-                        let dead = b.new_block();
-                        b.switch_to(dead);
+                        let after_pat = if arm.guard.is_some() { b.new_block() } else { arm_bb };
+                        b.terminate(Terminator::Goto(after_pat));
+                        if arm.guard.is_some() { b.switch_to(after_pat); }
                     }
                     _ => {
-                        // Complex patterns — unconditional for now
-                        b.terminate(Terminator::Goto(arm_bb));
-                        let dead = b.new_block();
-                        b.switch_to(dead);
+                        let after_pat = if arm.guard.is_some() { b.new_block() } else { arm_bb };
+                        b.terminate(Terminator::Goto(after_pat));
+                        if arm.guard.is_some() { b.switch_to(after_pat); }
                     }
                 }
 
+                // ── Guard check (if present) ─────────────────────────
+                // We are now in `after_pat` (only reached this block when
+                // the guard is Some). Evaluate it and branch.
+                if let Some(guard_expr) = &arm.guard {
+                    let guard_op = lower_expr(guard_expr, b);
+                    b.terminate(Terminator::If {
+                        cond:     guard_op,
+                        true_bb:  arm_bb,
+                        false_bb: next_arm_bb,
+                    });
+                }
+
+                // ── Arm body ─────────────────────────────────────────
                 b.switch_to(arm_bb);
                 let arm_op = lower_expr(&arm.body, b);
                 b.assign(result, Rvalue::Use(arm_op));
                 b.terminate(Terminator::Goto(join_bb));
+
+                // Next iteration will emit into next_arm_bb.
+                b.switch_to(next_arm_bb);
             }
 
             // Any unmatched falls through to Unreachable.
