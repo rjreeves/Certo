@@ -471,7 +471,8 @@ property "reverse twice is identity" {
 - **L001** unused parameter — parameter never read in the function body
 - **L002** unused variable — `val`/`var` declared but never read
 - **L003** assigned but never read — variable written but the value discarded before the next write
-- **L004** unreachable statement — code after a call to `panic`/`todo`/`unreachable`
+- **L004** unreachable statement — code after a call to `panic`/`todo`/`unreachable` or after a guard that always fires
+- **L005** guard condition is a literal bool — `guard true else ...` can never fire; `guard false else ...` always fires
 
 ```powershell
 certo lint myapp.cto

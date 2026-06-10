@@ -1247,6 +1247,7 @@ fn cmd_lint(args: &[String]) {
                 println!("  L002  unused variable (val/var declared but never read)");
                 println!("  L003  assigned but never read (value written then overwritten)");
                 println!("  L004  unreachable statement (after panic/todo/unreachable)");
+                println!("  L005  guard condition is a literal true/false");
                 println!();
                 println!("Prefix a name with `_` to suppress all L001/L002 warnings for it.");
                 return;

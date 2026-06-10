@@ -6,11 +6,12 @@
 ///   L003  assigned but never read — variable written after declaration but the
 ///                                   written value is never subsequently read
 ///   L004  unreachable statement   — statement after a call to panic/todo/unreachable
+///   L005  guard clause always true/false — guard condition is a literal bool
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use certo_ast::span::Span;
-use certo_hir::{HirFn, HirExpr, HirExprKind, HirStmt, HirItem, LocalId, lower_module};
+use certo_hir::{HirFn, HirExpr, HirExprKind, HirStmt, HirItem, LocalId, UnOp, lower_module};
 use certo_ast::module::Module;
 
 // ------------------------------------------------------------------ //
@@ -137,7 +138,31 @@ fn lint_block_stmts(expr: &HirExpr, path: &Path, src: &str,
             }
 
             HirStmt::Expr(e) => {
-                if is_terminal_call(e) { terminal = true; }
+                // L005: guard clause with a literal bool condition.
+                if let Some((cond, then_expr)) = as_guard_pattern(e) {
+                    match &cond.kind {
+                        HirExprKind::Bool(true) => {
+                            emit(path, src, e.span, "L005",
+                                "guard condition is always true — this guard clause can never fire",
+                                color);
+                            count += 1;
+                        }
+                        HirExprKind::Bool(false) => {
+                            emit(path, src, e.span, "L005",
+                                "guard condition is always false — this guard always fires; code after is unreachable",
+                                color);
+                            count += 1;
+                            terminal = true;
+                        }
+                        _ => {
+                            // If the then_expr (the early-return branch) is terminal,
+                            // treat the guard as a terminal for L004 purposes.
+                            if is_terminal_call(then_expr) { terminal = true; }
+                        }
+                    }
+                } else if is_terminal_call(e) {
+                    terminal = true;
+                }
                 count += lint_block_stmts(e, path, src, reads, color);
 
                 // A read of a local within this expression clears its pending write.
@@ -281,6 +306,22 @@ fn collect_reads(expr: &HirExpr, out: &mut HashSet<LocalId>) {
 // ------------------------------------------------------------------ //
 // Helpers
 // ------------------------------------------------------------------ //
+
+/// Detect the HIR pattern produced by `guard cond else e`:
+///   Block { stmts: [Expr(If { cond: UnOp(Not, inner), then_expr, else_expr: Unit })], tail: Unit }
+///
+/// Returns `Some((inner_cond, then_expr))` when matched.
+fn as_guard_pattern<'a>(expr: &'a HirExpr) -> Option<(&'a HirExpr, &'a HirExpr)> {
+    let HirExprKind::Block { stmts, tail } = &expr.kind else { return None; };
+    if stmts.len() != 1 { return None; }
+    if !matches!(tail.kind, HirExprKind::Unit) { return None; }
+    let HirStmt::Expr(if_expr) = &stmts[0] else { return None; };
+    let HirExprKind::If { cond, then_expr, else_expr } = &if_expr.kind else { return None; };
+    if !matches!(else_expr.kind, HirExprKind::Unit) { return None; }
+    let HirExprKind::UnOp { op: UnOp::Not, arg } = &cond.kind else { return None; };
+    Some((arg, then_expr)
+    )
+}
 
 /// True if the expression is a direct call to `panic`, `todo`, or `unreachable`.
 fn is_terminal_call(expr: &HirExpr) -> bool {
