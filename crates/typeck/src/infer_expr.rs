@@ -124,13 +124,27 @@ pub fn infer(expr: &S<Expr>, ctx: &mut Ctx<'_>) -> Ty {
         }
 
         Expr::Pipe { left, right, span } => {
-            // `a |> f` is equivalent to `f(a)`
             let left_ty = infer(left, ctx);
-            let right_ty = infer(right, ctx);
-            let ret_ty = ctx.fresh();
-            let expected_fn = Ty::Fn { params: vec![left_ty], ret: Box::new(ret_ty.clone()) };
-            ctx.unify(right_ty, expected_fn, *span);
-            ret_ty
+            match &right.node {
+                // `a |> f(b, c)` — type-check as `f(a, b, c)`
+                Expr::App { func, args, .. } => {
+                    let func_ty = infer(func, ctx);
+                    let mut param_tys = vec![left_ty];
+                    param_tys.extend(args.iter().map(|a| infer(&a.value, ctx)));
+                    let ret_ty = ctx.fresh();
+                    let expected = Ty::Fn { params: param_tys, ret: Box::new(ret_ty.clone()) };
+                    ctx.unify(func_ty, expected, *span);
+                    ret_ty
+                }
+                // `a |> f` — type-check as `f(a)`
+                _ => {
+                    let right_ty = infer(right, ctx);
+                    let ret_ty = ctx.fresh();
+                    let expected_fn = Ty::Fn { params: vec![left_ty], ret: Box::new(ret_ty.clone()) };
+                    ctx.unify(right_ty, expected_fn, *span);
+                    ret_ty
+                }
+            }
         }
 
         Expr::BinOp { op, left, right, span } => {

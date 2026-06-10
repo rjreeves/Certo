@@ -46,6 +46,7 @@ Tasks are listed in implementation order. Completed tasks have the crate they li
 | 38 | Stdlib.Db — parameterized queries, multi-row results, transactions | `crates/stdlib` |
 | 39 | Stdlib.Http — server (Windows/WinSock2, POSIX stub) | `crates/stdlib` |
 | 40 | Match guards (`x if x > 0 => ...`) full-stack | `crates/hir`, `crates/mir` |
+| 41 | Pipe operator partial application (`a \|> f(b)` → `f(a, b)`) | `crates/hir`, `crates/typeck` |
 
 ## Pending
 

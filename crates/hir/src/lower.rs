@@ -178,14 +178,21 @@ fn lower_expr(expr: &S<Expr>, cx: &mut Cx) -> HirExpr {
             }
         }
 
-        // Desugar `a |> f` → `f(a)`
         Expr::Pipe { left, right, .. } => {
             let lhs = lower_expr(left, cx);
-            let func = lower_expr(right, cx);
-            HirExpr {
-                kind: HirExprKind::Call { func: Box::new(func), args: vec![lhs] },
-                ty: Ty::Error,
-                span,
+            match &right.node {
+                // `a |> f(b, c)` → `f(a, b, c)`
+                Expr::App { func, args, .. } => {
+                    let func = lower_expr(func, cx);
+                    let mut call_args = vec![lhs];
+                    call_args.extend(args.iter().map(|a| lower_expr(&a.value, cx)));
+                    HirExpr { kind: HirExprKind::Call { func: Box::new(func), args: call_args }, ty: Ty::Error, span }
+                }
+                // `a |> f` → `f(a)`
+                _ => {
+                    let func = lower_expr(right, cx);
+                    HirExpr { kind: HirExprKind::Call { func: Box::new(func), args: vec![lhs] }, ty: Ty::Error, span }
+                }
             }
         }
 
