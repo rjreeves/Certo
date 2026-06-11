@@ -164,7 +164,7 @@ fn emit_const(c: &MirConst) -> String {
         MirConst::Bool(b)    => if *b { "true".into() } else { "false".into() },
         MirConst::Str(s)     => format!("CERTO_STR(\"{}\")", escape_str(s)),
         MirConst::Uuid(u)    => format!("CERTO_UUID(\"{}\")", u),
-        MirConst::Unit       => "CERTO_UNIT".into(),
+        MirConst::Unit       => "0".into(), // Unit locals are int64_t, 0 is compatible
     }
 }
 
