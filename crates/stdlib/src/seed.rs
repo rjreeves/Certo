@@ -29,6 +29,26 @@ pub fn seed_stdlib(env: &mut TypeEnv, counter: &mut u32) {
     def!("parseInt",   fn1(Ty::Text, Ty::Option(Box::new(Ty::Int))));
     def!("parseFloat", fn1(Ty::Text, Ty::Option(Box::new(Ty::Float))));
 
+    // Option constructors — Some(x) / None
+    {
+        let a = fresh();
+        env.define("Some", poly1(a, fn1(Ty::Var(a), Ty::Option(Box::new(Ty::Var(a))))));
+    }
+    {
+        let a = fresh();
+        env.define("None", poly1(a, Ty::Option(Box::new(Ty::Var(a)))));
+    }
+    // Result constructors — Ok(x) / Err(e)
+    {
+        let a = fresh(); let b = fresh();
+        env.define("Ok",  poly1(a, fn1(Ty::Var(a), Ty::Result(Box::new(Ty::Var(a)), Box::new(Ty::Var(b))))));
+    }
+    {
+        let a = fresh(); let b = fresh();
+        env.define("Err", poly1(b, fn1(Ty::Var(b), Ty::Result(Box::new(Ty::Var(a)), Box::new(Ty::Var(b))))));
+    }
+
+    def!("messageBox",      fn2(Ty::Text, Ty::Text, Ty::Unit)); // messageBox(title, message)
     def!("assert",  fn2(Ty::Bool, Ty::Text, Ty::Unit));
     def!("pow",     fn2(Ty::Int, Ty::Int, Ty::Int));
     def!("absInt",  fn1(Ty::Int, Ty::Int));
