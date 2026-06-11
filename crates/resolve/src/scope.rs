@@ -165,6 +165,7 @@ impl ScopeChain {
             "true", "false",
             // Built-in functions
             "panic", "unreachable", "todo",
+            "messageBox",
         ];
         let frame = self.frames.first_mut().unwrap();
         for b in builtins {

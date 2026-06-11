@@ -475,6 +475,8 @@ fn cmd_build(args: &[String], quiet: bool) {
         } else {
             // lld-link requires an explicit subsystem for console apps
             cmd.arg("-Xlinker").arg("/subsystem:console");
+            // Standard Windows libs (user32 for MessageBox, etc.)
+            cmd.arg("-luser32");
         }
     }
 

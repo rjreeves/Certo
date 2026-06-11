@@ -237,32 +237,119 @@ fn lower_expr(expr: &HirExpr, b: &mut Builder) -> Operand {
                         if arm.guard.is_some() { b.switch_to(after_pat); }
                     }
                     HirPat::Constructor { name, fields } => {
-                        // Compare scrutinee's tag field to the variant constant.
-                        // Emit: `_tag = scrutinee.tag; if _tag == TypeName_VariantName goto arm else next_arm`
-                        let tag_local = b.declare_local("_tag", Ty::Int);
-                        b.assign(tag_local, Rvalue::Field { base: scrut_op.clone(), field: "tag".into() });
-                        // Bind field locals for payload variants.
-                        for (i, field_pat) in fields.iter().enumerate() {
-                            if let HirPat::Bind { local, name: fname } = field_pat {
-                                let field_name = fname.clone();
-                                let ml = b.map_hir_local(*local, fname, Ty::Error);
-                                // Access payload via `scrutinee.variant_lower.field_name`
-                                let variant_local = b.declare_local("_v", Ty::Error);
-                                let vfield = name.to_lowercase();
-                                b.assign(variant_local, Rvalue::Field { base: scrut_op.clone(), field: vfield });
-                                b.assign(ml, Rvalue::Field { base: Operand::Local(variant_local), field: field_name });
-                                let _ = i;
+                        // Special-case built-in Option/Result constructors which use
+                        // pointer/struct representations rather than tagged-union enums.
+                        match name.as_str() {
+                            "None" => {
+                                // None: scrutinee == NULL
+                                let cmp = b.declare_local("_cmp", Ty::Bool);
+                                b.assign(cmp, Rvalue::BinOp {
+                                    op: certo_hir::BinOp::Eq,
+                                    lhs: scrut_op.clone(),
+                                    rhs: Operand::Global("__NULL".into()),
+                                });
+                                let after_pat = if arm.guard.is_some() { b.new_block() } else { arm_bb };
+                                b.terminate(Terminator::If { cond: Operand::Local(cmp), true_bb: after_pat, false_bb: next_arm_bb });
+                                if arm.guard.is_some() { b.switch_to(after_pat); }
+                            }
+                            "Some" => {
+                                // Some(n): scrutinee != NULL; bind n = (intptr_t)scrutinee
+                                let cmp = b.declare_local("_cmp", Ty::Bool);
+                                b.assign(cmp, Rvalue::BinOp {
+                                    op: certo_hir::BinOp::NotEq,
+                                    lhs: scrut_op.clone(),
+                                    rhs: Operand::Global("__NULL".into()),
+                                });
+                                for field_pat in fields.iter() {
+                                    if let HirPat::Bind { local, name: fname } = field_pat {
+                                        let ml = b.map_hir_local(*local, fname, Ty::Error);
+                                        b.assign(ml, Rvalue::Use(scrut_op.clone()));
+                                    }
+                                }
+                                let after_pat = if arm.guard.is_some() { b.new_block() } else { arm_bb };
+                                b.terminate(Terminator::If { cond: Operand::Local(cmp), true_bb: after_pat, false_bb: next_arm_bb });
+                                if arm.guard.is_some() { b.switch_to(after_pat); }
+                            }
+                            "Ok" => {
+                                // Ok(v): __result_is_ok(scrutinee); bind v = __result_unwrap(scrutinee)
+                                let is_ok = b.declare_local("_is_ok", Ty::Bool);
+                                let next_bb = b.new_block();
+                                b.terminate(Terminator::Call {
+                                    func: Operand::Global("__result_is_ok".into()),
+                                    args: vec![scrut_op.clone()],
+                                    dest: is_ok,
+                                    next: next_bb,
+                                });
+                                b.switch_to(next_bb);
+                                for field_pat in fields.iter() {
+                                    if let HirPat::Bind { local, name: fname } = field_pat {
+                                        let ml = b.map_hir_local(*local, fname, Ty::Error);
+                                        let unwrap_bb = b.new_block();
+                                        b.terminate(Terminator::Call {
+                                            func: Operand::Global("__result_unwrap".into()),
+                                            args: vec![scrut_op.clone()],
+                                            dest: ml,
+                                            next: unwrap_bb,
+                                        });
+                                        b.switch_to(unwrap_bb);
+                                    }
+                                }
+                                let after_pat = if arm.guard.is_some() { b.new_block() } else { arm_bb };
+                                b.terminate(Terminator::If { cond: Operand::Local(is_ok), true_bb: after_pat, false_bb: next_arm_bb });
+                                if arm.guard.is_some() { b.switch_to(after_pat); }
+                            }
+                            "Err" => {
+                                // Err(e): !__result_is_ok(scrutinee); bind e = __result_unwrap(scrutinee)
+                                let is_ok = b.declare_local("_is_ok", Ty::Bool);
+                                let next_bb = b.new_block();
+                                b.terminate(Terminator::Call {
+                                    func: Operand::Global("__result_is_ok".into()),
+                                    args: vec![scrut_op.clone()],
+                                    dest: is_ok,
+                                    next: next_bb,
+                                });
+                                b.switch_to(next_bb);
+                                for field_pat in fields.iter() {
+                                    if let HirPat::Bind { local, name: fname } = field_pat {
+                                        let ml = b.map_hir_local(*local, fname, Ty::Error);
+                                        let unwrap_bb = b.new_block();
+                                        b.terminate(Terminator::Call {
+                                            func: Operand::Global("__result_unwrap".into()),
+                                            args: vec![scrut_op.clone()],
+                                            dest: ml,
+                                            next: unwrap_bb,
+                                        });
+                                        b.switch_to(unwrap_bb);
+                                    }
+                                }
+                                let not_ok = b.declare_local("_not_ok", Ty::Bool);
+                                b.assign(not_ok, Rvalue::UnOp { op: certo_hir::UnOp::Not, arg: Operand::Local(is_ok) });
+                                let after_pat = if arm.guard.is_some() { b.new_block() } else { arm_bb };
+                                b.terminate(Terminator::If { cond: Operand::Local(not_ok), true_bb: after_pat, false_bb: next_arm_bb });
+                                if arm.guard.is_some() { b.switch_to(after_pat); }
+                            }
+                            _ => {
+                                // User-defined sum type: compare .tag field to variant constant.
+                                let tag_local = b.declare_local("_tag", Ty::Int);
+                                b.assign(tag_local, Rvalue::Field { base: scrut_op.clone(), field: "tag".into() });
+                                for (i, field_pat) in fields.iter().enumerate() {
+                                    if let HirPat::Bind { local, name: fname } = field_pat {
+                                        let ml = b.map_hir_local(*local, fname, Ty::Error);
+                                        let variant_local = b.declare_local("_v", Ty::Error);
+                                        let vfield = name.to_lowercase();
+                                        b.assign(variant_local, Rvalue::Field { base: scrut_op.clone(), field: vfield });
+                                        b.assign(ml, Rvalue::Field { base: Operand::Local(variant_local), field: fname.clone() });
+                                        let _ = i;
+                                    }
+                                }
+                                let cmp = b.declare_local("_cmp", Ty::Bool);
+                                let variant_tag = Operand::Global(format!("__tag__{}", name));
+                                b.assign(cmp, Rvalue::BinOp { op: certo_hir::BinOp::Eq, lhs: Operand::Local(tag_local), rhs: variant_tag });
+                                let after_pat = if arm.guard.is_some() { b.new_block() } else { arm_bb };
+                                b.terminate(Terminator::If { cond: Operand::Local(cmp), true_bb: after_pat, false_bb: next_arm_bb });
+                                if arm.guard.is_some() { b.switch_to(after_pat); }
                             }
                         }
-                        let cmp = b.declare_local("_cmp", Ty::Bool);
-                        // Compare tag to variant tag constant stored as a global symbol.
-                        // We use a special marker: Operand::Global("__tag__TypeName__VariantName")
-                        // Codegen emits this as `TypeName_VariantName`.
-                        let variant_tag = Operand::Global(format!("__tag__{}", name));
-                        b.assign(cmp, Rvalue::BinOp { op: certo_hir::BinOp::Eq, lhs: Operand::Local(tag_local), rhs: variant_tag });
-                        let after_pat = if arm.guard.is_some() { b.new_block() } else { arm_bb };
-                        b.terminate(Terminator::If { cond: Operand::Local(cmp), true_bb: after_pat, false_bb: next_arm_bb });
-                        if arm.guard.is_some() { b.switch_to(after_pat); }
                     }
                     _ => {
                         let after_pat = if arm.guard.is_some() { b.new_block() } else { arm_bb };

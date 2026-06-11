@@ -467,10 +467,28 @@ static inline intptr_t __result_unwrap(void* r) { return ((certo_result_t*)r)->p
 int64_t certo_pow(int64_t base, int64_t exp);
 void*   certo_coalesce(void* opt, void* fallback);
 
+/* NULL constant used by Option pattern matching (cast to int64_t for comparison) */
+#define __NULL ((int64_t)0)
+
 /* Panic */
 __attribute__((noreturn)) void certo_panic(certo_text_t msg);
 #define certo_unreachable() certo_panic("unreachable")
 #define certo_todo()        certo_panic("not yet implemented")
+
+/* GUI — native message box */
+#ifdef _WIN32
+#  include <windows.h>
+static inline int64_t certo_message_box(certo_text_t title, certo_text_t message) {
+    MessageBoxA(NULL, (const char*)message, (const char*)title, MB_OK | MB_ICONINFORMATION);
+    return 0;
+}
+#else
+static inline int64_t certo_message_box(certo_text_t title, certo_text_t message) {
+    /* Fallback: print to stderr on non-Windows */
+    fprintf(stderr, "[%s] %s\n", (const char*)title, (const char*)message);
+    return 0;
+}
+#endif
 
 /* stdin */
 certo_text_t certo_read_line(void);
