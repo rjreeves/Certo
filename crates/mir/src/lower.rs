@@ -170,7 +170,10 @@ fn lower_expr(expr: &HirExpr, b: &mut Builder) -> Operand {
             let join_bb = b.new_block();
             b.terminate(Terminator::If { cond: cond_op, true_bb: then_bb, false_bb: else_bb });
 
-            let result = b.declare_local("_if", expr.ty.clone());
+            // Use int64_t for Unit results — avoids certo_unit_t ↔ int64_t mismatches
+            // when arm bodies are stdlib calls typed as Ty::Error.
+            let if_ty = if matches!(expr.ty, Ty::Unit) { Ty::Error } else { expr.ty.clone() };
+            let result = b.declare_local("_if", if_ty);
 
             b.switch_to(then_bb);
             let then_op = lower_expr(then_expr, b);
@@ -194,7 +197,8 @@ fn lower_expr(expr: &HirExpr, b: &mut Builder) -> Operand {
         HirExprKind::Match { scrutinee, arms } => {
             let scrut_op = lower_expr(scrutinee, b);
             let join_bb  = b.new_block();
-            let result   = b.declare_local("_match", expr.ty.clone());
+            let match_ty = if matches!(expr.ty, Ty::Unit) { Ty::Error } else { expr.ty.clone() };
+            let result   = b.declare_local("_match", match_ty);
 
             for arm in arms {
                 let arm_bb = b.new_block();
