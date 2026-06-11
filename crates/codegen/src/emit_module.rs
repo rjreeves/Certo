@@ -190,11 +190,28 @@ pub fn emit_module(module: &Module, opts: &CodegenOptions) -> String {
         matches!(&d.node, Decl::Fn(f) if f.name.node == "main")
     });
     if has_main {
+        // On Windows emit a wmain entry point so the CRT passes wchar_t** argv,
+        // which is derived directly from CommandLineToArgvW — immune to shells
+        // (Git Bash, PowerShell, cmd) stripping or mangling quoted arguments.
+        writeln!(out, "#ifdef _WIN32").unwrap();
+        writeln!(out, "int wmain(int argc, wchar_t** argv) {{").unwrap();
+        writeln!(out, "    char** u8 = (char**)malloc((size_t)argc * sizeof(char*));").unwrap();
+        writeln!(out, "    for (int i = 0; i < argc; i++) {{").unwrap();
+        writeln!(out, "        int n = WideCharToMultiByte(CP_UTF8,0,argv[i],-1,NULL,0,NULL,NULL);").unwrap();
+        writeln!(out, "        u8[i] = (char*)malloc((size_t)n);").unwrap();
+        writeln!(out, "        WideCharToMultiByte(CP_UTF8,0,argv[i],-1,u8[i],n,NULL,NULL);").unwrap();
+        writeln!(out, "    }}").unwrap();
+        writeln!(out, "    certo_main_init(argc, (const char**)u8);").unwrap();
+        writeln!(out, "    certo_main();").unwrap();
+        writeln!(out, "    return 0;").unwrap();
+        writeln!(out, "}}").unwrap();
+        writeln!(out, "#else").unwrap();
         writeln!(out, "int main(int argc, const char** argv) {{").unwrap();
         writeln!(out, "    certo_main_init(argc, argv);").unwrap();
         writeln!(out, "    certo_main();").unwrap();
         writeln!(out, "    return 0;").unwrap();
         writeln!(out, "}}").unwrap();
+        writeln!(out, "#endif").unwrap();
     }
 
     out
