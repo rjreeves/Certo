@@ -1,0 +1,10 @@
+module GenSimple
+
+import Stdlib.Core
+
+fn identity<T>(x: T): T = x
+
+fn main(): Unit [io] = {
+    val n: Int = identity(42)
+    println(intToText(n))
+}
