@@ -792,26 +792,11 @@ fn resolve_pg_paths() -> (Option<String>, Option<String>) {
         return (env_inc, env_lib);
     }
 
-    // On Windows, probe common PostgreSQL install locations.
+    // On Windows, probe versioned install directories highest-first so the
+    // newest available libpq is always preferred over whatever pg_config
+    // happens to be on PATH (which may be an older version).
     if cfg!(windows) {
-        // Try pg_config first (works if PostgreSQL\bin is on PATH)
-        if let Ok(out) = std::process::Command::new("pg_config")
-            .args(["--includedir", "--libdir"])
-            .output()
-        {
-            if out.status.success() {
-                let lines: Vec<&str> = std::str::from_utf8(&out.stdout)
-                    .unwrap_or("")
-                    .lines()
-                    .collect();
-                let inc = lines.first().map(|s| s.trim().to_string());
-                let lib = lines.get(1).map(|s| s.trim().to_string());
-                return (inc, lib);
-            }
-        }
-
-        // Probe common install directories for versions 14-17
-        for ver in (14u32..=17).rev() {
+        for ver in (9u32..=20).rev() {
             let base = format!(r"C:\Program Files\PostgreSQL\{}", ver);
             let inc = format!(r"{}\include", base);
             let lib = format!(r"{}\lib", base);
