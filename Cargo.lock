@@ -39,6 +39,7 @@ dependencies = [
  "certo-parser",
  "certo-stdlib",
  "certo-testrunner",
+ "certo-traits",
  "certo-typeck",
  "tempfile",
 ]

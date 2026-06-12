@@ -169,15 +169,17 @@ fn sign(n: Int): Text =
 
 ### Val / var bindings
 
+`let` is an alias for `val` — both declare an immutable binding:
+
 ```
 fn hypotenuse(a: Float, b: Float): Float = {
-    val a2 = a * a
-    val b2 = b * b
+    let a2 = a * a
+    val b2 = b * b   // val and let are interchangeable
     sqrt(a2 + b2)
 }
 ```
 
-Use `val` for immutable bindings and `var` for mutable ones:
+Use `val`/`let` for immutable bindings and `var` for mutable ones:
 
 ```
 fn countDown(n: Int): Unit = {
@@ -240,6 +242,33 @@ Higher-order functions are also available for functional style:
 ```
 fn sumList(xs: List<Int>): Int =
     List.fold(xs, 0, (acc, x) => acc + x)
+```
+
+### Lambdas
+
+Lambdas can be passed inline as `(params) => body` or written with the `fn` expression form:
+
+```
+fn double(xs: List<Int>): List<Int> =
+    List.map(xs, (x) => x * 2)
+
+fn double(xs: List<Int>): List<Int> =
+    List.map(xs, fn(x: Int): Int = x * 2)
+```
+
+**Trailing lambda syntax** — when the last argument is a lambda, it can be
+written outside the parentheses (or the parentheses omitted entirely for
+single-argument calls):
+
+```
+// equivalent to List.map(xs, (x) => x * 2)
+List.map(xs) { x => x * 2 }
+
+// two-parameter lambda in trailing position
+List.fold(xs, 0) { acc, x => acc + x }
+
+// single-argument call — no parens needed
+List.forEach(xs) { x => println(x) }
 ```
 
 ### Error handling with Result and ?
@@ -405,6 +434,81 @@ Decimal.toText(d): Text
 Money.fromCents(cents: Int): Decimal
 Money.toCents(m): Int
 ```
+
+### Stdlib.Db
+
+```
+dbConnect(url: Text): Int [io]          // returns connection handle; 0 = failed
+dbClose(conn: Int): Unit [io]
+dbError(conn: Int): Text
+
+dbExec(conn, sql, params: List<Text>): Int [io]      // rows affected; -1 on error
+dbQuery(conn, sql, params): List<List<Text?>> [io]   // rows × columns; NULL → None
+dbQueryTyped(conn, sql, params, mapper: fn(List<Text?>): T): List<T> [io]
+dbQueryRow(conn, sql, params): List<Text?>? [io]
+dbQueryOne(conn, sql): Text? [io]                    // None when no rows or SQL NULL
+dbColumns(conn, sql): List<Text> [io]
+dbNull(): Text                          // sentinel for SQL NULL parameters
+
+dbBegin(conn): Int [io]
+dbCommit(conn): Int [io]
+dbRollback(conn): Int [io]
+
+// Higher-level wrappers — prefer these over manual resource management
+withConnection(url: Text, body: fn(Int): Result<T, E>): Result<T, E> [io]
+withTransaction(conn: Int, body: fn(): Result<T, E>): Result<T, E> [io]
+```
+
+### `defer` — guaranteed cleanup on scope exit
+
+`defer { expr }` schedules `expr` to run when the enclosing **function** returns,
+regardless of how it exits: normal return, early `?` propagation, or `guard`.
+Multiple defers in one function run in LIFO order (last registered, first executed).
+
+```
+fn readAndProcess(): Result<Text, Text> [io] = {
+    val conn = dbConnect(DATABASE_URL)
+    defer { dbClose(conn) }          // runs on every exit path below
+
+    val rows = dbQuery(conn, "SELECT body FROM messages LIMIT 1", [])?
+    val cell = List.getOrPanic(List.getOrPanic(rows, 0), 0) ?? ""
+    Ok(cell)
+}
+```
+
+Even if the `dbQuery` `?` propagates an `Err`, `dbClose(conn)` is called first.
+
+`defer` is function-scoped (Go-style), not block-scoped. A `defer` inside an `if`
+or `for` body still runs at **function** exit, not at the end of the block.
+
+#### `withConnection` and `withTransaction` — safe, composable resource management
+
+`withConnection` opens a connection, passes it to the body, and **always closes it**
+on exit — whether the body succeeds or fails.
+
+`withTransaction` wraps a body in `BEGIN` / `COMMIT`. If the body returns `Err`
+(including via `?` propagation), it issues `ROLLBACK`. When called inside an existing
+transaction it automatically uses a savepoint instead, so nesting is safe.
+
+Compose them for full resource safety with no manual cleanup:
+
+```
+fn transfer(fromId: Text, toId: Text, amount: Int): Result<Unit, Text> [io] =
+    withConnection(DATABASE_URL) { conn =>
+        withTransaction(conn) {
+            val s = intToText(amount)
+            dbExec(conn, "UPDATE accounts SET balance = balance - $1 WHERE id = $2",
+                   [s, fromId])?
+            dbExec(conn, "UPDATE accounts SET balance = balance + $1 WHERE id = $2",
+                   [s, toId])?
+            Ok(Unit)
+        }
+    }
+```
+
+If either `dbExec` returns `Err`, `?` short-circuits the block, `withTransaction` rolls
+back, `withConnection` closes the connection, and the error reaches the caller — zero
+manual resource management.
 
 ---
 
@@ -842,7 +946,19 @@ cargo build --release --bins
 
 Binaries land in `target\release\`.
 
-### Copy to dist/
+### One-step build (recommended)
+
+```powershell
+.\build.ps1             # release build — compiles Rust + copies binaries + compiles all examples
+.\build.ps1 -Debug      # debug build (faster compile, larger binaries)
+.\build.ps1 -NoExamples # skip example compilation
+```
+
+`build.ps1` in the repo root does everything in one shot: `cargo build`, copies
+the 8 binaries to `dist\`, and compiles all example `.cto` files to verify the
+build is healthy.
+
+### Copy to dist/ only
 
 ```powershell
 .\scripts\release.ps1
@@ -1029,7 +1145,12 @@ certo-wasm mylib.cto --emit-ir -o mylib.wasm.ll
 # Compile UI views to HTML
 certo-ui views.cto -o out/
 
-# Build all binaries from source
+# Build compiler + copy binaries + compile all examples
+.\build.ps1
+.\build.ps1 -Debug        # debug build
+.\build.ps1 -NoExamples   # skip example compilation
+
+# Build and stage binaries only (no examples)
 .\scripts\release.ps1
 
 # Package a release archive

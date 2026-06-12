@@ -137,6 +137,11 @@ fn lint_block_stmts(expr: &HirExpr, path: &Path, src: &str,
                 pending_writes.insert(*local, (name, value.span, false));
             }
 
+            HirStmt::Defer { body } => {
+                if is_terminal_call(body) { terminal = true; }
+                count += lint_block_stmts(body, path, src, reads, color);
+            }
+
             HirStmt::Expr(e) => {
                 // L005: guard clause with a literal bool condition.
                 if let Some((cond, then_expr)) = as_guard_pattern(e) {
@@ -255,9 +260,10 @@ fn collect_reads(expr: &HirExpr, out: &mut HashSet<LocalId>) {
         HirExprKind::Block { stmts, tail } => {
             for stmt in stmts {
                 match stmt {
-                    HirStmt::Let  { init, .. }  => collect_reads(init, out),
+                    HirStmt::Let  { init, .. }    => collect_reads(init, out),
                     HirStmt::Assign { value, .. } => collect_reads(value, out),
-                    HirStmt::Expr(e)             => collect_reads(e, out),
+                    HirStmt::Expr(e)              => collect_reads(e, out),
+                    HirStmt::Defer { body }       => collect_reads(body, out),
                 }
             }
             collect_reads(tail, out);
@@ -338,7 +344,8 @@ fn stmt_span(stmt: &HirStmt) -> Span {
     match stmt {
         HirStmt::Let    { init, .. }  => init.span,
         HirStmt::Assign { value, .. } => value.span,
-        HirStmt::Expr(e)             => e.span,
+        HirStmt::Expr(e)              => e.span,
+        HirStmt::Defer  { body }      => body.span,
     }
 }
 

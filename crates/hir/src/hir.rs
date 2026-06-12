@@ -187,6 +187,8 @@ pub enum HirStmt {
     Assign { local: LocalId, value: HirExpr },
     /// Expression statement.
     Expr(HirExpr),
+    /// `defer { body }` — body runs at function exit, LIFO order.
+    Defer { body: HirExpr },
 }
 
 // ------------------------------------------------------------------ //

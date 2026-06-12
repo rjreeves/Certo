@@ -197,7 +197,9 @@ int64_t certo_db_exec(int64_t handle, certo_text_t sql, CertoList* params) {
 /* ---- query (SELECT → List<List<Text>>) --------------------------- */
 
 /* Run a SELECT with $1..$N parameters.
- * Returns a List<List<Text>> — outer list is rows, inner is columns.
+ * Returns a List<List<Text?>> — outer list is rows, inner is columns.
+ * SQL NULL cells are stored as NULL pointers (Certo None); non-null cells
+ * are heap-copied strings (Certo Some(text)).
  * Returns an empty list on error. */
 CertoList* certo_db_query(int64_t handle, certo_text_t sql, CertoList* params) {
     CertoList* result = certo_list_new_empty();
@@ -216,9 +218,11 @@ CertoList* certo_db_query(int64_t handle, certo_text_t sql, CertoList* params) {
     for (int r = 0; r < nrows; r++) {
         CertoList* row = certo_list_new_empty();
         for (int c = 0; c < ncols; c++) {
-            char *cell = certo_db_strdup(
-                PQgetisnull(res, r, c) ? "" : PQgetvalue(res, r, c));
-            row = certo_list_push(row, (void*)cell);
+            /* NULL pointer = Certo None; heap string = Certo Some(text) */
+            void *cell = PQgetisnull(res, r, c)
+                ? NULL
+                : (void*)certo_db_strdup(PQgetvalue(res, r, c));
+            row = certo_list_push(row, cell);
         }
         result = certo_list_push(result, (void*)row);
     }
@@ -233,16 +237,19 @@ CertoList* certo_db_query_row(int64_t handle, certo_text_t sql, CertoList* param
     return (CertoList*)rows->data[0];
 }
 
-/* Convenience: return the first column of the first row as Text, or "". */
-certo_text_t certo_db_query_one(int64_t handle, certo_text_t sql) {
-    if (handle == 0) return certo_db_strdup("");
+/* Convenience: return the first column of the first row as Text?, or None.
+ * Returns NULL (None) when there are no rows or the cell is SQL NULL.
+ * Returns a heap-copied string pointer (Some(text)) otherwise. */
+void* certo_db_query_one(int64_t handle, certo_text_t sql) {
+    if (handle == 0) return NULL;
     PGconn *conn = (PGconn *)(uintptr_t)handle;
     PGresult *res = PQexec(conn, sql);
-    certo_text_t out;
-    if (PQresultStatus(res) != PGRES_TUPLES_OK || PQntuples(res) == 0) {
-        out = certo_db_strdup("");
+    void *out;
+    if (PQresultStatus(res) != PGRES_TUPLES_OK || PQntuples(res) == 0
+            || PQgetisnull(res, 0, 0)) {
+        out = NULL;
     } else {
-        out = certo_db_strdup(PQgetvalue(res, 0, 0));
+        out = (void*)certo_db_strdup(PQgetvalue(res, 0, 0));
     }
     PQclear(res);
     return out;
@@ -315,10 +322,143 @@ int64_t certo_db_rollback(int64_t handle) {
     PQclear(res);
     return ok;
 }
+
+/* ---- withTransaction ---------------------------------------------- */
+
+/* Monotonically increasing counter for savepoint names.
+ * Not thread-safe — acceptable while Certo's async runtime is single-threaded. */
+static int64_t certo_svp_seq = 0;
+
+/* Execute a zero-arg thunk inside a transaction on the given connection.
+ *
+ * Outer call  (no active txn):  issues BEGIN / COMMIT or ROLLBACK.
+ * Nested call (already in txn): issues SAVEPOINT / RELEASE or
+ *                               ROLLBACK TO SAVEPOINT + RELEASE, leaving
+ *                               the outer transaction intact on failure.
+ *
+ * Returns the Result<T,E> from the thunk unchanged in both cases, so ?
+ * propagation in Certo code works naturally at any nesting depth.
+ *
+ * certo_fn_t is void(*)(void) but the compiled thunk returns void*
+ * (a certo_result_t*).  The cast is safe on every ABI Certo targets
+ * because void* and void share the same return register (rax / r0). */
+void* certo_with_transaction(int64_t handle, certo_fn_t thunk) {
+    if (handle == 0 || !thunk) {
+        return certo_err((intptr_t)(certo_text_t)"withTransaction: invalid connection");
+    }
+    PGconn *conn = (PGconn *)(uintptr_t)handle;
+    typedef void* (*thunk_t)(void);
+
+    PGTransactionStatusType txstatus = PQtransactionStatus(conn);
+
+    if (txstatus == PQTRANS_INERROR) {
+        return certo_err((intptr_t)(certo_text_t)
+            "withTransaction: connection is in error state — call dbRollback first");
+    }
+    if (txstatus == PQTRANS_UNKNOWN) {
+        return certo_err((intptr_t)(certo_text_t)
+            "withTransaction: connection is invalid");
+    }
+
+    if (txstatus == PQTRANS_INTRANS) {
+        /* ---- nested: use a savepoint --------------------------------- */
+        char svp_name[40];
+        snprintf(svp_name, sizeof(svp_name), "certo_svp_%" PRId64, ++certo_svp_seq);
+
+        char sql[80];
+        snprintf(sql, sizeof(sql), "SAVEPOINT %s", svp_name);
+        PGresult *svp = PQexec(conn, sql);
+        if (PQresultStatus(svp) != PGRES_COMMAND_OK) {
+            char *msg = certo_db_strdup(PQerrorMessage(conn));
+            PQclear(svp);
+            return certo_err((intptr_t)(certo_text_t)msg);
+        }
+        PQclear(svp);
+
+        void *result = ((thunk_t)thunk)();
+
+        if (__result_is_ok(result)) {
+            snprintf(sql, sizeof(sql), "RELEASE SAVEPOINT %s", svp_name);
+            PGresult *rel = PQexec(conn, sql);
+            PQclear(rel);
+        } else {
+            /* Roll back to the savepoint, then release it to free server resources. */
+            snprintf(sql, sizeof(sql), "ROLLBACK TO SAVEPOINT %s", svp_name);
+            PGresult *rb = PQexec(conn, sql);
+            PQclear(rb);
+            snprintf(sql, sizeof(sql), "RELEASE SAVEPOINT %s", svp_name);
+            PGresult *rel = PQexec(conn, sql);
+            PQclear(rel);
+        }
+
+        return result;
+    } else {
+        /* ---- outer: use BEGIN / COMMIT / ROLLBACK -------------------- */
+        PGresult *begin = PQexec(conn, "BEGIN");
+        if (PQresultStatus(begin) != PGRES_COMMAND_OK) {
+            char *msg = certo_db_strdup(PQerrorMessage(conn));
+            PQclear(begin);
+            return certo_err((intptr_t)(certo_text_t)msg);
+        }
+        PQclear(begin);
+
+        void *result = ((thunk_t)thunk)();
+
+        if (__result_is_ok(result)) {
+            PGresult *res = PQexec(conn, "COMMIT");
+            PQclear(res);
+        } else {
+            PGresult *res = PQexec(conn, "ROLLBACK");
+            PQclear(res);
+        }
+
+        return result;
+    }
+}
+
+/* ---- withConnection ----------------------------------------------- */
+
+/* Open a connection, call body(conn), then close unconditionally.
+ *
+ * On connect failure returns Err with the libpq error message.
+ * On success or failure of the body, the connection is always closed
+ * before returning — no leak is possible.
+ *
+ * body is fn(Int): Result<T,E>.  certo_fn_t is void(*)(void) but the
+ * compiled lambda actually takes int64_t and returns void*.  The cast
+ * is safe: the argument goes in the first integer register (rdi / r0)
+ * and the void* result comes back in rax / r0 regardless of declared
+ * return type. */
+void* certo_with_connection(certo_text_t connstr, certo_fn_t body) {
+    if (!body) {
+        return certo_err((intptr_t)(certo_text_t)
+            "withConnection: invalid body");
+    }
+
+    int64_t handle = certo_db_connect(connstr);
+    if (handle == 0) {
+        const char *raw = certo_db_last_connect_error
+            ? certo_db_last_connect_error : "withConnection: connection failed";
+        return certo_err((intptr_t)(certo_text_t)certo_db_strdup(raw));
+    }
+
+    typedef void* (*body_t)(int64_t);
+    void *result = ((body_t)body)(handle);
+
+    certo_db_close(handle);
+    return result;
+}
 "#;
 
 /// Certo source declarations for Stdlib.Db.
 pub const DB_CERTO: &str = r#"
+// ── DbRow marker trait ──────────────────────────────────────────────────
+// Types generated by `certo db pull` automatically implement this trait.
+// It is the bound on `dbQueryTyped<T: DbRow>` — only schema-derived types
+// can be used as the typed result, catching mapper/schema mismatches at
+// compile time.
+trait DbRow {}
+
 module Stdlib.Db
 
 // ── Connection ──────────────────────────────────────────────────────
@@ -366,33 +506,38 @@ fn dbExec(conn: Int, sql: Text, params: List<Text>): Int [io]
 // ── Query (SELECT) ───────────────────────────────────────────────────
 
 /// Run a SELECT with positional parameters.
-/// Returns all rows as List<List<Text>> — outer list is rows, inner is columns.
-/// NULL cells are returned as empty strings.
+/// Returns all rows as List<List<Text?>> — outer list is rows, inner is columns.
+/// SQL NULL cells are None; non-null cells are Some(text).
+/// Use `?? ""` (or any default) to coerce a nullable cell to a plain Text.
 ///
 /// Example:
 ///   val rows = dbQuery(conn, "SELECT id, name FROM users WHERE age > $1", ["18"])
 ///   for row in rows {
-///       println(List.getOrPanic(row, 0) ++ " " ++ List.getOrPanic(row, 1))
+///       val id   = List.getOrPanic(row, 0) ?? ""
+///       val name = List.getOrPanic(row, 1) ?? "(unknown)"
+///       println(id ++ " " ++ name)
 ///   }
-fn dbQuery(conn: Int, sql: Text, params: List<Text>): List<List<Text>> [io]
+fn dbQuery(conn: Int, sql: Text, params: List<Text>): List<List<Text?>> [io]
 
 /// Run a SELECT, apply `mapper` to every row, and return a typed list.
 /// This is the preferred API when the schema is known — the return type is
 /// inferred from the mapper, so the compiler verifies the result type.
+/// Each row is List<Text?> so the mapper can handle nullable columns explicitly.
 ///
 /// Example:
 ///   val users = dbQueryTyped(conn,
 ///       "SELECT id, name, email FROM users WHERE active = $1",
 ///       ["true"], usersFromRow)
 ///   // users : List<Users>  — verified by the compiler
-fn dbQueryTyped(conn: Int, sql: Text, params: List<Text>, mapper: fn(List<Text>): T): List<T> [io]
+fn dbQueryTyped<T: DbRow>(conn: Int, sql: Text, params: List<Text>, mapper: fn(List<Text?>): T): List<T> [io]
 
-/// Run a SELECT and return only the first row as List<Text>, or None.
-fn dbQueryRow(conn: Int, sql: Text, params: List<Text>): List<Text>? [io]
+/// Run a SELECT and return only the first row as List<Text?>?, or None if no rows.
+fn dbQueryRow(conn: Int, sql: Text, params: List<Text>): List<Text?>? [io]
 
-/// Run a no-parameter SELECT and return the first column of the first row.
+/// Run a no-parameter SELECT and return the first column of the first row as Text?,
+/// or None when there are no rows or the cell is SQL NULL.
 /// Useful for scalar queries like COUNT or server metadata.
-fn dbQueryOne(conn: Int, sql: Text): Text [io]
+fn dbQueryOne(conn: Int, sql: Text): Text? [io]
 
 /// Return the column names for a query as List<Text>.
 fn dbColumns(conn: Int, sql: Text): List<Text> [io]
@@ -407,4 +552,39 @@ fn dbCommit(conn: Int): Int [io]
 
 /// Roll back the current transaction. Returns 1 on success, 0 on failure.
 fn dbRollback(conn: Int): Int [io]
+
+// ── withTransaction ─────────────────────────────────────────────────
+
+/// Execute `body` inside a transaction on `conn`.
+///
+/// Commits if `body` returns `Ok(_)`, rolls back if it returns `Err(_)`.
+/// The `Result` from `body` is returned unchanged, so `?` propagation
+/// works naturally inside the block.
+///
+/// Example — atomic transfer between accounts:
+///
+///   withTransaction(conn) {
+///       dbExec(conn, "UPDATE accounts SET balance = balance - $1 WHERE id = $2",
+///              [amountStr, fromId])?
+///       dbExec(conn, "UPDATE accounts SET balance = balance + $1 WHERE id = $2",
+///              [amountStr, toId])?
+///       Ok(Unit)
+///   }
+fn withTransaction(conn: Int, body: fn(): Result<T, E>): Result<T, E> [io]
+
+/// Open a connection to `url`, run `body(conn)`, then close the connection —
+/// whether `body` succeeds or fails.  The connection is never leaked.
+///
+/// Returns `Err` immediately if the connection cannot be established.
+/// Otherwise returns the `Result` produced by `body` unchanged.
+///
+/// Pair with `withTransaction` for full resource safety:
+///
+///   withConnection(DATABASE_URL) { conn =>
+///       withTransaction(conn) {
+///           dbExec(conn, "INSERT INTO orders (total) VALUES ($1)", [total])?
+///           Ok(Unit)
+///       }
+///   }
+fn withConnection(url: Text, body: fn(Int): Result<T, E>): Result<T, E> [io]
 "#;
