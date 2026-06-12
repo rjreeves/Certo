@@ -56,6 +56,16 @@ fn hoist_decl(
     match decl {
         Decl::Fn(f) => {
             let mut ctx = Ctx { env, uf, errors, counter };
+
+            // Push a temporary scope so type param bindings don't leak.
+            ctx.env.push();
+            let type_param_vars: Vec<u32> = f.type_params.iter().map(|tp| {
+                *ctx.counter += 1;
+                let v = *ctx.counter;
+                ctx.env.define(tp.name.node.clone(), Ty::Var(v));
+                v
+            }).collect();
+
             let param_tys: Vec<Ty> = f.params.iter()
                 .map(|p| type_expr_to_ty(&p.ty.node, &mut ctx))
                 .collect();
@@ -66,7 +76,15 @@ fn hoist_decl(
                     Ty::Var(*ctx.counter)
                 }
             };
+            ctx.env.pop();
+
             let fn_ty = Ty::Fn { params: param_tys, ret: Box::new(ret_ty) };
+            let fn_ty = if type_param_vars.is_empty() {
+                fn_ty
+            } else {
+                Ty::Forall { vars: type_param_vars, body: Box::new(fn_ty) }
+            };
+
             ctx.env.define(f.name.node.clone(), fn_ty);
             let meta: Vec<(String, bool)> = f.params.iter()
                 .map(|p| (p.name.node.clone(), p.default.is_some()))
@@ -183,6 +201,12 @@ fn check_decl(decl: &Decl, ctx: &mut Ctx<'_>) {
         Decl::Fn(f) => {
             if let Some(body) = &f.body {
                 ctx.env.push();
+                // Pre-define type params as fresh vars so every occurrence of T
+                // in the params and return type resolves to the same inference var.
+                for tp in &f.type_params {
+                    let fresh = ctx.fresh();
+                    ctx.env.define(tp.name.node.clone(), fresh);
+                }
                 // Bind parameters
                 for p in &f.params {
                     let ty = type_expr_to_ty(&p.ty.node, ctx);

@@ -140,9 +140,12 @@ pub fn emit_module(module: &Module, opts: &CodegenOptions) -> String {
     // Lower all functions to MIR once so the actual return types are known.
     // HirFn.ret_ty is Ty::Error (a placeholder) — the MIR return slot (local 0)
     // holds the real type after lower_fn() infers it from the function body.
+    let mut lifted_fns: Vec<certo_mir::MirFn> = Vec::new();
     let fn_mirs: Vec<(certo_mir::MirFn, &str)> = hir.items.iter()
         .filter_map(|item| if let HirItem::Fn(f) = item {
-            Some((lower_fn(f), f.name.as_str()))
+            let (mir, lifted) = lower_fn(f);
+            lifted_fns.extend(lifted);
+            Some((mir, f.name.as_str()))
         } else {
             None
         })
@@ -159,7 +162,23 @@ pub fn emit_module(module: &Module, opts: &CodegenOptions) -> String {
         let pfx = if pub_fns.contains(mir.name.as_str()) { export(&mir.name) } else { "" };
         writeln!(out, "{}{} {}({});", pfx, ret_c, c_fn_name(&mir.name), param_str).unwrap();
     }
+    // Forward-declare lifted lambdas.
+    for mir in &lifted_fns {
+        let ret_ty = mir.locals.first().map(|l| &l.ty).unwrap_or(&certo_typeck::Ty::Unit);
+        let ret_c  = ret_ty_to_c(ret_ty);
+        let params: Vec<String> = mir.locals.iter().skip(1).take(mir.param_count)
+            .map(|l| format!("{} _l{}", ty_to_c(&l.ty), l.id))
+            .collect();
+        let param_str = if params.is_empty() { "void".into() } else { params.join(", ") };
+        writeln!(out, "static {} {}({});", ret_c, c_fn_name(&mir.name), param_str).unwrap();
+    }
     writeln!(out).unwrap();
+
+    // Emit lifted lambda bodies before user functions.
+    for mir in &lifted_fns {
+        emit_fn_with_prefix(mir, "static ", &mut out);
+        writeln!(out).unwrap();
+    }
 
     // Emit function bodies from cached MIR.
     // Interleave any non-Fn HIR items (Const) at the right position.

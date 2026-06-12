@@ -188,7 +188,8 @@ pub fn lower_module(module: &Module) -> Result<HirModule, Vec<LowerError>> {
             cx.globals.insert(f.name.node.clone(), id);
             cx.fn_params.insert(f.name.node.clone(), f.params.clone());
             if let Some(ret) = &f.ret_ty {
-                cx.fn_ret_types.insert(f.name.node.clone(), ast_ty_to_ty(&ret.node));
+                let tp_names: Vec<&str> = f.type_params.iter().map(|tp| tp.name.node.as_str()).collect();
+                cx.fn_ret_types.insert(f.name.node.clone(), ast_ty_to_ty_with_params(&ret.node, &tp_names));
             }
         }
         // Register record field names for spread desugar.
@@ -238,9 +239,13 @@ pub fn lower_module(module: &Module) -> Result<HirModule, Vec<LowerError>> {
                 let id = cx.globals[&f.name.node];
                 cx.push_scope();
 
+                let tp_names: Vec<&str> = f.type_params.iter()
+                    .map(|tp| tp.name.node.as_str())
+                    .collect();
+
                 let params: Vec<HirParam> = f.params.iter().map(|p| {
                     let local = cx.define_local(&p.name.node);
-                    let ty = ast_ty_to_ty(&p.ty.node);
+                    let ty = ast_ty_to_ty_with_params(&p.ty.node, &tp_names);
                     HirParam { local, name: p.name.node.clone(), ty, span: p.span }
                 }).collect();
 
@@ -252,7 +257,7 @@ pub fn lower_module(module: &Module) -> Result<HirModule, Vec<LowerError>> {
                     id,
                     name:   f.name.node.clone(),
                     params,
-                    ret_ty: f.ret_ty.as_ref().map(|t| ast_ty_to_ty(&t.node)).unwrap_or(Ty::Error),
+                    ret_ty: f.ret_ty.as_ref().map(|t| ast_ty_to_ty_with_params(&t.node, &tp_names)).unwrap_or(Ty::Error),
                     body,
                     span:   f.span,
                 }));
@@ -928,11 +933,19 @@ fn lower_pat(pat: &S<certo_ast::pattern::Pattern>, cx: &mut Cx) -> HirPat {
 // ------------------------------------------------------------------ //
 
 fn ast_ty_to_ty(te: &certo_ast::types::TypeExpr) -> Ty {
+    ast_ty_to_ty_with_params(te, &[])
+}
+
+fn ast_ty_to_ty_with_params(te: &certo_ast::types::TypeExpr, type_params: &[&str]) -> Ty {
     use certo_ast::types::TypeExpr;
     match te {
         TypeExpr::Named { path, args, .. } => {
             let name = path.segments.last().map(|s| s.node.as_str()).unwrap_or("");
-            let targs: Vec<Ty> = args.iter().map(|a| ast_ty_to_ty(&a.node)).collect();
+            // Single-segment name that matches a known type param → void* (opaque generic).
+            if args.is_empty() && path.segments.len() == 1 && type_params.contains(&name) {
+                return Ty::Var(0);
+            }
+            let targs: Vec<Ty> = args.iter().map(|a| ast_ty_to_ty_with_params(&a.node, type_params)).collect();
             match name {
                 "Int"     => Ty::Int,
                 "Int8"    => Ty::Int8,
@@ -958,12 +971,15 @@ fn ast_ty_to_ty(te: &certo_ast::types::TypeExpr) -> Ty {
                 other     => Ty::Named { name: other.to_string(), args: targs },
             }
         }
-        TypeExpr::Option { inner, .. } => Ty::Option(Box::new(ast_ty_to_ty(&inner.node))),
-        TypeExpr::Tuple { elements, .. } => Ty::Tuple(elements.iter().map(|e| ast_ty_to_ty(&e.node)).collect()),
+        TypeExpr::Option { inner, .. } => Ty::Option(Box::new(ast_ty_to_ty_with_params(&inner.node, type_params))),
+        TypeExpr::Tuple { elements, .. } => Ty::Tuple(elements.iter().map(|e| ast_ty_to_ty_with_params(&e.node, type_params)).collect()),
         TypeExpr::Fn { params, ret, .. } => Ty::Fn {
-            params: params.iter().map(|p| ast_ty_to_ty(&p.node)).collect(),
-            ret:    Box::new(ast_ty_to_ty(&ret.node)),
+            params: params.iter().map(|p| ast_ty_to_ty_with_params(&p.node, type_params)).collect(),
+            ret:    Box::new(ast_ty_to_ty_with_params(&ret.node, type_params)),
         },
+        // Type parameters (e.g. T in fn foo<T>) are opaque at the HIR level.
+        // Ty::Var(0) round-trips to void* in the C backend.
+        TypeExpr::Param { .. } => Ty::Var(0),
         _ => Ty::Error,
     }
 }

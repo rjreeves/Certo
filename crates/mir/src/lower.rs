@@ -13,10 +13,15 @@ struct Builder {
     /// Maps HIR LocalId to MirLocal (same indices initially).
     local_map:   std::collections::HashMap<LocalId, MirLocal>,
     next_tmp:    MirLocal,
+    /// Lambdas lifted to top-level functions during lowering.
+    lifted_fns:  Vec<MirFn>,
+    lambda_count: u32,
+    /// Name prefix from the enclosing function (for naming lifted lambdas).
+    fn_name:     String,
 }
 
 impl Builder {
-    fn new() -> Self {
+    fn new(fn_name: &str) -> Self {
         let entry = BasicBlock { id: 0, ..Default::default() };
         Builder {
             locals:    Vec::new(),
@@ -24,6 +29,9 @@ impl Builder {
             current:   0,
             local_map: std::collections::HashMap::new(),
             next_tmp:  0,
+            lifted_fns: Vec::new(),
+            lambda_count: 0,
+            fn_name: fn_name.to_string(),
         }
     }
 
@@ -71,8 +79,9 @@ impl Builder {
 // Entry point
 // ------------------------------------------------------------------ //
 
-pub fn lower_fn(f: &HirFn) -> MirFn {
-    let mut b = Builder::new();
+/// Lower a HIR function to MIR. Returns the primary function plus any lambdas lifted to top level.
+pub fn lower_fn(f: &HirFn) -> (MirFn, Vec<MirFn>) {
+    let mut b = Builder::new(&f.name);
 
     // Declare params as locals (index 0 = return slot, type patched below).
     let ret_slot = b.declare_local("_ret", Ty::Error);
@@ -98,7 +107,8 @@ pub fn lower_fn(f: &HirFn) -> MirFn {
     }
     b.terminate(Terminator::Return(Operand::Local(ret_slot)));
 
-    MirFn { name: f.name.clone(), param_count: f.params.len(), locals: b.locals, blocks: b.blocks }
+    let lifted = b.lifted_fns;
+    (MirFn { name: f.name.clone(), param_count: f.params.len(), locals: b.locals, blocks: b.blocks }, lifted)
 }
 
 /// Derive the Certo type of a MIR operand from its constant or declared local type.
@@ -420,9 +430,38 @@ fn lower_expr(expr: &HirExpr, b: &mut Builder) -> Operand {
         }
 
         HirExprKind::Lambda { params, body } => {
-            // Closures — represent as a global reference for now (full closure lifting later).
-            let dest = b.declare_local("_lambda", expr.ty.clone());
-            b.assign(dest, Rvalue::Use(Operand::Global("__lambda".into())));
+            // Lift the lambda to a top-level MIR function named `__lam_<parent>_N`.
+            let idx = b.lambda_count;
+            b.lambda_count += 1;
+            let lam_name = format!("__lam_{}_{}", b.fn_name, idx);
+
+            // Build MIR for the lambda body using a fresh builder.
+            let mut lb = Builder::new(&lam_name);
+            let ret_slot = lb.declare_local("_ret", Ty::Error);
+            for p in params {
+                lb.map_hir_local(p.local, &p.name, p.ty.clone());
+            }
+            let lam_result = lower_expr(body, &mut lb);
+            let lam_ret_ty = infer_operand_ty(&lam_result, &lb);
+            lb.locals[ret_slot as usize].ty = lam_ret_ty.clone();
+            if !matches!(lam_ret_ty, Ty::Unit) {
+                lb.assign(ret_slot, Rvalue::Use(lam_result));
+            }
+            lb.terminate(Terminator::Return(Operand::Local(ret_slot)));
+
+            let lam_fn = MirFn {
+                name: lam_name.clone(),
+                param_count: params.len(),
+                locals: lb.locals,
+                blocks: lb.blocks,
+            };
+            // Propagate any nested lambdas lifted inside this lambda.
+            b.lifted_fns.extend(lb.lifted_fns);
+            b.lifted_fns.push(lam_fn);
+
+            // Represent the lambda as a function pointer (int64_t cast of the global address).
+            let dest = b.declare_local("_lam_ptr", Ty::Error);
+            b.assign(dest, Rvalue::Use(Operand::Global(lam_name)));
             Operand::Local(dest)
         }
 
