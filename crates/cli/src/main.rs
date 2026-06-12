@@ -453,7 +453,8 @@ fn cmd_build(args: &[String], quiet: bool) {
        .arg("-Wno-pointer-to-int-cast")
        .arg("-Wno-int-conversion")
        .arg("-Wno-implicit-function-declaration")
-       .arg("-Wno-deprecated-declarations");
+       .arg("-Wno-deprecated-declarations")
+       .arg("-Wno-incompatible-function-pointer-types");
 
     if emit_dll {
         cmd.arg("-shared");
@@ -1416,7 +1417,8 @@ fn run_bench_module(module: &certo_ast::module::Module, path: &Path, src: &str, 
        .arg("-Wno-pointer-to-int-cast")
        .arg("-Wno-int-conversion")
        .arg("-Wno-implicit-function-declaration")
-       .arg("-Wno-deprecated-declarations");
+       .arg("-Wno-deprecated-declarations")
+       .arg("-Wno-incompatible-function-pointer-types");
     if cfg!(windows) {
         cmd.arg("-Xlinker").arg("/subsystem:console");
     } else {

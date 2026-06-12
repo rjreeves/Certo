@@ -24,6 +24,10 @@ pub fn ty_to_c(ty: &Ty) -> String {
             format!("certo_tuple_{}_t", ts.iter().map(mangle).collect::<Vec<_>>().join("_"))
         }
 
+        // Http opaque handles — passed as int64_t (pointer-sized) through the runtime ABI.
+        Ty::Named { name, args } if args.is_empty() && matches!(name.as_str(), "HttpRequest" | "HttpResponse") => {
+            "int64_t".into()
+        }
         Ty::Named { name, args } if args.is_empty() => c_ident(name),
         Ty::Named { name, args } => {
             format!("{}_{}_t", c_ident(name), args.iter().map(mangle).collect::<Vec<_>>().join("_"))

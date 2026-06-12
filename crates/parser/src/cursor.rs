@@ -40,7 +40,11 @@ impl<'src> Cursor<'src> {
         match (self.peek2(), self.peek3()) {
             // `{ ident => …`
             (Some(Token::Ident(_)), Some(Token::FatArrow)) => true,
-            // `{ ident, … => …` — multi-param: check pos+1=ident, pos+2=comma, pos+3=ident, and further => would need more lookahead; just support single-param for now
+            // `{ ident, ident => …`  (two-param)
+            (Some(Token::Ident(_)), Some(Token::Comma)) => {
+                matches!(self.peek4(), Some(Token::Ident(_)))
+                    && matches!(self.tokens.get(self.pos + 4).map(|s| &s.token), Some(Token::FatArrow))
+            }
             _ => false,
         }
     }
