@@ -35,9 +35,90 @@ static const char** certo_db_params(CertoList* params, int* nparams) {
 
 /* ---- connect / close / error ------------------------------------- */
 
+/* Last connection-error message — set when certo_db_connect fails. */
+static char* certo_db_last_connect_error = NULL;
+
+/* Convert a postgres://user:pass@host:port/dbname URI to libpq keyword=value
+ * format so older libpq versions (pre-9.2) that don't accept URIs still work.
+ * Returns a newly malloc'd string, or NULL if the input is not a URI. */
+static char* certo_db_uri_to_kv(const char* uri) {
+    const char* pfx1 = "postgres://";
+    const char* pfx2 = "postgresql://";
+    const char* rest = NULL;
+    if (strncmp(uri, pfx2, strlen(pfx2)) == 0) rest = uri + strlen(pfx2);
+    else if (strncmp(uri, pfx1, strlen(pfx1)) == 0) rest = uri + strlen(pfx1);
+    else return NULL;
+
+    /* rest = [user[:pass]@]host[:port][/dbname] */
+    char user[256]="", pass[256]="", host[256]="localhost", port[16]="5432", dbname[256]="";
+
+    const char* at = strchr(rest, '@');
+    if (at) {
+        /* parse user[:pass] */
+        size_t ulen = (size_t)(at - rest);
+        char cred[512]; if (ulen >= sizeof(cred)) ulen = sizeof(cred)-1;
+        memcpy(cred, rest, ulen); cred[ulen] = '\0';
+        const char* colon = strchr(cred, ':');
+        if (colon) {
+            size_t ul = (size_t)(colon - cred);
+            if (ul >= sizeof(user)) ul = sizeof(user)-1;
+            memcpy(user, cred, ul); user[ul] = '\0';
+            strncpy(pass, colon+1, sizeof(pass)-1);
+        } else {
+            strncpy(user, cred, sizeof(user)-1);
+        }
+        rest = at + 1;
+    }
+
+    /* rest = host[:port][/dbname] */
+    const char* slash = strchr(rest, '/');
+    if (slash) {
+        strncpy(dbname, slash+1, sizeof(dbname)-1);
+        /* strip query string from dbname */
+        char* q = strchr(dbname, '?'); if (q) *q = '\0';
+    }
+    size_t hplen = slash ? (size_t)(slash - rest) : strlen(rest);
+    char hostport[512]; if (hplen >= sizeof(hostport)) hplen = sizeof(hostport)-1;
+    memcpy(hostport, rest, hplen); hostport[hplen] = '\0';
+
+    /* host may be [ipv6] */
+    if (hostport[0] == '[') {
+        char* rb = strchr(hostport, ']');
+        if (rb) {
+            size_t hl = (size_t)(rb - hostport - 1);
+            if (hl >= sizeof(host)) hl = sizeof(host)-1;
+            memcpy(host, hostport+1, hl); host[hl] = '\0';
+            if (*(rb+1) == ':') strncpy(port, rb+2, sizeof(port)-1);
+        }
+    } else {
+        const char* col = strchr(hostport, ':');
+        if (col) {
+            size_t hl = (size_t)(col - hostport);
+            if (hl >= sizeof(host)) hl = sizeof(host)-1;
+            memcpy(host, hostport, hl); host[hl] = '\0';
+            strncpy(port, col+1, sizeof(port)-1);
+        } else {
+            strncpy(host, hostport, sizeof(host)-1);
+        }
+    }
+
+    /* Build keyword=value string */
+    char* out = (char*)malloc(1024);
+    int n = 0;
+    n += snprintf(out+n, 1024-n, "host=%s port=%s", host, port);
+    if (dbname[0]) n += snprintf(out+n, 1024-n, " dbname=%s", dbname);
+    if (user[0])   n += snprintf(out+n, 1024-n, " user=%s", user);
+    if (pass[0])   n += snprintf(out+n, 1024-n, " password=%s", pass);
+    return out;
+}
+
 int64_t certo_db_connect(certo_text_t connstr) {
-    PGconn *conn = PQconnectdb(connstr);
+    char* kv = certo_db_uri_to_kv(connstr);
+    PGconn *conn = PQconnectdb(kv ? kv : connstr);
+    free(kv);
     if (PQstatus(conn) != CONNECTION_OK) {
+        free(certo_db_last_connect_error);
+        certo_db_last_connect_error = certo_db_strdup(PQerrorMessage(conn));
         PQfinish(conn);
         return 0;
     }
@@ -50,7 +131,9 @@ int64_t certo_db_close(int64_t handle) {
 }
 
 certo_text_t certo_db_error(int64_t handle) {
-    if (handle == 0) return certo_db_strdup("connection failed");
+    if (handle == 0) {
+        return certo_db_last_connect_error ? certo_db_last_connect_error : "connection failed";
+    }
     PGconn *conn = (PGconn *)(uintptr_t)handle;
     return certo_db_strdup(PQerrorMessage(conn));
 }

@@ -176,8 +176,13 @@ pub fn emit_module(module: &Module, opts: &CodegenOptions) -> String {
             }
             HirItem::Const(c) => {
                 // Module-level constants become static C globals.
-                let cty = ty_to_c(&c.ty);
-                writeln!(out, "static {} {} = {};", cty, c_ident(&c.name),
+                // Use the expression type when the declared type is unknown (Ty::Error).
+                let cty = if matches!(c.ty, certo_typeck::Ty::Error) {
+                    const_expr_ty(&c.value)
+                } else {
+                    ty_to_c(&c.ty)
+                };
+                writeln!(out, "static {} {} = {};", cty, c_fn_name(&c.name),
                     const_expr_to_c(&c.value)).unwrap();
             }
             }
@@ -363,9 +368,31 @@ fn const_expr_to_c(expr: &certo_hir::HirExpr) -> String {
         HirExprKind::Int(n)     => n.to_string(),
         HirExprKind::Float(f)   => format!("{:.}", f),
         HirExprKind::Bool(b)    => if *b { "true".into() } else { "false".into() },
-        HirExprKind::Str(s)     => format!("CERTO_STR(\"{}\")", s),
+        HirExprKind::Str(s)     => {
+            let escaped: String = s.chars().flat_map(|c| match c {
+                '\n' => vec!['\\', 'n'],
+                '\r' => vec!['\\', 'r'],
+                '\t' => vec!['\\', 't'],
+                '\\' => vec!['\\', '\\'],
+                '"'  => vec!['\\', '"'],
+                c    => vec![c],
+            }).collect();
+            format!("CERTO_STR(\"{}\")", escaped)
+        }
         HirExprKind::Unit       => "CERTO_UNIT".into(),
         _                       => "/* expr */0".into(),
+    }
+}
+
+fn const_expr_ty(expr: &certo_hir::HirExpr) -> String {
+    use certo_hir::HirExprKind;
+    match &expr.kind {
+        HirExprKind::Int(_)   => "int64_t".into(),
+        HirExprKind::Float(_) => "double".into(),
+        HirExprKind::Bool(_)  => "bool".into(),
+        HirExprKind::Str(_)   => "certo_text_t".into(),
+        HirExprKind::Unit     => "int64_t".into(),
+        _                     => "void*".into(),
     }
 }
 
@@ -399,7 +426,17 @@ fn simple_expr_to_c_rvalue(expr: &certo_ast::expr::Expr) -> Option<String> {
     use certo_ast::expr::{Expr, Lit};
     match expr {
         Expr::Lit { value, .. } => match value {
-            Lit::String(s) => Some(format!("CERTO_STR(\"{}\")", s.replace('\\', "\\\\").replace('"', "\\\""))),
+            Lit::String(s) => {
+                let e: String = s.chars().flat_map(|c| match c {
+                    '\n' => vec!['\\', 'n'],
+                    '\r' => vec!['\\', 'r'],
+                    '\t' => vec!['\\', 't'],
+                    '\\' => vec!['\\', '\\'],
+                    '"'  => vec!['\\', '"'],
+                    c    => vec![c],
+                }).collect();
+                Some(format!("CERTO_STR(\"{}\")", e))
+            }
             Lit::Int(n)    => Some(n.to_string()),
             Lit::Float(f)  => Some(f.to_string()),
             Lit::Bool(b)   => Some(if *b { "true".into() } else { "false".into() }),
@@ -456,12 +493,18 @@ certo_uuid_t certo_uuid_new(void);
 
 /* Generic option (pointer-sized tag + value) */
 typedef struct { bool has_value; void* value; } certo_option_t;
+/* Option constructors — None is a null pointer, Some wraps any value as void* */
+#define certo_none ((void*)0)
+#define certo_some(x) ((void*)(intptr_t)(x))
 typedef struct { void* value; } certo_tuple_t;
 typedef void (*certo_fn_t)(void);
 typedef void* certo_error_t;
 
 /* List (dynamic array) — full signatures are in the stdlib C block. */
 typedef struct { void** data; int64_t len; int64_t cap; } certo_list_base_t;
+/* List.empty constant — alias for the runtime constructor so codegen can emit
+   it as a plain global reference without a separate MIR aggregate node. */
+#define certo_list_empty certo_list_new_empty()
 
 /* Result<T,E> — heap-allocated tagged value.
    payload stores any scalar (int/float/bool) or pointer cast to intptr_t.

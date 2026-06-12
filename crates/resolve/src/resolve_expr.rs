@@ -113,7 +113,7 @@ pub fn resolve_expr(expr: &S<Expr>, scope: &mut ScopeChain) {
         Expr::For { binding, iter, body, .. } => {
             resolve_expr(iter, scope);
             scope.push();
-            scope.define(&binding.node, Res::Local, binding.span);
+            scope.define(&binding.node, Res::Local { span: binding.span }, binding.span);
             resolve_expr(body, scope);
             scope.pop();
         }
