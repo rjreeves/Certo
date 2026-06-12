@@ -5,7 +5,7 @@ mod error;
 
 pub use trait_db::{TraitDb, TraitDef, ImplRecord, MethodSig};
 pub use error::{TraitError, TraitErrorKind};
-pub use bounds::{check_bounds, check_call_bounds};
+pub use bounds::{check_bounds, check_call_bounds, check_dbquery_typed_bounds};
 
 use certo_ast::module::Module;
 
@@ -19,6 +19,7 @@ pub fn check_module(module: &Module) -> Result<TraitDb, Vec<TraitError>> {
     let mut errors = Vec::new();
     errors.extend(check_impl::check_impls(module, &db));
     errors.extend(check_bounds(module, &db));
+    errors.extend(check_dbquery_typed_bounds(module, &db));
 
     if errors.is_empty() { Ok(db) } else { Err(errors) }
 }

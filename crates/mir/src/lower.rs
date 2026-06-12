@@ -18,6 +18,9 @@ struct Builder {
     lambda_count: u32,
     /// Name prefix from the enclosing function (for naming lifted lambdas).
     fn_name:     String,
+    /// Deferred expressions accumulated by `defer { ... }` statements.
+    /// Emitted in LIFO order before every `Return` terminator.
+    defers:      Vec<certo_hir::HirExpr>,
 }
 
 impl Builder {
@@ -32,6 +35,7 @@ impl Builder {
             lifted_fns: Vec::new(),
             lambda_count: 0,
             fn_name: fn_name.to_string(),
+            defers:    Vec::new(),
         }
     }
 
@@ -76,6 +80,20 @@ impl Builder {
 }
 
 // ------------------------------------------------------------------ //
+// Defer helper
+// ------------------------------------------------------------------ //
+
+/// Emit all pending deferred expressions (LIFO), then terminate with Return.
+/// Clones the defer list so the Builder can be mutably borrowed during lowering.
+fn emit_defers_then_return(return_op: Operand, b: &mut Builder) {
+    let defers: Vec<certo_hir::HirExpr> = b.defers.clone();
+    for body in defers.iter().rev() {
+        lower_expr(body, b);
+    }
+    b.terminate(Terminator::Return(return_op));
+}
+
+// ------------------------------------------------------------------ //
 // Entry point
 // ------------------------------------------------------------------ //
 
@@ -105,7 +123,7 @@ pub fn lower_fn(f: &HirFn) -> (MirFn, Vec<MirFn>) {
     if !matches!(ret_ty, Ty::Unit) {
         b.assign(ret_slot, Rvalue::Use(result.clone()));
     }
-    b.terminate(Terminator::Return(Operand::Local(ret_slot)));
+    emit_defers_then_return(Operand::Local(ret_slot), &mut b);
 
     let lifted = b.lifted_fns;
     (MirFn { name: f.name.clone(), param_count: f.params.len(), locals: b.locals, blocks: b.blocks }, lifted)
@@ -447,7 +465,7 @@ fn lower_expr(expr: &HirExpr, b: &mut Builder) -> Operand {
             if !matches!(lam_ret_ty, Ty::Unit) {
                 lb.assign(ret_slot, Rvalue::Use(lam_result));
             }
-            lb.terminate(Terminator::Return(Operand::Local(ret_slot)));
+            emit_defers_then_return(Operand::Local(ret_slot), &mut lb);
 
             let lam_fn = MirFn {
                 name: lam_name.clone(),
@@ -502,9 +520,9 @@ fn lower_expr(expr: &HirExpr, b: &mut Builder) -> Operand {
                 false_bb: err_block,
             });
 
-            // err_block: propagate the Err by returning it directly.
+            // err_block: run defers then propagate the Err.
             b.switch_to(err_block);
-            b.terminate(Terminator::Return(Operand::Local(result_local)));
+            emit_defers_then_return(Operand::Local(result_local), b);
 
             // ok_block: extract the Ok payload.
             b.switch_to(ok_block);
@@ -654,6 +672,9 @@ fn lower_stmt(stmt: &HirStmt, b: &mut Builder) {
         }
         HirStmt::Expr(e) => {
             lower_expr(e, b);
+        }
+        HirStmt::Defer { body } => {
+            b.defers.push(body.clone());
         }
     }
 }

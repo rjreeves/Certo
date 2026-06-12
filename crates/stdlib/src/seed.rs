@@ -461,7 +461,11 @@ pub fn seed_stdlib(env: &mut TypeEnv, counter: &mut u32) {
     {
         let conn      = Ty::Int; // connection handle
         let list_text = Ty::List(Box::new(Ty::Text));
-        let list_row  = Ty::List(Box::new(list_text.clone()));
+        // Nullable cell type — Text? — used in query result rows
+        let opt_text     = Ty::Option(Box::new(Ty::Text));
+        let list_opt_text = Ty::List(Box::new(opt_text.clone()));
+        // List<List<Text?>> — full result set
+        let list_row_nullable = Ty::List(Box::new(list_opt_text.clone()));
 
         // Null sentinel
         def!("dbNull", Ty::Fn { params: vec![], ret: Box::new(Ty::Text) });
@@ -481,16 +485,16 @@ pub fn seed_stdlib(env: &mut TypeEnv, counter: &mut u32) {
             ret: Box::new(Ty::Int),
         });
 
-        // Query
+        // Query — cells are Text? so SQL NULL is None, not ""
         def!("dbQuery", Ty::Fn {
             params: vec![conn.clone(), Ty::Text, list_text.clone()],
-            ret: Box::new(list_row.clone()),
+            ret: Box::new(list_row_nullable.clone()),
         });
 
-        // dbQueryTyped :: ∀T. (Int, Text, List<Text>, List<Text> -> T) -> List<T>
+        // dbQueryTyped :: ∀T. (Int, Text, List<Text>, List<Text?> -> T) -> List<T>
         {
             let t = fresh();
-            let mapper = fn1(list_text.clone(), Ty::Var(t));
+            let mapper = fn1(list_opt_text.clone(), Ty::Var(t));
             env.define("dbQueryTyped", Ty::Forall {
                 vars: vec![t],
                 body: Box::new(Ty::Fn {
@@ -499,17 +503,44 @@ pub fn seed_stdlib(env: &mut TypeEnv, counter: &mut u32) {
                 }),
             });
         }
+        // dbQueryRow → List<Text?>?
         def!("dbQueryRow", Ty::Fn {
             params: vec![conn.clone(), Ty::Text, list_text.clone()],
-            ret: Box::new(Ty::Option(Box::new(list_text.clone()))),
+            ret: Box::new(Ty::Option(Box::new(list_opt_text.clone()))),
         });
-        def!("dbQueryOne",  fn2(conn.clone(), Ty::Text, Ty::Text));
+        // dbQueryOne → Text?  (None when no rows or cell is SQL NULL)
+        def!("dbQueryOne",  fn2(conn.clone(), Ty::Text, opt_text.clone()));
         def!("dbColumns",   fn2(conn.clone(), Ty::Text, list_text.clone()));
 
         // Transactions
         def!("dbBegin",    fn1(conn.clone(), Ty::Int));
         def!("dbCommit",   fn1(conn.clone(), Ty::Int));
         def!("dbRollback", fn1(conn.clone(), Ty::Int));
+
+        // withTransaction :: ∀T E. (Int, () -> Result<T,E>) -> Result<T,E>
+        {
+            let t = fresh(); let e = fresh();
+            let result_te = Ty::Result(Box::new(Ty::Var(t)), Box::new(Ty::Var(e)));
+            let body_ty   = Ty::Fn { params: vec![], ret: Box::new(result_te.clone()) };
+            env.define("withTransaction", Ty::Forall {
+                vars: vec![t, e],
+                body: Box::new(Ty::Fn {
+                    params: vec![conn.clone(), body_ty],
+                    ret:    Box::new(result_te),
+                }),
+            });
+        }
+
+        // withConnection :: ∀T E. (Text, Int -> Result<T,E>) -> Result<T,E>
+        {
+            let t = fresh(); let e = fresh();
+            let result_te = Ty::Result(Box::new(Ty::Var(t)), Box::new(Ty::Var(e)));
+            let body_ty   = fn1(conn.clone(), result_te.clone());
+            env.define("withConnection", Ty::Forall {
+                vars: vec![t, e],
+                body: Box::new(fn2(Ty::Text, body_ty, result_te)),
+            });
+        }
     }
 
     // ---------------------------------------------------------------- //
@@ -729,10 +760,12 @@ pub fn seed_stdlib(env: &mut TypeEnv, counter: &mut u32) {
     pm!("Regex.split",    "pattern", "text");
 
     // Db
-    pm!("dbConnect",    "url");
-    pm!("dbExec",       "conn", "sql", "params");
-    pm!("dbQuery",      "conn", "sql", "params");
-    pm!("dbQueryRow",   "conn", "sql", "params");
+    pm!("dbConnect",         "url");
+    pm!("dbExec",            "conn", "sql", "params");
+    pm!("dbQuery",           "conn", "sql", "params");
+    pm!("dbQueryRow",        "conn", "sql", "params");
+    pm!("withTransaction",   "conn", "body");
+    pm!("withConnection",    "url",  "body");
 }
 
 fn fn1(a: Ty, ret: Ty) -> Ty {

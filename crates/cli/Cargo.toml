@@ -18,4 +18,5 @@ certo-codegen     = { path = "../codegen" }
 certo-stdlib      = { path = "../stdlib" }
 certo-diagnostics = { path = "../diagnostics" }
 certo-typeck      = { path = "../typeck" }
+certo-traits      = { path = "../traits" }
 tempfile          = "3"

@@ -868,9 +868,8 @@ fn lower_block(stmts: &[Stmt], span: Span, cx: &mut Cx) -> HirExpr {
                 }
             }
             Stmt::Defer { body, .. } => {
-                // `defer` — emit as a statement; the C backend will handle cleanup.
                 let e = lower_expr(body, cx);
-                hir_stmts.push(HirStmt::Expr(e));
+                hir_stmts.push(HirStmt::Defer { body: e });
             }
             Stmt::Expr { expr, .. } => {
                 let e = lower_expr(expr, cx);
