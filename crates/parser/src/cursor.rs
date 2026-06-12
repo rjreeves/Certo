@@ -26,6 +26,25 @@ impl<'src> Cursor<'src> {
         self.tokens.get(self.pos + 1).map(|s| &s.token)
     }
 
+    pub fn peek3(&self) -> Option<&Token<'src>> {
+        self.tokens.get(self.pos + 2).map(|s| &s.token)
+    }
+
+    pub fn peek4(&self) -> Option<&Token<'src>> {
+        self.tokens.get(self.pos + 3).map(|s| &s.token)
+    }
+
+    /// True if the next tokens look like a trailing lambda: `{ ident => …` or `{ ident, ident => …`
+    pub fn is_trailing_lambda(&self) -> bool {
+        if self.peek() != Some(&Token::LBrace) { return false; }
+        match (self.peek2(), self.peek3()) {
+            // `{ ident => …`
+            (Some(Token::Ident(_)), Some(Token::FatArrow)) => true,
+            // `{ ident, … => …` — multi-param: check pos+1=ident, pos+2=comma, pos+3=ident, and further => would need more lookahead; just support single-param for now
+            _ => false,
+        }
+    }
+
     pub fn peek_span(&self) -> Span {
         self.tokens
             .get(self.pos)

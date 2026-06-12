@@ -23,13 +23,26 @@ static char* certo_db_strdup(const char* s) {
     return out;
 }
 
+/* Sentinel for SQL NULL parameters.  dbNull() returns a pointer to this
+ * buffer.  certo_db_params detects it by pointer identity and passes NULL
+ * to PQexecParams, which libpq treats as SQL NULL. */
+static const char certo_db_null_sentinel_str[] = "\x01CERTO_DB_NULL\x01";
+
+certo_text_t certo_db_null_param(void) {
+    return (certo_text_t)certo_db_null_sentinel_str;
+}
+
 /* Build a const char** array from a CertoList* of certo_text_t.
+ * Elements that are the null sentinel are mapped to NULL (→ SQL NULL).
  * Returns NULL and sets *nparams=0 if list is NULL. */
 static const char** certo_db_params(CertoList* params, int* nparams) {
     if (!params || params->len == 0) { *nparams = 0; return NULL; }
     *nparams = (int)params->len;
     const char** arr = (const char**)malloc((size_t)*nparams * sizeof(char*));
-    for (int i = 0; i < *nparams; i++) arr[i] = (const char*)params->data[i];
+    for (int i = 0; i < *nparams; i++) {
+        const char* v = (const char*)params->data[i];
+        arr[i] = (v == certo_db_null_sentinel_str) ? NULL : v;
+    }
     return arr;
 }
 
@@ -255,6 +268,25 @@ CertoList* certo_db_columns(int64_t handle, certo_text_t sql) {
     return result;
 }
 
+/* ---- typed query -------------------------------------------------- */
+
+/* Run a SELECT and map each row through a Certo function.
+ * mapper :: List<Text> -> T  (CertoFn1 convention: void* -> void*)
+ * Returns List<T>. */
+typedef void* (*CertoFn1)(void*);
+
+CertoList* certo_db_query_typed(int64_t handle, certo_text_t sql,
+                                CertoList* params, CertoFn1 mapper) {
+    CertoList* rows = certo_db_query(handle, sql, params);
+    if (!mapper) return rows;
+    CertoList* result = certo_list_new_empty();
+    for (size_t i = 0; i < rows->len; i++) {
+        void* mapped = mapper(rows->data[i]);
+        result = certo_list_push(result, mapped);
+    }
+    return result;
+}
+
 /* ---- transactions ------------------------------------------------- */
 
 int64_t certo_db_begin(int64_t handle) {
@@ -311,6 +343,16 @@ fn dbServerVersion(conn: Int): Int [io]
 /// Full version banner from SELECT version().
 fn dbVersionString(conn: Int): Text [io]
 
+// ── Null sentinel ────────────────────────────────────────────────────
+
+/// Return a sentinel value that dbExec treats as SQL NULL for that parameter.
+/// Use this when a nullable field is null in an insert or update:
+///
+///   dbExec(conn, "INSERT INTO t (name, note) VALUES ($1, $2)",
+///          [record.name,
+///           if record.note == null then dbNull() else record.note ?? ""])
+fn dbNull(): Text
+
 // ── Exec (INSERT / UPDATE / DELETE) ─────────────────────────────────
 
 /// Execute a statement with positional parameters ($1, $2, …).
@@ -333,6 +375,17 @@ fn dbExec(conn: Int, sql: Text, params: List<Text>): Int [io]
 ///       println(List.getOrPanic(row, 0) ++ " " ++ List.getOrPanic(row, 1))
 ///   }
 fn dbQuery(conn: Int, sql: Text, params: List<Text>): List<List<Text>> [io]
+
+/// Run a SELECT, apply `mapper` to every row, and return a typed list.
+/// This is the preferred API when the schema is known — the return type is
+/// inferred from the mapper, so the compiler verifies the result type.
+///
+/// Example:
+///   val users = dbQueryTyped(conn,
+///       "SELECT id, name, email FROM users WHERE active = $1",
+///       ["true"], usersFromRow)
+///   // users : List<Users>  — verified by the compiler
+fn dbQueryTyped(conn: Int, sql: Text, params: List<Text>, mapper: fn(List<Text>): T): List<T> [io]
 
 /// Run a SELECT and return only the first row as List<Text>, or None.
 fn dbQueryRow(conn: Int, sql: Text, params: List<Text>): List<Text>? [io]

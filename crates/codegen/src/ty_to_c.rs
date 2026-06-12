@@ -32,10 +32,9 @@ pub fn ty_to_c(ty: &Ty) -> String {
         Ty::Record(_) => "void*".into(), // anonymous records become void* until struct is emitted
         Ty::Fn { .. } => "certo_fn_t".into(),
 
-        // Inference leftovers — shouldn't reach codegen, but be safe.
-        // Use int64_t (not void*): on 64-bit it can store both integers and
-        // pointers, avoiding hard void-pointer↔integer conversion errors.
-        Ty::Var(v)    => format!("certo_var{}_t", v),
+        // Type variables reach codegen only as unerased generic type params.
+        // Represent them as void* — consistent with List<T>, Option<T>, etc.
+        Ty::Var(_)    => "void*".into(),
         Ty::Forall { body, .. } => ty_to_c(body),
         Ty::Error     => "int64_t".into(),
     }

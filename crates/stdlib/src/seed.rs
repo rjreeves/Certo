@@ -463,6 +463,9 @@ pub fn seed_stdlib(env: &mut TypeEnv, counter: &mut u32) {
         let list_text = Ty::List(Box::new(Ty::Text));
         let list_row  = Ty::List(Box::new(list_text.clone()));
 
+        // Null sentinel
+        def!("dbNull", Ty::Fn { params: vec![], ret: Box::new(Ty::Text) });
+
         // Connection
         def!("dbConnect",       fn1(Ty::Text, conn.clone()));
         def!("dbClose",         fn1(conn.clone(), Ty::Unit));
@@ -483,6 +486,19 @@ pub fn seed_stdlib(env: &mut TypeEnv, counter: &mut u32) {
             params: vec![conn.clone(), Ty::Text, list_text.clone()],
             ret: Box::new(list_row.clone()),
         });
+
+        // dbQueryTyped :: ∀T. (Int, Text, List<Text>, List<Text> -> T) -> List<T>
+        {
+            let t = fresh();
+            let mapper = fn1(list_text.clone(), Ty::Var(t));
+            env.define("dbQueryTyped", Ty::Forall {
+                vars: vec![t],
+                body: Box::new(Ty::Fn {
+                    params: vec![conn.clone(), Ty::Text, list_text.clone(), mapper],
+                    ret: Box::new(Ty::List(Box::new(Ty::Var(t)))),
+                }),
+            });
+        }
         def!("dbQueryRow", Ty::Fn {
             params: vec![conn.clone(), Ty::Text, list_text.clone()],
             ret: Box::new(Ty::Option(Box::new(list_text.clone()))),

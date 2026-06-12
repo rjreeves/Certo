@@ -70,7 +70,15 @@ pub fn type_expr_to_ty(te: &TypeExpr, ctx: &mut Ctx<'_>) -> Ty {
                     let v = it.next().unwrap_or(Ty::Error);
                     Ty::Map(Box::new(k), Box::new(v))
                 }
-                _ => Ty::Named { name, args: targs },
+                _ => {
+                    // If this name is a type parameter in scope, use its var.
+                    if targs.is_empty() {
+                        if let Some(ty) = ctx.env.lookup(&name) {
+                            return ty.clone();
+                        }
+                    }
+                    Ty::Named { name, args: targs }
+                }
             }
         }
         TE::Option { inner, .. } => Ty::Option(Box::new(type_expr_to_ty(&inner.node, ctx))),
@@ -83,8 +91,12 @@ pub fn type_expr_to_ty(te: &TypeExpr, ctx: &mut Ctx<'_>) -> Ty {
             fields.iter().map(|f| (f.name.node.clone(), type_expr_to_ty(&f.ty.node, ctx))).collect()
         ),
         TE::Param { name, .. } => {
-            // Generic type parameter — treat as fresh var if not in env; this
-            // is a simplification for now (proper polymorphic defs need skolems).
+            // If the enclosing fn pre-defined this type param (via hoist/check),
+            // reuse the same var so all occurrences of T unify correctly.
+            if let Some(ty) = ctx.env.lookup(&name.node) {
+                return ty.clone();
+            }
+            // Fallback: create a fresh var (unannotated generic context).
             let fresh = ctx.fresh();
             ctx.env.define(name.node.clone(), fresh.clone());
             fresh

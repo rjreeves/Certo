@@ -1742,24 +1742,94 @@ fn cmd_db_pull(args: &[String]) {
 
     for table in &tables {
         let type_name = snake_to_pascal(table);
+        let cols = columns.get(table).map(|v| v.as_slice()).unwrap_or(&[]);
+
+        // ── Type declaration ─────────────────────────────────────────────
         src.push_str(&format!("type {} {{\n", type_name));
-        if let Some(cols) = columns.get(table) {
-            for (col_name, certo_ty, nullable) in cols {
-                let field_name = snake_to_camel(col_name);
-                let is_pk = primary_keys.contains(&(table.clone(), col_name.clone()));
-                let ty_str = if *nullable {
-                    format!("{}?", certo_ty)
-                } else {
-                    certo_ty.clone()
-                };
-                if is_pk {
-                    src.push_str(&format!("    {}: {}  // PK\n", field_name, ty_str));
-                } else {
-                    src.push_str(&format!("    {}: {}\n", field_name, ty_str));
-                }
+        for (col_name, certo_ty, nullable) in cols {
+            let field_name = snake_to_camel(col_name);
+            let is_pk = primary_keys.contains(&(table.clone(), col_name.clone()));
+            let ty_str = if *nullable { format!("{}?", certo_ty) } else { certo_ty.clone() };
+            if is_pk {
+                src.push_str(&format!("    {}: {}  // PK\n", field_name, ty_str));
+            } else {
+                src.push_str(&format!("    {}: {}\n", field_name, ty_str));
             }
         }
         src.push_str("}\n\n");
+
+        // ── fromRow ──────────────────────────────────────────────────────
+        let select_cols: Vec<&str> = cols.iter().map(|(c, _, _)| c.as_str()).collect();
+        let select_list = select_cols.join(", ");
+
+        src.push_str(&format!("fn {}FromRow(row: List<Text>): {} =\n", table, type_name));
+        src.push_str(&format!("    {} {{\n", type_name));
+        for (i, (col_name, certo_ty, nullable)) in cols.iter().enumerate() {
+            let field = snake_to_camel(col_name);
+            let cell  = format!("List.getOrPanic(row, {})", i);
+            let expr  = if *nullable {
+                format!("if {} == \"\" then null else {}",
+                    cell, text_to_certo_expr(&cell, certo_ty))
+            } else {
+                text_to_certo_expr(&cell, certo_ty)
+            };
+            src.push_str(&format!("        {}: {},\n", field, expr));
+        }
+        src.push_str("    }\n\n");
+
+        // ── findAll ──────────────────────────────────────────────────────
+        src.push_str(&format!(
+            "fn {}FindAll(conn: Int): List<{}> [io] =\n    dbQueryTyped(conn, \"SELECT {} FROM {} ORDER BY 1\", [], {}FromRow)\n\n",
+            table, type_name, select_list, table, table
+        ));
+
+        // ── findById / deleteById (only when a PK exists) ────────────────
+        let pk = cols.iter().find(|(c, _, _)|
+            primary_keys.contains(&(table.clone(), c.clone())));
+
+        if let Some((pk_col, pk_ty, _)) = pk {
+            let pk_certo   = if pk_ty == "Int" { "Int" } else { "Text" };
+            let pk_to_text = certo_to_text_expr("id", pk_ty);
+
+            src.push_str(&format!(
+                "fn {}FindById(conn: Int, id: {}): {}? [io] = {{\n    val rows = dbQueryTyped(conn, \"SELECT {} FROM {} WHERE {} = $1 LIMIT 1\", [{}], {}FromRow)\n    List.first(rows)\n}}\n\n",
+                table, pk_certo, type_name,
+                select_list, table, pk_col, pk_to_text,
+                table
+            ));
+
+            src.push_str(&format!(
+                "fn {}DeleteById(conn: Int, id: {}): Int [io] =\n    dbExec(conn, \"DELETE FROM {} WHERE {} = $1\", [{}])\n\n",
+                table, pk_certo, table, pk_col, pk_to_text
+            ));
+        }
+
+        // ── insert (non-PK columns) ──────────────────────────────────────
+        let insert_cols: Vec<_> = cols.iter()
+            .filter(|(c, _, _)| !primary_keys.contains(&(table.clone(), c.clone())))
+            .collect();
+
+        if !insert_cols.is_empty() {
+            let col_names: Vec<&str>  = insert_cols.iter().map(|(c, _, _)| c.as_str()).collect();
+            let placeholders: Vec<String> =
+                (1..=insert_cols.len()).map(|i| format!("${}", i)).collect();
+            let params: Vec<String> = insert_cols.iter().map(|(c, ty, nullable)| {
+                let field = snake_to_camel(c);
+                let expr  = format!("record.{}", field);
+                if *nullable {
+                    certo_nullable_to_text_expr(&expr, ty)
+                } else {
+                    certo_to_text_expr(&expr, ty)
+                }
+            }).collect();
+
+            src.push_str(&format!(
+                "fn {}Insert(conn: Int, record: {}): Int [io] =\n    dbExec(conn,\n        \"INSERT INTO {} ({}) VALUES ({})\",\n        [{}])\n\n",
+                table, type_name,
+                table, col_names.join(", "), placeholders.join(", "),
+                params.join(", ")
+            ));
+        }
     }
 
     std::fs::write(&out, &src).unwrap_or_else(|e| {
@@ -1818,6 +1888,49 @@ fn snake_to_camel(s: &str) -> String {
         }
     }).collect();
     first + &rest
+}
+
+/// Convert a `List<Text>` cell expression to a typed Certo expression.
+fn text_to_certo_expr(cell: &str, ty: &str) -> String {
+    match ty {
+        "Int"      => format!("parseInt({}) ?? 0", cell),
+        "Bool"     => format!("{} == \"t\"", cell),
+        "Float"    => format!("parseFloat({}) ?? intToFloat(0)", cell),
+        "Decimal"  => format!("Decimal.fromInt(parseInt({}) ?? 0)", cell),
+        "DateTime" => format!("DateTime.parseIso({})", cell),
+        _          => cell.to_string(), // Text, UUID, unknown named types
+    }
+}
+
+/// Convert a non-nullable Certo field expression to `Text` for use in dbExec params.
+fn certo_to_text_expr(expr: &str, ty: &str) -> String {
+    match ty {
+        "Int"      => format!("intToText({})", expr),
+        "Bool"     => format!("boolToText({})", expr),
+        "Float"    => format!("floatToText({})", expr),
+        "Decimal"  => format!("Decimal.toText({})", expr),
+        "DateTime" => format!("DateTime.toIso({})", expr),
+        _          => expr.to_string(), // Text, UUID
+    }
+}
+
+/// Convert a nullable Certo field expression (`T?`) to `Text` for a dbExec param.
+/// Emits `dbNull()` when the value is null so the C runtime passes SQL NULL.
+fn certo_nullable_to_text_expr(expr: &str, ty: &str) -> String {
+    let convert = certo_to_text_expr(&format!("{} ?? {}", expr, null_default(ty)), ty);
+    format!("if {} == null then dbNull() else {}", expr, convert)
+}
+
+/// A typed default used only as a dead branch for type-checker satisfaction.
+fn null_default(ty: &str) -> &'static str {
+    match ty {
+        "Int"      => "0",
+        "Bool"     => "false",
+        "Float"    => "intToFloat(0)",
+        "Decimal"  => "Decimal.fromInt(0)",
+        "DateTime" => "DateTime.now()",
+        _          => "\"\"",
+    }
 }
 
 /// Redact the password from a connection URL for display.

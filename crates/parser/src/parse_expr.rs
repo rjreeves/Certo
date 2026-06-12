@@ -202,8 +202,21 @@ fn parse_postfix(cur: &mut Cursor<'_>) -> Result<S<Expr>, ParseError> {
             }
             // `expr(args)`
             Some(Token::LParen) => {
-                let (args, end_span) = parse_arg_list(cur)?;
+                let (mut args, mut end_span) = parse_arg_list(cur)?;
+                // Trailing lambda: `f(a) { x => body }` — append the lambda as the last arg
+                if cur.is_trailing_lambda() {
+                    let (lambda, lam_span) = parse_trailing_lambda(cur)?;
+                    args.push(Arg { label: None, value: lambda, span: lam_span });
+                    end_span = lam_span;
+                }
                 let span = expr.span.to(end_span);
+                expr = S::new(Expr::App { func: Box::new(expr), args, span }, span);
+            }
+            // `expr { x => body }` — call with no parens, just trailing lambda
+            _ if cur.is_trailing_lambda() => {
+                let (lambda, lam_span) = parse_trailing_lambda(cur)?;
+                let args = vec![Arg { label: None, value: lambda, span: lam_span }];
+                let span = expr.span.to(lam_span);
                 expr = S::new(Expr::App { func: Box::new(expr), args, span }, span);
             }
             // `expr?`
@@ -246,6 +259,40 @@ fn parse_arg_list(cur: &mut Cursor<'_>) -> Result<(Vec<Arg>, Span), ParseError> 
 
     let end = cur.expect(&Token::RParen)?;
     Ok((args, end))
+}
+
+/// Parse a trailing lambda block: `{ x => body }` or `{ x, y => body }`.
+/// The `{` has already been confirmed via `is_trailing_lambda`.
+fn parse_trailing_lambda(cur: &mut Cursor<'_>) -> Result<(S<Expr>, Span), ParseError> {
+    let start = cur.peek_span();
+    cur.bump(); // eat `{`
+
+    // Collect params until `=>`
+    let mut params = Vec::new();
+    loop {
+        let (name, name_span) = cur.expect_ident()?;
+        let ty = if cur.eat(|t| matches!(t, Token::Colon)).is_some() {
+            Some(parse_type(cur)?)
+        } else {
+            None
+        };
+        params.push(LambdaParam { name: S::new(name, name_span), ty, span: name_span });
+        match cur.peek() {
+            Some(Token::FatArrow) => { cur.bump(); break; }
+            Some(Token::Comma)    => { cur.bump(); }
+            _ => {
+                let sp = cur.peek_span();
+                let found = cur.peek().map(|t| format!("{t:?}")).unwrap_or_else(|| "end of file".into());
+                return Err(ParseError { kind: ParseErrorKind::Expected { expected: "=> or ,".into(), found }, span: sp });
+            }
+        }
+    }
+
+    let body = parse_expr(cur)?;
+    let end = cur.expect(&Token::RBrace)?;
+    let span = start.to(end);
+    let lambda = S::new(Expr::Lambda { params, body: Box::new(body), span }, span);
+    Ok((lambda, span))
 }
 
 // ------------------------------------------------------------------ //
@@ -441,7 +488,7 @@ fn parse_stmt(cur: &mut Cursor<'_>) -> Result<Stmt, ParseError> {
     let span = cur.peek_span();
 
     match cur.peek() {
-        Some(Token::Val) => {
+        Some(Token::Val) | Some(Token::Let) => {
             cur.bump();
             let pattern = parse_pattern(cur)?;
             let ty = if cur.eat(|t| matches!(t, Token::Colon)).is_some() {
