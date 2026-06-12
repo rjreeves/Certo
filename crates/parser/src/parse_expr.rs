@@ -347,8 +347,8 @@ fn parse_literal(cur: &mut Cursor<'_>) -> Result<S<Expr>, ParseError> {
             Lit::Float(f)
         }
         Token::Decimal(s)       => Lit::Decimal(s.to_string()),
-        Token::StringLit(s)     => Lit::String(s.to_string()),
-        Token::MultilineString(s) => Lit::String(s.to_string()),
+        Token::StringLit(s)     => Lit::String(unescape_str(s)),
+        Token::MultilineString(s) => Lit::String(unescape_str(s)),
         Token::FString(s)       => Lit::FString(parse_fstring_parts(s, span)?),
         Token::UuidLit(s)       => Lit::Uuid(s.to_string()),
         Token::True             => Lit::Bool(true),
@@ -530,12 +530,53 @@ fn parse_record_body(
 fn parse_if(cur: &mut Cursor<'_>) -> Result<S<Expr>, ParseError> {
     let start = cur.peek_span();
     cur.bump(); // eat `if`
+
+    // `if let Pat = expr { body } [else { other }]`
+    // Desugar to: match expr { Pat => body, _ => other_or_unit }
+    if cur.eat(|t| matches!(t, Token::Let)).is_some() {
+        let pat = parse_pattern(cur)?;
+        cur.expect(&Token::Eq)?;
+        let scrutinee = parse_expr(cur)?;
+        let body = parse_block(cur)?;
+        let else_expr = if cur.eat(|t| matches!(t, Token::Else)).is_some() {
+            parse_block(cur)?
+        } else {
+            let sp = body.span;
+            S::new(Expr::Lit { value: Lit::Unit, span: sp }, sp)
+        };
+        let span = start.to(else_expr.span);
+        let wildcard_span = else_expr.span;
+        let match_arm = MatchArm {
+            pattern: pat,
+            guard:   None,
+            body,
+            span:    span,
+        };
+        let wildcard_arm = MatchArm {
+            pattern: S::new(certo_ast::pattern::Pattern::Wildcard { span: wildcard_span }, wildcard_span),
+            guard:   None,
+            body:    else_expr,
+            span:    wildcard_span,
+        };
+        return Ok(S::new(Expr::Match {
+            scrutinee: Box::new(scrutinee),
+            arms:      vec![match_arm, wildcard_arm],
+            span,
+        }, span));
+    }
+
     let cond = parse_expr(cur)?;
     cur.expect(&Token::Then)?;
     let then_expr = parse_expr(cur)?;
-    cur.expect(&Token::Else)?;
-    let else_expr = parse_expr(cur)?;
-    let span = start.to(else_expr.span);
+    let (else_expr, span) = if cur.eat(|t| matches!(t, Token::Else)).is_some() {
+        let e = parse_expr(cur)?;
+        let sp = start.to(e.span);
+        (e, sp)
+    } else {
+        // Synthesise a Unit else-branch so `if cond then stmt` is valid.
+        let sp = start.to(then_expr.span);
+        (S::new(Expr::Block { stmts: vec![], span: sp }, sp), sp)
+    };
     Ok(S::new(Expr::If {
         cond: Box::new(cond),
         then_expr: Box::new(then_expr),
@@ -693,6 +734,28 @@ fn parse_while(cur: &mut Cursor<'_>) -> Result<S<Expr>, ParseError> {
     let body  = parse_block(cur)?;
     let span  = start.to(body.span);
     Ok(S::new(Expr::While { cond: Box::new(cond), body: Box::new(body), span }, span))
+}
+
+fn unescape_str(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            match chars.next() {
+                Some('n')  => out.push('\n'),
+                Some('t')  => out.push('\t'),
+                Some('r')  => out.push('\r'),
+                Some('\\') => out.push('\\'),
+                Some('"')  => out.push('"'),
+                Some('0')  => out.push('\0'),
+                Some(c)    => { out.push('\\'); out.push(c); }
+                None       => out.push('\\'),
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }
 
 fn parse_for(cur: &mut Cursor<'_>) -> Result<S<Expr>, ParseError> {

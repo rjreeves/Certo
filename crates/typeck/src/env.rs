@@ -104,6 +104,23 @@ impl TypeEnv {
             });
         }
 
+        // Some :: ∀a. a → Option<a>
+        // None :: ∀a. Option<a>
+        {
+            *counter += 1; let a = *counter;
+            self.define("Some", Ty::Forall {
+                vars: vec![a],
+                body: Box::new(Ty::Fn { params: vec![Ty::Var(a)], ret: Box::new(Ty::Option(Box::new(Ty::Var(a)))) }),
+            });
+        }
+        {
+            *counter += 1; let a = *counter;
+            self.define("None", Ty::Forall {
+                vars: vec![a],
+                body: Box::new(Ty::Option(Box::new(Ty::Var(a)))),
+            });
+        }
+
         // Ok  :: ∀T E. T → Result<T, E>
         // Err :: ∀T E. E → Result<T, E>
         {
