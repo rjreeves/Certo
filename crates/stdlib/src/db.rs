@@ -26,7 +26,7 @@ static char* certo_db_strdup(const char* s) {
 /* Sentinel for SQL NULL parameters.  dbNull() returns a pointer to this
  * buffer.  certo_db_params detects it by pointer identity and passes NULL
  * to PQexecParams, which libpq treats as SQL NULL. */
-static const char certo_db_null_sentinel_str[] = "\x01CERTO_DB_NULL\x01";
+static const char certo_db_null_sentinel_str[] = "\001CERTO_DB_NULL\001";
 
 certo_text_t certo_db_null_param(void) {
     return (certo_text_t)certo_db_null_sentinel_str;

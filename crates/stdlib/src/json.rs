@@ -392,8 +392,20 @@ void certo_json_object_set(CertoJsonValue* obj, certo_text_t key, CertoJsonValue
     }
     obj->obj.keys[obj->obj.count] = strdup(key);
     obj->obj.vals[obj->obj.count] = val;
+
     obj->obj.count++;
 }
+
+/* Aliases so camelCase Certo names (Json.object → certo_json_object) resolve */
+static inline CertoJsonValue* certo_json_object(void)                           { return certo_json_object_val(); }
+static inline CertoJsonValue* certo_json_array(void)                            { return certo_json_array_val(); }
+static inline CertoJsonValue* certo_json_string(certo_text_t s)                 { return certo_json_string_val(s); }
+static inline CertoJsonValue* certo_json_int(int64_t i)                         { return certo_json_int_val(i); }
+static inline CertoJsonValue* certo_json_float(double f)                        { return certo_json_float_val(f); }
+static inline CertoJsonValue* certo_json_bool(bool b)                           { return certo_json_bool_val(b); }
+static inline CertoJsonValue* certo_json_null(void)                             { return certo_json_null_val(); }
+static inline int64_t          certo_json_value_set(CertoJsonValue* o, certo_text_t k, CertoJsonValue* v) { certo_json_object_set(o, k, v); return 0; }
+static inline int64_t          certo_json_array_append(CertoJsonValue* a, CertoJsonValue* v)              { certo_json_array_push(a, v); return 0; }
 "#;
 
 pub const JSON_CERTO: &str = r#"

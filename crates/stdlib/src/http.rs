@@ -258,6 +258,9 @@ CertoHttpResponse* certo_http_ok        (certo_text_t body, certo_text_t ct)  { 
 CertoHttpResponse* certo_http_not_found (certo_text_t body)                   { return certo_http_respond(404, body, "text/plain"); }
 CertoHttpResponse* certo_http_bad_req   (certo_text_t body)                   { return certo_http_respond(400, body, "text/plain"); }
 CertoHttpResponse* certo_http_srv_error (certo_text_t body)                   { return certo_http_respond(500, body, "text/plain"); }
+/* Aliases matching camelCase Certo names → c_fn_name output */
+static inline CertoHttpResponse* certo_http_bad_request    (certo_text_t b) { return certo_http_bad_req(b); }
+static inline CertoHttpResponse* certo_http_server_error   (certo_text_t b) { return certo_http_srv_error(b); }
 
 /* HttpRequest accessors */
 certo_text_t certo_http_request_method (CertoHttpRequest* r) { return r ? r->method  : ""; }
@@ -460,7 +463,7 @@ static void http_srv_send(SOCKET sock, CertoHttpResponse* resp) {
 }
 
 /* ---- public: blocking serve loop ------------------------------- */
-void certo_http_serve(int64_t port, certo_fn_t raw_handler) {
+int64_t certo_http_serve(int64_t port, certo_fn_t raw_handler) {
     CertoHttpHandler handler = (CertoHttpHandler)raw_handler;
 
     WSADATA wsa;
@@ -499,13 +502,15 @@ void certo_http_serve(int64_t port, certo_fn_t raw_handler) {
         closesocket(client);
     }
     /* unreachable — server runs until process exits */
+    return 0;
 }
 
 #else
 /* ---- POSIX stub ------------------------------------------------- */
-void certo_http_serve(int64_t port, certo_fn_t handler) {
+int64_t certo_http_serve(int64_t port, certo_fn_t handler) {
     (void)port; (void)handler;
     certo_panic("Http.serve is not yet supported on this platform");
+    return 0;
 }
 #endif
 "#;

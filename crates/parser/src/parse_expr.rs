@@ -295,6 +295,34 @@ fn parse_trailing_lambda(cur: &mut Cursor<'_>) -> Result<(S<Expr>, Span), ParseE
     Ok((lambda, span))
 }
 
+/// Parse `fn(p1: T1, p2: T2): RetTy = body` — explicit-signature lambda expression.
+fn parse_fn_lambda(cur: &mut Cursor<'_>) -> Result<S<Expr>, ParseError> {
+    let start = cur.peek_span();
+    cur.bump(); // eat `fn`
+    cur.expect(&Token::LParen)?;
+
+    let mut params = Vec::new();
+    while cur.peek() != Some(&Token::RParen) && !cur.at_end() {
+        let (name, name_span) = cur.expect_ident()?;
+        cur.expect(&Token::Colon)?;
+        let ty = parse_type(cur)?;
+        let param_span = name_span.to(ty.span);
+        params.push(LambdaParam { name: S::new(name, name_span), ty: Some(ty), span: param_span });
+        if cur.eat(|t| matches!(t, Token::Comma)).is_none() { break; }
+    }
+    cur.expect(&Token::RParen)?;
+
+    // Optional return type annotation `: T`
+    if cur.eat(|t| matches!(t, Token::Colon)).is_some() {
+        parse_type(cur)?; // consume but discard — typeck infers it
+    }
+
+    cur.expect(&Token::Eq)?;
+    let body = parse_expr(cur)?;
+    let span = start.to(body.span);
+    Ok(S::new(Expr::Lambda { params, body: Box::new(body), span }, span))
+}
+
 // ------------------------------------------------------------------ //
 // Atoms
 // ------------------------------------------------------------------ //
@@ -326,6 +354,9 @@ fn parse_atom(cur: &mut Cursor<'_>) -> Result<S<Expr>, ParseError> {
 
         // `{ ... }` — block or record
         Some(Token::LBrace)   => parse_block_or_record(cur),
+
+        // `fn(params): RetType = body` — explicit-signature lambda expression
+        Some(Token::Fn) => parse_fn_lambda(cur),
 
         // `if cond then a else b`
         Some(Token::If)       => parse_if(cur),

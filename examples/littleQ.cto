@@ -1,13 +1,21 @@
 module littleQ
 
-fn main(): Unit = {
-    db.connect("host=localhost dbname=fireworks user=fireworks password=***REMOVED***")
+import Stdlib.Core
+import Stdlib.Db
 
-    val sql = "SELECT cust_acctname, cust_name1, cust_name2 FROM fireworks.customer LIMIT 5"
-
-    val results = db.query(sql)
-
-    for row in results {
-        println(f"Account Name: {row.cust_acctname}, Name1: {row.cust_name1}, Name2: {row.cust_name2}")
+fn main(): Unit [io] = {
+    val conn = dbConnect("host=localhost dbname=fireworks user=fireworks password=***REMOVED***")
+    if conn == 0 then {
+        eprintln(f"connect failed: {dbError(0)}")
+    } else {
+        val sql = "SELECT cust_acctname, cust_name1, cust_name2 FROM fireworks.customer LIMIT 5"
+        val rows = dbQuery(conn, sql, [])
+        for row in rows {
+            val acct  = List.get(row, 0) ?? ""
+            val name1 = List.get(row, 1) ?? ""
+            val name2 = List.get(row, 2) ?? ""
+            println(f"Account Name: {acct}, Name1: {name1}, Name2: {name2}")
+        }
+        dbClose(conn)
     }
 }
