@@ -37,6 +37,12 @@ pub(crate) const REPL_PREAMBLE: &str =
      #include <stdarg.h>\n\
      #define _CRT_SECURE_NO_WARNINGS\n";
 
+const CERTO_VERSION: &str = concat!(
+    env!("CARGO_PKG_VERSION"), ".",
+    env!("CERTO_BUILD_DATE"), ".",
+    env!("CERTO_BUILD_NUM")
+);
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     // Bare `certo` with no args: try certo.toml entry, else show help.
@@ -70,6 +76,7 @@ fn main() {
             "db"      => cmd_db(&args[2..]),
             "repl"    => cmd_repl::cmd_repl(),
             "help" | "--help" | "-h" => { print_top_help(); }
+            "--version" | "-V" => { println!("certo {}", CERTO_VERSION); }
             other => {
                 eprintln!("Unknown command: {}", other);
                 print_top_help();
@@ -1613,7 +1620,7 @@ static void bench_run(const char* name, int64_t (*fn)(void)) {{
 }
 
 fn print_top_help() {
-    eprintln!("Certo compiler");
+    eprintln!("Certo compiler  v{}", CERTO_VERSION);
     eprintln!();
     eprintln!("Usage:");
     eprintln!("  certo                            Start the interactive REPL");
@@ -1629,7 +1636,8 @@ fn print_top_help() {
     eprintln!("  certo lint  <file.cto>...      Lint for unused params / dead code");
     eprintln!("  certo bench <file.cto>...      Run bench_ functions");
     eprintln!("  certo db <subcommand>            Database tools (migrate, rollback, status, pull)");
-    eprintln!("  certo migrate <subcommand>       Alias for certo db");
+    eprintln!("  certo migrate <subcommand>       Alias for certo db
+  certo --version                  Print version and exit");
     eprintln!();
     eprintln!("Build options:");
     eprintln!("  -o <file>    Output path");

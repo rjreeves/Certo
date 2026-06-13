@@ -16,13 +16,30 @@ function Step($msg) { Write-Host "`n==> $msg" -ForegroundColor Cyan }
 function Ok($msg)   { Write-Host "    $msg" -ForegroundColor Green }
 function Fail($msg) { Write-Host "    ERROR: $msg" -ForegroundColor Red; exit 1 }
 
-# ── 1. Compile all Rust crates ────────────────────────────────────────────────
+# ── 1. Bump patch version on release builds ──────────────────────────────────
+$cliToml = "$PSScriptRoot\crates\cli\Cargo.toml"
+if (-not $Debug) {
+    $tomlContent = Get-Content $cliToml -Raw
+    if ($tomlContent -match 'version\s*=\s*"(\d+)\.(\d+)\.(\d+)"') {
+        $major = [int]$Matches[1]
+        $minor = [int]$Matches[2]
+        $patch = [int]$Matches[3] + 1
+        $newVersion = "$major.$minor.$patch"
+        $tomlContent = $tomlContent -replace 'version\s*=\s*"\d+\.\d+\.\d+"', "version = `"$newVersion`""
+        Set-Content $cliToml $tomlContent -NoNewline
+        Ok "Version bumped to $newVersion"
+    } else {
+        Write-Host "    WARN: could not parse version from $cliToml" -ForegroundColor Yellow
+    }
+}
+
+# ── 2. Compile all Rust crates ────────────────────────────────────────────────
 Step "Building all Rust crates ($profile)"
 if ($Debug) { cargo build } else { cargo build --release }
 if ($LASTEXITCODE -ne 0) { Fail "cargo build failed" }
 Ok "Rust build complete"
 
-# ── 2. Copy binaries to dist/ ─────────────────────────────────────────────────
+# ── 3. Copy binaries to dist\ ─────────────────────────────────────────────────
 Step "Copying binaries to dist\"
 New-Item -ItemType Directory -Force -Path dist | Out-Null
 
@@ -54,7 +71,7 @@ if ($NoExamples) {
     exit 0
 }
 
-# ── 3. Compile example programs ───────────────────────────────────────────────
+# ── 4. Compile example programs ───────────────────────────────────────────────
 Step "Building example programs"
 
 $certo = "dist\certo.exe"

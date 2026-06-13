@@ -8,18 +8,14 @@ use std::io::{self, Write};
 use certo_typeck::{TypeError, TypeErrorKind, TypeEnv, Ty, assign_var_names};
 use certo_diagnostics::{Diagnostic, render_all};
 
-const BANNER_VERSION: &str = concat!(
-    env!("CARGO_PKG_VERSION"), ".",
-    env!("CERTO_BUILD_DATE"),  ".",
-    env!("CERTO_BUILD_NUM")
-);
+use crate::CERTO_VERSION;
 
 // ------------------------------------------------------------------ //
 // Entry point
 // ------------------------------------------------------------------ //
 
 pub fn cmd_repl() {
-    println!("Certo v{} (c) SyntrA 2026", BANNER_VERSION);
+    println!("Certo v{} (c) SyntrA 2026", CERTO_VERSION);
     println!("Type :help for commands, :quit or . to exit.");
     println!();
 

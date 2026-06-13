@@ -407,7 +407,10 @@ pub fn seed_stdlib(env: &mut TypeEnv, counter: &mut u32) {
     {
         let pr = Ty::Named { name: "ProcessResult".into(), args: vec![] };
         let list_text = Ty::List(Box::new(Ty::Text));
-        def!("Process.exec",           fn2(Ty::Text, list_text, pr.clone()));
+        let handler = Ty::Fn { params: vec![Ty::Text], ret: Box::new(Ty::Unit) };
+        def!("Process.exec",           fn2(Ty::Text, list_text.clone(), pr.clone()));
+        def!("Process.execWithInput",  Ty::Fn { params: vec![Ty::Text, list_text.clone(), Ty::Text], ret: Box::new(pr.clone()) });
+        def!("Process.lines",          Ty::Fn { params: vec![Ty::Text, list_text.clone(), handler], ret: Box::new(Ty::Int) });
         def!("ProcessResult.exitCode", fn1(pr.clone(), Ty::Int));
         def!("ProcessResult.stdout",   fn1(pr.clone(), Ty::Text));
         def!("ProcessResult.stderr",   fn1(pr.clone(), Ty::Text));
@@ -739,7 +742,9 @@ pub fn seed_stdlib(env: &mut TypeEnv, counter: &mut u32) {
     pm!("Path.join",   "base", "part");
 
     // Process
-    pm!("Process.exec", "cmd", "args");
+    pm!("Process.exec",          "cmd", "args");
+    pm!("Process.execWithInput", "cmd", "args", "input");
+    pm!("Process.lines",         "cmd", "args", "handler");
 
     // Json
     pm!("JsonValue.at",   "value", "index");
