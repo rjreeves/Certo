@@ -512,6 +512,15 @@ pub fn seed_stdlib(env: &mut TypeEnv, counter: &mut u32) {
         def!("dbQueryOne",  fn2(conn.clone(), Ty::Text, opt_text.clone()));
         def!("dbColumns",   fn2(conn.clone(), Ty::Text, list_text.clone()));
 
+        // dbStream :: (Int, Text, List<Text>, List<Text?> -> Unit) -> Int
+        {
+            let handler = Ty::Fn { params: vec![list_opt_text.clone()], ret: Box::new(Ty::Unit) };
+            def!("dbStream", Ty::Fn {
+                params: vec![conn.clone(), Ty::Text, list_text.clone(), handler],
+                ret: Box::new(Ty::Int),
+            });
+        }
+
         // Transactions
         def!("dbBegin",    fn1(conn.clone(), Ty::Int));
         def!("dbCommit",   fn1(conn.clone(), Ty::Int));
@@ -766,6 +775,7 @@ pub fn seed_stdlib(env: &mut TypeEnv, counter: &mut u32) {
     pm!("dbQueryRow",        "conn", "sql", "params");
     pm!("withTransaction",   "conn", "body");
     pm!("withConnection",    "url",  "body");
+    pm!("dbStream",          "conn", "sql", "params", "handler");
 }
 
 fn fn1(a: Ty, ret: Ty) -> Ty {

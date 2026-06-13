@@ -11,9 +11,9 @@ fn main(): Unit [io] = {
         val sql = "SELECT cust_acctname, cust_name1, cust_name2 FROM fireworks.customer LIMIT 5"
         val rows = dbQuery(conn, sql, [])
         for row in rows {
-            val acct  = List.get(row, 0) ?? ""
-            val name1 = List.get(row, 1) ?? ""
-            val name2 = List.get(row, 2) ?? ""
+            val acct  = List.getOrPanic(row, 0) ?? ""
+            val name1 = List.getOrPanic(row, 1) ?? ""
+            val name2 = List.getOrPanic(row, 2) ?? ""
             println(f"Account Name: {acct}, Name1: {name1}, Name2: {name2}")
         }
         dbClose(conn)

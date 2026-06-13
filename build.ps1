@@ -11,7 +11,6 @@ param(
 
 $ErrorActionPreference = "Stop"
 $profile = if ($Debug) { "debug" } else { "release" }
-$cargoFlag = if ($Debug) { @() } else { @("--release") }
 
 function Step($msg) { Write-Host "`n==> $msg" -ForegroundColor Cyan }
 function Ok($msg)   { Write-Host "    $msg" -ForegroundColor Green }
@@ -19,7 +18,7 @@ function Fail($msg) { Write-Host "    ERROR: $msg" -ForegroundColor Red; exit 1 
 
 # ── 1. Compile all Rust crates ────────────────────────────────────────────────
 Step "Building all Rust crates ($profile)"
-cargo build @cargoFlag
+if ($Debug) { cargo build } else { cargo build --release }
 if ($LASTEXITCODE -ne 0) { Fail "cargo build failed" }
 Ok "Rust build complete"
 

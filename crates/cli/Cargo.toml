@@ -19,4 +19,5 @@ certo-stdlib      = { path = "../stdlib" }
 certo-diagnostics = { path = "../diagnostics" }
 certo-typeck      = { path = "../typeck" }
 certo-traits      = { path = "../traits" }
+certo-dbschema    = { path = "../dbschema" }
 tempfile          = "3"
