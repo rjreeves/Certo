@@ -15,6 +15,7 @@ use certo_migrate::{
 use certo_diagnostics::{Diagnostic, render_all};
 use certo_typeck::{TypeError, TypeErrorKind, TypeEnv, assign_var_names};
 use certo_traits::{TraitError, TraitErrorKind};
+use certo_dbschema::DbErrorKind;
 
 /// C preamble shared by the build pipeline and the REPL.
 pub(crate) const REPL_PREAMBLE: &str =
@@ -581,6 +582,68 @@ fn run_typeck(module: &Module, src: &str, filename: &str, colour: bool) {
         eprint!("{}", render_all(&diags, src, filename, colour));
         eprintln!("aborting due to {} trait error(s)", diags.len());
         process::exit(1);
+    }
+
+    if let Err(errs) = certo_dbschema::check_module(module) {
+        let diags: Vec<Diagnostic> = errs.iter()
+            .map(|e| db_error_to_diagnostic(e))
+            .collect();
+        eprint!("{}", render_all(&diags, src, filename, colour));
+        eprintln!("aborting due to {} migration schema error(s)", diags.len());
+        process::exit(1);
+    }
+}
+
+fn db_error_to_diagnostic(e: &certo_dbschema::DbError) -> Diagnostic {
+    match &e.kind {
+        DbErrorKind::ColumnTypeMismatch { table, column, declared, migration } =>
+            Diagnostic::error("E0501",
+                format!("column `{}.{}` type mismatch", table, column))
+                .with_span(e.span)
+                .with_label(format!("migration uses `{}`, type declaration has `{}`", migration, declared))
+                .with_note("update the migration column type to match the `type` declaration"),
+
+        DbErrorKind::UnknownForeignKeyTarget { table, column, references } =>
+            Diagnostic::error("E0502",
+                format!("foreign key `{}.{}` references unknown table `{}`", table, column, references))
+                .with_span(e.span)
+                .with_note("the referenced table must be declared as a `type` in this module"),
+
+        DbErrorKind::DuplicateMigration { name, .. } =>
+            Diagnostic::error("E0503",
+                format!("duplicate migration name `{}`", name))
+                .with_span(e.span)
+                .with_note("migration names must be unique within a module"),
+
+        DbErrorKind::MissingDownMigration { name } =>
+            Diagnostic::error("E0504",
+                format!("migration `{}` has no `down` block", name))
+                .with_span(e.span)
+                .with_note("add a `down { ... }` block to make this migration reversible"),
+
+        DbErrorKind::TableNotDeclaredAsType { migration, table } =>
+            Diagnostic::error("E0505",
+                format!("migration `{}` creates table `{}` which is not declared as a `type`", migration, table))
+                .with_span(e.span)
+                .with_note(format!("add `type {} {{ ... }}` to your module", table)),
+
+        DbErrorKind::UnknownColumn { migration, table, column } =>
+            Diagnostic::error("E0506",
+                format!("column `{}` does not exist on type `{}`", column, table))
+                .with_span(e.span)
+                .with_label(format!("referenced in migration `{}`", migration))
+                .with_note(format!("add field `{}: <Type>` to the `type {}` declaration", column, table)),
+
+        DbErrorKind::TableNotCreated { migration, table } =>
+            Diagnostic::error("E0507",
+                format!("migration `{}` alters/drops `{}` before it was created", migration, table))
+                .with_span(e.span)
+                .with_note("add a `CreateTable` operation for this table in an earlier migration"),
+
+        DbErrorKind::UnknownTable { migration, table } =>
+            Diagnostic::error("E0500",
+                format!("migration `{}` references unknown table `{}`", migration, table))
+                .with_span(e.span),
     }
 }
 
@@ -1576,11 +1639,12 @@ fn print_top_help() {
     eprintln!("  --watch, -w  Watch source file and rebuild on change");
     eprintln!();
     eprintln!("DB/migrate subcommands:");
-    eprintln!("  migrate [--dry-run]    Apply pending migrations");
-    eprintln!("  rollback [N]           Roll back N migrations (default 1)");
-    eprintln!("  status                 Show applied/pending migrations");
-    eprintln!("  create <name>          Scaffold a new migration file");
-    eprintln!("  pull [-o <file>]       Introspect live DB schema → db/schema.cto");
+    eprintln!("  migrate [--dry-run]          Apply pending migrations");
+    eprintln!("  rollback [N]                 Roll back N migrations (default 1)");
+    eprintln!("  status                       Show applied/pending migrations");
+    eprintln!("  create <name>                Scaffold a new migration file");
+    eprintln!("  pull [-o <file>]             Introspect live DB schema → db/schema.cto");
+    eprintln!("  diff <file.cto>              Compare type declarations to live DB");
 }
 
 fn die(msg: &str, code: i32) -> ! {
@@ -1599,6 +1663,227 @@ pub(crate) fn stderr_is_tty() -> bool {
     { std::env::var_os("TERM").is_some() || std::env::var_os("WT_SESSION").is_some() }
     #[cfg(not(windows))]
     { std::env::var_os("TERM").is_some() }
+}
+
+// ------------------------------------------------------------------ //
+// db diff
+// ------------------------------------------------------------------ //
+
+fn cmd_db_diff(args: &[String]) {
+    let mut schema_name = "public".to_string();
+    let mut src_path: Option<PathBuf> = None;
+
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--schema" => {
+                i += 1;
+                schema_name = args.get(i)
+                    .unwrap_or_else(|| die("--schema requires a name", 2))
+                    .clone();
+            }
+            "--help" | "-h" => {
+                println!("Usage: certo db diff <file.cto> [--schema <name>]");
+                println!();
+                println!("Compare the type declarations in <file.cto> against the live");
+                println!("PostgreSQL database and report any schema drift.");
+                println!();
+                println!("Options:");
+                println!("  --schema <name>  PostgreSQL schema to inspect (default: public)");
+                println!();
+                println!("Reads DATABASE_URL from the environment or .env file.");
+                println!("Requires psql on PATH.");
+                return;
+            }
+            other if other.starts_with('-') => {
+                eprintln!("Unknown option: {}", other);
+                process::exit(2);
+            }
+            path => {
+                src_path = Some(PathBuf::from(path));
+            }
+        }
+        i += 1;
+    }
+
+    let src_path = src_path.unwrap_or_else(|| die("usage: certo db diff <file.cto>", 2));
+
+    // Parse and build the expected schema from type declarations.
+    let (module, _) = parse_file_or_exit(&src_path, false);
+    let expected = match certo_dbschema::check_module(&module) {
+        Ok(s)    => s,
+        Err(errs) => {
+            for e in &errs { eprintln!("error: {}", e.message()); }
+            process::exit(1);
+        }
+    };
+
+    // Resolve DATABASE_URL.
+    let db_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| {
+        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        if let Ok(contents) = std::fs::read_to_string(cwd.join(".env")) {
+            for line in contents.lines() {
+                let line = line.trim();
+                if let Some(val) = line.strip_prefix("DATABASE_URL=") {
+                    return val.trim().trim_matches('"').to_string();
+                }
+            }
+        }
+        eprintln!("error: DATABASE_URL is not set");
+        process::exit(1);
+    });
+
+    // Verify psql is available.
+    let psql_ok = std::process::Command::new("psql")
+        .arg("--version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if !psql_ok {
+        eprintln!("error: psql not found on PATH");
+        process::exit(1);
+    }
+
+    // Query live columns from information_schema.
+    let col_query = format!(
+        "SELECT table_name, column_name, data_type, is_nullable \
+         FROM information_schema.columns \
+         WHERE table_schema = '{}' \
+         ORDER BY table_name, ordinal_position;",
+        schema_name.replace('\'', "")
+    );
+    let col_out = std::process::Command::new("psql")
+        .arg(&db_url)
+        .arg("--no-align").arg("--tuples-only").arg("--field-separator=|")
+        .arg("--command").arg(&col_query)
+        .output()
+        .unwrap_or_else(|e| { eprintln!("error running psql: {}", e); process::exit(1); });
+    if !col_out.status.success() {
+        eprintln!("error: psql failed: {}", String::from_utf8_lossy(&col_out.stderr).trim());
+        process::exit(1);
+    }
+
+    // Parse live schema into HashMap<table, Vec<(col, certo_ty, nullable)>>.
+    use std::collections::HashMap;
+    let mut live: HashMap<String, Vec<(String, String, bool)>> = HashMap::new();
+    for line in String::from_utf8_lossy(&col_out.stdout).lines() {
+        let line = line.trim();
+        if line.is_empty() { continue; }
+        let parts: Vec<&str> = line.splitn(4, '|').collect();
+        if parts.len() < 4 { continue; }
+        let table    = parts[0].trim().to_string();
+        let col      = parts[1].trim().to_string();
+        let certo_ty = pg_type_to_certo(parts[2].trim());
+        let nullable = parts[3].trim().eq_ignore_ascii_case("YES");
+        live.entry(table).or_default().push((col, certo_ty, nullable));
+    }
+
+    // ── Diff ─────────────────────────────────────────────────────────
+    let mut diffs: Vec<String> = Vec::new();
+    let mut ok_count = 0usize;
+
+    // Only diff tables that are declared as types (ignore migration-only helpers).
+    let mut expected_names: Vec<&str> = expected.tables.keys().map(|s| s.as_str()).collect();
+    expected_names.sort();
+
+    for table_name in &expected_names {
+        let expected_table = &expected.tables[*table_name];
+        match live.get(*table_name) {
+            None => {
+                diffs.push(format!("  MISSING TABLE  {}", table_name));
+            }
+            Some(live_cols) => {
+                let live_map: HashMap<&str, (&str, bool)> = live_cols.iter()
+                    .map(|(c, t, n)| (c.as_str(), (t.as_str(), *n)))
+                    .collect();
+
+                let mut table_diffs: Vec<String> = Vec::new();
+
+                // Columns expected but missing from live.
+                for ec in &expected_table.columns {
+                    match live_map.get(ec.name.as_str()) {
+                        None => {
+                            table_diffs.push(format!(
+                                "    MISSING COLUMN  {}.{}: {}{}",
+                                table_name, ec.name, ec.ty,
+                                if ec.nullable { "?" } else { "" }
+                            ));
+                        }
+                        Some((live_ty, live_null)) => {
+                            // Type mismatch.
+                            if !types_match(&ec.ty, live_ty) {
+                                table_diffs.push(format!(
+                                    "    TYPE MISMATCH   {}.{} — code: `{}`, db: `{}`",
+                                    table_name, ec.name, ec.ty, live_ty
+                                ));
+                            }
+                            // Nullable mismatch.
+                            if ec.nullable != *live_null {
+                                table_diffs.push(format!(
+                                    "    NULLABLE DRIFT  {}.{} — code: {}, db: {}",
+                                    table_name, ec.name,
+                                    if ec.nullable { "nullable" } else { "NOT NULL" },
+                                    if *live_null  { "nullable" } else { "NOT NULL" },
+                                ));
+                            }
+                        }
+                    }
+                }
+
+                // Columns in live but not in the type declaration.
+                let expected_cols: std::collections::HashSet<&str> =
+                    expected_table.columns.iter().map(|c| c.name.as_str()).collect();
+                for (live_col, live_ty, live_null) in live_cols {
+                    if !expected_cols.contains(live_col.as_str()) {
+                        table_diffs.push(format!(
+                            "    EXTRA COLUMN    {}.{}: {}{}",
+                            table_name, live_col, live_ty,
+                            if *live_null { "?" } else { "" }
+                        ));
+                    }
+                }
+
+                if table_diffs.is_empty() {
+                    ok_count += 1;
+                } else {
+                    diffs.push(format!("  TABLE  {}", table_name));
+                    diffs.extend(table_diffs);
+                }
+            }
+        }
+    }
+
+    // Tables in live DB but not declared as types (informational only).
+    let mut extra_tables: Vec<&str> = live.keys()
+        .filter(|t| !expected.tables.contains_key(t.as_str()))
+        .map(|t| t.as_str())
+        .collect();
+    extra_tables.sort();
+    for t in &extra_tables {
+        diffs.push(format!("  EXTRA TABLE     {} (not declared as a type)", t));
+    }
+
+    // ── Report ───────────────────────────────────────────────────────
+    if diffs.is_empty() {
+        println!("schema in sync — {} table(s) match the live database", ok_count);
+    } else {
+        println!("schema drift detected:\n");
+        for line in &diffs {
+            println!("{}", line);
+        }
+        println!();
+        println!("{} issue(s) found, {} table(s) ok", diffs.len(), ok_count);
+        process::exit(1);
+    }
+}
+
+/// Loose type comparison — ignores casing, treats nullable-stripped types as equal.
+fn types_match(code_ty: &str, live_ty: &str) -> bool {
+    let a = code_ty.trim_end_matches('?').to_lowercase();
+    let b = live_ty.trim_end_matches('?').to_lowercase();
+    a == b
 }
 
 // ------------------------------------------------------------------ //
@@ -1688,7 +1973,7 @@ fn cmd_db_pull(args: &[String]) {
     );
 
     let col_out = std::process::Command::new("psql")
-        .arg(&db_url)
+        .arg("-d").arg(&db_url)
         .arg("--no-align")
         .arg("--tuples-only")
         .arg("--field-separator=|")
@@ -1716,7 +2001,7 @@ fn cmd_db_pull(args: &[String]) {
     );
 
     let pk_out = std::process::Command::new("psql")
-        .arg(&db_url)
+        .arg("-d").arg(&db_url)
         .arg("--no-align")
         .arg("--tuples-only")
         .arg("--field-separator=|")
@@ -1765,12 +2050,17 @@ fn cmd_db_pull(args: &[String]) {
     }
 
     // Emit db/schema.cto.
-    let out = out_path.unwrap_or_else(|| {
-        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-        let dir = cwd.join("db");
-        std::fs::create_dir_all(&dir).ok();
-        dir.join("schema.cto")
-    });
+    let out_is_stdout = out_path.as_ref().map(|p| p.as_os_str() == "-").unwrap_or(false);
+    let out = if out_is_stdout {
+        PathBuf::from("-")
+    } else {
+        out_path.unwrap_or_else(|| {
+            let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+            let dir = cwd.join("db");
+            std::fs::create_dir_all(&dir).ok();
+            dir.join("schema.cto")
+        })
+    };
 
     let mut src = String::new();
     src.push_str("module DbSchema\n\n");
@@ -1873,12 +2163,15 @@ fn cmd_db_pull(args: &[String]) {
         }
     }
 
-    std::fs::write(&out, &src).unwrap_or_else(|e| {
-        eprintln!("error writing {}: {}", out.display(), e);
-        process::exit(1);
-    });
-
-    eprintln!("wrote {} ({} table(s))", out.display(), tables.len());
+    if out_is_stdout {
+        print!("{}", src);
+    } else {
+        std::fs::write(&out, &src).unwrap_or_else(|e| {
+            eprintln!("error writing {}: {}", out.display(), e);
+            process::exit(1);
+        });
+        eprintln!("wrote {} ({} table(s))", out.display(), tables.len());
+    }
     for table in &tables {
         let col_count = columns.get(table).map(|c| c.len()).unwrap_or(0);
         eprintln!("  {}  ({} column(s))", snake_to_pascal(table), col_count);
@@ -2020,15 +2313,17 @@ fn cmd_db(args: &[String]) {
             cmd_migrate(&fwd);
         }
         "pull" => cmd_db_pull(&args[1..]),
+        "diff" => cmd_db_diff(&args[1..]),
         "--help" | "-h" | "" => {
             println!("Usage: certo db <subcommand> [options]");
             println!();
             println!("Subcommands:");
-            println!("  migrate [--dry-run]    Apply all pending migrations");
-            println!("  rollback [N]           Roll back N migrations (default 1)");
-            println!("  status                 Show applied vs pending migrations");
-            println!("  create <name>          Scaffold a new migration file");
-            println!("  pull [-o <file>]       Introspect live DB → db/schema.cto");
+            println!("  migrate [--dry-run]          Apply all pending migrations");
+            println!("  rollback [N]                 Roll back N migrations (default 1)");
+            println!("  status                       Show applied vs pending migrations");
+            println!("  create <name>                Scaffold a new migration file");
+            println!("  pull [-o <file>]             Introspect live DB → db/schema.cto");
+            println!("  diff <file.cto>              Compare type declarations to live DB");
             println!();
             println!("Set DATABASE_URL in your environment or .env file.");
         }

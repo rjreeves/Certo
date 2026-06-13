@@ -416,6 +416,96 @@ void* certo_with_transaction(int64_t handle, certo_fn_t thunk) {
     }
 }
 
+/* ---- dbStream ----------------------------------------------------- */
+
+/* Stream query results row-by-row via a server-side cursor.
+ *
+ * Uses DECLARE … CURSOR FOR <sql> then FETCH 100 rows at a time.
+ * Cursors require an active transaction; if none exists one is opened and
+ * committed on exit.  If the connection is already in a transaction the
+ * cursor is declared within it (no implicit BEGIN/COMMIT).
+ *
+ * handler is fn(List<Text?>): Unit compiled as void (*)(CertoList*). */
+static int64_t certo_stream_seq = 0;
+
+int64_t certo_db_stream(int64_t handle, certo_text_t sql, CertoList* params, certo_fn_t handler) {
+    if (handle == 0 || !handler) return -1;
+    PGconn *conn = (PGconn *)(uintptr_t)handle;
+
+    PGTransactionStatusType txstatus = PQtransactionStatus(conn);
+    if (txstatus == PQTRANS_INERROR || txstatus == PQTRANS_UNKNOWN) return -1;
+
+    int own_txn = (txstatus == PQTRANS_IDLE);
+    if (own_txn) {
+        PGresult *b = PQexec(conn, "BEGIN");
+        int ok = PQresultStatus(b) == PGRES_COMMAND_OK;
+        PQclear(b);
+        if (!ok) return -1;
+    }
+
+    /* Unique cursor name for this call. */
+    char cur[64];
+    snprintf(cur, sizeof(cur), "certo_cur_%" PRId64, ++certo_stream_seq);
+
+    /* Build DECLARE <cur> CURSOR FOR <sql> and execute with params. */
+    size_t decl_len = strlen("DECLARE  CURSOR FOR ") + strlen(cur) + strlen(sql) + 1;
+    char *decl = (char*)malloc(decl_len);
+    if (!decl) { if (own_txn) PQexec(conn, "ROLLBACK"); return -1; }
+    snprintf(decl, decl_len, "DECLARE %s CURSOR FOR %s", cur, sql);
+
+    int nparams = 0;
+    const char **pv = certo_db_params(params, &nparams);
+    PGresult *dr = PQexecParams(conn, decl, nparams, NULL, pv, NULL, NULL, 0);
+    free(decl);
+    if (pv) free(pv);
+    if (PQresultStatus(dr) != PGRES_COMMAND_OK) {
+        PQclear(dr);
+        if (own_txn) PQexec(conn, "ROLLBACK");
+        return -1;
+    }
+    PQclear(dr);
+
+    /* FETCH loop — 100 rows per round-trip. */
+    char fetch[128];
+    snprintf(fetch, sizeof(fetch), "FETCH 100 FROM %s", cur);
+    typedef void (*row_handler_t)(CertoList*);
+    int64_t total = 0;
+
+    for (;;) {
+        PGresult *res = PQexec(conn, fetch);
+        if (PQresultStatus(res) != PGRES_TUPLES_OK) { PQclear(res); break; }
+        int nrows = PQntuples(res);
+        if (nrows == 0) { PQclear(res); break; }
+        int ncols = PQnfields(res);
+
+        for (int r = 0; r < nrows; r++) {
+            CertoList *row = certo_list_new_empty();
+            for (int c = 0; c < ncols; c++) {
+                void *cell = PQgetisnull(res, r, c)
+                    ? NULL
+                    : (void*)certo_db_strdup(PQgetvalue(res, r, c));
+                row = certo_list_push(row, cell);
+            }
+            ((row_handler_t)handler)(row);
+            total++;
+        }
+        PQclear(res);
+        if (nrows < 100) break;
+    }
+
+    /* Close the cursor and optionally commit. */
+    char close_sql[128];
+    snprintf(close_sql, sizeof(close_sql), "CLOSE %s", cur);
+    PGresult *cr = PQexec(conn, close_sql);
+    PQclear(cr);
+    if (own_txn) {
+        PGresult *cm = PQexec(conn, "COMMIT");
+        PQclear(cm);
+    }
+
+    return total;
+}
+
 /* ---- withConnection ----------------------------------------------- */
 
 /* Open a connection, call body(conn), then close unconditionally.
@@ -541,6 +631,24 @@ fn dbQueryOne(conn: Int, sql: Text): Text? [io]
 
 /// Return the column names for a query as List<Text>.
 fn dbColumns(conn: Int, sql: Text): List<Text> [io]
+
+/// Stream query results row-by-row using a server-side cursor.
+/// Opens a cursor on `conn`, fetches 100 rows per round-trip, and calls
+/// `handler` once per row.  Returns the total number of rows processed,
+/// or -1 on error.
+///
+/// If `conn` is not already in a transaction one is opened automatically
+/// and committed after the cursor closes (cursors require a transaction).
+/// If a transaction is already active the cursor runs within it.
+///
+/// Example — export a large table without loading it all into memory:
+///
+///   dbStream(conn, "SELECT id, name FROM users ORDER BY id", []) { row ->
+///       val id   = List.getOrPanic(row, 0) ?? ""
+///       val name = List.getOrPanic(row, 1) ?? "(unknown)"
+///       println(id ++ "," ++ name)
+///   }
+fn dbStream(conn: Int, sql: Text, params: List<Text>, handler: fn(List<Text?>): Unit): Int [io]
 
 // ── Transactions ────────────────────────────────────────────────────
 

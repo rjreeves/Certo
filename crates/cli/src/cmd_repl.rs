@@ -20,7 +20,7 @@ const BANNER_VERSION: &str = concat!(
 
 pub fn cmd_repl() {
     println!("Certo v{} (c) SyntrA 2026", BANNER_VERSION);
-    println!("Type :help for commands, :quit to exit.");
+    println!("Type :help for commands, :quit or . to exit.");
     println!();
 
     let mut session: Vec<String> = Vec::new();
@@ -77,7 +77,7 @@ pub fn cmd_repl() {
 /// Returns true if the line was a REPL command (consumed).
 fn handle_command(line: &str, session: &mut Vec<String>) -> bool {
     match line {
-        ":quit" | ":q" | ":exit" => {
+        ":quit" | ":q" | ":exit" | "." => {
             println!();
             println!("Bye.");
             std::process::exit(0);
@@ -115,7 +115,7 @@ fn handle_command(line: &str, session: &mut Vec<String>) -> bool {
 fn print_repl_help() {
     println!("REPL commands:");
     println!("  :help, :h          This message");
-    println!("  :quit, :q          Exit");
+    println!("  :quit, :q, .       Exit");
     println!("  :clear             Clear the session (forget all definitions)");
     println!("  :session, :s       Show accumulated session declarations");
     println!("  :type <expr>       Show the inferred type of an expression");
