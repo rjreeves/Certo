@@ -3,48 +3,26 @@ module FireworksUI
 // ---------------------------------------------------------------------------
 // Fireworks CRUD UI — view and form declarations for certo-ui
 // Compile with: certo-ui fireworks_ui.cto -o out/fireworks
+//
+// Relationships:
+//   Customer (cust_no) --< Subscriber (sub_no, FK: cust_no)
+//                             --< Subscription (FK: cust_no + sub_no)
+//   Product (product_cde)  <-- Subscription (product_code FK)
 // ---------------------------------------------------------------------------
 
-// ── Customer views ────────────────────────────────────────────────────────────
+// ── Customer ──────────────────────────────────────────────────────────────────
 
 view CustomerList {
+    pk = custNo
     layout = VStack(children: [
         Heading("Customers"),
         HStack(children: [
-            Button("New Customer", "/customer/new"),
+            Button("New Customer", "/create-customer"),
             Input("search", "Search"),
         ]),
         For(customers, customer),
     ])
 }
-
-view CustomerDetail {
-    layout = VStack(children: [
-        Heading("Customer Detail"),
-        HStack(children: [
-            Button("Edit", "/customer/edit"),
-            Button("Back", "/customers"),
-        ]),
-        VStack(children: [
-            Heading("Account"),
-            Text("Account Name"), Text("Account No"), Text("Type"), Text("Status"),
-        ]),
-        VStack(children: [
-            Heading("Name & Address"),
-            Text("Name"), Text("Address"), Text("Town"), Text("Postcode"),
-        ]),
-        VStack(children: [
-            Heading("Contact"),
-            Text("Phone"), Text("Email"),
-        ]),
-        VStack(children: [
-            Heading("Billing"),
-            Text("Bill Cycle"), Text("Next Bill"), Text("Credit Code"), Text("Limit"),
-        ]),
-    ])
-}
-
-// ── Customer forms ─────────────────────────────────────────────────────────────
 
 form CreateCustomer -> Customer {
     custAcctname: Text,
@@ -67,6 +45,7 @@ form CreateCustomer -> Customer {
 }
 
 form EditCustomer -> Customer {
+    pk: custNo,
     custType: Text,
     custStatus: Text,
     custName1: Text,
@@ -84,42 +63,20 @@ form EditCustomer -> Customer {
     custLimit: Text,
 }
 
-// ── Subscriber views ────────────────────────────────────────────────────────────
+// ── Subscriber ────────────────────────────────────────────────────────────────
 
 view SubscriberList {
+    pk     = subNo
+    filter = custNo
     layout = VStack(children: [
         Heading("Subscribers"),
         HStack(children: [
-            Button("New Subscriber", "/subscriber/new"),
+            Button("New Subscriber", "/create-subscriber"),
             Input("search", "Search"),
         ]),
         For(subscribers, subscriber),
     ])
 }
-
-view SubscriberDetail {
-    layout = VStack(children: [
-        Heading("Subscriber Detail"),
-        HStack(children: [
-            Button("Edit", "/subscriber/edit"),
-            Button("Back", "/subscribers"),
-        ]),
-        VStack(children: [
-            Heading("Identity"),
-            Text("Customer No"), Text("Subscriber No"), Text("Status"),
-        ]),
-        VStack(children: [
-            Heading("Name & Address"),
-            Text("Name"), Text("Address"), Text("Town"), Text("Postcode"),
-        ]),
-        VStack(children: [
-            Heading("Contact"),
-            Text("Email"),
-        ]),
-    ])
-}
-
-// ── Subscriber forms ───────────────────────────────────────────────────────────
 
 form CreateSubscriber -> Subscriber {
     custNo: Text,
@@ -137,6 +94,7 @@ form CreateSubscriber -> Subscriber {
 }
 
 form EditSubscriber -> Subscriber {
+    pk: subNo,
     subsName: Text,
     subsName1: Text,
     subsName2: Text,
@@ -149,20 +107,19 @@ form EditSubscriber -> Subscriber {
     subsStatus: Text,
 }
 
-// ── Subscription views ──────────────────────────────────────────────────────────
+// ── Subscription ──────────────────────────────────────────────────────────────
 
 view SubscriptionList {
+    filter = subNo
     layout = VStack(children: [
         Heading("Subscriptions"),
         HStack(children: [
-            Button("New Subscription", "/subscription/new"),
+            Button("New Subscription", "/create-subscription"),
             Input("search", "Search"),
         ]),
         For(subscriptions, subscription),
     ])
 }
-
-// ── Subscription forms ──────────────────────────────────────────────────────────
 
 form CreateSubscription -> Subscription {
     custNo: Text,
@@ -177,20 +134,10 @@ form CreateSubscription -> Subscription {
     sourceMnth: Text,
 }
 
-form EditSubscription -> Subscription {
-    subTyper: Text,
-    productCode: Text,
-    subCopies: Text,
-    invoiceFreq: Text,
-    invoiceMnth: Text,
-    labelsCount: Text,
-    localCode: Text,
-    sourceMnth: Text,
-}
-
-// ── Product views ─────────────────────────────────────────────────────────────
+// ── Product ───────────────────────────────────────────────────────────────────
 
 view ProductList {
+    pk = productCde
     layout = VStack(children: [
         Heading("Products"),
         HStack(children: [
@@ -200,8 +147,6 @@ view ProductList {
         For(products, product),
     ])
 }
-
-// ── Product forms ─────────────────────────────────────────────────────────────
 
 form CreateProduct -> Product {
     productCde: Text,
@@ -216,6 +161,7 @@ form CreateProduct -> Product {
 }
 
 form EditProduct -> Product {
+    pk: productCde,
     productDesc1: Text,
     productDesc2: Text,
     productPrice: Text,

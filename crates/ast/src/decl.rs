@@ -292,10 +292,12 @@ pub enum FkAction { Cascade, SetNull, Restrict, NoAction }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ViewDecl {
-    pub name:   Ident,
-    pub live:   Vec<ValDecl>,
-    pub layout: S<Expr>,
-    pub span:   Span,
+    pub name:      Ident,
+    pub live:      Vec<ValDecl>,
+    pub layout:    S<Expr>,
+    pub pk:        Option<String>,   // primary key column (camelCase field name)
+    pub filter_by: Option<String>,   // FK column to filter on (?field=X in URL)
+    pub span:      Span,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -303,6 +305,7 @@ pub struct FormDecl {
     pub name:       Ident,
     pub target:     ModulePath,
     pub fields:     Vec<FormField>,
+    pub pk:         Option<String>,  // if set, generates UPDATE WHERE pk=$N instead of INSERT
     pub on_submit:  Option<S<Expr>>,
     pub on_success: Option<S<Expr>>,
     pub span:       Span,

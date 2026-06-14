@@ -524,9 +524,54 @@ fn parse_migration_op(cur: &mut Cursor<'_>) -> Result<MigrationOp, ParseError> {
 fn parse_view(cur: &mut Cursor<'_>) -> Result<ViewDecl, ParseError> {
     let start = cur.expect(&Token::View)?;
     let (name, name_span) = cur.expect_ident()?;
-    let layout = parse_block(cur)?;
-    let span = start.to(layout.span);
-    Ok(ViewDecl { name: S::new(name, name_span), live: vec![], layout, span })
+
+    let mut pk: Option<String> = None;
+    let mut filter_by: Option<String> = None;
+    let mut layout_expr: Option<S<certo_ast::expr::Expr>> = None;
+
+    cur.expect(&Token::LBrace)?;
+    loop {
+        if cur.peek() == Some(&Token::RBrace) { break; }
+        if let Some(Token::Ident(k)) = cur.peek().cloned() {
+            let k_str = k.to_string();
+            match k_str.as_str() {
+                "pk" => {
+                    cur.bump();
+                    cur.expect(&Token::Eq)?;
+                    let (val, _) = cur.expect_ident()?;
+                    pk = Some(val);
+                    cur.eat(|t| matches!(t, Token::Comma));
+                    continue;
+                }
+                "filter" => {
+                    cur.bump();
+                    cur.expect(&Token::Eq)?;
+                    let (val, _) = cur.expect_ident()?;
+                    filter_by = Some(val);
+                    cur.eat(|t| matches!(t, Token::Comma));
+                    continue;
+                }
+                "layout" => {
+                    cur.bump();
+                    cur.expect(&Token::Eq)?;
+                    layout_expr = Some(parse_expr(cur)?);
+                    cur.eat(|t| matches!(t, Token::Comma));
+                    continue;
+                }
+                _ => {}
+            }
+        }
+        // Unknown key or non-ident token: parse as expression and use as layout
+        layout_expr = Some(parse_expr(cur)?);
+        cur.eat(|t| matches!(t, Token::Comma));
+    }
+    let end = cur.expect(&Token::RBrace)?;
+    let layout = layout_expr.ok_or_else(|| ParseError {
+        kind: crate::error::ParseErrorKind::Custom("view missing layout".into()),
+        span: name_span,
+    })?;
+    let span = start.to(end);
+    Ok(ViewDecl { name: S::new(name, name_span), live: vec![], layout, pk, filter_by, span })
 }
 
 fn parse_form(cur: &mut Cursor<'_>) -> Result<FormDecl, ParseError> {
@@ -542,6 +587,7 @@ fn parse_form(cur: &mut Cursor<'_>) -> Result<FormDecl, ParseError> {
     };
     // Optional body block — parse as key: value pairs
     let mut fields = vec![];
+    let mut pk: Option<String> = None;
     let mut on_submit = None;
     let mut on_success = None;
     let end_span;
@@ -551,6 +597,11 @@ fn parse_form(cur: &mut Cursor<'_>) -> Result<FormDecl, ParseError> {
             if cur.peek() == Some(&Token::RBrace) { break; }
             let (key, key_span) = cur.expect_ident()?;
             match key.as_str() {
+                "pk" => {
+                    cur.expect(&Token::Colon)?;
+                    let (val, _) = cur.expect_ident()?;
+                    pk = Some(val);
+                }
                 "onSubmit" => {
                     cur.expect(&Token::Colon)?;
                     on_submit = Some(parse_expr(cur)?);
@@ -579,7 +630,7 @@ fn parse_form(cur: &mut Cursor<'_>) -> Result<FormDecl, ParseError> {
         end_span = name_span;
     }
     let span = start.to(end_span);
-    Ok(FormDecl { name: S::new(name, name_span), target, fields, on_submit, on_success, span })
+    Ok(FormDecl { name: S::new(name, name_span), target, fields, pk, on_submit, on_success, span })
 }
 
 // ------------------------------------------------------------------ //

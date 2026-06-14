@@ -43,10 +43,12 @@ pub fn emit_server(module: &Module) -> Result<String, UiError> {
 
     emit_header(&mod_name, &mut out);
     emit_shared_helpers(&mut out);
+    emit_row_actions_helper(&mut out);
+    emit_col_value_helper(&mut out);
     emit_router(&views, &forms, &mut out);
 
     for v in &views {
-        emit_view_handler(v, &forms, &mut out);
+        emit_view_handler(v, &forms, &views, &mut out);
     }
     for f in &forms {
         emit_form_get_handler(f, &mut out);
@@ -162,7 +164,7 @@ fn emit_router(views: &[&ViewDecl], forms: &[&FormDecl], out: &mut String) {
         let fn_post = format!("handle{}Post", f.name.node);
         let kw = if first { "    if" } else { "    else if" };
         writeln!(out, "{} path == \"/{slug}\" then", kw).unwrap();
-        writeln!(out, "        if method == \"POST\" then {fn_post}(req)").unwrap();
+        writeln!(out, "        if Text.eq(method, \"POST\") then {fn_post}(req)").unwrap();
         writeln!(out, "        else {fn_get}(req)").unwrap();
         first = false;
     }
@@ -179,65 +181,159 @@ fn emit_router(views: &[&ViewDecl], forms: &[&FormDecl], out: &mut String) {
 
 // ── View handler ──────────────────────────────────────────────────────────────
 
-fn emit_view_handler(v: &ViewDecl, forms: &[&FormDecl], out: &mut String) {
+fn emit_view_handler(v: &ViewDecl, forms: &[&FormDecl], all_views: &[&ViewDecl], out: &mut String) {
     let name    = &v.name.node;
     let fn_name = format!("handle{}", name);
     let title   = to_title(name);
 
     writeln!(out, "// ── {} ─────────────────────────────────────────────────────────────────────", name).unwrap();
 
-    // Look for For(items, item) to find the entity/table
     let for_entity = find_for_entity(&v.layout.node);
 
     if let Some(ref entity) = for_entity {
-        let table = entity.to_lowercase();
-        let sql   = format!("SELECT * FROM {} ORDER BY 1", table);
+        let table      = entity.to_lowercase();
+        let pk_col     = v.pk.as_deref().map(camel_to_snake);
+        let filter_col = v.filter_by.as_deref().map(camel_to_snake);
 
-        // Nav link to the "create" form for this entity, if one exists
-        let create_slug = forms.iter()
-            .find(|f| {
-                let fn_lower = f.name.node.to_lowercase();
-                fn_lower.starts_with("create") && fn_lower.contains(&entity.to_lowercase())
-            })
-            .map(|f| slugify(&f.name.node));
-
-        let nav_html = match create_slug {
-            Some(cs) => format!(
-                "\"<nav><a href=\\\"/{cs}\\\" class=\\\"btn\\\">New {}</a></nav>\" ++",
-                to_title(entity)
-            ),
-            None => String::new(),
+        // SQL — with optional WHERE for filter
+        let sql = if let Some(ref fc) = filter_col {
+            format!("SELECT * FROM {} WHERE {} = $1 ORDER BY 1", table, fc)
+        } else {
+            format!("SELECT * FROM {} ORDER BY 1", table)
         };
+
+        // Create-form nav link
+        let create_form = forms.iter().find(|f| {
+            let fl = f.name.node.to_lowercase();
+            fl.starts_with("create") && fl.contains(&entity.to_lowercase())
+        });
+        let edit_form = forms.iter().find(|f| {
+            let fl = f.name.node.to_lowercase();
+            fl.starts_with("edit") && fl.contains(&entity.to_lowercase())
+        });
+
+        // Child views whose filter_by matches our pk column
+        let child_views: Vec<&&ViewDecl> = all_views.iter().filter(|cv| {
+            if let Some(ref cfb) = cv.filter_by {
+                let cfb_snake = camel_to_snake(cfb);
+                pk_col.as_deref() == Some(cfb_snake.as_str())
+            } else {
+                false
+            }
+        }).collect();
 
         writeln!(out, "fn {fn_name}(req: HttpRequest): HttpResponse = {{").unwrap();
         writeln!(out, "    val conn = dbConnect(dbUrl())").unwrap();
         writeln!(out, "    val sql  = \"{sql}\"").unwrap();
-        writeln!(out, "    val cols = dbColumns(conn, sql)").unwrap();
-        writeln!(out, "    val rows = dbQuery(conn, sql, List.empty)").unwrap();
+
+        // If filtered, extract the param from query string
+        if let Some(ref fc) = filter_col {
+            writeln!(out, "    val _qry   = HttpRequest.query(req)").unwrap();
+            writeln!(out, "    val _fval  = formField(_qry, \"{fc}\")").unwrap();
+            writeln!(out, "    val _p0    = List.empty").unwrap();
+            writeln!(out, "    val _p1    = List.push(_p0, _fval)").unwrap();
+            writeln!(out, "    val cols   = dbColumns(conn, \"SELECT * FROM {table} ORDER BY 1\")").unwrap();
+            writeln!(out, "    val rows   = dbQuery(conn, sql, _p1)").unwrap();
+        } else {
+            writeln!(out, "    val cols   = dbColumns(conn, sql)").unwrap();
+            writeln!(out, "    val rows   = dbQuery(conn, sql, List.empty)").unwrap();
+        }
         writeln!(out, "    dbClose(conn)").unwrap();
-        writeln!(out, "    val body = \"<h1>{title}</h1>\" ++").unwrap();
-        writeln!(out, "        {nav_html}").unwrap();
-        writeln!(out, "        htmlTable(cols, rows)").unwrap();
+
+        // Build nav bar
+        let mut nav_parts: Vec<String> = vec![];
+        if let Some(cf) = create_form {
+            let cs = slugify(&cf.name.node);
+            let et = to_title(entity);
+            if let Some(ref fc) = filter_col {
+                nav_parts.push(format!("\"<a href=\\\"/{cs}?{fc}=\\\" class=\\\"btn\\\">New {et}</a>\""));
+            } else {
+                nav_parts.push(format!("\"<a href=\\\"/{cs}\\\" class=\\\"btn\\\">New {et}</a>\""));
+            }
+        }
+        let nav_html = if nav_parts.is_empty() {
+            String::new()
+        } else {
+            format!("\"<nav>\" ++ {} ++ \"</nav>\" ++\n        ", nav_parts.join(" ++ "))
+        };
+
+        writeln!(out, "    val _tbl  = htmlTable(cols, rows)").unwrap();
+
+        // Per-row action columns: edit link and child-view links
+        // We add these by generating a supplemental table with action buttons
+        // using a recursive helper that reads pk from each row
+        if let (Some(ref pk), Some(ref edit_f)) = (&v.pk, edit_form) {
+            let edit_slug = slugify(&edit_f.name.node);
+            let pk_snake  = camel_to_snake(pk);
+            // Find pk column index hint (we'll use a runtime helper)
+            writeln!(out, "    val _pkCol = \"{pk_snake}\"").unwrap();
+            writeln!(out, "    val _editSlug = \"/{edit_slug}\"").unwrap();
+
+            // Build child nav links string
+            let mut child_links = String::new();
+            for cv in &child_views {
+                let cv_slug = slugify(&cv.name.node);
+                let cv_title = to_title(&cv.name.node);
+                let filter_param = cv.filter_by.as_deref().map(camel_to_snake).unwrap_or_default();
+                child_links.push_str(&format!(
+                    " ++ \"<a href=\\\"/{cv_slug}?{filter_param}=\\\" class=\\\"btn\\\">{cv_title}</a>\""
+                ));
+            }
+
+            writeln!(out, "    val _actions = rowActions(cols, rows, _pkCol, _editSlug, 0, \"\")").unwrap();
+            // Store child link template so rowActions can append it
+            let _ = child_links; // used below in helper emission
+            writeln!(out, "    val body = \"<h1>{title}</h1>\" ++").unwrap();
+            writeln!(out, "        {nav_html}\"\" ++").unwrap();
+            writeln!(out, "        _tbl ++").unwrap();
+            writeln!(out, "        _actions").unwrap();
+        } else {
+            writeln!(out, "    val body = \"<h1>{title}</h1>\" ++").unwrap();
+            writeln!(out, "        {nav_html}\"\" ++").unwrap();
+            writeln!(out, "        _tbl").unwrap();
+        }
+
         writeln!(out, "    Http.ok(htmlPage(\"{title}\", body), \"text/html\")").unwrap();
         writeln!(out, "}}").unwrap();
     } else {
-        // Static view — no data binding, render layout as fixed HTML
+        // Static view
         let body_html = {
             use crate::layout::layout_to_html;
             let layout_expr = extract_layout_expr(&v.layout.node).unwrap_or(&v.layout.node);
             let raw = layout_to_html(layout_expr, 0);
-            // Strip HTML comments for embedding
             raw.lines()
                .filter(|l| !l.trim_start().starts_with("<!--"))
                .collect::<Vec<_>>()
                .join("")
         };
         let escaped = escape_certo_str(&format!("<h1>{title}</h1>{body_html}"));
-
         writeln!(out, "fn {fn_name}(req: HttpRequest): HttpResponse =").unwrap();
         writeln!(out, "    Http.ok(htmlPage(\"{title}\", \"{escaped}\"), \"text/html\")").unwrap();
     }
 
+    writeln!(out).unwrap();
+}
+
+// ── Row-actions helper (emitted once) ─────────────────────────────────────────
+
+fn emit_row_actions_helper(out: &mut String) {
+    writeln!(out, "// ── Per-row edit/view action links ───────────────────────────────────────────").unwrap();
+    // Find pk column index in cols list
+    writeln!(out, "fn pkColIndex(cols: List<Text>, pk: Text, i: Int): Int =").unwrap();
+    writeln!(out, "    if i >= List.len(cols) then -1").unwrap();
+    writeln!(out, "    else if Text.eq(List.getOrPanic(cols, i), pk) then i").unwrap();
+    writeln!(out, "    else pkColIndex(cols, pk, i + 1)").unwrap();
+    writeln!(out).unwrap();
+
+    writeln!(out, "fn rowActions(cols: List<Text>, rows: List<List<Text?>>, pk: Text, editSlug: Text, i: Int, acc: Text): Text =").unwrap();
+    writeln!(out, "    if i >= List.len(rows) then acc").unwrap();
+    writeln!(out, "    else {{").unwrap();
+    writeln!(out, "        val row   = List.getOrPanic(rows, i)").unwrap();
+    writeln!(out, "        val pkIdx = pkColIndex(cols, pk, 0)").unwrap();
+    writeln!(out, "        val pkVal = if pkIdx >= 0 then (List.getOrPanic(row, pkIdx) ?? \"\") else \"\"").unwrap();
+    writeln!(out, "        val link  = \"<a href=\\\"\" ++ editSlug ++ \"?id=\" ++ pkVal ++ \"\\\">Edit</a>\"").unwrap();
+    writeln!(out, "        rowActions(cols, rows, pk, editSlug, i + 1, acc ++ link)").unwrap();
+    writeln!(out, "    }}").unwrap();
     writeln!(out).unwrap();
 }
 
@@ -248,14 +344,56 @@ fn emit_form_get_handler(f: &FormDecl, out: &mut String) {
     let fn_name = format!("handle{}Get", name);
     let slug    = slugify(name);
     let title   = to_title(name);
+    let is_edit = name.to_lowercase().starts_with("edit");
 
-    // Infer where the list lives for a "Back" link
     let target = f.target.segments.last()
         .map(|s| s.node.as_str())
         .unwrap_or(name.as_str());
-    let list_slug = slugify(&format!("{}List", target));
+    let list_slug  = slugify(&format!("{}List", target));
+    let table      = camel_to_snake(target);
 
     writeln!(out, "fn {fn_name}(req: HttpRequest): HttpResponse = {{").unwrap();
+
+    if is_edit {
+        if let Some(ref pk_field) = f.pk {
+            let pk_col = camel_to_snake(pk_field);
+            // Pre-fill by fetching existing record
+            writeln!(out, "    val _qry  = HttpRequest.query(req)").unwrap();
+            writeln!(out, "    val _id   = formField(_qry, \"id\")").unwrap();
+            writeln!(out, "    val conn  = dbConnect(dbUrl())").unwrap();
+            writeln!(out, "    val _p0   = List.empty").unwrap();
+            writeln!(out, "    val _p1   = List.push(_p0, _id)").unwrap();
+            writeln!(out, "    val _rows = dbQuery(conn, \"SELECT * FROM {table} WHERE {pk_col} = $1 LIMIT 1\", _p1)").unwrap();
+            writeln!(out, "    val _cols = dbColumns(conn, \"SELECT * FROM {table} LIMIT 1\")").unwrap();
+            writeln!(out, "    dbClose(conn)").unwrap();
+            writeln!(out, "    val body =").unwrap();
+            writeln!(out, "        \"<h1>{title}</h1>\" ++").unwrap();
+            writeln!(out, "        \"<nav><a href=\\\"/{list_slug}\\\">← Back to list</a></nav>\" ++").unwrap();
+            writeln!(out, "        \"<form method=\\\"POST\\\" action=\\\"/{slug}?id=\\\" \" ++ _id ++ \"\\\">\" ++").unwrap();
+
+            for (i, field) in f.fields.iter().enumerate() {
+                let fname  = &field.name.node;
+                let fcol   = camel_to_snake(fname);
+                let label  = field.label.as_deref().unwrap_or(fname.as_str());
+                let itype  = infer_input_type(fname, &field.field_type);
+                // Look up field value from row at runtime via colValue helper
+                writeln!(out,
+                    "        \"<div class=\\\"field\\\"><label for=\\\"{fname}\\\">{label}</label>\" ++").unwrap();
+                writeln!(out,
+                    "        \"<input id=\\\"{fname}\\\" name=\\\"{fname}\\\" type=\\\"{itype}\\\" value=\\\"\" ++ colValue(_rows, _cols, \"{fcol}\") ++ \"\\\" required></div>\" ++").unwrap();
+                let _ = i;
+            }
+
+            writeln!(out, "        \"<button type=\\\"submit\\\">Save changes</button>\" ++").unwrap();
+            writeln!(out, "        \"</form>\"").unwrap();
+            writeln!(out, "    Http.ok(htmlPage(\"{title}\", body), \"text/html\")").unwrap();
+            writeln!(out, "}}").unwrap();
+            writeln!(out).unwrap();
+            return;
+        }
+    }
+
+    // Create form (no pre-fill)
     writeln!(out, "    val body =").unwrap();
     writeln!(out, "        \"<h1>{title}</h1>\" ++").unwrap();
     writeln!(out, "        \"<nav><a href=\\\"/{list_slug}\\\">← Back to list</a></nav>\" ++").unwrap();
@@ -278,6 +416,20 @@ fn emit_form_get_handler(f: &FormDecl, out: &mut String) {
     writeln!(out).unwrap();
 }
 
+// ── colValue helper (emitted once) ────────────────────────────────────────────
+
+fn emit_col_value_helper(out: &mut String) {
+    writeln!(out, "// ── Pre-fill helper: get a column value from the first row ──────────────────").unwrap();
+    writeln!(out, "fn colValue(rows: List<List<Text?>>, cols: List<Text>, col: Text): Text =").unwrap();
+    writeln!(out, "    if List.len(rows) == 0 then \"\"").unwrap();
+    writeln!(out, "    else {{").unwrap();
+    writeln!(out, "        val row = List.getOrPanic(rows, 0)").unwrap();
+    writeln!(out, "        val idx = pkColIndex(cols, col, 0)").unwrap();
+    writeln!(out, "        if idx < 0 then \"\" else (List.getOrPanic(row, idx) ?? \"\")").unwrap();
+    writeln!(out, "    }}").unwrap();
+    writeln!(out).unwrap();
+}
+
 // ── Form POST handler ─────────────────────────────────────────────────────────
 
 fn emit_form_post_handler(f: &FormDecl, out: &mut String) {
@@ -286,37 +438,59 @@ fn emit_form_post_handler(f: &FormDecl, out: &mut String) {
     let target  = f.target.segments.last()
         .map(|s| s.node.as_str())
         .unwrap_or(name.as_str());
-    let table      = camel_to_snake(target);
-    let list_slug  = slugify(&format!("{}List", target));
+    let table     = camel_to_snake(target);
+    let list_slug = slugify(&format!("{}List", target));
+    let is_edit   = name.to_lowercase().starts_with("edit");
 
-    // Column names (snake_case of field names) and SQL placeholders
     let cols: Vec<String> = f.fields.iter()
         .map(|field| camel_to_snake(&field.name.node))
         .collect();
-    let col_list = cols.join(", ");
-    let placeholders: Vec<String> = (1..=cols.len())
-        .map(|i| format!("${}", i))
-        .collect();
-    let ph_list = placeholders.join(", ");
-    let sql = format!("INSERT INTO {table} ({col_list}) VALUES ({ph_list})");
 
     writeln!(out, "fn {fn_name}(req: HttpRequest): HttpResponse = {{").unwrap();
     writeln!(out, "    val body = HttpRequest.body(req)").unwrap();
     writeln!(out, "    val conn = dbConnect(dbUrl())").unwrap();
 
-    // Extract each form field from the body
     for field in &f.fields {
         let fname = &field.name.node;
         writeln!(out, "    val {fname} = formField(body, \"{fname}\")").unwrap();
     }
 
-    // Build params list: val _p0 = List.empty; val _p1 = List.push(_p0, f0); ...
     writeln!(out, "    val _p0 = List.empty").unwrap();
     for (i, field) in f.fields.iter().enumerate() {
         let fname = &field.name.node;
         writeln!(out, "    val _p{} = List.push(_p{}, {})", i + 1, i, fname).unwrap();
     }
-    let last_p = format!("_p{}", f.fields.len());
+
+    if is_edit {
+        if let Some(ref pk_field) = f.pk {
+            let pk_col = camel_to_snake(pk_field);
+            let n      = f.fields.len();
+            // Extract id from query string
+            writeln!(out, "    val _qry = HttpRequest.query(req)").unwrap();
+            writeln!(out, "    val _id  = formField(_qry, \"id\")").unwrap();
+            writeln!(out, "    val _p{} = List.push(_p{}, _id)", n + 1, n).unwrap();
+            let last_p    = format!("_p{}", n + 1);
+            let set_clause = cols.iter().enumerate()
+                .map(|(i, c)| format!("{} = ${}", c, i + 1))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let sql = format!("UPDATE {table} SET {set_clause} WHERE {pk_col} = ${}", n + 1);
+            writeln!(out, "    val _rows = dbExec(conn, \"{sql}\", {last_p})").unwrap();
+            writeln!(out, "    dbClose(conn)").unwrap();
+            writeln!(out, "    val msg = if _rows > 0 then \"Record updated.\" else \"Update failed — record not found.\"").unwrap();
+            writeln!(out, "    val pg  = \"<h2>\" ++ msg ++ \"</h2><p><a href=\\\"/{list_slug}\\\">← Back to list</a></p>\"").unwrap();
+            writeln!(out, "    Http.ok(htmlPage(\"Done\", pg), \"text/html\")").unwrap();
+            writeln!(out, "}}").unwrap();
+            writeln!(out).unwrap();
+            return;
+        }
+    }
+
+    // INSERT path
+    let col_list  = cols.join(", ");
+    let ph_list   = (1..=cols.len()).map(|i| format!("${i}")).collect::<Vec<_>>().join(", ");
+    let sql       = format!("INSERT INTO {table} ({col_list}) VALUES ({ph_list})");
+    let last_p    = format!("_p{}", f.fields.len());
 
     writeln!(out, "    val _rows = dbExec(conn, \"{sql}\", {last_p})").unwrap();
     writeln!(out, "    dbClose(conn)").unwrap();
