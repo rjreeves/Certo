@@ -1,0 +1,204 @@
+module FireworksCrud
+
+// ---------------------------------------------------------------------------
+// Fireworks CRUD UI — Customer, Subscriber, Subscription
+// Compiled with: certo-ui fireworks_crud.cto -o out/fireworks
+// ---------------------------------------------------------------------------
+
+// ============================================================
+// HOME
+// ============================================================
+
+view Home {
+    layout = VStack(children: [
+        Heading("Fireworks"),
+        HStack(children: [
+            Button("Customers",     "/customers"),
+            Button("Subscribers",   "/subscribers"),
+            Button("Subscriptions", "/subscriptions"),
+        ])
+    ])
+}
+
+// ============================================================
+// CUSTOMER
+// ============================================================
+
+view CustomerList {
+    layout = VStack(children: [
+        Heading("Customers"),
+        HStack(children: [
+            Button("New Customer", "/customers/new"),
+            Link("Home", "/"),
+        ]),
+        Button("View All Customers", "/customers"),
+    ])
+}
+
+view CustomerDetail {
+    layout = VStack(children: [
+        Heading("Customer Detail"),
+        HStack(children: [
+            Button("Edit",   "/customers/edit"),
+            Button("Delete", "/customers/delete"),
+            Link("Back to Customers", "/customers"),
+        ]),
+        Text("Account Name:"),
+        Text("Customer No:"),
+        Text("Type:"),
+        Text("Status:"),
+        Text("Name 1:"),
+        Text("Name 2:"),
+        Text("Address 1:"),
+        Text("Address 2:"),
+        Text("Town:"),
+        Text("Postcode:"),
+        Text("Mail Code:"),
+        Text("Contact:"),
+        Text("Phone:"),
+        Text("Email:"),
+        Text("E-Billing:"),
+        Text("Print Invoice:"),
+        Text("Bill Cycle:"),
+        Text("Next Bill Date:"),
+        Text("Credit Code:"),
+        Text("Credit Limit:"),
+        Text("Dunning:"),
+        Text("Carried Forward:"),
+    ])
+}
+
+view CustomerNew {
+    layout = VStack(children: [
+        Heading("New Customer"),
+        Link("Cancel", "/customers"),
+        Button("Save Customer", "/customers/create"),
+    ])
+}
+
+view CustomerEdit {
+    layout = VStack(children: [
+        Heading("Edit Customer"),
+        Link("Cancel", "/customers"),
+        HStack(children: [
+            Button("Save",   "/customers/update"),
+            Button("Delete", "/customers/delete"),
+        ]),
+    ])
+}
+
+// ============================================================
+// SUBSCRIBER
+// ============================================================
+
+view SubscriberList {
+    layout = VStack(children: [
+        Heading("Subscribers"),
+        HStack(children: [
+            Button("New Subscriber", "/subscribers/new"),
+            Link("Home", "/"),
+        ]),
+        Button("View All Subscribers", "/subscribers"),
+    ])
+}
+
+view SubscriberDetail {
+    layout = VStack(children: [
+        Heading("Subscriber Detail"),
+        HStack(children: [
+            Button("Edit",   "/subscribers/edit"),
+            Button("Delete", "/subscribers/delete"),
+            Link("Back to Subscribers", "/subscribers"),
+        ]),
+        Text("Customer No:"),
+        Text("Subscriber No:"),
+        Text("Name:"),
+        Text("Name 1:"),
+        Text("Name 2:"),
+        Text("Address 1:"),
+        Text("Address 2:"),
+        Text("Town:"),
+        Text("Postcode:"),
+        Text("Mail Code:"),
+        Text("Email:"),
+        Text("Use Email:"),
+        Text("Active:"),
+        Text("Status:"),
+        Text("DN:"),
+        Text("Source Month:"),
+    ])
+}
+
+view SubscriberNew {
+    layout = VStack(children: [
+        Heading("New Subscriber"),
+        Link("Cancel", "/subscribers"),
+        Button("Save Subscriber", "/subscribers/create"),
+    ])
+}
+
+view SubscriberEdit {
+    layout = VStack(children: [
+        Heading("Edit Subscriber"),
+        Link("Cancel", "/subscribers"),
+        HStack(children: [
+            Button("Save",   "/subscribers/update"),
+            Button("Delete", "/subscribers/delete"),
+        ]),
+    ])
+}
+
+// ============================================================
+// SUBSCRIPTION
+// ============================================================
+
+view SubscriptionList {
+    layout = VStack(children: [
+        Heading("Subscriptions"),
+        HStack(children: [
+            Button("New Subscription", "/subscriptions/new"),
+            Link("Home", "/"),
+        ]),
+        Button("View All Subscriptions", "/subscriptions"),
+    ])
+}
+
+view SubscriptionDetail {
+    layout = VStack(children: [
+        Heading("Subscription Detail"),
+        HStack(children: [
+            Button("Edit",   "/subscriptions/edit"),
+            Button("Delete", "/subscriptions/delete"),
+            Link("Back to Subscriptions", "/subscriptions"),
+        ]),
+        Text("Customer No:"),
+        Text("Subscriber No:"),
+        Text("Type:"),
+        Text("Product Code:"),
+        Text("Copies:"),
+        Text("Invoice Freq (months):"),
+        Text("Invoice Month:"),
+        Text("Labels Count:"),
+        Text("Local Code:"),
+        Text("Source Month:"),
+    ])
+}
+
+view SubscriptionNew {
+    layout = VStack(children: [
+        Heading("New Subscription"),
+        Link("Cancel", "/subscriptions"),
+        Button("Save Subscription", "/subscriptions/create"),
+    ])
+}
+
+view SubscriptionEdit {
+    layout = VStack(children: [
+        Heading("Edit Subscription"),
+        Link("Cancel", "/subscriptions"),
+        HStack(children: [
+            Button("Save",   "/subscriptions/update"),
+            Button("Delete", "/subscriptions/delete"),
+        ]),
+    ])
+}

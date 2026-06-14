@@ -1,0 +1,56 @@
+module pattern_test
+
+import Stdlib.Core
+
+fn main(): Unit [io] = {
+    // 1. Basic Some/None with if let
+    val a: Int? = Some(42)
+    if let Some(n) = a {
+        println(f"1. Some({intToText(n)})")
+    }
+
+    // 2. match with Some/None arms
+    val c: Int? = None
+    match c {
+        Some(n) => println(f"2. got {intToText(n)}")
+        None    => println("2. got None")
+    }
+
+    // 3. Literal pattern
+    val f = 3
+    match f {
+        1 => println("3. one")
+        2 => println("3. two")
+        3 => println("3. three")
+        _ => println("3. other")
+    }
+
+    // 4. Or pattern
+    val g = 2
+    match g {
+        1 | 2 => println("4. one or two")
+        _     => println("4. other")
+    }
+
+    // 5. Guard
+    val h = 10
+    match h {
+        n if n > 5 => println(f"5. {intToText(n)} > 5")
+        n          => println(f"5. {intToText(n)} <= 5")
+    }
+
+    // 6. Tuple pattern
+    val t = (10, 20)
+    match t {
+        (x, y) => println(f"6. tuple ({intToText(x)}, {intToText(y)})")
+    }
+
+    // 7. Nested Option (Int??)
+    val inner: Int? = Some(99)
+    val outer: Int?? = Some(inner)
+    if let Some(a) = outer {
+        if let Some(n) = a {
+            println(f"7. nested Some({intToText(n)})")
+        }
+    }
+}
