@@ -503,6 +503,7 @@ certo_decimal_t certo_decimal_parse(const char* s);
 #define CERTO_STR(s) ((certo_text_t)(s))
 certo_text_t certo_text_concat(certo_text_t a, certo_text_t b);
 int64_t      certo_text_len(certo_text_t t);
+bool         certo_text_eq(certo_text_t a, certo_text_t b);
 
 /* UUID */
 typedef struct { uint8_t bytes[16]; } certo_uuid_t;
@@ -520,7 +521,7 @@ typedef void (*certo_fn_t)(void);
 typedef void* certo_error_t;
 
 /* List (dynamic array) — full signatures are in the stdlib C block. */
-typedef struct { void** data; int64_t len; int64_t cap; } certo_list_base_t;
+typedef struct { int64_t len; int64_t cap; void** data; } certo_list_base_t;
 /* List.empty constant — alias for the runtime constructor so codegen can emit
    it as a plain global reference without a separate MIR aggregate node. */
 #define certo_list_empty certo_list_new_empty()
@@ -541,6 +542,7 @@ static inline void* certo_err(intptr_t e) {
 /* Intrinsics used by the ? desugaring in compiled code. */
 static inline bool     __result_is_ok(void* r) { return ((certo_result_t*)r)->is_ok; }
 static inline intptr_t __result_unwrap(void* r) { return ((certo_result_t*)r)->payload; }
+static inline intptr_t __tuple_get(void* t, int64_t i) { return (intptr_t)((certo_list_base_t*)t)->data[i]; }
 
 /* Arithmetic helpers */
 int64_t certo_pow(int64_t base, int64_t exp);

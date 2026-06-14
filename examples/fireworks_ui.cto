@@ -1,0 +1,227 @@
+module FireworksUI
+
+// ---------------------------------------------------------------------------
+// Fireworks CRUD UI — view and form declarations for certo-ui
+// Compile with: certo-ui fireworks_ui.cto -o out/fireworks
+// ---------------------------------------------------------------------------
+
+// ── Customer views ────────────────────────────────────────────────────────────
+
+view CustomerList {
+    layout = VStack(children: [
+        Heading("Customers"),
+        HStack(children: [
+            Button("New Customer", "/customer/new"),
+            Input("search", "Search"),
+        ]),
+        For(customers, customer),
+    ])
+}
+
+view CustomerDetail {
+    layout = VStack(children: [
+        Heading("Customer Detail"),
+        HStack(children: [
+            Button("Edit", "/customer/edit"),
+            Button("Back", "/customers"),
+        ]),
+        VStack(children: [
+            Heading("Account"),
+            Text("Account Name"), Text("Account No"), Text("Type"), Text("Status"),
+        ]),
+        VStack(children: [
+            Heading("Name & Address"),
+            Text("Name"), Text("Address"), Text("Town"), Text("Postcode"),
+        ]),
+        VStack(children: [
+            Heading("Contact"),
+            Text("Phone"), Text("Email"),
+        ]),
+        VStack(children: [
+            Heading("Billing"),
+            Text("Bill Cycle"), Text("Next Bill"), Text("Credit Code"), Text("Limit"),
+        ]),
+    ])
+}
+
+// ── Customer forms ─────────────────────────────────────────────────────────────
+
+form CreateCustomer -> Customer {
+    custAcctname: Text,
+    custNo: Text,
+    custType: Text,
+    custStatus: Text,
+    custName1: Text,
+    custName2: Text,
+    custAddress1: Text,
+    custAddress2: Text,
+    custTown: Text,
+    custPostcode: Text,
+    custContact: Text,
+    custPhone: Text,
+    custEmail: Text,
+    custBillCycle: Text,
+    custNextBill: Text,
+    custCreditCde: Text,
+    custLimit: Text,
+}
+
+form EditCustomer -> Customer {
+    custType: Text,
+    custStatus: Text,
+    custName1: Text,
+    custName2: Text,
+    custAddress1: Text,
+    custAddress2: Text,
+    custTown: Text,
+    custPostcode: Text,
+    custContact: Text,
+    custPhone: Text,
+    custEmail: Text,
+    custBillCycle: Text,
+    custNextBill: Text,
+    custCreditCde: Text,
+    custLimit: Text,
+}
+
+// ── Subscriber views ────────────────────────────────────────────────────────────
+
+view SubscriberList {
+    layout = VStack(children: [
+        Heading("Subscribers"),
+        HStack(children: [
+            Button("New Subscriber", "/subscriber/new"),
+            Input("search", "Search"),
+        ]),
+        For(subscribers, subscriber),
+    ])
+}
+
+view SubscriberDetail {
+    layout = VStack(children: [
+        Heading("Subscriber Detail"),
+        HStack(children: [
+            Button("Edit", "/subscriber/edit"),
+            Button("Back", "/subscribers"),
+        ]),
+        VStack(children: [
+            Heading("Identity"),
+            Text("Customer No"), Text("Subscriber No"), Text("Status"),
+        ]),
+        VStack(children: [
+            Heading("Name & Address"),
+            Text("Name"), Text("Address"), Text("Town"), Text("Postcode"),
+        ]),
+        VStack(children: [
+            Heading("Contact"),
+            Text("Email"),
+        ]),
+    ])
+}
+
+// ── Subscriber forms ───────────────────────────────────────────────────────────
+
+form CreateSubscriber -> Subscriber {
+    custNo: Text,
+    subNo: Text,
+    subsName: Text,
+    subsName1: Text,
+    subsName2: Text,
+    subsAddress1: Text,
+    subsAddress2: Text,
+    subsTown: Text,
+    subsPostcode: Text,
+    subsEmail: Text,
+    subActive: Text,
+    subsStatus: Text,
+}
+
+form EditSubscriber -> Subscriber {
+    subsName: Text,
+    subsName1: Text,
+    subsName2: Text,
+    subsAddress1: Text,
+    subsAddress2: Text,
+    subsTown: Text,
+    subsPostcode: Text,
+    subsEmail: Text,
+    subActive: Text,
+    subsStatus: Text,
+}
+
+// ── Subscription views ──────────────────────────────────────────────────────────
+
+view SubscriptionList {
+    layout = VStack(children: [
+        Heading("Subscriptions"),
+        HStack(children: [
+            Button("New Subscription", "/subscription/new"),
+            Input("search", "Search"),
+        ]),
+        For(subscriptions, subscription),
+    ])
+}
+
+// ── Subscription forms ──────────────────────────────────────────────────────────
+
+form CreateSubscription -> Subscription {
+    custNo: Text,
+    subNo: Text,
+    subTyper: Text,
+    productCode: Text,
+    subCopies: Text,
+    invoiceFreq: Text,
+    invoiceMnth: Text,
+    labelsCount: Text,
+    localCode: Text,
+    sourceMnth: Text,
+}
+
+form EditSubscription -> Subscription {
+    subTyper: Text,
+    productCode: Text,
+    subCopies: Text,
+    invoiceFreq: Text,
+    invoiceMnth: Text,
+    labelsCount: Text,
+    localCode: Text,
+    sourceMnth: Text,
+}
+
+// ── Product views ─────────────────────────────────────────────────────────────
+
+view ProductList {
+    layout = VStack(children: [
+        Heading("Products"),
+        HStack(children: [
+            Button("New Product", "/create-product"),
+            Input("search", "Search"),
+        ]),
+        For(products, product),
+    ])
+}
+
+// ── Product forms ─────────────────────────────────────────────────────────────
+
+form CreateProduct -> Product {
+    productCde: Text,
+    productDesc1: Text,
+    productDesc2: Text,
+    productPrice: Text,
+    productGst: Text,
+    productMonthlyWrapper: Text,
+    productLabelCountDefault: Text,
+    invoiceCycle: Text,
+    pdfOnly: Text,
+}
+
+form EditProduct -> Product {
+    productDesc1: Text,
+    productDesc2: Text,
+    productPrice: Text,
+    productGst: Text,
+    productMonthlyWrapper: Text,
+    productLabelCountDefault: Text,
+    invoiceCycle: Text,
+    pdfOnly: Text,
+}

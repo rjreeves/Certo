@@ -23,6 +23,7 @@ pub mod error;
 pub mod layout;
 pub mod view;
 pub mod form;
+pub mod server;
 
 use certo_ast::decl::Decl;
 use certo_ast::module::Module;
@@ -30,11 +31,21 @@ use certo_ast::module::Module;
 pub use error::UiError;
 pub use view::generate_view;
 pub use form::generate_form;
+pub use server::emit_server;
 
-/// Compile all `view` and `form` declarations in `module` to `(filename, html)` pairs.
+/// Compile all `view` and `form` declarations to a single runnable `server.cto`.
 ///
-/// Returns `Err(UiError::NoDeclarations)` if neither kind appears.
+/// This is the default `certo-ui` mode. Use `emit_html` for the legacy
+/// per-page HTML output.
 pub fn emit_module(module: &Module) -> Result<Vec<(String, String)>, UiError> {
+    let code = emit_server(module)?;
+    Ok(vec![("server.cto".to_string(), code)])
+}
+
+/// Compile all `view` and `form` declarations to individual HTML files (legacy mode).
+///
+/// Activated by `certo-ui --html <file.cto>`.
+pub fn emit_html(module: &Module) -> Result<Vec<(String, String)>, UiError> {
     let mut out = Vec::new();
 
     for sd in &module.decls {
