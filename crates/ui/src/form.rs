@@ -241,6 +241,7 @@ mod tests {
             name: ident(name),
             target: path(&[target]),
             fields,
+            pk: None,
             on_submit:  if on_submit { Some(S::new(certo_ast::expr::Expr::Lit {
                 value: certo_ast::expr::Lit::Unit,
                 span: dummy_span(),
