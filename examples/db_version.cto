@@ -1,0 +1,54 @@
+module db_version
+
+import Stdlib.Core
+import Stdlib.Db
+
+// ---------------------------------------------------------------------------
+// db_version — connect to PostgreSQL and display its version
+//
+// Usage:
+//   db_version [connstr]
+//
+// Example:
+//   db_version "host=localhost dbname=postgres user=postgres port=5432"
+// ---------------------------------------------------------------------------
+
+fn main(): Unit [io] = {
+    val connstr = arg(1) ?? "host=192.168.0.2 port=5433 dbname=fireworks user=fireworks password=***REMOVED***"
+
+    println("Connecting to PostgreSQL...")
+    println(f"  connection string : {connstr}")
+    println("")
+
+    val conn = dbConnect(connstr)
+
+    if conn == 0 then {
+        eprintln(f"ERROR  could not connect to server")
+        eprintln(f"       {dbError(0)}")
+    } else {
+        // Query the version string directly from the server
+        val rows = dbQuery(conn, "SELECT version()", [])
+
+        val versionText =
+            if let Some(row) = List.first(rows) {
+                List.getOrPanic(row, 0) ?? "(unknown)"
+            } else {
+                "(no rows returned)"
+            }
+
+        println(f"PostgreSQL version:")
+        println(f"  {versionText}")
+        println("")
+
+        // Also show the numeric version for easy comparison
+        val num   = dbServerVersion(conn)
+        val major = num / 10000
+        val minor = (num % 10000) / 100
+        val patch = num % 100
+
+        println(f"  numeric : {intToText(num)}")
+        println(f"  parsed  : {intToText(major)}.{intToText(minor)}.{intToText(patch)}")
+
+        dbClose(conn)
+    }
+}

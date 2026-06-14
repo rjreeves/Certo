@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>CustomerList</title>
+  <script src="https://unpkg.com/htmx.org@2" defer></script>
+  <style>
+    .vstack { display: flex; flex-direction: column; gap: 0.5rem; }
+    .hstack { display: flex; flex-direction: row;    gap: 0.5rem; }
+    .cto-view { padding: 1rem; }
+  </style>
+</head>
+<body>
+<div id="customer-list-view" class="certo-view"
+     hx-get="/customer-list" hx-trigger="load" hx-swap="innerHTML">
+    <div class="vstack">
+      <h2>Customers</h2>
+      <div class="hstack">
+        <button hx-get="/customer/new" hx-swap="outerHTML">New Customer</button>
+        <label>Search<input name="search" type="text"></label>
+      </div>
+      <!-- For loop: render list here -->
+    </div>
+</div>
+</body>
+</html>

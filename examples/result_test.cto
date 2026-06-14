@@ -1,0 +1,58 @@
+module result_test
+
+import Stdlib.Core
+
+fn divide(a: Int, b: Int): Result<Int, Text> =
+    if b == 0 then Err("division by zero")
+    else Ok(a / b)
+
+fn divideAndDouble(a: Int, b: Int): Result<Int, Text> = {
+    val n = divide(a, b)?
+    Ok(n * 2)
+}
+
+fn chain(a: Int, b: Int, c: Int): Result<Int, Text> = {
+    val x = divide(a, b)?
+    val y = divide(x, c)?
+    Ok(y)
+}
+
+fn main(): Unit [io] = {
+    // Basic if let
+    val r1 = divide(10, 2)
+    if let Ok(n) = r1 {
+        println(f"10 / 2 = {intToText(n)}")
+    } else if let Err(msg) = r1 {
+        eprintln(f"error: {msg}")
+    }
+
+    // ? propagation — success
+    val r2 = divideAndDouble(10, 2)
+    if let Ok(n) = r2 {
+        println(f"divideAndDouble(10,2) = {intToText(n)}")
+    } else if let Err(msg) = r2 {
+        eprintln(f"error: {msg}")
+    }
+
+    // ? propagation — error propagates up
+    val r3 = divideAndDouble(10, 0)
+    if let Ok(n) = r3 {
+        println(f"divideAndDouble(10,0) = {intToText(n)}")
+    } else if let Err(msg) = r3 {
+        eprintln(f"error: {msg}")
+    }
+
+    // Chained ? — error at second step
+    val r4 = chain(10, 2, 0)
+    if let Ok(n) = r4 {
+        println(f"chain(10,2,0) = {intToText(n)}")
+    } else if let Err(msg) = r4 {
+        eprintln(f"error: {msg}")
+    }
+
+    // match
+    match divide(20, 4) {
+        Ok(n)    => println(f"20 / 4 = {intToText(n)}")
+        Err(msg) => eprintln(f"error: {msg}")
+    }
+}

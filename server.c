@@ -1,0 +1,6679 @@
+#ifdef _WIN32
+#  ifndef WIN32_LEAN_AND_MEAN
+#    define WIN32_LEAN_AND_MEAN
+#  endif
+#  ifndef _USE_MATH_DEFINES
+#    define _USE_MATH_DEFINES
+#  endif
+#  include <winsock2.h>
+#  include <ws2tcpip.h>
+#  pragma comment(lib, "ws2_32.lib")
+#endif
+#include <stdint.h>
+#include <stdbool.h>
+#include <stddef.h>
+#include <inttypes.h>
+#include <stdarg.h>
+#define _CRT_SECURE_NO_WARNINGS
+
+#include <stdlib.h>
+/* ---- DLL export attribute ---- */
+#ifdef _WIN32
+#  define CERTO_EXPORT __declspec(dllexport)
+#else
+#  define CERTO_EXPORT __attribute__((visibility("default")))
+#endif
+
+/* ---- Certo runtime types ---- */
+typedef int64_t      certo_int_t;
+typedef double       certo_float_t;
+typedef const char*  certo_text_t;
+typedef bool         certo_bool_t;
+
+typedef struct { int _unused; } certo_unit_t;
+#define CERTO_UNIT ((certo_unit_t){0})
+
+/* Decimal: stored as scaled integer (cents × 10^scale). */
+typedef struct { int64_t value; int8_t scale; } certo_decimal_t;
+#define CERTO_DECIMAL(s) certo_decimal_parse(s)
+certo_decimal_t certo_decimal_parse(const char* s);
+
+/* Text */
+#define CERTO_STR(s) ((certo_text_t)(s))
+certo_text_t certo_text_concat(certo_text_t a, certo_text_t b);
+int64_t      certo_text_len(certo_text_t t);
+bool         certo_text_eq(certo_text_t a, certo_text_t b);
+
+/* UUID */
+typedef struct { uint8_t bytes[16]; } certo_uuid_t;
+#define CERTO_UUID(s) certo_uuid_parse(s)
+certo_uuid_t certo_uuid_parse(const char* s);
+certo_uuid_t certo_uuid_new(void);
+
+/* Generic option (pointer-sized tag + value) */
+typedef struct { bool has_value; void* value; } certo_option_t;
+/* Option constructors — None is a null pointer, Some wraps any value as void* */
+#define certo_none ((void*)0)
+#define certo_some(x) ((void*)(intptr_t)(x))
+typedef struct { void* value; } certo_tuple_t;
+typedef void (*certo_fn_t)(void);
+typedef void* certo_error_t;
+
+/* List (dynamic array) — full signatures are in the stdlib C block. */
+typedef struct { int64_t len; int64_t cap; void** data; } certo_list_base_t;
+/* List.empty constant — alias for the runtime constructor so codegen can emit
+   it as a plain global reference without a separate MIR aggregate node. */
+#define certo_list_empty certo_list_new_empty()
+
+/* Result<T,E> — heap-allocated tagged value.
+   payload stores any scalar (int/float/bool) or pointer cast to intptr_t.
+   On 64-bit platforms intptr_t == int64_t, so all Certo value types fit. */
+typedef struct { bool is_ok; intptr_t payload; } certo_result_t;
+
+static inline void* certo_ok(intptr_t v) {
+    certo_result_t* r = (certo_result_t*)malloc(sizeof(certo_result_t));
+    r->is_ok = true;  r->payload = v; return r;
+}
+static inline void* certo_err(intptr_t e) {
+    certo_result_t* r = (certo_result_t*)malloc(sizeof(certo_result_t));
+    r->is_ok = false; r->payload = e; return r;
+}
+/* Intrinsics used by the ? desugaring in compiled code. */
+static inline bool     __result_is_ok(void* r) { return ((certo_result_t*)r)->is_ok; }
+static inline intptr_t __result_unwrap(void* r) { return ((certo_result_t*)r)->payload; }
+static inline intptr_t __tuple_get(void* t, int64_t i) { return (intptr_t)((certo_list_base_t*)t)->data[i]; }
+
+/* Arithmetic helpers */
+int64_t certo_pow(int64_t base, int64_t exp);
+void*   certo_coalesce(void* opt, void* fallback);
+
+/* NULL constant used by Option pattern matching (cast to int64_t for comparison) */
+#define __NULL ((int64_t)0)
+
+/* Panic */
+__attribute__((noreturn)) void certo_panic(certo_text_t msg);
+#define certo_unreachable() certo_panic("unreachable")
+#define certo_todo()        certo_panic("not yet implemented")
+
+/* GUI — native message box */
+#ifdef _WIN32
+#  include <windows.h>
+static inline int64_t certo_message_box(certo_text_t title, certo_text_t message) {
+    MessageBoxA(NULL, (const char*)message, (const char*)title, MB_OK | MB_ICONINFORMATION);
+    return 0;
+}
+#else
+static inline int64_t certo_message_box(certo_text_t title, certo_text_t message) {
+    /* Fallback: print to stderr on non-Windows */
+    fprintf(stderr, "[%s] %s\n", (const char*)title, (const char*)message);
+    return 0;
+}
+#endif
+
+/* stdin */
+certo_text_t certo_read_line(void);
+certo_text_t certo_read_all(void);
+
+/* argv — call certo_main_init(argc, argv) at the top of main() */
+void    certo_main_init(int argc, const char** argv);
+int64_t certo_arg_count(void);
+certo_text_t certo_arg(int64_t i);
+
+/* DB transaction stub */
+void* __db_transaction(certo_fn_t thunk);
+
+/* Record update */
+void* __record_update(void* base, void* updates);
+
+/* Async / spawn — stub runtime (single-threaded; spawn evaluates eagerly) */
+/* Full threading support requires linking with -lpthread on POSIX or using Win32 threads. */
+static inline int64_t __certo_await(int64_t task_handle) { return task_handle; }
+/* ---- end Certo runtime ---- */
+
+
+/* ================================================================
+   Stdlib.Core — core utilities
+   ================================================================ */
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <math.h>
+
+/* ---- print / println ---- */
+/* Return int64_t so generated code can assign the result to an int64_t temp. */
+
+int64_t certo_print(certo_text_t s) {
+    fputs(s ? s : "", stdout);
+    return 0;
+}
+
+int64_t certo_println(certo_text_t s) {
+    puts(s ? s : "");
+    return 0;
+}
+
+int64_t certo_eprint(certo_text_t s) {
+    fputs(s ? s : "", stderr);
+    return 0;
+}
+
+int64_t certo_eprintln(certo_text_t s) {
+    fputs(s ? s : "", stderr);
+    fputc('\n', stderr);
+    return 0;
+}
+
+/* ---- conversions ---- */
+
+certo_text_t certo_int_to_text(int64_t n) {
+    /* 21 bytes is enough for any int64 including sign and NUL */
+    char* buf = (char*)malloc(24);
+    if (!buf) certo_panic("out of memory");
+    snprintf(buf, 24, "%" PRId64, n);
+    return buf;
+}
+
+certo_text_t certo_float_to_text(double f) {
+    char* buf = (char*)malloc(64);
+    if (!buf) certo_panic("out of memory");
+    snprintf(buf, 64, "%g", f);
+    return buf;
+}
+
+certo_text_t certo_bool_to_text(bool b) {
+    return b ? "true" : "false";
+}
+
+int64_t certo_float_to_int(double f) {
+    return (int64_t)f;
+}
+
+double certo_int_to_float(int64_t n) {
+    return (double)n;
+}
+
+int64_t certo_text_to_int_unsafe(certo_text_t s) {
+    if (!s) certo_panic("text_to_int: null string");
+    return (int64_t)strtoll(s, NULL, 10);
+}
+
+double certo_text_to_float_unsafe(certo_text_t s) {
+    if (!s) certo_panic("text_to_float: null string");
+    return strtod(s, NULL);
+}
+
+/* Option<Int> — NULL pointer means None */
+void* certo_text_parse_int(certo_text_t s) {
+    if (!s || !*s) return NULL;
+    char* end;
+    int64_t v = strtoll(s, &end, 10);
+    if (*end != '\0') return NULL;
+    int64_t* p = (int64_t*)malloc(sizeof(int64_t));
+    if (!p) certo_panic("out of memory");
+    *p = v;
+    return p;
+}
+
+void* certo_text_parse_float(certo_text_t s) {
+    if (!s || !*s) return NULL;
+    char* end;
+    double v = strtod(s, &end);
+    if (*end != '\0') return NULL;
+    double* p = (double*)malloc(sizeof(double));
+    if (!p) certo_panic("out of memory");
+    *p = v;
+    return p;
+}
+
+/* ---- assert ---- */
+
+int64_t certo_assert(bool cond, certo_text_t msg) {
+    if (!cond) certo_panic(msg ? msg : "assertion failed");
+    return 0;
+}
+
+/* ---- arithmetic ---- */
+
+int64_t certo_pow(int64_t base, int64_t exp) {
+    if (exp < 0) return 0;
+    int64_t result = 1;
+    while (exp > 0) {
+        if (exp & 1) result *= base;
+        base *= base;
+        exp >>= 1;
+    }
+    return result;
+}
+
+int64_t certo_abs_int(int64_t n)   { return n < 0 ? -n : n; }
+double  certo_abs_float(double f)  { return f < 0.0 ? -f : f; }
+int64_t certo_min_int(int64_t a, int64_t b) { return a < b ? a : b; }
+int64_t certo_max_int(int64_t a, int64_t b) { return a > b ? a : b; }
+double  certo_min_float(double a, double b) { return a < b ? a : b; }
+double  certo_max_float(double a, double b) { return a > b ? a : b; }
+double  certo_floor(double f) { return floor(f); }
+double  certo_ceil(double f)  { return ceil(f); }
+double  certo_round(double f) { return round(f); }
+double  certo_sqrt(double f)  { return sqrt(f); }
+
+/* ---- range ---- */
+
+/* Returns a heap-allocated array of int64_t preceded by a length header.
+   Layout: [int64_t len] [int64_t data[len]]
+   Caller owns the allocation. */
+void* certo_range(int64_t start, int64_t end_excl) {
+    int64_t len = end_excl > start ? end_excl - start : 0;
+    int64_t* arr = (int64_t*)malloc((1 + (size_t)len) * sizeof(int64_t));
+    if (!arr) certo_panic("out of memory");
+    arr[0] = len;
+    for (int64_t i = 0; i < len; i++) arr[i + 1] = start + i;
+    return arr;
+}
+
+void* certo_range_inclusive(int64_t start, int64_t end_incl) {
+    return certo_range(start, end_incl + 1);
+}
+
+/* ---- panic ---- */
+
+__attribute__((noreturn)) void certo_panic(certo_text_t msg) {
+    fprintf(stderr, "certo panic: %s\n", msg ? msg : "(no message)");
+    abort();
+}
+
+/* ---- null coalesce / coerce ---- */
+void* certo_coalesce(void* opt, void* fallback) {
+    return opt ? opt : fallback;
+}
+
+/* text_concat lives in text.rs to avoid duplicate definitions */
+
+/* ---- stdin ---- */
+
+/* Read one line from stdin (strips trailing newline).
+   Returns a heap-allocated string, or NULL on EOF / error. */
+certo_text_t certo_read_line(void) {
+    char*  buf  = NULL;
+    size_t cap  = 0;
+    size_t len  = 0;
+    int    c;
+
+    while ((c = fgetc(stdin)) != EOF) {
+        if (len + 2 > cap) {
+            cap = cap ? cap * 2 : 128;
+            char* nb = (char*)realloc(buf, cap);
+            if (!nb) { free(buf); certo_panic("out of memory"); }
+            buf = nb;
+        }
+        if (c == '\n') break;
+        buf[len++] = (char)c;
+    }
+
+    if (len == 0 && c == EOF) { free(buf); return NULL; }
+    if (!buf) { buf = (char*)malloc(1); if (!buf) certo_panic("out of memory"); }
+    buf[len] = '\0';
+    return buf;
+}
+
+/* Read all of stdin into a single heap-allocated string. */
+certo_text_t certo_read_all(void) {
+    char*  buf = NULL;
+    size_t cap = 0;
+    size_t len = 0;
+    int    c;
+
+    while ((c = fgetc(stdin)) != EOF) {
+        if (len + 2 > cap) {
+            cap = cap ? cap * 2 : 4096;
+            char* nb = (char*)realloc(buf, cap);
+            if (!nb) { free(buf); certo_panic("out of memory"); }
+            buf = nb;
+        }
+        buf[len++] = (char)c;
+    }
+
+    if (!buf) { buf = (char*)malloc(1); if (!buf) certo_panic("out of memory"); }
+    buf[len] = '\0';
+    return buf;
+}
+
+/* ---- argv ---- */
+
+/* These globals are set by the certo_main_init() bootstrap call that the
+   compiled main() must make before calling user code. */
+static int          __certo_argc = 0;
+static const char** __certo_argv = NULL;
+
+void certo_main_init(int argc, const char** argv) {
+    __certo_argc = argc;
+    __certo_argv = argv;
+}
+
+int64_t certo_arg_count(void) {
+    return (int64_t)__certo_argc;
+}
+
+/* Returns NULL (None) if index is out of range. */
+certo_text_t certo_arg(int64_t i) {
+    if (i < 0 || i >= (int64_t)__certo_argc) return NULL;
+    return __certo_argv[i];
+}
+
+/* ---- parseInt / parseFloat ---- */
+/* Returns NULL (None) on failure, heap-allocated int64_t* on success. */
+int64_t* certo_parse_int(certo_text_t s) {
+    if (!s) return NULL;
+    char *end;
+    long long v = strtoll(s, &end, 10);
+    if (end == s || *end != '\0') return NULL;
+    int64_t *box = (int64_t*)malloc(sizeof(int64_t));
+    *box = (int64_t)v;
+    return box;
+}
+
+double* certo_parse_float(certo_text_t s) {
+    if (!s) return NULL;
+    char *end;
+    double v = strtod(s, &end);
+    if (end == s || *end != '\0') return NULL;
+    double *box = (double*)malloc(sizeof(double));
+    *box = v;
+    return box;
+}
+
+/* ================================================================
+   Stdlib.Collections — List<T> and Map<K,V>
+   ================================================================
+   List is a heap-allocated struct:
+     { int64_t len; int64_t cap; void** data; }
+
+   Map is a simple open-addressing hash table:
+     { int64_t len; int64_t cap; MapEntry* entries; }
+     where MapEntry = { void* key; void* value; bool occupied; }
+   ================================================================ */
+
+/* ---- List ---- */
+
+typedef struct {
+    int64_t  len;
+    int64_t  cap;
+    void**   data;
+} CertoList;
+
+static CertoList* list_alloc(int64_t cap) {
+    if (cap < 8) cap = 8;
+    CertoList* l = (CertoList*)malloc(sizeof(CertoList));
+    if (!l) certo_panic("out of memory");
+    l->len  = 0;
+    l->cap  = cap;
+    l->data = (void**)malloc((size_t)cap * sizeof(void*));
+    if (!l->data) certo_panic("out of memory");
+    return l;
+}
+
+CertoList* certo_list_new_empty(void) {
+    return list_alloc(8);
+}
+/* Alias used by stdlib modules (csv, regex, json). */
+CertoList* certo_list_new(void) {
+    return list_alloc(8);
+}
+
+CertoList* certo_list_of(int64_t n, ...) {
+    va_list ap;
+    CertoList* l = list_alloc(n < 8 ? 8 : n);
+    va_start(ap, n);
+    for (int64_t i = 0; i < n; i++) l->data[i] = va_arg(ap, void*);
+    va_end(ap);
+    l->len = n;
+    return l;
+}
+
+int64_t certo_list_len(CertoList* l) {
+    return l ? l->len : 0;
+}
+
+void* certo_list_get_opt(CertoList* l, int64_t i) {
+    if (!l || i < 0 || i >= l->len) return NULL;
+    return l->data[i];
+}
+
+void* certo_list_get(CertoList* l, int64_t i) {
+    if (!l || i < 0 || i >= l->len) certo_panic("list index out of bounds");
+    return l->data[i];
+}
+
+/* Alias used by for-loop codegen (List.getOrPanic desugars to this). */
+static inline void* certo_list_get_or_panic(CertoList* l, int64_t i) {
+    return certo_list_get(l, i);
+}
+
+CertoList* certo_list_push(CertoList* l, void* item) {
+    /* Returns a new list (functional update). */
+    CertoList* n = list_alloc(l ? l->len + 1 : 1);
+    if (l) {
+        memcpy(n->data, l->data, (size_t)l->len * sizeof(void*));
+        n->len = l->len;
+    }
+    n->data[n->len++] = item;
+    return n;
+}
+
+CertoList* certo_list_concat(CertoList* a, CertoList* b) {
+    int64_t al = a ? a->len : 0;
+    int64_t bl = b ? b->len : 0;
+    CertoList* n = list_alloc(al + bl);
+    if (a) memcpy(n->data,      a->data, (size_t)al * sizeof(void*));
+    if (b) memcpy(n->data + al, b->data, (size_t)bl * sizeof(void*));
+    n->len = al + bl;
+    return n;
+}
+
+void* certo_list_first(CertoList* l) {
+    return (l && l->len > 0) ? l->data[0] : NULL;
+}
+
+void* certo_list_last(CertoList* l) {
+    return (l && l->len > 0) ? l->data[l->len - 1] : NULL;
+}
+
+CertoList* certo_list_slice(CertoList* l, int64_t start, int64_t end) {
+    if (!l) return list_alloc(0);
+    if (start < 0) start = 0;
+    if (end > l->len) end = l->len;
+    if (start >= end) return list_alloc(0);
+    int64_t len = end - start;
+    CertoList* n = list_alloc(len);
+    memcpy(n->data, l->data + start, (size_t)len * sizeof(void*));
+    n->len = len;
+    return n;
+}
+
+CertoList* certo_list_reverse(CertoList* l) {
+    if (!l) return list_alloc(0);
+    CertoList* n = list_alloc(l->len);
+    for (int64_t i = 0; i < l->len; i++) n->data[i] = l->data[l->len - 1 - i];
+    n->len = l->len;
+    return n;
+}
+
+/* map / filter / fold take function pointers — generated code supplies them */
+typedef void* (*CertoFn1)(void*);
+typedef void* (*CertoFn2)(void*, void*);
+typedef bool  (*CertoPred)(void*);
+
+CertoList* certo_list_map(CertoList* l, CertoFn1 f) {
+    if (!l) return list_alloc(0);
+    CertoList* n = list_alloc(l->len);
+    for (int64_t i = 0; i < l->len; i++) n->data[i] = f(l->data[i]);
+    n->len = l->len;
+    return n;
+}
+
+CertoList* certo_list_filter(CertoList* l, CertoPred pred) {
+    if (!l) return list_alloc(0);
+    CertoList* n = list_alloc(l->len);
+    for (int64_t i = 0; i < l->len; i++) {
+        if (pred(l->data[i])) n->data[n->len++] = l->data[i];
+    }
+    return n;
+}
+
+void* certo_list_fold(CertoList* l, void* init, CertoFn2 f) {
+    void* acc = init;
+    if (!l) return acc;
+    for (int64_t i = 0; i < l->len; i++) acc = f(acc, l->data[i]);
+    return acc;
+}
+
+bool certo_list_contains_ptr(CertoList* l, void* item) {
+    if (!l) return false;
+    for (int64_t i = 0; i < l->len; i++) if (l->data[i] == item) return true;
+    return false;
+}
+
+void* certo_list_find(CertoList* l, CertoPred pred) {
+    if (!l) return NULL;
+    for (int64_t i = 0; i < l->len; i++)
+        if (pred(l->data[i])) return l->data[i];
+    return NULL;
+}
+
+bool certo_list_any(CertoList* l, CertoPred pred) {
+    if (!l) return false;
+    for (int64_t i = 0; i < l->len; i++)
+        if (pred(l->data[i])) return true;
+    return false;
+}
+
+bool certo_list_all(CertoList* l, CertoPred pred) {
+    if (!l) return true;
+    for (int64_t i = 0; i < l->len; i++)
+        if (!pred(l->data[i])) return false;
+    return true;
+}
+
+/* ---- sort (merge sort, stable) ---- */
+
+typedef int64_t (*CertoCmp)(void*, void*);
+
+static CertoList* list_merge(CertoList* a, CertoList* b, CertoCmp cmp) {
+    CertoList* n = list_alloc(a->len + b->len);
+    int64_t i = 0, j = 0;
+    while (i < a->len && j < b->len) {
+        if (cmp(a->data[i], b->data[j]) <= 0)
+            n->data[n->len++] = a->data[i++];
+        else
+            n->data[n->len++] = b->data[j++];
+    }
+    while (i < a->len) n->data[n->len++] = a->data[i++];
+    while (j < b->len) n->data[n->len++] = b->data[j++];
+    return n;
+}
+
+CertoList* certo_list_sort(CertoList* l, CertoCmp cmp) {
+    if (!l || l->len <= 1) return l ? l : list_alloc(0);
+    int64_t mid = l->len / 2;
+    CertoList* left  = certo_list_slice(l, 0,   mid);
+    CertoList* right = certo_list_slice(l, mid, l->len);
+    return list_merge(certo_list_sort(left, cmp),
+                      certo_list_sort(right, cmp), cmp);
+}
+
+/* ---- zip (pairs stored as heap-allocated {fst, snd}) ---- */
+
+typedef struct { void* fst; void* snd; } CertoPair;
+
+CertoList* certo_list_zip(CertoList* a, CertoList* b) {
+    if (!a || !b) return list_alloc(0);
+    int64_t len = a->len < b->len ? a->len : b->len;
+    CertoList* n = list_alloc(len);
+    for (int64_t i = 0; i < len; i++) {
+        CertoPair* p = (CertoPair*)malloc(sizeof(CertoPair));
+        if (!p) certo_panic("out of memory");
+        p->fst = a->data[i];
+        p->snd = b->data[i];
+        n->data[n->len++] = p;
+    }
+    return n;
+}
+
+/* ---- Map (open-addressing, pointer-equality keys) ---- */
+
+typedef struct {
+    void* key;
+    void* value;
+    bool  occupied;
+} MapEntry;
+
+typedef struct {
+    int64_t   len;
+    int64_t   cap;
+    MapEntry* entries;
+} CertoMap;
+
+static CertoMap* map_alloc(int64_t cap) {
+    if (cap < 16) cap = 16;
+    CertoMap* m = (CertoMap*)malloc(sizeof(CertoMap));
+    if (!m) certo_panic("out of memory");
+    m->len     = 0;
+    m->cap     = cap;
+    m->entries = (MapEntry*)calloc((size_t)cap, sizeof(MapEntry));
+    if (!m->entries) certo_panic("out of memory");
+    return m;
+}
+
+CertoMap* certo_map_new(void) {
+    return map_alloc(16);
+}
+
+static int64_t map_probe(CertoMap* m, void* key) {
+    int64_t h = (int64_t)((uintptr_t)key >> 3) % m->cap;
+    while (m->entries[h].occupied && m->entries[h].key != key)
+        h = (h + 1) % m->cap;
+    return h;
+}
+
+CertoMap* certo_map_insert(CertoMap* m, void* key, void* value) {
+    /* Copy-on-write: return a new map */
+    CertoMap* n = map_alloc(m ? (m->len + 1) * 2 : 16);
+    if (m) {
+        for (int64_t i = 0; i < m->cap; i++) {
+            if (!m->entries[i].occupied) continue;
+            int64_t h = map_probe(n, m->entries[i].key);
+            n->entries[h] = m->entries[i];
+            n->len++;
+        }
+    }
+    int64_t h = map_probe(n, key);
+    if (!n->entries[h].occupied) n->len++;
+    n->entries[h] = (MapEntry){ .key = key, .value = value, .occupied = true };
+    return n;
+}
+
+void* certo_map_get(CertoMap* m, void* key) {
+    if (!m) return NULL;
+    int64_t h = map_probe(m, key);
+    if (!m->entries[h].occupied) return NULL;
+    return m->entries[h].value;
+}
+
+bool certo_map_contains(CertoMap* m, void* key) {
+    return certo_map_get(m, key) != NULL;
+}
+
+int64_t certo_map_len(CertoMap* m) {
+    return m ? m->len : 0;
+}
+
+CertoList* certo_map_keys(CertoMap* m) {
+    CertoList* out = list_alloc(m ? m->len : 0);
+    if (!m) return out;
+    for (int64_t i = 0; i < m->cap; i++) {
+        if (m->entries[i].occupied) out->data[out->len++] = m->entries[i].key;
+    }
+    return out;
+}
+
+CertoList* certo_map_values(CertoMap* m) {
+    CertoList* out = list_alloc(m ? m->len : 0);
+    if (!m) return out;
+    for (int64_t i = 0; i < m->cap; i++) {
+        if (m->entries[i].occupied) out->data[out->len++] = m->entries[i].value;
+    }
+    return out;
+}
+
+CertoMap* certo_map_from_list(CertoList* l) {
+    if (!l) return map_alloc(16);
+    CertoMap* m = map_alloc(l->len > 0 ? l->len * 2 : 16);
+    for (int64_t i = 0; i < l->len; i++) {
+        CertoPair* p = (CertoPair*)l->data[i];
+        int64_t h = map_probe(m, p->fst);
+        if (!m->entries[h].occupied) m->len++;
+        m->entries[h] = (MapEntry){ .key = p->fst, .value = p->snd, .occupied = true };
+    }
+    return m;
+}
+
+CertoMap* certo_map_remove(CertoMap* m, void* key) {
+    if (!m) return map_alloc(16);
+    CertoMap* n = map_alloc(m->len > 0 ? m->len * 2 : 16);
+    for (int64_t i = 0; i < m->cap; i++) {
+        if (!m->entries[i].occupied || m->entries[i].key == key) continue;
+        int64_t h = map_probe(n, m->entries[i].key);
+        n->entries[h] = m->entries[i];
+        n->len++;
+    }
+    return n;
+}
+
+/* ================================================================
+   Stdlib.Text — Text (certo_text_t = const char*) operations
+   ================================================================ */
+
+#include <ctype.h>
+
+int64_t certo_text_len(certo_text_t s) {
+    return s ? (int64_t)strlen(s) : 0;
+}
+
+certo_text_t certo_text_concat(certo_text_t a, certo_text_t b) {
+    size_t la = a ? strlen(a) : 0;
+    size_t lb = b ? strlen(b) : 0;
+    char* out = (char*)malloc(la + lb + 1);
+    if (!out) certo_panic("out of memory");
+    memcpy(out, a ? a : "", la);
+    memcpy(out + la, b ? b : "", lb);
+    out[la + lb] = '\0';
+    return out;
+}
+
+bool certo_text_eq(certo_text_t a, certo_text_t b) {
+    if (!a && !b) return true;
+    if (!a || !b) return false;
+    return strcmp(a, b) == 0;
+}
+
+bool certo_text_contains(certo_text_t haystack, certo_text_t needle) {
+    if (!haystack || !needle) return false;
+    return strstr(haystack, needle) != NULL;
+}
+
+bool certo_text_starts_with(certo_text_t s, certo_text_t prefix) {
+    if (!s || !prefix) return false;
+    size_t pl = strlen(prefix);
+    return strncmp(s, prefix, pl) == 0;
+}
+
+bool certo_text_ends_with(certo_text_t s, certo_text_t suffix) {
+    if (!s || !suffix) return false;
+    size_t sl = strlen(s), fl = strlen(suffix);
+    if (fl > sl) return false;
+    return strcmp(s + sl - fl, suffix) == 0;
+}
+
+certo_text_t certo_text_to_upper(certo_text_t s) {
+    if (!s) return "";
+    size_t n = strlen(s);
+    char* out = (char*)malloc(n + 1);
+    if (!out) certo_panic("out of memory");
+    for (size_t i = 0; i <= n; i++) out[i] = (char)toupper((unsigned char)s[i]);
+    return out;
+}
+
+certo_text_t certo_text_to_lower(certo_text_t s) {
+    if (!s) return "";
+    size_t n = strlen(s);
+    char* out = (char*)malloc(n + 1);
+    if (!out) certo_panic("out of memory");
+    for (size_t i = 0; i <= n; i++) out[i] = (char)tolower((unsigned char)s[i]);
+    return out;
+}
+
+certo_text_t certo_text_trim(certo_text_t s) {
+    if (!s) return "";
+    while (*s && isspace((unsigned char)*s)) s++;
+    size_t n = strlen(s);
+    while (n > 0 && isspace((unsigned char)s[n - 1])) n--;
+    char* out = (char*)malloc(n + 1);
+    if (!out) certo_panic("out of memory");
+    memcpy(out, s, n);
+    out[n] = '\0';
+    return out;
+}
+
+certo_text_t certo_text_trim_start(certo_text_t s) {
+    if (!s) return "";
+    while (*s && isspace((unsigned char)*s)) s++;
+    return s;  /* safe — points into caller's string */
+}
+
+certo_text_t certo_text_trim_end(certo_text_t s) {
+    if (!s) return "";
+    size_t n = strlen(s);
+    while (n > 0 && isspace((unsigned char)s[n - 1])) n--;
+    char* out = (char*)malloc(n + 1);
+    if (!out) certo_panic("out of memory");
+    memcpy(out, s, n);
+    out[n] = '\0';
+    return out;
+}
+
+certo_text_t certo_text_slice(certo_text_t s, int64_t start, int64_t end) {
+    if (!s) return "";
+    int64_t n = (int64_t)strlen(s);
+    if (start < 0) start = 0;
+    if (end > n) end = n;
+    if (start >= end) return "";
+    int64_t len = end - start;
+    char* out = (char*)malloc((size_t)len + 1);
+    if (!out) certo_panic("out of memory");
+    memcpy(out, s + start, (size_t)len);
+    out[len] = '\0';
+    return out;
+}
+
+/* Returns NULL (None) if not found, else pointer to int64_t index */
+void* certo_text_index_of(certo_text_t haystack, certo_text_t needle) {
+    if (!haystack || !needle) return NULL;
+    const char* p = strstr(haystack, needle);
+    if (!p) return NULL;
+    int64_t* idx = (int64_t*)malloc(sizeof(int64_t));
+    if (!idx) certo_panic("out of memory");
+    *idx = (int64_t)(p - haystack);
+    return idx;
+}
+
+certo_text_t certo_text_replace(certo_text_t s, certo_text_t from, certo_text_t to) {
+    if (!s || !from || strlen(from) == 0) return s;
+    size_t from_len = strlen(from);
+    size_t to_len   = to ? strlen(to) : 0;
+
+    /* Count occurrences */
+    size_t count = 0;
+    const char* p = s;
+    while ((p = strstr(p, from))) { count++; p += from_len; }
+
+    size_t new_len = strlen(s) + count * (to_len - from_len);
+    char* out = (char*)malloc(new_len + 1);
+    if (!out) certo_panic("out of memory");
+
+    char* dst = out;
+    p = s;
+    const char* match;
+    while ((match = strstr(p, from))) {
+        size_t pre = (size_t)(match - p);
+        memcpy(dst, p, pre); dst += pre;
+        if (to) { memcpy(dst, to, to_len); dst += to_len; }
+        p = match + from_len;
+    }
+    strcpy(dst, p);
+    return out;
+}
+
+/* Returns a CertoList* of certo_text_t segments */
+void* certo_text_split(certo_text_t s, certo_text_t sep) {
+    CertoList* out = list_alloc(8);
+    if (!s) return out;
+    if (!sep || strlen(sep) == 0) {
+        /* split into individual characters */
+        for (size_t i = 0; s[i]; i++) {
+            char* ch = (char*)malloc(2);
+            if (!ch) certo_panic("out of memory");
+            ch[0] = s[i]; ch[1] = '\0';
+            out = (CertoList*)certo_list_push(out, ch);
+        }
+        return out;
+    }
+    size_t sep_len = strlen(sep);
+    const char* p = s;
+    const char* match;
+    while ((match = strstr(p, sep))) {
+        size_t len = (size_t)(match - p);
+        char* seg = (char*)malloc(len + 1);
+        if (!seg) certo_panic("out of memory");
+        memcpy(seg, p, len); seg[len] = '\0';
+        out = (CertoList*)certo_list_push(out, seg);
+        p = match + sep_len;
+    }
+    out = (CertoList*)certo_list_push(out, (void*)p);  /* last segment */
+    return out;
+}
+
+certo_text_t certo_text_join(CertoList* parts, certo_text_t sep) {
+    if (!parts || parts->len == 0) return "";
+    size_t sep_len = sep ? strlen(sep) : 0;
+    size_t total = 0;
+    for (int64_t i = 0; i < parts->len; i++) {
+        certo_text_t s = (certo_text_t)parts->data[i];
+        if (s) total += strlen(s);
+        if (i + 1 < parts->len) total += sep_len;
+    }
+    char* out = (char*)malloc(total + 1);
+    if (!out) certo_panic("out of memory");
+    char* dst = out;
+    for (int64_t i = 0; i < parts->len; i++) {
+        certo_text_t s = (certo_text_t)parts->data[i];
+        if (s) { size_t n = strlen(s); memcpy(dst, s, n); dst += n; }
+        if (sep && i + 1 < parts->len) { memcpy(dst, sep, sep_len); dst += sep_len; }
+    }
+    *dst = '\0';
+    return out;
+}
+
+certo_text_t certo_text_repeat(certo_text_t s, int64_t n) {
+    if (!s || n <= 0) return "";
+    size_t sl = strlen(s);
+    char* out = (char*)malloc(sl * (size_t)n + 1);
+    if (!out) certo_panic("out of memory");
+    for (int64_t i = 0; i < n; i++) memcpy(out + (size_t)i * sl, s, sl);
+    out[sl * (size_t)n] = '\0';
+    return out;
+}
+
+/* ================================================================
+   Stdlib.DateTime
+   Dates are stored as int64_t Unix timestamps (seconds since epoch).
+   Date-only values use midnight UTC.
+   ================================================================ */
+
+#include <time.h>
+
+/* timegm is POSIX; on Windows use _mkgmtime */
+#ifdef _WIN32
+#  define timegm _mkgmtime
+#endif
+
+typedef int64_t CertoDateTime;   /* Unix seconds */
+typedef int64_t CertoDate;       /* Unix seconds at midnight UTC */
+
+/* ---- constructors ---- */
+
+CertoDateTime certo_datetime_now(void) {
+    return (CertoDateTime)time(NULL);
+}
+
+CertoDate certo_date_today(void) {
+    time_t now = time(NULL);
+    struct tm* t = gmtime(&now);
+    t->tm_hour = 0; t->tm_min = 0; t->tm_sec = 0;
+    return (CertoDate)timegm(t);
+}
+
+CertoDateTime certo_datetime_from_unix(int64_t secs) {
+    return (CertoDateTime)secs;
+}
+
+int64_t certo_datetime_to_unix(CertoDateTime dt) {
+    return (int64_t)dt;
+}
+
+/* ---- formatting ---- */
+
+certo_text_t certo_datetime_format(CertoDateTime dt, certo_text_t fmt) {
+    time_t t = (time_t)dt;
+    struct tm* tm_info = gmtime(&t);
+    char* buf = (char*)malloc(256);
+    if (!buf) certo_panic("out of memory");
+    strftime(buf, 256, fmt ? fmt : "%Y-%m-%dT%H:%M:%SZ", tm_info);
+    return buf;
+}
+
+certo_text_t certo_date_format(CertoDate d, certo_text_t fmt) {
+    return certo_datetime_format((CertoDateTime)d, fmt ? fmt : "%Y-%m-%d");
+}
+
+certo_text_t certo_datetime_to_iso(CertoDateTime dt) {
+    return certo_datetime_format(dt, "%Y-%m-%dT%H:%M:%SZ");
+}
+
+/* ---- arithmetic ---- */
+
+CertoDateTime certo_datetime_add_seconds(CertoDateTime dt, int64_t s) { return dt + s; }
+CertoDateTime certo_datetime_add_minutes(CertoDateTime dt, int64_t m) { return dt + m * 60; }
+CertoDateTime certo_datetime_add_hours  (CertoDateTime dt, int64_t h) { return dt + h * 3600; }
+CertoDateTime certo_datetime_add_days   (CertoDateTime dt, int64_t d) { return dt + d * 86400; }
+
+int64_t certo_datetime_diff_seconds(CertoDateTime a, CertoDateTime b) { return a - b; }
+int64_t certo_datetime_diff_days   (CertoDateTime a, CertoDateTime b) { return (a - b) / 86400; }
+
+/* ---- comparison ---- */
+
+bool certo_datetime_before(CertoDateTime a, CertoDateTime b) { return a < b; }
+bool certo_datetime_after (CertoDateTime a, CertoDateTime b) { return a > b; }
+bool certo_datetime_eq    (CertoDateTime a, CertoDateTime b) { return a == b; }
+
+/* ---- components ---- */
+
+int64_t certo_datetime_year  (CertoDateTime dt) { time_t t = (time_t)dt; struct tm* m = gmtime(&t); return m->tm_year + 1900; }
+int64_t certo_datetime_month (CertoDateTime dt) { time_t t = (time_t)dt; struct tm* m = gmtime(&t); return m->tm_mon + 1; }
+int64_t certo_datetime_day   (CertoDateTime dt) { time_t t = (time_t)dt; struct tm* m = gmtime(&t); return m->tm_mday; }
+int64_t certo_datetime_hour  (CertoDateTime dt) { time_t t = (time_t)dt; struct tm* m = gmtime(&t); return m->tm_hour; }
+int64_t certo_datetime_minute(CertoDateTime dt) { time_t t = (time_t)dt; struct tm* m = gmtime(&t); return m->tm_min; }
+int64_t certo_datetime_second(CertoDateTime dt) { time_t t = (time_t)dt; struct tm* m = gmtime(&t); return m->tm_sec; }
+
+/* ---- parse ISO 8601 ---- */
+CertoDateTime certo_datetime_parse_iso(certo_text_t s) {
+    if (!s) certo_panic("datetime_parse_iso: null input");
+    struct tm t = {0};
+    /* Minimal parser: YYYY-MM-DDTHH:MM:SSZ */
+    if (sscanf(s, "%d-%d-%dT%d:%d:%d",
+               &t.tm_year, &t.tm_mon, &t.tm_mday,
+               &t.tm_hour, &t.tm_min, &t.tm_sec) < 3)
+        certo_panic("datetime_parse_iso: invalid format");
+    t.tm_year -= 1900;
+    t.tm_mon  -= 1;
+    return (CertoDateTime)timegm(&t);
+}
+
+/* ================================================================
+   Stdlib.Money  (and extended Decimal arithmetic)
+
+   Decimal layout: { int64_t value; int8_t scale; }
+   where the true value = value / 10^scale.
+   e.g. $19.99 → { value: 1999, scale: 2 }
+   ================================================================ */
+
+/* ---- Decimal parse / format ---- */
+
+certo_decimal_t certo_decimal_parse(const char* s) {
+    if (!s) { certo_decimal_t z = {0, 0}; return z; }
+    /* Find decimal point */
+    const char* dot = strchr(s, '.');
+    int8_t scale = 0;
+    int64_t value;
+    if (dot) {
+        /* Count decimal places */
+        scale = (int8_t)strlen(dot + 1);
+        /* Parse integer part + fractional part as one integer */
+        char buf[64];
+        size_t int_len = (size_t)(dot - s);
+        if (int_len >= sizeof(buf) - 20) { certo_decimal_t z = {0, 0}; return z; }
+        memcpy(buf, s, int_len);
+        strcpy(buf + int_len, dot + 1);
+        value = strtoll(buf, NULL, 10);
+    } else {
+        value = strtoll(s, NULL, 10);
+    }
+    certo_decimal_t d = { .value = value, .scale = scale };
+    return d;
+}
+
+certo_text_t certo_decimal_to_text(certo_decimal_t d) {
+    char* buf = (char*)malloc(64);
+    if (!buf) certo_panic("out of memory");
+    if (d.scale == 0) {
+        snprintf(buf, 64, "%" PRId64, d.value);
+    } else {
+        int64_t divisor = 1;
+        for (int i = 0; i < d.scale; i++) divisor *= 10;
+        int64_t whole    = d.value / divisor;
+        int64_t frac     = d.value % divisor;
+        if (frac < 0) frac = -frac;
+        char fmt[16];
+        snprintf(fmt, sizeof(fmt), "%%" PRId64 ".%%0%d" PRId64, (int)d.scale);
+        snprintf(buf, 64, fmt, whole, frac);
+    }
+    return buf;
+}
+
+/* Align two decimals to the same scale */
+static void decimal_align(certo_decimal_t* a, certo_decimal_t* b) {
+    while (a->scale < b->scale) { a->value *= 10; a->scale++; }
+    while (b->scale < a->scale) { b->value *= 10; b->scale++; }
+}
+
+certo_decimal_t certo_decimal_add(certo_decimal_t a, certo_decimal_t b) {
+    decimal_align(&a, &b);
+    certo_decimal_t r = { .value = a.value + b.value, .scale = a.scale };
+    return r;
+}
+
+certo_decimal_t certo_decimal_sub(certo_decimal_t a, certo_decimal_t b) {
+    decimal_align(&a, &b);
+    certo_decimal_t r = { .value = a.value - b.value, .scale = a.scale };
+    return r;
+}
+
+certo_decimal_t certo_decimal_mul(certo_decimal_t a, certo_decimal_t b) {
+    certo_decimal_t r = {
+        .value = a.value * b.value,
+        .scale = (int8_t)(a.scale + b.scale),
+    };
+    return r;
+}
+
+certo_decimal_t certo_decimal_div(certo_decimal_t a, certo_decimal_t b) {
+    if (b.value == 0) certo_panic("decimal division by zero");
+    /* Multiply numerator by 10^scale to keep precision */
+    int8_t extra = 6;  /* 6 extra digits of precision */
+    int64_t scale_factor = 1;
+    for (int i = 0; i < extra; i++) scale_factor *= 10;
+    certo_decimal_t r = {
+        .value = (a.value * scale_factor) / b.value,
+        .scale = (int8_t)(a.scale - b.scale + extra),
+    };
+    return r;
+}
+
+bool certo_decimal_eq (certo_decimal_t a, certo_decimal_t b) {
+    decimal_align(&a, &b); return a.value == b.value;
+}
+bool certo_decimal_lt (certo_decimal_t a, certo_decimal_t b) {
+    decimal_align(&a, &b); return a.value < b.value;
+}
+bool certo_decimal_gt (certo_decimal_t a, certo_decimal_t b) {
+    decimal_align(&a, &b); return a.value > b.value;
+}
+bool certo_decimal_lte(certo_decimal_t a, certo_decimal_t b) {
+    decimal_align(&a, &b); return a.value <= b.value;
+}
+bool certo_decimal_gte(certo_decimal_t a, certo_decimal_t b) {
+    decimal_align(&a, &b); return a.value >= b.value;
+}
+
+certo_decimal_t certo_decimal_abs(certo_decimal_t d) {
+    certo_decimal_t r = { .value = d.value < 0 ? -d.value : d.value, .scale = d.scale };
+    return r;
+}
+
+certo_decimal_t certo_decimal_negate(certo_decimal_t d) {
+    certo_decimal_t r = { .value = -d.value, .scale = d.scale };
+    return r;
+}
+
+/* Round to `places` decimal places (half-up) */
+certo_decimal_t certo_decimal_round(certo_decimal_t d, int8_t places) {
+    if (d.scale <= places) return d;
+    int8_t excess = d.scale - places;
+    int64_t divisor = 1;
+    for (int i = 0; i < excess; i++) divisor *= 10;
+    int64_t rounded = (d.value + divisor / 2) / divisor;
+    certo_decimal_t r = { .value = rounded, .scale = places };
+    return r;
+}
+
+/* Convert decimal to int64 (truncate) */
+int64_t certo_decimal_to_int(certo_decimal_t d) {
+    int64_t divisor = 1;
+    for (int i = 0; i < d.scale; i++) divisor *= 10;
+    return d.value / divisor;
+}
+
+/* Convert int64 to decimal with scale 0 */
+certo_decimal_t certo_decimal_from_int(int64_t n) {
+    certo_decimal_t d = { .value = n, .scale = 0 };
+    return d;
+}
+
+/* ---- Money (alias for Decimal with scale=2) ---- */
+
+certo_decimal_t certo_money_from_cents(int64_t cents) {
+    certo_decimal_t d = { .value = cents, .scale = 2 };
+    return d;
+}
+
+int64_t certo_money_to_cents(certo_decimal_t m) {
+    return certo_decimal_round(m, 2).value;
+}
+
+certo_decimal_t certo_money_from_decimal(certo_decimal_t d) {
+    return certo_decimal_round(d, 2);
+}
+
+/* ================================================================
+   Stdlib.Env — environment variable access
+   ================================================================ */
+
+#include <stdlib.h>
+#include <string.h>
+
+certo_text_t certo_get_env(certo_text_t key) {
+    if (!key) return NULL;
+    char* val = getenv(key);
+    if (!val) return NULL;
+    size_t len = strlen(val) + 1;
+    char* copy = (char*)malloc(len);
+    if (!copy) certo_panic("out of memory");
+    memcpy(copy, val, len);
+    return copy;
+}
+
+int64_t certo_set_env(certo_text_t key, certo_text_t val) {
+    if (!key || !val) return 0;
+#ifdef _WIN32
+    _putenv_s(key, val);
+#else
+    setenv(key, val, 1);
+#endif
+    return 0;
+}
+
+int64_t certo_unset_env(certo_text_t key) {
+    if (!key) return 0;
+#ifdef _WIN32
+    _putenv_s(key, "");
+#else
+    unsetenv(key);
+#endif
+    return 0;
+}
+
+/* ================================================================
+   Stdlib.File — file I/O and directory listing
+   ================================================================ */
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+/* Returns file contents as a heap string, or NULL on error. */
+certo_text_t certo_read_file(certo_text_t path) {
+    if (!path) return NULL;
+    FILE* f = fopen(path, "rb");
+    if (!f) return NULL;
+    fseek(f, 0, SEEK_END);
+    long size = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (size < 0) { fclose(f); return NULL; }
+    char* buf = (char*)malloc((size_t)size + 1);
+    if (!buf) { fclose(f); certo_panic("out of memory"); }
+    size_t got = fread(buf, 1, (size_t)size, f);
+    buf[got] = '\0';
+    fclose(f);
+    return buf;
+}
+
+/* Write text to path; returns true on success. */
+bool certo_write_file(certo_text_t path, certo_text_t content) {
+    if (!path || !content) return false;
+    FILE* f = fopen(path, "wb");
+    if (!f) return false;
+    size_t len = strlen(content);
+    bool ok = fwrite(content, 1, len, f) == len;
+    fclose(f);
+    return ok;
+}
+
+/* Append text to path; returns true on success. */
+bool certo_append_file(certo_text_t path, certo_text_t content) {
+    if (!path || !content) return false;
+    FILE* f = fopen(path, "ab");
+    if (!f) return false;
+    size_t len = strlen(content);
+    bool ok = fwrite(content, 1, len, f) == len;
+    fclose(f);
+    return ok;
+}
+
+bool certo_file_exists(certo_text_t path) {
+    if (!path) return false;
+    FILE* f = fopen(path, "rb");
+    if (!f) return false;
+    fclose(f);
+    return true;
+}
+
+/* Delete a file; returns true on success. */
+bool certo_delete_file(certo_text_t path) {
+    if (!path) return false;
+    return remove(path) == 0;
+}
+
+/* List directory entries (excluding . and ..).
+   Returns a List<Text> or NULL on error. */
+CertoList* certo_list_dir(certo_text_t path) {
+    if (!path) return NULL;
+    CertoList* out = certo_list_new_empty();
+#ifdef _WIN32
+    char pattern[4096];
+    snprintf(pattern, sizeof(pattern), "%s\\*", path);
+    WIN32_FIND_DATAA fd;
+    HANDLE h = FindFirstFileA(pattern, &fd);
+    if (h == INVALID_HANDLE_VALUE) return NULL;
+    do {
+        if (strcmp(fd.cFileName, ".") == 0 || strcmp(fd.cFileName, "..") == 0) continue;
+        size_t len = strlen(fd.cFileName) + 1;
+        char* name = (char*)malloc(len);
+        if (!name) { FindClose(h); certo_panic("out of memory"); }
+        memcpy(name, fd.cFileName, len);
+        out = certo_list_push(out, name);
+    } while (FindNextFileA(h, &fd));
+    FindClose(h);
+#else
+    DIR* d = opendir(path);
+    if (!d) return NULL;
+    struct dirent* entry;
+    while ((entry = readdir(d)) != NULL) {
+        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) continue;
+        size_t len = strlen(entry->d_name) + 1;
+        char* name = (char*)malloc(len);
+        if (!name) { closedir(d); certo_panic("out of memory"); }
+        memcpy(name, entry->d_name, len);
+        out = certo_list_push(out, name);
+    }
+    closedir(d);
+#endif
+    return out;
+}
+
+/* ================================================================
+   Stdlib.Path — path manipulation (pure string operations)
+   Handles both '/' and '\' as separators.
+   ================================================================ */
+
+#include <string.h>
+#include <stdlib.h>
+
+static bool is_sep(char c) { return c == '/' || c == '\\'; }
+
+/* Find index of last separator, or -1. */
+static int64_t last_sep(certo_text_t path, size_t len) {
+    for (int64_t i = (int64_t)len - 1; i >= 0; i--)
+        if (is_sep(path[i])) return i;
+    return -1;
+}
+
+/* Join two path segments, inserting a separator if needed. */
+certo_text_t certo_path_join(certo_text_t a, certo_text_t b) {
+    if (!a || !*a) return b ? b : "";
+    if (!b || !*b) return a;
+    size_t la = strlen(a);
+    size_t lb = strlen(b);
+    bool has_sep = is_sep(a[la - 1]) || is_sep(b[0]);
+    size_t total = la + lb + (has_sep ? 1 : 2);
+    char* out = (char*)malloc(total);
+    if (!out) certo_panic("out of memory");
+    memcpy(out, a, la);
+    size_t pos = la;
+    if (!is_sep(a[la - 1]) && !is_sep(b[0]))
+        out[pos++] = '/';
+    memcpy(out + pos, b, lb + 1);
+    return out;
+}
+
+/* Last component of a path (after last separator). */
+certo_text_t certo_path_basename(certo_text_t path) {
+    if (!path || !*path) return "";
+    size_t len = strlen(path);
+    /* Strip trailing separators */
+    while (len > 1 && is_sep(path[len - 1])) len--;
+    int64_t sep = last_sep(path, len);
+    const char* start = path + (sep >= 0 ? sep + 1 : 0);
+    size_t blen = len - (size_t)(sep >= 0 ? sep + 1 : 0);
+    char* out = (char*)malloc(blen + 1);
+    if (!out) certo_panic("out of memory");
+    memcpy(out, start, blen);
+    out[blen] = '\0';
+    return out;
+}
+
+/* Everything before the last separator. Returns "." if no separator. */
+certo_text_t certo_path_dirname(certo_text_t path) {
+    if (!path || !*path) return ".";
+    size_t len = strlen(path);
+    /* Strip trailing separators (but not a leading one) */
+    while (len > 1 && is_sep(path[len - 1])) len--;
+    int64_t sep = last_sep(path, len);
+    if (sep < 0) return ".";
+    if (sep == 0) {
+        char* out = (char*)malloc(2);
+        if (!out) certo_panic("out of memory");
+        out[0] = path[0]; out[1] = '\0';
+        return out;
+    }
+    char* out = (char*)malloc((size_t)sep + 1);
+    if (!out) certo_panic("out of memory");
+    memcpy(out, path, (size_t)sep);
+    out[sep] = '\0';
+    return out;
+}
+
+/* Extension of the last component (after the last dot), or NULL if none. */
+certo_text_t certo_path_extension(certo_text_t path) {
+    if (!path || !*path) return NULL;
+    size_t len = strlen(path);
+    int64_t sep = last_sep(path, len);
+    const char* base = path + (sep >= 0 ? sep + 1 : 0);
+    const char* dot  = strrchr(base, '.');
+    if (!dot || dot == base) return NULL;  /* no ext or hidden file */
+    size_t elen = strlen(dot + 1);
+    if (elen == 0) return NULL;
+    char* out = (char*)malloc(elen + 1);
+    if (!out) certo_panic("out of memory");
+    memcpy(out, dot + 1, elen + 1);
+    return out;
+}
+
+/* Strip the extension from a path. */
+certo_text_t certo_path_stem(certo_text_t path) {
+    if (!path || !*path) return "";
+    size_t len = strlen(path);
+    int64_t sep = last_sep(path, len);
+    const char* base = path + (sep >= 0 ? sep + 1 : 0);
+    const char* dot  = strrchr(base, '.');
+    size_t keep;
+    if (!dot || dot == base) keep = len;
+    else keep = (size_t)(dot - path);
+    char* out = (char*)malloc(keep + 1);
+    if (!out) certo_panic("out of memory");
+    memcpy(out, path, keep);
+    out[keep] = '\0';
+    return out;
+}
+
+/* ================================================================
+   Stdlib.Process — run external commands and capture output
+   ================================================================ */
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+typedef struct {
+    int64_t      exit_code;
+    certo_text_t out;
+    certo_text_t err;
+} CertoProcessResult;
+
+/* Read all of a FILE* into a heap string. */
+static certo_text_t read_pipe(FILE* f) {
+    if (!f) return "";
+    char*  buf = NULL;
+    size_t cap = 0;
+    size_t len = 0;
+    char   tmp[4096];
+    size_t got;
+    while ((got = fread(tmp, 1, sizeof(tmp), f)) > 0) {
+        if (len + got + 1 > cap) {
+            cap = (len + got + 1) * 2;
+            char* nb = (char*)realloc(buf, cap);
+            if (!nb) { free(buf); certo_panic("out of memory"); }
+            buf = nb;
+        }
+        memcpy(buf + len, tmp, got);
+        len += got;
+    }
+    if (!buf) { buf = (char*)malloc(1); if (!buf) certo_panic("out of memory"); }
+    buf[len] = '\0';
+    return buf;
+}
+
+/* Append a shell-quoted argument to buf[pos], growing buf as needed. */
+static void append_arg(char** buf, size_t* cap, size_t* pos, certo_text_t arg) {
+    size_t arg_len = arg ? strlen(arg) : 0;
+    /* Worst case: every char is a quote => 2x + surrounding quotes + space + NUL */
+    size_t need = *pos + arg_len * 2 + 4;
+    if (need > *cap) {
+        *cap = need * 2;
+        char* nb = (char*)realloc(*buf, *cap);
+        if (!nb) certo_panic("out of memory");
+        *buf = nb;
+    }
+    (*buf)[(*pos)++] = '"';
+    if (arg) {
+        for (size_t i = 0; i < arg_len; i++) {
+            if (arg[i] == '"') (*buf)[(*pos)++] = '\\';
+            (*buf)[(*pos)++] = arg[i];
+        }
+    }
+    (*buf)[(*pos)++] = '"';
+}
+
+CertoProcessResult* certo_process_exec(certo_text_t cmd, CertoList* args) {
+    /* Build command string: cmd "arg1" "arg2" ... */
+    size_t cap = 256;
+    size_t pos = 0;
+    char*  cbuf = (char*)malloc(cap);
+    if (!cbuf) certo_panic("out of memory");
+
+    append_arg(&cbuf, &cap, &pos, cmd);
+
+    if (args) {
+        for (int64_t i = 0; i < args->len; i++) {
+            cbuf[pos++] = ' ';
+            if (pos + 4 > cap) {
+                cap *= 2;
+                char* nb = (char*)realloc(cbuf, cap);
+                if (!nb) certo_panic("out of memory");
+                cbuf = nb;
+            }
+            append_arg(&cbuf, &cap, &pos, (certo_text_t)args->data[i]);
+        }
+    }
+    cbuf[pos] = '\0';
+
+    /* Redirect stderr to a temp file so we can capture it separately. */
+    char out_tmp[64], err_tmp[64];
+#ifdef _WIN32
+    snprintf(out_tmp, sizeof(out_tmp), "%s\\certo_out_%u.tmp", getenv("TEMP") ? getenv("TEMP") : ".", (unsigned)GetTickCount());
+    snprintf(err_tmp, sizeof(err_tmp), "%s\\certo_err_%u.tmp", getenv("TEMP") ? getenv("TEMP") : ".", (unsigned)GetTickCount() + 1);
+#else
+    snprintf(out_tmp, sizeof(out_tmp), "/tmp/certo_out_%d.tmp", (int)getpid());
+    snprintf(err_tmp, sizeof(err_tmp), "/tmp/certo_err_%d.tmp", (int)getpid());
+#endif
+
+    size_t full_cap = pos + strlen(out_tmp) + strlen(err_tmp) + 32;
+    char*  full_cmd = (char*)malloc(full_cap);
+    if (!full_cmd) certo_panic("out of memory");
+    snprintf(full_cmd, full_cap, "%s > \"%s\" 2> \"%s\"", cbuf, out_tmp, err_tmp);
+    free(cbuf);
+
+    int rc = system(full_cmd);
+    free(full_cmd);
+
+    /* Read captured output */
+    FILE* fo = fopen(out_tmp, "rb");
+    FILE* fe = fopen(err_tmp, "rb");
+    certo_text_t out_str = read_pipe(fo);
+    certo_text_t err_str = read_pipe(fe);
+    if (fo) fclose(fo);
+    if (fe) fclose(fe);
+    remove(out_tmp);
+    remove(err_tmp);
+
+    CertoProcessResult* res = (CertoProcessResult*)malloc(sizeof(CertoProcessResult));
+    if (!res) certo_panic("out of memory");
+#ifdef _WIN32
+    res->exit_code = (int64_t)rc;
+#else
+    res->exit_code = WIFEXITED(rc) ? (int64_t)WEXITSTATUS(rc) : -1;
+#endif
+    res->out = out_str;
+    res->err = err_str;
+    return res;
+}
+
+int64_t      certo_process_result_exit_code(CertoProcessResult* r) { return r ? r->exit_code : -1; }
+certo_text_t certo_process_result_stdout(CertoProcessResult* r)    { return r ? r->out : ""; }
+certo_text_t certo_process_result_stderr(CertoProcessResult* r)    { return r ? r->err : ""; }
+
+/* ------------------------------------------------------------------ *
+ * Process.execWithInput — like exec but writes `input` to stdin.
+ * ------------------------------------------------------------------ */
+CertoProcessResult* certo_process_exec_with_input(certo_text_t cmd, CertoList* args,
+                                                   certo_text_t input) {
+    size_t cap = 256, pos = 0;
+    char* cbuf = (char*)malloc(cap);
+    if (!cbuf) certo_panic("out of memory");
+    append_arg(&cbuf, &cap, &pos, cmd);
+    if (args) {
+        for (int64_t i = 0; i < args->len; i++) {
+            cbuf[pos++] = ' ';
+            if (pos + 4 > cap) { cap *= 2; char* nb = (char*)realloc(cbuf, cap); if (!nb) certo_panic("oom"); cbuf = nb; }
+            append_arg(&cbuf, &cap, &pos, (certo_text_t)args->data[i]);
+        }
+    }
+    cbuf[pos] = '\0';
+
+    char out_tmp[64], err_tmp[64];
+#ifdef _WIN32
+    snprintf(out_tmp, sizeof(out_tmp), "%s\\certo_out_%u.tmp", getenv("TEMP") ? getenv("TEMP") : ".", (unsigned)GetTickCount());
+    snprintf(err_tmp, sizeof(err_tmp), "%s\\certo_err_%u.tmp", getenv("TEMP") ? getenv("TEMP") : ".", (unsigned)GetTickCount() + 1);
+#else
+    snprintf(out_tmp, sizeof(out_tmp), "/tmp/certo_out_%d.tmp", (int)getpid());
+    snprintf(err_tmp, sizeof(err_tmp), "/tmp/certo_err_%d.tmp", (int)getpid());
+#endif
+
+    /* Use popen to write stdin, redirect stdout/stderr to temp files. */
+    size_t full_cap = pos + strlen(out_tmp) + strlen(err_tmp) + 32;
+    char* full_cmd = (char*)malloc(full_cap);
+    if (!full_cmd) certo_panic("out of memory");
+    snprintf(full_cmd, full_cap, "%s > \"%s\" 2> \"%s\"", cbuf, out_tmp, err_tmp);
+    free(cbuf);
+
+#ifdef _WIN32
+    FILE* proc = _popen(full_cmd, "w");
+#else
+    FILE* proc = popen(full_cmd, "w");
+#endif
+    free(full_cmd);
+
+    if (proc && input && *input) {
+        fputs(input, proc);
+    }
+
+    int rc = 0;
+#ifdef _WIN32
+    if (proc) rc = _pclose(proc);
+#else
+    if (proc) rc = pclose(proc);
+#endif
+
+    FILE* fo = fopen(out_tmp, "rb");
+    FILE* fe = fopen(err_tmp, "rb");
+    certo_text_t out_str = read_pipe(fo);
+    certo_text_t err_str = read_pipe(fe);
+    if (fo) fclose(fo);
+    if (fe) fclose(fe);
+    remove(out_tmp);
+    remove(err_tmp);
+
+    CertoProcessResult* res = (CertoProcessResult*)malloc(sizeof(CertoProcessResult));
+    if (!res) certo_panic("out of memory");
+#ifdef _WIN32
+    res->exit_code = (int64_t)rc;
+#else
+    res->exit_code = WIFEXITED(rc) ? (int64_t)WEXITSTATUS(rc) : -1;
+#endif
+    res->out = out_str;
+    res->err = err_str;
+    return res;
+}
+
+/* ------------------------------------------------------------------ *
+ * Process.lines — stream stdout line-by-line to a callback.
+ * handler(line: Text): Unit  called once per line, without newline.
+ * Returns exit code.
+ * ------------------------------------------------------------------ */
+typedef void (*CertoLineHandler)(certo_text_t line, void* ctx);
+
+int64_t certo_process_lines(certo_text_t cmd, CertoList* args,
+                             CertoLineHandler handler, void* ctx) {
+    size_t cap = 256, pos = 0;
+    char* cbuf = (char*)malloc(cap);
+    if (!cbuf) certo_panic("out of memory");
+    append_arg(&cbuf, &cap, &pos, cmd);
+    if (args) {
+        for (int64_t i = 0; i < args->len; i++) {
+            cbuf[pos++] = ' ';
+            if (pos + 4 > cap) { cap *= 2; char* nb = (char*)realloc(cbuf, cap); if (!nb) certo_panic("oom"); cbuf = nb; }
+            append_arg(&cbuf, &cap, &pos, (certo_text_t)args->data[i]);
+        }
+    }
+    cbuf[pos] = '\0';
+
+    /* Redirect stderr to /dev/null so only stdout streams to us. */
+#ifdef _WIN32
+    size_t full_cap = pos + 20;
+    char* full_cmd = (char*)malloc(full_cap);
+    snprintf(full_cmd, full_cap, "%s 2>NUL", cbuf);
+    FILE* proc = _popen(full_cmd, "r");
+#else
+    size_t full_cap = pos + 20;
+    char* full_cmd = (char*)malloc(full_cap);
+    snprintf(full_cmd, full_cap, "%s 2>/dev/null", cbuf);
+    FILE* proc = popen(full_cmd, "r");
+#endif
+    free(cbuf);
+    free(full_cmd);
+
+    if (!proc) return -1;
+
+    char line_buf[4096];
+    while (fgets(line_buf, sizeof(line_buf), proc)) {
+        /* Strip trailing newline. */
+        size_t len = strlen(line_buf);
+        if (len > 0 && line_buf[len-1] == '\n') line_buf[--len] = '\0';
+        if (len > 0 && line_buf[len-1] == '\r') line_buf[--len] = '\0';
+        handler((certo_text_t)line_buf, ctx);
+    }
+
+    int rc = 0;
+#ifdef _WIN32
+    rc = _pclose(proc);
+    return (int64_t)rc;
+#else
+    rc = pclose(proc);
+    return WIFEXITED(rc) ? (int64_t)WEXITSTATUS(rc) : -1;
+#endif
+}
+
+/* Certo calls this as: Process.lines(cmd, args, handler)
+ * handler is a Certo fn(Text): Unit closure pointer passed as void*.
+ * We wrap it so the C signature matches what Certo codegen expects. */
+typedef void (*CertoClosure)(void* env, certo_text_t arg);
+typedef struct { CertoClosure fn; void* env; } CertoFnText;
+
+int64_t certo_process_lines_certo(certo_text_t cmd, CertoList* args, CertoFnText* handler) {
+    /* Inline the loop so we can call the Certo closure directly. */
+    size_t cap = 256, pos = 0;
+    char* cbuf = (char*)malloc(cap);
+    if (!cbuf) certo_panic("out of memory");
+    append_arg(&cbuf, &cap, &pos, cmd);
+    if (args) {
+        for (int64_t i = 0; i < args->len; i++) {
+            cbuf[pos++] = ' ';
+            if (pos + 4 > cap) { cap *= 2; char* nb = (char*)realloc(cbuf, cap); if (!nb) certo_panic("oom"); cbuf = nb; }
+            append_arg(&cbuf, &cap, &pos, (certo_text_t)args->data[i]);
+        }
+    }
+    cbuf[pos] = '\0';
+
+#ifdef _WIN32
+    size_t full_cap = pos + 20;
+    char* full_cmd = (char*)malloc(full_cap);
+    snprintf(full_cmd, full_cap, "%s 2>NUL", cbuf);
+    FILE* proc = _popen(full_cmd, "r");
+#else
+    size_t full_cap = pos + 20;
+    char* full_cmd = (char*)malloc(full_cap);
+    snprintf(full_cmd, full_cap, "%s 2>/dev/null", cbuf);
+    FILE* proc = popen(full_cmd, "r");
+#endif
+    free(cbuf);
+    free(full_cmd);
+    if (!proc) return -1;
+
+    char line_buf[4096];
+    while (fgets(line_buf, sizeof(line_buf), proc)) {
+        size_t len = strlen(line_buf);
+        if (len > 0 && line_buf[len-1] == '\n') line_buf[--len] = '\0';
+        if (len > 0 && line_buf[len-1] == '\r') line_buf[--len] = '\0';
+        char* line_copy = (char*)malloc(len + 1);
+        if (!line_copy) certo_panic("out of memory");
+        memcpy(line_copy, line_buf, len + 1);
+        handler->fn(handler->env, (certo_text_t)line_copy);
+    }
+
+    int rc = 0;
+#ifdef _WIN32
+    rc = _pclose(proc);
+    return (int64_t)rc;
+#else
+    rc = pclose(proc);
+    return WIFEXITED(rc) ? (int64_t)WEXITSTATUS(rc) : -1;
+#endif
+}
+
+/* ================================================================
+   Stdlib.Json — pure-C JSON parser and serializer
+   No external dependencies.
+   ================================================================ */
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stdint.h>
+#include <stdbool.h>
+#include <inttypes.h>
+
+/* ---- Value type ------------------------------------------------- */
+
+typedef enum {
+    CERTO_JSON_NULL   = 0,
+    CERTO_JSON_BOOL   = 1,
+    CERTO_JSON_INT    = 2,
+    CERTO_JSON_FLOAT  = 3,
+    CERTO_JSON_STRING = 4,
+    CERTO_JSON_ARRAY  = 5,
+    CERTO_JSON_OBJECT = 6
+} CertoJsonType;
+
+typedef struct CertoJsonValue {
+    CertoJsonType type;
+    union {
+        bool    b;
+        int64_t i;
+        double  f;
+        char*   s;
+        struct {
+            struct CertoJsonValue** items;
+            int64_t count;
+            int64_t cap;
+        } arr;
+        struct {
+            char**                  keys;
+            struct CertoJsonValue** vals;
+            int64_t                 count;
+            int64_t                 cap;
+        } obj;
+    };
+} CertoJsonValue;
+
+/* ---- Allocator -------------------------------------------------- */
+
+static CertoJsonValue* json_new(CertoJsonType t) {
+    CertoJsonValue* v = (CertoJsonValue*)calloc(1, sizeof(CertoJsonValue));
+    if (!v) certo_panic("out of memory");
+    v->type = t;
+    return v;
+}
+
+/* ---- Growing string buffer (for stringify) --------------------- */
+
+typedef struct { char* buf; size_t pos; size_t cap; } JBuf;
+
+static void jbuf_ensure(JBuf* b, size_t need) {
+    if (b->pos + need > b->cap) {
+        b->cap = (b->pos + need) * 2 + 64;
+        b->buf = (char*)realloc(b->buf, b->cap);
+        if (!b->buf) certo_panic("out of memory");
+    }
+}
+static void jbuf_ch(JBuf* b, char c) { jbuf_ensure(b, 1); b->buf[b->pos++] = c; }
+static void jbuf_raw(JBuf* b, const char* s, size_t n) { jbuf_ensure(b, n); memcpy(b->buf + b->pos, s, n); b->pos += n; }
+static void jbuf_cstr(JBuf* b, const char* s) { jbuf_raw(b, s, strlen(s)); }
+
+/* ---- Parser context -------------------------------------------- */
+
+typedef struct { const char* src; size_t pos; size_t len; } JCtx;
+
+static void jctx_ws(JCtx* c) {
+    while (c->pos < c->len) {
+        char ch = c->src[c->pos];
+        if (ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r') c->pos++;
+        else break;
+    }
+}
+
+static CertoJsonValue* jctx_value(JCtx* c);
+
+static CertoJsonValue* jctx_string(JCtx* c) {
+    /* expects '"' at c->pos */
+    c->pos++;
+    size_t cap = 64;
+    char*  out = (char*)malloc(cap);
+    if (!out) certo_panic("out of memory");
+    size_t j = 0;
+    while (c->pos < c->len && c->src[c->pos] != '"') {
+        if (j + 8 >= cap) { cap *= 2; out = (char*)realloc(out, cap); if (!out) certo_panic("out of memory"); }
+        if (c->src[c->pos] == '\\') {
+            c->pos++;
+            if (c->pos >= c->len) break;
+            char e = c->src[c->pos++];
+            switch (e) {
+                case '"': out[j++] = '"';  break;
+                case '\\':out[j++] = '\\'; break;
+                case '/': out[j++] = '/';  break;
+                case 'b': out[j++] = '\b'; break;
+                case 'f': out[j++] = '\f'; break;
+                case 'n': out[j++] = '\n'; break;
+                case 'r': out[j++] = '\r'; break;
+                case 't': out[j++] = '\t'; break;
+                case 'u': {
+                    if (c->pos + 4 <= c->len) {
+                        char hex[5] = {0};
+                        memcpy(hex, c->src + c->pos, 4);
+                        c->pos += 4;
+                        unsigned cp = (unsigned)strtoul(hex, NULL, 16);
+                        if      (cp < 0x80)  { out[j++] = (char)cp; }
+                        else if (cp < 0x800) { out[j++] = (char)(0xC0|(cp>>6)); out[j++] = (char)(0x80|(cp&0x3F)); }
+                        else                 { out[j++] = (char)(0xE0|(cp>>12)); out[j++] = (char)(0x80|((cp>>6)&0x3F)); out[j++] = (char)(0x80|(cp&0x3F)); }
+                    }
+                    break;
+                }
+                default: out[j++] = e; break;
+            }
+        } else {
+            out[j++] = c->src[c->pos++];
+        }
+    }
+    if (c->pos < c->len && c->src[c->pos] == '"') c->pos++;
+    out[j] = '\0';
+    CertoJsonValue* v = json_new(CERTO_JSON_STRING);
+    v->s = out;
+    return v;
+}
+
+static CertoJsonValue* jctx_value(JCtx* c) {
+    jctx_ws(c);
+    if (c->pos >= c->len) return json_new(CERTO_JSON_NULL);
+    char ch = c->src[c->pos];
+
+    if (ch == 'n' && c->pos + 4 <= c->len && strncmp(c->src + c->pos, "null",  4) == 0) { c->pos += 4; return json_new(CERTO_JSON_NULL); }
+    if (ch == 't' && c->pos + 4 <= c->len && strncmp(c->src + c->pos, "true",  4) == 0) { c->pos += 4; CertoJsonValue* v = json_new(CERTO_JSON_BOOL); v->b = true;  return v; }
+    if (ch == 'f' && c->pos + 5 <= c->len && strncmp(c->src + c->pos, "false", 5) == 0) { c->pos += 5; CertoJsonValue* v = json_new(CERTO_JSON_BOOL); v->b = false; return v; }
+    if (ch == '"') return jctx_string(c);
+
+    if (ch == '[') {
+        c->pos++;
+        CertoJsonValue* v = json_new(CERTO_JSON_ARRAY);
+        v->arr.cap   = 4;
+        v->arr.items = (CertoJsonValue**)malloc((size_t)v->arr.cap * sizeof(CertoJsonValue*));
+        if (!v->arr.items) certo_panic("out of memory");
+        jctx_ws(c);
+        if (c->pos < c->len && c->src[c->pos] == ']') { c->pos++; return v; }
+        while (c->pos < c->len) {
+            CertoJsonValue* item = jctx_value(c);
+            if (v->arr.count >= v->arr.cap) {
+                v->arr.cap *= 2;
+                v->arr.items = (CertoJsonValue**)realloc(v->arr.items, (size_t)v->arr.cap * sizeof(CertoJsonValue*));
+                if (!v->arr.items) certo_panic("out of memory");
+            }
+            v->arr.items[v->arr.count++] = item;
+            jctx_ws(c);
+            if (c->pos >= c->len) break;
+            if (c->src[c->pos] == ']') { c->pos++; break; }
+            if (c->src[c->pos] == ',') c->pos++;
+        }
+        return v;
+    }
+
+    if (ch == '{') {
+        c->pos++;
+        CertoJsonValue* v = json_new(CERTO_JSON_OBJECT);
+        v->obj.cap  = 4;
+        v->obj.keys = (char**)malloc((size_t)v->obj.cap * sizeof(char*));
+        v->obj.vals = (CertoJsonValue**)malloc((size_t)v->obj.cap * sizeof(CertoJsonValue*));
+        if (!v->obj.keys || !v->obj.vals) certo_panic("out of memory");
+        jctx_ws(c);
+        if (c->pos < c->len && c->src[c->pos] == '}') { c->pos++; return v; }
+        while (c->pos < c->len) {
+            jctx_ws(c);
+            if (c->pos >= c->len || c->src[c->pos] != '"') break;
+            CertoJsonValue* kv = jctx_string(c);
+            char* key = kv ? kv->s : NULL;
+            if (kv) { kv->s = NULL; free(kv); }
+            jctx_ws(c);
+            if (c->pos < c->len && c->src[c->pos] == ':') c->pos++;
+            CertoJsonValue* val = jctx_value(c);
+            if (v->obj.count >= v->obj.cap) {
+                v->obj.cap *= 2;
+                v->obj.keys = (char**)realloc(v->obj.keys, (size_t)v->obj.cap * sizeof(char*));
+                v->obj.vals = (CertoJsonValue**)realloc(v->obj.vals, (size_t)v->obj.cap * sizeof(CertoJsonValue*));
+                if (!v->obj.keys || !v->obj.vals) certo_panic("out of memory");
+            }
+            v->obj.keys[v->obj.count] = key;
+            v->obj.vals[v->obj.count] = val;
+            v->obj.count++;
+            jctx_ws(c);
+            if (c->pos >= c->len) break;
+            if (c->src[c->pos] == '}') { c->pos++; break; }
+            if (c->src[c->pos] == ',') c->pos++;
+        }
+        return v;
+    }
+
+    if (ch == '-' || (ch >= '0' && ch <= '9')) {
+        size_t start = c->pos;
+        bool is_float = false;
+        if (c->src[c->pos] == '-') c->pos++;
+        while (c->pos < c->len && c->src[c->pos] >= '0' && c->src[c->pos] <= '9') c->pos++;
+        if (c->pos < c->len && c->src[c->pos] == '.') {
+            is_float = true; c->pos++;
+            while (c->pos < c->len && c->src[c->pos] >= '0' && c->src[c->pos] <= '9') c->pos++;
+        }
+        if (c->pos < c->len && (c->src[c->pos] == 'e' || c->src[c->pos] == 'E')) {
+            is_float = true; c->pos++;
+            if (c->pos < c->len && (c->src[c->pos] == '+' || c->src[c->pos] == '-')) c->pos++;
+            while (c->pos < c->len && c->src[c->pos] >= '0' && c->src[c->pos] <= '9') c->pos++;
+        }
+        char numstr[64] = {0};
+        size_t nlen = c->pos - start;
+        if (nlen >= sizeof(numstr)) nlen = sizeof(numstr) - 1;
+        memcpy(numstr, c->src + start, nlen);
+        if (is_float) {
+            CertoJsonValue* v = json_new(CERTO_JSON_FLOAT);
+            v->f = strtod(numstr, NULL);
+            return v;
+        } else {
+            CertoJsonValue* v = json_new(CERTO_JSON_INT);
+            v->i = (int64_t)strtoll(numstr, NULL, 10);
+            return v;
+        }
+    }
+
+    return json_new(CERTO_JSON_NULL);
+}
+
+/* ---- Stringify helper ------------------------------------------ */
+
+static void json_emit(JBuf* b, CertoJsonValue* v) {
+    if (!v) { jbuf_cstr(b, "null"); return; }
+    switch (v->type) {
+        case CERTO_JSON_NULL:  jbuf_cstr(b, "null"); break;
+        case CERTO_JSON_BOOL:  jbuf_cstr(b, v->b ? "true" : "false"); break;
+        case CERTO_JSON_INT: {
+            char tmp[32];
+            int n = snprintf(tmp, sizeof(tmp), "%" PRId64, v->i);
+            jbuf_raw(b, tmp, (size_t)n);
+            break;
+        }
+        case CERTO_JSON_FLOAT: {
+            char tmp[64];
+            int n = snprintf(tmp, sizeof(tmp), "%.17g", v->f);
+            jbuf_raw(b, tmp, (size_t)n);
+            break;
+        }
+        case CERTO_JSON_STRING: {
+            jbuf_ch(b, '"');
+            if (v->s) {
+                for (const char* p = v->s; *p; p++) {
+                    unsigned char uc = (unsigned char)*p;
+                    if      (uc == '"')  jbuf_raw(b, "\\\"", 2);
+                    else if (uc == '\\') jbuf_raw(b, "\\\\", 2);
+                    else if (uc == '\n') jbuf_raw(b, "\\n",  2);
+                    else if (uc == '\r') jbuf_raw(b, "\\r",  2);
+                    else if (uc == '\t') jbuf_raw(b, "\\t",  2);
+                    else if (uc < 0x20) {
+                        char esc[7];
+                        snprintf(esc, sizeof(esc), "\\u%04x", uc);
+                        jbuf_raw(b, esc, 6);
+                    } else {
+                        jbuf_ch(b, *p);
+                    }
+                }
+            }
+            jbuf_ch(b, '"');
+            break;
+        }
+        case CERTO_JSON_ARRAY: {
+            jbuf_ch(b, '[');
+            for (int64_t i = 0; i < v->arr.count; i++) {
+                if (i > 0) jbuf_ch(b, ',');
+                json_emit(b, v->arr.items[i]);
+            }
+            jbuf_ch(b, ']');
+            break;
+        }
+        case CERTO_JSON_OBJECT: {
+            jbuf_ch(b, '{');
+            for (int64_t i = 0; i < v->obj.count; i++) {
+                if (i > 0) jbuf_ch(b, ',');
+                CertoJsonValue ks = { CERTO_JSON_STRING };
+                ks.s = v->obj.keys[i];
+                json_emit(b, &ks);
+                jbuf_ch(b, ':');
+                json_emit(b, v->obj.vals[i]);
+            }
+            jbuf_ch(b, '}');
+            break;
+        }
+    }
+}
+
+/* ================================================================
+   Public API
+   ================================================================ */
+
+CertoJsonValue* certo_json_parse(certo_text_t text) {
+    if (!text) return json_new(CERTO_JSON_NULL);
+    JCtx ctx = { text, 0, strlen(text) };
+    return jctx_value(&ctx);
+}
+
+certo_text_t certo_json_stringify(CertoJsonValue* v) {
+    JBuf b = { NULL, 0, 256 };
+    b.buf = (char*)malloc(b.cap);
+    if (!b.buf) certo_panic("out of memory");
+    json_emit(&b, v);
+    jbuf_ch(&b, '\0');
+    return b.buf;
+}
+
+/* Type predicates */
+bool certo_json_is_null  (CertoJsonValue* v) { return !v || v->type == CERTO_JSON_NULL;   }
+bool certo_json_is_bool  (CertoJsonValue* v) { return v && v->type == CERTO_JSON_BOOL;    }
+bool certo_json_is_int   (CertoJsonValue* v) { return v && v->type == CERTO_JSON_INT;     }
+bool certo_json_is_float (CertoJsonValue* v) { return v && (v->type == CERTO_JSON_FLOAT || v->type == CERTO_JSON_INT); }
+bool certo_json_is_string(CertoJsonValue* v) { return v && v->type == CERTO_JSON_STRING;  }
+bool certo_json_is_array (CertoJsonValue* v) { return v && v->type == CERTO_JSON_ARRAY;   }
+bool certo_json_is_object(CertoJsonValue* v) { return v && v->type == CERTO_JSON_OBJECT;  }
+
+/* Value extractors */
+bool         certo_json_as_bool  (CertoJsonValue* v) { return v && v->type == CERTO_JSON_BOOL && v->b; }
+int64_t      certo_json_as_int   (CertoJsonValue* v) { if (!v) return 0; if (v->type==CERTO_JSON_INT) return v->i; if (v->type==CERTO_JSON_FLOAT) return (int64_t)v->f; return 0; }
+double       certo_json_as_float (CertoJsonValue* v) { if (!v) return 0.0; if (v->type==CERTO_JSON_FLOAT) return v->f; if (v->type==CERTO_JSON_INT) return (double)v->i; return 0.0; }
+certo_text_t certo_json_as_string(CertoJsonValue* v) { return (v && v->type==CERTO_JSON_STRING && v->s) ? v->s : ""; }
+
+/* Structural access */
+int64_t certo_json_length(CertoJsonValue* v) {
+    if (!v) return 0;
+    if (v->type == CERTO_JSON_ARRAY)  return v->arr.count;
+    if (v->type == CERTO_JSON_OBJECT) return v->obj.count;
+    return 0;
+}
+
+CertoJsonValue* certo_json_at(CertoJsonValue* v, int64_t i) {
+    if (!v || v->type != CERTO_JSON_ARRAY) return json_new(CERTO_JSON_NULL);
+    if (i < 0 || i >= v->arr.count)       return json_new(CERTO_JSON_NULL);
+    return v->arr.items[i];
+}
+
+CertoJsonValue* certo_json_get(CertoJsonValue* v, certo_text_t key) {
+    if (!v || v->type != CERTO_JSON_OBJECT || !key) return json_new(CERTO_JSON_NULL);
+    for (int64_t i = 0; i < v->obj.count; i++)
+        if (v->obj.keys[i] && strcmp(v->obj.keys[i], key) == 0)
+            return v->obj.vals[i];
+    return json_new(CERTO_JSON_NULL);
+}
+
+CertoList* certo_json_keys(CertoJsonValue* v) {
+    CertoList* list = certo_list_new();
+    if (!v || v->type != CERTO_JSON_OBJECT) return list;
+    for (int64_t i = 0; i < v->obj.count; i++)
+        certo_list_push(list, (void*)v->obj.keys[i]);
+    return list;
+}
+
+/* Constructors */
+CertoJsonValue* certo_json_null_val  ()              { return json_new(CERTO_JSON_NULL); }
+CertoJsonValue* certo_json_bool_val  (bool b)        { CertoJsonValue* v = json_new(CERTO_JSON_BOOL);   v->b = b;       return v; }
+CertoJsonValue* certo_json_int_val   (int64_t i)     { CertoJsonValue* v = json_new(CERTO_JSON_INT);    v->i = i;       return v; }
+CertoJsonValue* certo_json_float_val (double f)      { CertoJsonValue* v = json_new(CERTO_JSON_FLOAT);  v->f = f;       return v; }
+CertoJsonValue* certo_json_string_val(certo_text_t s){ CertoJsonValue* v = json_new(CERTO_JSON_STRING); v->s = s ? strdup(s) : NULL; return v; }
+CertoJsonValue* certo_json_array_val ()              { CertoJsonValue* v = json_new(CERTO_JSON_ARRAY);  v->arr.cap = 4; v->arr.items = (CertoJsonValue**)malloc(4*sizeof(CertoJsonValue*)); return v; }
+CertoJsonValue* certo_json_object_val()              { CertoJsonValue* v = json_new(CERTO_JSON_OBJECT); v->obj.cap = 4; v->obj.keys = (char**)malloc(4*sizeof(char*)); v->obj.vals = (CertoJsonValue**)malloc(4*sizeof(CertoJsonValue*)); return v; }
+
+void certo_json_array_push(CertoJsonValue* arr, CertoJsonValue* item) {
+    if (!arr || arr->type != CERTO_JSON_ARRAY) return;
+    if (arr->arr.count >= arr->arr.cap) {
+        arr->arr.cap = arr->arr.cap ? arr->arr.cap * 2 : 4;
+        arr->arr.items = (CertoJsonValue**)realloc(arr->arr.items, (size_t)arr->arr.cap * sizeof(CertoJsonValue*));
+        if (!arr->arr.items) certo_panic("out of memory");
+    }
+    arr->arr.items[arr->arr.count++] = item;
+}
+
+void certo_json_object_set(CertoJsonValue* obj, certo_text_t key, CertoJsonValue* val) {
+    if (!obj || obj->type != CERTO_JSON_OBJECT || !key) return;
+    for (int64_t i = 0; i < obj->obj.count; i++) {
+        if (obj->obj.keys[i] && strcmp(obj->obj.keys[i], key) == 0) { obj->obj.vals[i] = val; return; }
+    }
+    if (obj->obj.count >= obj->obj.cap) {
+        obj->obj.cap = obj->obj.cap ? obj->obj.cap * 2 : 4;
+        obj->obj.keys = (char**)realloc(obj->obj.keys, (size_t)obj->obj.cap * sizeof(char*));
+        obj->obj.vals = (CertoJsonValue**)realloc(obj->obj.vals, (size_t)obj->obj.cap * sizeof(CertoJsonValue*));
+        if (!obj->obj.keys || !obj->obj.vals) certo_panic("out of memory");
+    }
+    obj->obj.keys[obj->obj.count] = strdup(key);
+    obj->obj.vals[obj->obj.count] = val;
+
+    obj->obj.count++;
+}
+
+/* Aliases so camelCase Certo names (Json.object → certo_json_object) resolve */
+static inline CertoJsonValue* certo_json_object(void)                           { return certo_json_object_val(); }
+static inline CertoJsonValue* certo_json_array(void)                            { return certo_json_array_val(); }
+static inline CertoJsonValue* certo_json_string(certo_text_t s)                 { return certo_json_string_val(s); }
+static inline CertoJsonValue* certo_json_int(int64_t i)                         { return certo_json_int_val(i); }
+static inline CertoJsonValue* certo_json_float(double f)                        { return certo_json_float_val(f); }
+static inline CertoJsonValue* certo_json_bool(bool b)                           { return certo_json_bool_val(b); }
+static inline CertoJsonValue* certo_json_null(void)                             { return certo_json_null_val(); }
+static inline int64_t          certo_json_value_set(CertoJsonValue* o, certo_text_t k, CertoJsonValue* v) { certo_json_object_set(o, k, v); return 0; }
+static inline int64_t          certo_json_array_append(CertoJsonValue* a, CertoJsonValue* v)              { certo_json_array_push(a, v); return 0; }
+
+/* ================================================================
+   Stdlib.Http — simple HTTP/HTTPS client
+   Windows: WinHTTP (built-in, no extra deps).
+   Other platforms: stub (panics with helpful message).
+   ================================================================ */
+
+#include <stdlib.h>
+#include <string.h>
+#include <stdint.h>
+#include <stdio.h>
+
+typedef struct {
+    int64_t      status;
+    certo_text_t body;
+    certo_text_t content_type;
+} CertoHttpResponse;
+
+static CertoHttpResponse* http_response_new(int64_t status, char* body, char* ct) {
+    CertoHttpResponse* r = (CertoHttpResponse*)malloc(sizeof(CertoHttpResponse));
+    if (!r) certo_panic("out of memory");
+    r->status       = status;
+    r->body         = body ? body : (char*)"";
+    r->content_type = ct   ? ct   : (char*)"";
+    return r;
+}
+
+#ifdef _WIN32
+#include <windows.h>
+#include <winhttp.h>
+#ifdef _MSC_VER
+#pragma comment(lib, "winhttp.lib")
+#endif
+
+/* Convert UTF-8 to wide string (caller frees). */
+static LPWSTR utf8_to_wide(const char* s) {
+    if (!s) return NULL;
+    int n = MultiByteToWideChar(CP_UTF8, 0, s, -1, NULL, 0);
+    if (n <= 0) return NULL;
+    LPWSTR w = (LPWSTR)malloc((size_t)n * sizeof(WCHAR));
+    if (!w) certo_panic("out of memory");
+    MultiByteToWideChar(CP_UTF8, 0, s, -1, w, n);
+    return w;
+}
+
+/* Convert wide string to UTF-8 heap string (caller frees). */
+static char* wide_to_utf8(LPCWSTR w) {
+    if (!w) return NULL;
+    int n = WideCharToMultiByte(CP_UTF8, 0, w, -1, NULL, 0, NULL, NULL);
+    if (n <= 0) return NULL;
+    char* s = (char*)malloc((size_t)n);
+    if (!s) certo_panic("out of memory");
+    WideCharToMultiByte(CP_UTF8, 0, w, -1, s, n, NULL, NULL);
+    return s;
+}
+
+/* Parse URL into components (scheme, host, port, path+query). */
+typedef struct { bool https; char* host; INTERNET_PORT port; char* path; } ParsedUrl;
+
+static bool parse_url(const char* url, ParsedUrl* out) {
+    out->host = NULL; out->path = NULL;
+    bool https = false;
+    const char* rest = url;
+    if (strncmp(url, "https://", 8) == 0) { https = true; rest = url + 8; }
+    else if (strncmp(url, "http://", 7) == 0) { rest = url + 7; }
+    else return false;
+    out->https = https;
+    out->port  = https ? INTERNET_DEFAULT_HTTPS_PORT : INTERNET_DEFAULT_HTTP_PORT;
+
+    const char* slash = strchr(rest, '/');
+    size_t host_len = slash ? (size_t)(slash - rest) : strlen(rest);
+
+    /* Check for explicit port */
+    const char* colon = (const char*)memchr(rest, ':', host_len);
+    if (colon) {
+        out->port  = (INTERNET_PORT)atoi(colon + 1);
+        host_len   = (size_t)(colon - rest);
+    }
+
+    out->host = (char*)malloc(host_len + 1);
+    if (!out->host) certo_panic("out of memory");
+    memcpy(out->host, rest, host_len);
+    out->host[host_len] = '\0';
+
+    const char* path_start = slash ? slash : "/";
+    size_t path_len = strlen(path_start);
+    out->path = (char*)malloc(path_len + 1);
+    if (!out->path) certo_panic("out of memory");
+    memcpy(out->path, path_start, path_len + 1);
+    return true;
+}
+
+/* Core request function. */
+static CertoHttpResponse* winhttp_request(
+    const char* method,
+    const char* url,
+    const char* extra_headers, /* may be NULL */
+    const char* body,          /* may be NULL */
+    size_t body_len
+) {
+    ParsedUrl pu = {0};
+    if (!parse_url(url, &pu)) return http_response_new(0, NULL, NULL);
+
+    LPWSTR w_host   = utf8_to_wide(pu.host);
+    LPWSTR w_path   = utf8_to_wide(pu.path);
+    LPWSTR w_method = utf8_to_wide(method);
+
+    HINTERNET hsess = WinHttpOpen(L"Certo/1.0",
+        WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
+        WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+    CertoHttpResponse* result = NULL;
+
+    if (!hsess) goto cleanup;
+
+    HINTERNET hconn = WinHttpConnect(hsess, w_host, pu.port, 0);
+    if (!hconn) { WinHttpCloseHandle(hsess); goto cleanup; }
+
+    DWORD flags = pu.https ? WINHTTP_FLAG_SECURE : 0;
+    HINTERNET hreq = WinHttpOpenRequest(hconn, w_method, w_path,
+        NULL, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, flags);
+    if (!hreq) { WinHttpCloseHandle(hconn); WinHttpCloseHandle(hsess); goto cleanup; }
+
+    /* Add extra headers if provided */
+    if (extra_headers && *extra_headers) {
+        LPWSTR w_hdrs = utf8_to_wide(extra_headers);
+        WinHttpAddRequestHeaders(hreq, w_hdrs, (DWORD)-1L,
+            WINHTTP_ADDREQ_FLAG_ADD | WINHTTP_ADDREQ_FLAG_REPLACE);
+        free(w_hdrs);
+    }
+
+    BOOL sent = WinHttpSendRequest(hreq,
+        WINHTTP_NO_ADDITIONAL_HEADERS, 0,
+        (LPVOID)body, (DWORD)body_len, (DWORD)body_len, 0);
+
+    if (sent) WinHttpReceiveResponse(hreq, NULL);
+
+    /* Status code */
+    DWORD status_code = 0;
+    DWORD status_size = sizeof(DWORD);
+    WinHttpQueryHeaders(hreq,
+        WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+        WINHTTP_HEADER_NAME_BY_INDEX, &status_code, &status_size,
+        WINHTTP_NO_HEADER_INDEX);
+
+    /* Content-Type */
+    WCHAR ct_buf[256] = {0};
+    DWORD ct_size = sizeof(ct_buf);
+    WinHttpQueryHeaders(hreq, WINHTTP_QUERY_CONTENT_TYPE,
+        WINHTTP_HEADER_NAME_BY_INDEX, ct_buf, &ct_size,
+        WINHTTP_NO_HEADER_INDEX);
+    char* ct = wide_to_utf8(ct_buf);
+
+    /* Read body */
+    char*  body_out = NULL;
+    size_t body_cap = 0;
+    size_t body_pos = 0;
+    DWORD  avail    = 0;
+    while (WinHttpQueryDataAvailable(hreq, &avail) && avail > 0) {
+        if (body_pos + avail + 1 > body_cap) {
+            body_cap = (body_pos + avail + 1) * 2;
+            body_out = (char*)realloc(body_out, body_cap);
+            if (!body_out) certo_panic("out of memory");
+        }
+        DWORD read = 0;
+        WinHttpReadData(hreq, body_out + body_pos, avail, &read);
+        body_pos += read;
+    }
+    if (!body_out) { body_out = (char*)malloc(1); if (!body_out) certo_panic("out of memory"); }
+    body_out[body_pos] = '\0';
+
+    result = http_response_new((int64_t)status_code, body_out, ct);
+
+    WinHttpCloseHandle(hreq);
+    WinHttpCloseHandle(hconn);
+    WinHttpCloseHandle(hsess);
+
+cleanup:
+    free(w_host); free(w_path); free(w_method);
+    free(pu.host); free(pu.path);
+    if (!result) result = http_response_new(0, NULL, NULL);
+    return result;
+}
+
+CertoHttpResponse* certo_http_get(certo_text_t url) {
+    return winhttp_request("GET", url, NULL, NULL, 0);
+}
+
+CertoHttpResponse* certo_http_post(certo_text_t url, certo_text_t body, certo_text_t content_type) {
+    char hdr[256] = {0};
+    if (content_type && *content_type)
+        snprintf(hdr, sizeof(hdr), "Content-Type: %s", content_type);
+    size_t blen = body ? strlen(body) : 0;
+    return winhttp_request("POST", url, *hdr ? hdr : NULL, body, blen);
+}
+
+CertoHttpResponse* certo_http_put(certo_text_t url, certo_text_t body, certo_text_t content_type) {
+    char hdr[256] = {0};
+    if (content_type && *content_type)
+        snprintf(hdr, sizeof(hdr), "Content-Type: %s", content_type);
+    size_t blen = body ? strlen(body) : 0;
+    return winhttp_request("PUT", url, *hdr ? hdr : NULL, body, blen);
+}
+
+CertoHttpResponse* certo_http_delete(certo_text_t url) {
+    return winhttp_request("DELETE", url, NULL, NULL, 0);
+}
+
+#else
+/* ---- POSIX stub ------------------------------------------------- */
+CertoHttpResponse* certo_http_get   (certo_text_t url)                                              { (void)url; certo_panic("Http not supported on this platform — link libcurl and implement."); return NULL; }
+CertoHttpResponse* certo_http_post  (certo_text_t url, certo_text_t body, certo_text_t ct)          { (void)url; (void)body; (void)ct; certo_panic("Http not supported on this platform."); return NULL; }
+CertoHttpResponse* certo_http_put   (certo_text_t url, certo_text_t body, certo_text_t ct)          { (void)url; (void)body; (void)ct; certo_panic("Http not supported on this platform."); return NULL; }
+CertoHttpResponse* certo_http_delete(certo_text_t url)                                              { (void)url; certo_panic("Http not supported on this platform."); return NULL; }
+#endif
+
+/* ---- Accessors (platform-independent) -------------------------- */
+
+int64_t      certo_http_response_status      (CertoHttpResponse* r) { return r ? r->status       : 0; }
+certo_text_t certo_http_response_body        (CertoHttpResponse* r) { return r ? r->body         : ""; }
+certo_text_t certo_http_response_content_type(CertoHttpResponse* r) { return r ? r->content_type : ""; }
+bool         certo_http_response_ok          (CertoHttpResponse* r) { return r && r->status >= 200 && r->status < 300; }
+
+/* ================================================================
+   Stdlib.Http — server (Windows-only via WinSock2)
+   ================================================================ */
+
+/* An incoming HTTP request. */
+typedef struct {
+    certo_text_t method;
+    certo_text_t path;
+    certo_text_t query;     /* everything after '?' in the URL, or "" */
+    certo_text_t body;
+    CertoList*   headers;   /* List<List<Text>>: each inner = [name, value] */
+} CertoHttpRequest;
+
+typedef CertoHttpResponse* (*CertoHttpHandler)(CertoHttpRequest*);
+
+/* Convenience response constructors */
+CertoHttpResponse* certo_http_respond(int64_t status, certo_text_t body, certo_text_t ct) {
+    char* b = NULL;
+    if (body) {
+        size_t n = strlen(body);
+        b = (char*)malloc(n + 1);
+        if (!b) certo_panic("out of memory");
+        memcpy(b, body, n + 1);
+    }
+    char* c = NULL;
+    if (ct) {
+        size_t n = strlen(ct);
+        c = (char*)malloc(n + 1);
+        if (!c) certo_panic("out of memory");
+        memcpy(c, ct, n + 1);
+    }
+    return http_response_new(status, b, c);
+}
+
+CertoHttpResponse* certo_http_ok        (certo_text_t body, certo_text_t ct)  { return certo_http_respond(200, body, ct); }
+CertoHttpResponse* certo_http_not_found (certo_text_t body)                   { return certo_http_respond(404, body, "text/plain"); }
+CertoHttpResponse* certo_http_bad_req   (certo_text_t body)                   { return certo_http_respond(400, body, "text/plain"); }
+CertoHttpResponse* certo_http_srv_error (certo_text_t body)                   { return certo_http_respond(500, body, "text/plain"); }
+/* Aliases matching camelCase Certo names → c_fn_name output */
+static inline CertoHttpResponse* certo_http_bad_request    (certo_text_t b) { return certo_http_bad_req(b); }
+static inline CertoHttpResponse* certo_http_server_error   (certo_text_t b) { return certo_http_srv_error(b); }
+
+/* HttpRequest accessors */
+certo_text_t certo_http_request_method (CertoHttpRequest* r) { return r ? r->method  : ""; }
+certo_text_t certo_http_request_path   (CertoHttpRequest* r) { return r ? r->path    : ""; }
+certo_text_t certo_http_request_query  (CertoHttpRequest* r) { return r ? r->query   : ""; }
+certo_text_t certo_http_request_body   (CertoHttpRequest* r) { return r ? r->body    : ""; }
+CertoList*   certo_http_request_headers(CertoHttpRequest* r) {
+    return (r && r->headers) ? r->headers : certo_list_new_empty();
+}
+
+/* Look up a header by name (case-insensitive). Returns "" if not found. */
+certo_text_t certo_http_request_header(CertoHttpRequest* r, certo_text_t name) {
+    if (!r || !r->headers || !name) return "";
+    for (int64_t i = 0; i < r->headers->len; i++) {
+        CertoList* pair = (CertoList*)r->headers->data[i];
+        if (!pair || pair->len < 2) continue;
+        const char* k = (const char*)pair->data[0];
+        if (k && _stricmp(k, name) == 0) return (certo_text_t)pair->data[1];
+    }
+    return "";
+}
+
+#ifdef _WIN32
+/* ---- internal: heap-duplicate a string -------------------------- */
+static char* http_srv_strdup(const char* s) {
+    if (!s) { char* e = (char*)malloc(1); e[0]='\0'; return e; }
+    size_t n = strlen(s);
+    char* out = (char*)malloc(n + 1);
+    if (!out) certo_panic("out of memory");
+    memcpy(out, s, n + 1);
+    return out;
+}
+
+/* ---- internal: read until CRLF CRLF ----------------------------- */
+static char* http_srv_read_request(SOCKET sock) {
+    size_t cap = 4096, pos = 0;
+    char* buf = (char*)malloc(cap);
+    if (!buf) certo_panic("out of memory");
+    for (;;) {
+        if (pos + 1 >= cap) {
+            cap *= 2;
+            char* nb = (char*)realloc(buf, cap);
+            if (!nb) { free(buf); certo_panic("out of memory"); }
+            buf = nb;
+        }
+        int n = recv(sock, buf + pos, 1, 0);
+        if (n <= 0) break;
+        pos++;
+        if (pos >= 4
+            && buf[pos-4] == '\r' && buf[pos-3] == '\n'
+            && buf[pos-2] == '\r' && buf[pos-1] == '\n') break;
+    }
+    buf[pos] = '\0';
+    return buf;
+}
+
+/* ---- internal: read exactly `len` bytes of body ----------------- */
+static char* http_srv_read_body(SOCKET sock, int64_t len) {
+    if (len <= 0) { char* e = (char*)malloc(1); e[0]='\0'; return e; }
+    char* buf = (char*)malloc((size_t)len + 1);
+    if (!buf) certo_panic("out of memory");
+    int64_t got = 0;
+    while (got < len) {
+        int n = recv(sock, buf + got, (int)(len - got), 0);
+        if (n <= 0) break;
+        got += n;
+    }
+    buf[got] = '\0';
+    return buf;
+}
+
+/* ---- internal: parse raw headers text into CertoHttpRequest ----- */
+static CertoHttpRequest* http_srv_parse(const char* raw, SOCKET sock) {
+    CertoHttpRequest* req = (CertoHttpRequest*)malloc(sizeof(CertoHttpRequest));
+    if (!req) certo_panic("out of memory");
+    req->method  = http_srv_strdup("");
+    req->path    = http_srv_strdup("");
+    req->query   = http_srv_strdup("");
+    req->body    = http_srv_strdup("");
+    req->headers = certo_list_new_empty();
+
+    /* Parse request line: METHOD SP path[?query] SP HTTP/x.y */
+    const char* p = raw;
+    const char* sp1 = strchr(p, ' ');
+    if (!sp1) return req;
+
+    size_t mlen = (size_t)(sp1 - p);
+    char* method = (char*)malloc(mlen + 1);
+    if (!method) certo_panic("out of memory");
+    memcpy(method, p, mlen);
+    method[mlen] = '\0';
+    req->method = method;
+
+    p = sp1 + 1;
+    const char* sp2 = strchr(p, ' ');
+    if (!sp2) return req;
+
+    size_t pqlen = (size_t)(sp2 - p);
+    char* pq = (char*)malloc(pqlen + 1);
+    if (!pq) certo_panic("out of memory");
+    memcpy(pq, p, pqlen);
+    pq[pqlen] = '\0';
+
+    char* qmark = strchr(pq, '?');
+    if (qmark) {
+        *qmark = '\0';
+        req->path  = pq;
+        req->query = http_srv_strdup(qmark + 1);
+    } else {
+        req->path  = pq;
+        req->query = http_srv_strdup("");
+    }
+
+    /* Skip to end of request line */
+    p = sp2 + 1;
+    while (*p && *p != '\n') p++;
+    if (*p) p++;
+
+    /* Parse header lines */
+    int64_t content_length = 0;
+    while (*p && !(*p == '\r' && *(p+1) == '\n')) {
+        const char* eol = strstr(p, "\r\n");
+        if (!eol) break;
+        const char* colon = (const char*)memchr(p, ':', (size_t)(eol - p));
+        if (colon) {
+            size_t klen = (size_t)(colon - p);
+            char* key = (char*)malloc(klen + 1);
+            if (!key) certo_panic("out of memory");
+            memcpy(key, p, klen);
+            key[klen] = '\0';
+
+            const char* vstart = colon + 1;
+            while (*vstart == ' ') vstart++;
+            size_t vlen = (size_t)(eol - vstart);
+            char* val = (char*)malloc(vlen + 1);
+            if (!val) certo_panic("out of memory");
+            memcpy(val, vstart, vlen);
+            val[vlen] = '\0';
+
+            if (_stricmp(key, "content-length") == 0)
+                content_length = atoll(val);
+
+            CertoList* pair = certo_list_new_empty();
+            pair = certo_list_push(pair, (void*)key);
+            pair = certo_list_push(pair, (void*)val);
+            req->headers = certo_list_push(req->headers, (void*)pair);
+        }
+        p = eol + 2;
+    }
+
+    /* Read body if Content-Length > 0 */
+    if (content_length > 0)
+        req->body = http_srv_read_body(sock, content_length);
+
+    return req;
+}
+
+/* ---- internal: status text ------------------------------------- */
+static const char* http_status_text(int64_t code) {
+    switch (code) {
+        case 200: return "OK";
+        case 201: return "Created";
+        case 204: return "No Content";
+        case 301: return "Moved Permanently";
+        case 302: return "Found";
+        case 304: return "Not Modified";
+        case 400: return "Bad Request";
+        case 401: return "Unauthorized";
+        case 403: return "Forbidden";
+        case 404: return "Not Found";
+        case 405: return "Method Not Allowed";
+        case 409: return "Conflict";
+        case 422: return "Unprocessable Entity";
+        case 429: return "Too Many Requests";
+        case 500: return "Internal Server Error";
+        case 502: return "Bad Gateway";
+        case 503: return "Service Unavailable";
+        default:  return "Unknown";
+    }
+}
+
+/* ---- internal: send response ----------------------------------- */
+static void http_srv_send(SOCKET sock, CertoHttpResponse* resp) {
+    const char* body = resp && resp->body         ? resp->body         : "";
+    const char* ct   = resp && resp->content_type ? resp->content_type : "text/plain";
+    int64_t     code = resp ? resp->status : 500;
+    size_t      blen = strlen(body);
+
+    char header[512];
+    snprintf(header, sizeof(header),
+        "HTTP/1.1 %lld %s\r\n"
+        "Content-Type: %s\r\n"
+        "Content-Length: %zu\r\n"
+        "Connection: close\r\n"
+        "\r\n",
+        (long long)code, http_status_text(code), ct, blen);
+
+    send(sock, header, (int)strlen(header), 0);
+    if (blen > 0) send(sock, body, (int)blen, 0);
+}
+
+/* ---- public: blocking serve loop ------------------------------- */
+int64_t certo_http_serve(int64_t port, certo_fn_t raw_handler) {
+    CertoHttpHandler handler = (CertoHttpHandler)raw_handler;
+
+    WSADATA wsa;
+    if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0)
+        certo_panic("WSAStartup failed");
+
+    SOCKET srv = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (srv == INVALID_SOCKET) certo_panic("socket() failed");
+
+    BOOL reuse = TRUE;
+    setsockopt(srv, SOL_SOCKET, SO_REUSEADDR, (char*)&reuse, sizeof(reuse));
+
+    struct sockaddr_in addr = {0};
+    addr.sin_family      = AF_INET;
+    addr.sin_addr.s_addr = INADDR_ANY;
+    addr.sin_port        = htons((u_short)port);
+
+    if (bind(srv, (struct sockaddr*)&addr, sizeof(addr)) != 0)
+        certo_panic("bind() failed — port may already be in use");
+    if (listen(srv, SOMAXCONN) != 0)
+        certo_panic("listen() failed");
+
+    for (;;) {
+        struct sockaddr_in client_addr = {0};
+        int addr_len = sizeof(client_addr);
+        SOCKET client = accept(srv, (struct sockaddr*)&client_addr, &addr_len);
+        if (client == INVALID_SOCKET) continue;
+
+        char* raw = http_srv_read_request(client);
+        CertoHttpRequest* req = http_srv_parse(raw, client);
+        free(raw);
+
+        CertoHttpResponse* resp = handler(req);
+        http_srv_send(client, resp);
+
+        closesocket(client);
+    }
+    /* unreachable — server runs until process exits */
+    return 0;
+}
+
+#else
+/* ---- POSIX stub ------------------------------------------------- */
+int64_t certo_http_serve(int64_t port, certo_fn_t handler) {
+    (void)port; (void)handler;
+    certo_panic("Http.serve is not yet supported on this platform");
+    return 0;
+}
+#endif
+
+/* ===== Stdlib.Math ===== */
+#include <math.h>
+#include <stdlib.h>
+#include <time.h>
+
+static double certo_math_pi(void)  { return M_PI; }
+static double certo_math_e(void)   { return M_E;  }
+static double certo_math_sin(double x)  { return sin(x);   }
+static double certo_math_cos(double x)  { return cos(x);   }
+static double certo_math_tan(double x)  { return tan(x);   }
+static double certo_math_asin(double x) { return asin(x);  }
+static double certo_math_acos(double x) { return acos(x);  }
+static double certo_math_atan(double x) { return atan(x);  }
+static double certo_math_atan2(double y, double x) { return atan2(y, x); }
+static double certo_math_log(double x)  { return log(x);   }
+static double certo_math_log2(double x) { return log2(x);  }
+static double certo_math_log10(double x){ return log10(x); }
+static double certo_math_exp(double x)  { return exp(x);   }
+static double certo_math_pow(double x, double y) { return pow(x, y); }
+static double certo_math_hypot(double a, double b) { return hypot(a, b); }
+static double certo_math_clamp(double x, double lo, double hi) {
+    if (x < lo) return lo;
+    if (x > hi) return hi;
+    return x;
+}
+static int64_t certo_math_clamp_int(int64_t x, int64_t lo, int64_t hi) {
+    if (x < lo) return lo;
+    if (x > hi) return hi;
+    return x;
+}
+static double certo_math_sign(double x) {
+    if (x > 0.0) return 1.0;
+    if (x < 0.0) return -1.0;
+    return 0.0;
+}
+static int64_t certo_math_sign_int(int64_t x) {
+    if (x > 0) return 1;
+    if (x < 0) return -1;
+    return 0;
+}
+static double certo_math_trunc(double x) { return trunc(x); }
+static int _certo_math_rng_seeded = 0;
+static double certo_math_random(void) {
+    if (!_certo_math_rng_seeded) {
+        srand((unsigned int)time(NULL));
+        _certo_math_rng_seeded = 1;
+    }
+    return (double)rand() / ((double)RAND_MAX + 1.0);
+}
+
+/* ===== Stdlib.Crypto ===== */
+#include <string.h>
+#include <stdlib.h>
+#include <stdint.h>
+
+/* ---- SHA-256 ---- */
+typedef struct { uint32_t s[8]; uint8_t buf[64]; uint64_t len; uint32_t blen; } certo_sha256_ctx;
+static const uint32_t _sha256_k[64] = {
+    0x428a2f98,0x71374491,0xb5c0fbcf,0xe9b5dba5,0x3956c25b,0x59f111f1,0x923f82a4,0xab1c5ed5,
+    0xd807aa98,0x12835b01,0x243185be,0x550c7dc3,0x72be5d74,0x80deb1fe,0x9bdc06a7,0xc19bf174,
+    0xe49b69c1,0xefbe4786,0x0fc19dc6,0x240ca1cc,0x2de92c6f,0x4a7484aa,0x5cb0a9dc,0x76f988da,
+    0x983e5152,0xa831c66d,0xb00327c8,0xbf597fc7,0xc6e00bf3,0xd5a79147,0x06ca6351,0x14292967,
+    0x27b70a85,0x2e1b2138,0x4d2c6dfc,0x53380d13,0x650a7354,0x766a0abb,0x81c2c92e,0x92722c85,
+    0xa2bfe8a1,0xa81a664b,0xc24b8b70,0xc76c51a3,0xd192e819,0xd6990624,0xf40e3585,0x106aa070,
+    0x19a4c116,0x1e376c08,0x2748774c,0x34b0bcb5,0x391c0cb3,0x4ed8aa4a,0x5b9cca4f,0x682e6ff3,
+    0x748f82ee,0x78a5636f,0x84c87814,0x8cc70208,0x90befffa,0xa4506ceb,0xbef9a3f7,0xc67178f2
+};
+#define SHA256_ROR(x,n) (((x)>>(n))|((x)<<(32-(n))))
+#define SHA256_CH(x,y,z)  (((x)&(y))^(~(x)&(z)))
+#define SHA256_MAJ(x,y,z) (((x)&(y))^((x)&(z))^((y)&(z)))
+#define SHA256_S0(x) (SHA256_ROR(x,2)^SHA256_ROR(x,13)^SHA256_ROR(x,22))
+#define SHA256_S1(x) (SHA256_ROR(x,6)^SHA256_ROR(x,11)^SHA256_ROR(x,25))
+#define SHA256_R0(x) (SHA256_ROR(x,7)^SHA256_ROR(x,18)^((x)>>3))
+#define SHA256_R1(x) (SHA256_ROR(x,17)^SHA256_ROR(x,19)^((x)>>10))
+static void _sha256_block(certo_sha256_ctx *c, const uint8_t *p) {
+    uint32_t w[64], a,b,d,e,f,g,h,t1,t2; int i;
+    uint32_t cc = c->s[2];
+    for(i=0;i<16;i++) w[i]=((uint32_t)p[i*4]<<24)|((uint32_t)p[i*4+1]<<16)|((uint32_t)p[i*4+2]<<8)|p[i*4+3];
+    for(i=16;i<64;i++) w[i]=SHA256_R1(w[i-2])+w[i-7]+SHA256_R0(w[i-15])+w[i-16];
+    a=c->s[0];b=c->s[1];cc=c->s[2];d=c->s[3];e=c->s[4];f=c->s[5];g=c->s[6];h=c->s[7];
+    for(i=0;i<64;i++){
+        t1=h+SHA256_S1(e)+SHA256_CH(e,f,g)+_sha256_k[i]+w[i];
+        t2=SHA256_S0(a)+SHA256_MAJ(a,b,cc);
+        h=g;g=f;f=e;e=d+t1;d=cc;cc=b;b=a;a=t1+t2;
+    }
+    c->s[0]+=a;c->s[1]+=b;c->s[2]+=cc;c->s[3]+=d;
+    c->s[4]+=e;c->s[5]+=f;c->s[6]+=g;c->s[7]+=h;
+}
+static void _sha256_init(certo_sha256_ctx *c) {
+    c->s[0]=0x6a09e667;c->s[1]=0xbb67ae85;c->s[2]=0x3c6ef372;c->s[3]=0xa54ff53a;
+    c->s[4]=0x510e527f;c->s[5]=0x9b05688c;c->s[6]=0x1f83d9ab;c->s[7]=0x5be0cd19;
+    c->len=c->blen=0;
+}
+static void _sha256_update(certo_sha256_ctx *c, const uint8_t *d, size_t n) {
+    for(size_t i=0;i<n;i++){
+        c->buf[c->blen++]=d[i]; c->len++;
+        if(c->blen==64){_sha256_block(c,c->buf);c->blen=0;}
+    }
+}
+static void _sha256_final(certo_sha256_ctx *c, uint8_t *out) {
+    uint64_t bits=c->len*8; c->buf[c->blen++]=0x80;
+    if(c->blen>56){while(c->blen<64)c->buf[c->blen++]=0;_sha256_block(c,c->buf);c->blen=0;}
+    while(c->blen<56)c->buf[c->blen++]=0;
+    for(int i=7;i>=0;i--){c->buf[c->blen++]=(uint8_t)(bits>>(i*8));}
+    _sha256_block(c,c->buf);
+    for(int i=0;i<8;i++){out[i*4]=(uint8_t)(c->s[i]>>24);out[i*4+1]=(uint8_t)(c->s[i]>>16);out[i*4+2]=(uint8_t)(c->s[i]>>8);out[i*4+3]=(uint8_t)c->s[i];}
+}
+static certo_text_t certo_crypto_sha256(certo_text_t s) {
+    certo_sha256_ctx c; uint8_t h[32];
+    _sha256_init(&c); _sha256_update(&c,(const uint8_t*)s,strlen(s)); _sha256_final(&c,h);
+    char *out=(char*)malloc(65); for(int i=0;i<32;i++)sprintf(out+i*2,"%02x",h[i]); out[64]=0;
+    return out;
+}
+
+/* ---- MD5 ---- */
+typedef struct { uint32_t s[4]; uint32_t c[2]; uint8_t buf[64]; } certo_md5_ctx;
+static const uint32_t _md5_t[64]={
+    0xd76aa478,0xe8c7b756,0x242070db,0xc1bdceee,0xf57c0faf,0x4787c62a,0xa8304613,0xfd469501,
+    0x698098d8,0x8b44f7af,0xffff5bb1,0x895cd7be,0x6b901122,0xfd987193,0xa679438e,0x49b40821,
+    0xf61e2562,0xc040b340,0x265e5a51,0xe9b6c7aa,0xd62f105d,0x02441453,0xd8a1e681,0xe7d3fbc8,
+    0x21e1cde6,0xc33707d6,0xf4d50d87,0x455a14ed,0xa9e3e905,0xfcefa3f8,0x676f02d9,0x8d2a4c8a,
+    0xfffa3942,0x8771f681,0x6d9d6122,0xfde5380c,0xa4beea44,0x4bdecfa9,0xf6bb4b60,0xbebfbc70,
+    0x289b7ec6,0xeaa127fa,0xd4ef3085,0x04881d05,0xd9d4d039,0xe6db99e5,0x1fa27cf8,0xc4ac5665,
+    0xf4292244,0x432aff97,0xab9423a7,0xfc93a039,0x655b59c3,0x8f0ccc92,0xffeff47d,0x85845dd1,
+    0x6fa87e4f,0xfe2ce6e0,0xa3014314,0x4e0811a1,0xf7537e82,0xbd3af235,0x2ad7d2bb,0xeb86d391
+};
+static const uint8_t _md5_s[64]={7,12,17,22,7,12,17,22,7,12,17,22,7,12,17,22,5,9,14,20,5,9,14,20,5,9,14,20,5,9,14,20,4,11,16,23,4,11,16,23,4,11,16,23,4,11,16,23,6,10,15,21,6,10,15,21,6,10,15,21,6,10,15,21};
+#define MD5_ROL(x,n) (((x)<<(n))|((x)>>(32-(n))))
+static void _md5_block(certo_md5_ctx *c, const uint8_t *p) {
+    uint32_t w[16],a,b,cc,d,f,g,t; int i;
+    for(i=0;i<16;i++) w[i]=((uint32_t)p[i*4])|((uint32_t)p[i*4+1]<<8)|((uint32_t)p[i*4+2]<<16)|((uint32_t)p[i*4+3]<<24);
+    a=c->s[0];b=c->s[1];cc=c->s[2];d=c->s[3];
+    for(i=0;i<64;i++){
+        if(i<16){f=(b&cc)|(~b&d);g=i;}
+        else if(i<32){f=(d&b)|(~d&cc);g=(5*i+1)%16;}
+        else if(i<48){f=b^cc^d;g=(3*i+5)%16;}
+        else{f=cc^(b|~d);g=(7*i)%16;}
+        t=d;d=cc;cc=b;b=b+MD5_ROL(a+f+_md5_t[i]+w[g],_md5_s[i]);a=t;
+    }
+    c->s[0]+=a;c->s[1]+=b;c->s[2]+=cc;c->s[3]+=d;
+}
+static certo_text_t certo_crypto_md5(certo_text_t s) {
+    certo_md5_ctx c; size_t len=strlen(s);
+    c.s[0]=0x67452301;c.s[1]=0xefcdab89;c.s[2]=0x98badcfe;c.s[3]=0x10325476;
+    c.c[0]=c.c[1]=0;
+    uint8_t *padded; size_t plen=(len+8)/64*64+64; padded=(uint8_t*)calloc(plen+8,1);
+    memcpy(padded,s,len); padded[len]=0x80;
+    uint64_t bits=(uint64_t)len*8;
+    memcpy(padded+plen-8,&bits,8);
+    for(size_t i=0;i<plen;i+=64){_md5_block(&c,padded+i);}
+    free(padded);
+    uint8_t h[16]; for(int i=0;i<4;i++){h[i*4]=(uint8_t)c.s[i];h[i*4+1]=(uint8_t)(c.s[i]>>8);h[i*4+2]=(uint8_t)(c.s[i]>>16);h[i*4+3]=(uint8_t)(c.s[i]>>24);}
+    char *out=(char*)malloc(33); for(int i=0;i<16;i++)sprintf(out+i*2,"%02x",h[i]); out[32]=0;
+    return out;
+}
+
+/* ---- Base64 ---- */
+static const char _b64enc[]="ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+static certo_text_t certo_crypto_base64_encode(certo_text_t s) {
+    size_t len=strlen(s); size_t outlen=((len+2)/3)*4;
+    char *out=(char*)malloc(outlen+1); size_t j=0;
+    for(size_t i=0;i<len;i+=3){
+        uint32_t v=((uint8_t)s[i]<<16)|(i+1<len?(uint8_t)s[i+1]<<8:0)|(i+2<len?(uint8_t)s[i+2]:0);
+        out[j++]=_b64enc[(v>>18)&63]; out[j++]=_b64enc[(v>>12)&63];
+        out[j++]=(i+1<len)?_b64enc[(v>>6)&63]:'=';
+        out[j++]=(i+2<len)?_b64enc[v&63]:'=';
+    }
+    out[j]=0; return out;
+}
+static int _b64val(char c){
+    if(c>='A'&&c<='Z')return c-'A';
+    if(c>='a'&&c<='z')return c-'a'+26;
+    if(c>='0'&&c<='9')return c-'0'+52;
+    if(c=='+')return 62; if(c=='/')return 63; return -1;
+}
+static certo_text_t certo_crypto_base64_decode(certo_text_t s) {
+    size_t len=strlen(s); char *out=(char*)malloc(len*3/4+4); size_t j=0;
+    for(size_t i=0;i<len;i+=4){
+        int a=_b64val(s[i]),b=_b64val(s[i+1]),c=(s[i+2]!='=')?_b64val(s[i+2]):0,d=(s[i+3]!='=')?_b64val(s[i+3]):0;
+        if(a<0||b<0)break;
+        out[j++]=(char)((a<<2)|(b>>4));
+        if(s[i+2]!='=')out[j++]=(char)((b<<4)|(c>>2));
+        if(s[i+3]!='=')out[j++]=(char)((c<<2)|d);
+    }
+    out[j]=0; return out;
+}
+
+/* ===== Stdlib.Regex ===== */
+/* Backtracking regex engine — supports: . * + ? ^ $ [] () captures */
+#include <string.h>
+#include <stdlib.h>
+#include <stdio.h>
+
+#define CERTO_RE_NCAP 10
+
+typedef struct {
+    const char *start;
+    int         len;
+} certo_re_cap;
+
+/* Forward declarations */
+static const char *_re_match(const char *pat, const char *str, certo_re_cap *caps, int ncaps);
+
+static int _re_matchchar(const char *pat, char c, int *consumed) {
+    *consumed = 1;
+    if (*pat == '.') return (c != '\0');
+    if (*pat == '[') {
+        const char *p = pat + 1; int neg = 0, found = 0;
+        if (*p == '^') { neg = 1; p++; }
+        while (*p && *p != ']') {
+            if (*(p+1) == '-' && *(p+2) && *(p+2) != ']') {
+                if (c >= *p && c <= *(p+2)) found = 1;
+                p += 3;
+            } else {
+                if (*p == c) found = 1;
+                p++;
+            }
+        }
+        *consumed = (int)(p - pat) + 1; /* skip past ] */
+        return neg ? !found : found;
+    }
+    return (*pat == c);
+}
+
+static int _re_patlen(const char *pat) {
+    if (*pat == '[') {
+        int i = 1;
+        if (pat[i] == '^') i++;
+        while (pat[i] && pat[i] != ']') i++;
+        return i + 1;
+    }
+    return 1;
+}
+
+static const char *_re_match(const char *pat, const char *str, certo_re_cap *caps, int ncaps) {
+    while (1) {
+        if (*pat == '\0') return str;
+        if (*pat == '$' && *(pat+1) == '\0') return (*str == '\0') ? str : NULL;
+        if (*pat == '(') {
+            /* find matching close, try to match inner */
+            int depth = 1, i = 1;
+            while (pat[i] && depth > 0) { if (pat[i]=='(') depth++; else if (pat[i]==')') depth--; i++; }
+            /* inner is pat+1 .. pat+i-1, then rest is pat+i */
+            for (int ci = 0; ci < ncaps; ci++) {
+                if (caps[ci].start == NULL) {
+                    caps[ci].start = str;
+                    char *inner = (char*)malloc(i); strncpy(inner, pat+1, i-2); inner[i-2]='\0';
+                    const char *after = _re_match(inner, str, caps+ci+1, ncaps-ci-1);
+                    free(inner);
+                    if (after) {
+                        caps[ci].len = (int)(after - str);
+                        const char *rest = _re_match(pat+i, after, caps, ncaps);
+                        if (rest) return rest;
+                    }
+                    caps[ci].start = NULL; caps[ci].len = 0;
+                    return NULL;
+                }
+            }
+            return NULL;
+        }
+        int consumed = 0;
+        int plen = _re_patlen(pat);
+        char quant = *(pat + plen);
+        if (quant == '*' || quant == '+' || quant == '?') {
+            int min = (quant == '+') ? 1 : 0;
+            int max = (quant == '?') ? 1 : 256*256;
+            const char *s = str; int count = 0;
+            while (count < max && *s) {
+                if (!_re_matchchar(pat, *s, &consumed)) break;
+                s++; count++;
+            }
+            /* greedy: try longest first */
+            while (count >= min) {
+                const char *rest = _re_match(pat+plen+1, str+count, caps, ncaps);
+                if (rest) return rest;
+                count--;
+            }
+            return NULL;
+        }
+        if (!_re_matchchar(pat, *str, &consumed)) return NULL;
+        pat += plen; str++;
+    }
+}
+
+static int _re_find(const char *pat, const char *str, certo_re_cap *caps, int ncaps, const char **match_start, const char **match_end) {
+    int anchored = (*pat == '^');
+    const char *p = anchored ? pat+1 : pat;
+    const char *s = str;
+    do {
+        for (int i = 0; i < ncaps; i++) { caps[i].start = NULL; caps[i].len = 0; }
+        const char *end = _re_match(p, s, caps, ncaps);
+        if (end) {
+            if (match_start) *match_start = s;
+            if (match_end) *match_end = end;
+            return 1;
+        }
+        s++;
+    } while (!anchored && *s);
+    return 0;
+}
+
+static int64_t certo_regex_match(certo_text_t pat, certo_text_t str) {
+    certo_re_cap caps[CERTO_RE_NCAP] = {0};
+    return _re_find(pat, str, caps, CERTO_RE_NCAP, NULL, NULL);
+}
+
+static certo_text_t certo_regex_find(certo_text_t pat, certo_text_t str) {
+    certo_re_cap caps[CERTO_RE_NCAP] = {0};
+    const char *ms, *me;
+    if (!_re_find(pat, str, caps, CERTO_RE_NCAP, &ms, &me)) return "";
+    int len = (int)(me - ms);
+    char *out = (char*)malloc(len+1); strncpy(out, ms, len); out[len] = 0;
+    return out;
+}
+
+static CertoList* certo_regex_captures(certo_text_t pat, certo_text_t str) {
+    certo_re_cap caps[CERTO_RE_NCAP] = {0};
+    _re_find(pat, str, caps, CERTO_RE_NCAP, NULL, NULL);
+    CertoList *list = certo_list_new();
+    for (int i = 0; i < CERTO_RE_NCAP; i++) {
+        if (!caps[i].start) break;
+        char *s = (char*)malloc(caps[i].len+1);
+        strncpy(s, caps[i].start, caps[i].len); s[caps[i].len]=0;
+        certo_list_push(list, s);
+    }
+    return list;
+}
+
+static certo_text_t certo_regex_replace(certo_text_t pat, certo_text_t str, certo_text_t repl) {
+    size_t cap = strlen(str)*2 + 64; char *out = (char*)malloc(cap); size_t j = 0;
+    const char *s = str;
+    while (*s) {
+        certo_re_cap caps[CERTO_RE_NCAP] = {0};
+        const char *ms, *me;
+        if (_re_find(pat, s, caps, CERTO_RE_NCAP, &ms, &me)) {
+            /* copy prefix */
+            size_t pre = ms - s;
+            if (j + pre + strlen(repl) + (strlen(s) - (me-s)) + 2 > cap) {
+                cap *= 2; out = (char*)realloc(out, cap);
+            }
+            memcpy(out+j, s, pre); j += pre;
+            size_t rl = strlen(repl); memcpy(out+j, repl, rl); j += rl;
+            s = me;
+        } else {
+            if (j + 1 >= cap) { cap *= 2; out = (char*)realloc(out, cap); }
+            out[j++] = *s++;
+        }
+    }
+    out[j] = 0; return out;
+}
+
+static CertoList* certo_regex_split(certo_text_t pat, certo_text_t str) {
+    CertoList *list = certo_list_new();
+    const char *s = str;
+    while (*s) {
+        certo_re_cap caps[CERTO_RE_NCAP] = {0};
+        const char *ms, *me;
+        if (_re_find(pat, s, caps, CERTO_RE_NCAP, &ms, &me) && ms == s) {
+            /* zero-length match guard */
+            if (me == ms) { char *seg = (char*)malloc(2); seg[0]=*s; seg[1]=0; certo_list_push(list, seg); s++; continue; }
+            char *seg = (char*)malloc(1); seg[0]=0; certo_list_push(list, seg);
+            s = me;
+        } else if (_re_find(pat, s, caps, CERTO_RE_NCAP, &ms, &me)) {
+            int len = (int)(ms - s); char *seg = (char*)malloc(len+1); strncpy(seg, s, len); seg[len]=0;
+            certo_list_push(list, seg); s = me;
+        } else {
+            char *seg = (char*)malloc(strlen(s)+1); strcpy(seg, s); certo_list_push(list, seg);
+            break;
+        }
+    }
+    return list;
+}
+
+/* ===== Stdlib.Csv — RFC 4180 CSV parser / serializer ===== */
+#include <string.h>
+#include <stdlib.h>
+
+/* Parse one field starting at *p. Advances *p past the delimiter/newline.
+   Returns a malloc'd string. Sets *eol if end of row was reached. */
+static char *_csv_parse_field(const char **p, int *eol) {
+    *eol = 0;
+    const char *s = *p;
+    char *out; size_t cap = 64, len = 0;
+    out = (char*)malloc(cap);
+
+    if (*s == '"') {
+        s++; /* skip opening quote */
+        while (*s) {
+            if (*s == '"') {
+                if (*(s+1) == '"') { /* escaped quote */
+                    if (len+1 >= cap) { cap *= 2; out = (char*)realloc(out, cap); }
+                    out[len++] = '"'; s += 2;
+                } else { s++; break; } /* closing quote */
+            } else {
+                if (len+1 >= cap) { cap *= 2; out = (char*)realloc(out, cap); }
+                out[len++] = *s++;
+            }
+        }
+        /* skip optional comma after closing quote */
+        if (*s == ',') s++;
+        else if (*s == '\r' && *(s+1) == '\n') { s += 2; *eol = 1; }
+        else if (*s == '\n') { s++; *eol = 1; }
+        else if (*s == '\0') *eol = 1;
+    } else {
+        while (*s && *s != ',' && *s != '\n' && *s != '\r') {
+            if (len+1 >= cap) { cap *= 2; out = (char*)realloc(out, cap); }
+            out[len++] = *s++;
+        }
+        if (*s == ',') s++;
+        else if (*s == '\r' && *(s+1) == '\n') { s += 2; *eol = 1; }
+        else if (*s == '\n') { s++; *eol = 1; }
+        else if (*s == '\0') *eol = 1;
+    }
+    out[len] = 0;
+    *p = s;
+    return out;
+}
+
+/* Csv.parse(text) → List<List<Text>> */
+static CertoList *certo_csv_parse(certo_text_t text) {
+    CertoList *rows = certo_list_new();
+    const char *p = text;
+    while (*p) {
+        CertoList *row = certo_list_new();
+        int eol = 0;
+        while (!eol && *p) {
+            char *field = _csv_parse_field(&p, &eol);
+            certo_list_push(row, field);
+        }
+        certo_list_push(rows, row);
+        /* skip trailing empty line at EOF */
+        if (!*p && row->len == 1 && ((char*)row->data[0])[0] == '\0') {
+            rows->len--;
+        }
+    }
+    return rows;
+}
+
+/* Csv.serialize(rows) → Text */
+static certo_text_t certo_csv_serialize(CertoList *rows) {
+    size_t cap = 256, len = 0;
+    char *out = (char*)malloc(cap);
+    for (int64_t r = 0; r < rows->len; r++) {
+        CertoList *row = (CertoList*)rows->data[r];
+        for (int64_t c = 0; c < row->len; c++) {
+            const char *field = (const char*)row->data[c];
+            /* quote if field contains comma, quote, or newline */
+            int needs_quote = 0;
+            for (const char *ch = field; *ch; ch++) {
+                if (*ch == ',' || *ch == '"' || *ch == '\n' || *ch == '\r') { needs_quote = 1; break; }
+            }
+            size_t flen = strlen(field);
+            size_t need = flen * 2 + 4; /* worst case: all quotes */
+            while (len + need >= cap) { cap *= 2; out = (char*)realloc(out, cap); }
+            if (needs_quote) {
+                out[len++] = '"';
+                for (size_t i = 0; i < flen; i++) {
+                    if (field[i] == '"') out[len++] = '"'; /* escape */
+                    out[len++] = field[i];
+                }
+                out[len++] = '"';
+            } else {
+                memcpy(out+len, field, flen); len += flen;
+            }
+            if (c < row->len - 1) out[len++] = ',';
+        }
+        out[len++] = '\n';
+    }
+    out[len] = 0;
+    return out;
+}
+
+/* Csv.header(rows) → List<Text>  — first row as header */
+static CertoList *certo_csv_header(CertoList *rows) {
+    if (rows->len == 0) return certo_list_new();
+    return (CertoList*)rows->data[0];
+}
+
+/* Csv.rows(rows) → List<List<Text>>  — all rows except header */
+static CertoList *certo_csv_rows(CertoList *rows) {
+    CertoList *out = certo_list_new();
+    for (int64_t i = 1; i < rows->len; i++) certo_list_push(out, rows->data[i]);
+    return out;
+}
+
+/* ------------------------------------------------------------------ */
+/* Stdlib.Db — PostgreSQL via libpq                                    */
+/* ------------------------------------------------------------------ */
+#include <libpq-fe.h>
+#include <string.h>
+#include <stdlib.h>
+#include <stdio.h>
+
+/* ---- internal helpers -------------------------------------------- */
+
+static char* certo_db_strdup(const char* s) {
+    if (!s) { char *e = malloc(1); e[0]='\0'; return e; }
+    size_t n = strlen(s);
+    char *out = malloc(n + 1);
+    memcpy(out, s, n + 1);
+    return out;
+}
+
+/* Sentinel for SQL NULL parameters.  dbNull() returns a pointer to this
+ * buffer.  certo_db_params detects it by pointer identity and passes NULL
+ * to PQexecParams, which libpq treats as SQL NULL. */
+static const char certo_db_null_sentinel_str[] = "\001CERTO_DB_NULL\001";
+
+certo_text_t certo_db_null_param(void) {
+    return (certo_text_t)certo_db_null_sentinel_str;
+}
+
+/* Build a const char** array from a CertoList* of certo_text_t.
+ * Elements that are the null sentinel are mapped to NULL (→ SQL NULL).
+ * Returns NULL and sets *nparams=0 if list is NULL. */
+static const char** certo_db_params(CertoList* params, int* nparams) {
+    if (!params || params->len == 0) { *nparams = 0; return NULL; }
+    *nparams = (int)params->len;
+    const char** arr = (const char**)malloc((size_t)*nparams * sizeof(char*));
+    for (int i = 0; i < *nparams; i++) {
+        const char* v = (const char*)params->data[i];
+        arr[i] = (v == certo_db_null_sentinel_str) ? NULL : v;
+    }
+    return arr;
+}
+
+/* ---- connect / close / error ------------------------------------- */
+
+/* Last connection-error message — set when certo_db_connect fails. */
+static char* certo_db_last_connect_error = NULL;
+
+/* Convert a postgres://user:pass@host:port/dbname URI to libpq keyword=value
+ * format so older libpq versions (pre-9.2) that don't accept URIs still work.
+ * Returns a newly malloc'd string, or NULL if the input is not a URI. */
+static char* certo_db_uri_to_kv(const char* uri) {
+    const char* pfx1 = "postgres://";
+    const char* pfx2 = "postgresql://";
+    const char* rest = NULL;
+    if (strncmp(uri, pfx2, strlen(pfx2)) == 0) rest = uri + strlen(pfx2);
+    else if (strncmp(uri, pfx1, strlen(pfx1)) == 0) rest = uri + strlen(pfx1);
+    else return NULL;
+
+    /* rest = [user[:pass]@]host[:port][/dbname] */
+    char user[256]="", pass[256]="", host[256]="localhost", port[16]="5432", dbname[256]="";
+
+    const char* at = strchr(rest, '@');
+    if (at) {
+        /* parse user[:pass] */
+        size_t ulen = (size_t)(at - rest);
+        char cred[512]; if (ulen >= sizeof(cred)) ulen = sizeof(cred)-1;
+        memcpy(cred, rest, ulen); cred[ulen] = '\0';
+        const char* colon = strchr(cred, ':');
+        if (colon) {
+            size_t ul = (size_t)(colon - cred);
+            if (ul >= sizeof(user)) ul = sizeof(user)-1;
+            memcpy(user, cred, ul); user[ul] = '\0';
+            strncpy(pass, colon+1, sizeof(pass)-1);
+        } else {
+            strncpy(user, cred, sizeof(user)-1);
+        }
+        rest = at + 1;
+    }
+
+    /* rest = host[:port][/dbname] */
+    const char* slash = strchr(rest, '/');
+    if (slash) {
+        strncpy(dbname, slash+1, sizeof(dbname)-1);
+        /* strip query string from dbname */
+        char* q = strchr(dbname, '?'); if (q) *q = '\0';
+    }
+    size_t hplen = slash ? (size_t)(slash - rest) : strlen(rest);
+    char hostport[512]; if (hplen >= sizeof(hostport)) hplen = sizeof(hostport)-1;
+    memcpy(hostport, rest, hplen); hostport[hplen] = '\0';
+
+    /* host may be [ipv6] */
+    if (hostport[0] == '[') {
+        char* rb = strchr(hostport, ']');
+        if (rb) {
+            size_t hl = (size_t)(rb - hostport - 1);
+            if (hl >= sizeof(host)) hl = sizeof(host)-1;
+            memcpy(host, hostport+1, hl); host[hl] = '\0';
+            if (*(rb+1) == ':') strncpy(port, rb+2, sizeof(port)-1);
+        }
+    } else {
+        const char* col = strchr(hostport, ':');
+        if (col) {
+            size_t hl = (size_t)(col - hostport);
+            if (hl >= sizeof(host)) hl = sizeof(host)-1;
+            memcpy(host, hostport, hl); host[hl] = '\0';
+            strncpy(port, col+1, sizeof(port)-1);
+        } else {
+            strncpy(host, hostport, sizeof(host)-1);
+        }
+    }
+
+    /* Build keyword=value string */
+    char* out = (char*)malloc(1024);
+    int n = 0;
+    n += snprintf(out+n, 1024-n, "host=%s port=%s", host, port);
+    if (dbname[0]) n += snprintf(out+n, 1024-n, " dbname=%s", dbname);
+    if (user[0])   n += snprintf(out+n, 1024-n, " user=%s", user);
+    if (pass[0])   n += snprintf(out+n, 1024-n, " password=%s", pass);
+    return out;
+}
+
+int64_t certo_db_connect(certo_text_t connstr) {
+    char* kv = certo_db_uri_to_kv(connstr);
+    PGconn *conn = PQconnectdb(kv ? kv : connstr);
+    free(kv);
+    if (PQstatus(conn) != CONNECTION_OK) {
+        free(certo_db_last_connect_error);
+        certo_db_last_connect_error = certo_db_strdup(PQerrorMessage(conn));
+        PQfinish(conn);
+        return 0;
+    }
+    return (int64_t)(uintptr_t)conn;
+}
+
+int64_t certo_db_close(int64_t handle) {
+    if (handle != 0) PQfinish((PGconn *)(uintptr_t)handle);
+    return 0;
+}
+
+certo_text_t certo_db_error(int64_t handle) {
+    if (handle == 0) {
+        return certo_db_last_connect_error ? certo_db_last_connect_error : "connection failed";
+    }
+    PGconn *conn = (PGconn *)(uintptr_t)handle;
+    return certo_db_strdup(PQerrorMessage(conn));
+}
+
+/* ---- server info -------------------------------------------------- */
+
+int64_t certo_db_server_version(int64_t handle) {
+    if (handle == 0) return -1;
+    PGconn *conn = (PGconn *)(uintptr_t)handle;
+    return (int64_t)PQserverVersion(conn);
+}
+
+certo_text_t certo_db_version_string(int64_t handle) {
+    if (handle == 0) return certo_db_strdup("");
+    PGconn *conn = (PGconn *)(uintptr_t)handle;
+    PGresult *res = PQexec(conn, "SELECT version()");
+    certo_text_t out;
+    if (PQresultStatus(res) != PGRES_TUPLES_OK) {
+        out = certo_db_strdup("");
+    } else {
+        out = certo_db_strdup(PQgetvalue(res, 0, 0));
+    }
+    PQclear(res);
+    return out;
+}
+
+/* ---- exec (INSERT / UPDATE / DELETE) ----------------------------- */
+
+/* Execute a statement with $1..$N parameters.
+ * Returns the number of rows affected, or -1 on error. */
+int64_t certo_db_exec(int64_t handle, certo_text_t sql, CertoList* params) {
+    if (handle == 0) return -1;
+    PGconn *conn = (PGconn *)(uintptr_t)handle;
+    int nparams;
+    const char **pv = certo_db_params(params, &nparams);
+    PGresult *res = PQexecParams(conn, sql, nparams, NULL, pv, NULL, NULL, 0);
+    free(pv);
+    int64_t affected = -1;
+    ExecStatusType st = PQresultStatus(res);
+    if (st == PGRES_COMMAND_OK || st == PGRES_TUPLES_OK) {
+        const char *rows = PQcmdTuples(res);
+        affected = (rows && rows[0]) ? (int64_t)atoll(rows) : 0;
+    }
+    PQclear(res);
+    return affected;
+}
+
+/* ---- query (SELECT → List<List<Text>>) --------------------------- */
+
+/* Run a SELECT with $1..$N parameters.
+ * Returns a List<List<Text?>> — outer list is rows, inner is columns.
+ * SQL NULL cells are stored as NULL pointers (Certo None); non-null cells
+ * are heap-copied strings (Certo Some(text)).
+ * Returns an empty list on error. */
+CertoList* certo_db_query(int64_t handle, certo_text_t sql, CertoList* params) {
+    CertoList* result = certo_list_new_empty();
+    if (handle == 0) return result;
+    PGconn *conn = (PGconn *)(uintptr_t)handle;
+    int nparams;
+    const char **pv = certo_db_params(params, &nparams);
+    PGresult *res = PQexecParams(conn, sql, nparams, NULL, pv, NULL, NULL, 0);
+    free(pv);
+    if (PQresultStatus(res) != PGRES_TUPLES_OK) {
+        PQclear(res);
+        return result;
+    }
+    int nrows = PQntuples(res);
+    int ncols = PQnfields(res);
+    for (int r = 0; r < nrows; r++) {
+        CertoList* row = certo_list_new_empty();
+        for (int c = 0; c < ncols; c++) {
+            /* NULL pointer = Certo None; heap string = Certo Some(text) */
+            void *cell = PQgetisnull(res, r, c)
+                ? NULL
+                : (void*)certo_db_strdup(PQgetvalue(res, r, c));
+            row = certo_list_push(row, cell);
+        }
+        result = certo_list_push(result, (void*)row);
+    }
+    PQclear(res);
+    return result;
+}
+
+/* Convenience: return the first row, or NULL (None) if no rows. */
+CertoList* certo_db_query_row(int64_t handle, certo_text_t sql, CertoList* params) {
+    CertoList* rows = certo_db_query(handle, sql, params);
+    if (!rows || rows->len == 0) return NULL;
+    return (CertoList*)rows->data[0];
+}
+
+/* Convenience: return the first column of the first row as Text?, or None.
+ * Returns NULL (None) when there are no rows or the cell is SQL NULL.
+ * Returns a heap-copied string pointer (Some(text)) otherwise. */
+void* certo_db_query_one(int64_t handle, certo_text_t sql) {
+    if (handle == 0) return NULL;
+    PGconn *conn = (PGconn *)(uintptr_t)handle;
+    PGresult *res = PQexec(conn, sql);
+    void *out;
+    if (PQresultStatus(res) != PGRES_TUPLES_OK || PQntuples(res) == 0
+            || PQgetisnull(res, 0, 0)) {
+        out = NULL;
+    } else {
+        out = (void*)certo_db_strdup(PQgetvalue(res, 0, 0));
+    }
+    PQclear(res);
+    return out;
+}
+
+/* ---- column names ------------------------------------------------- */
+
+/* Return the column names for a query as List<Text>. */
+CertoList* certo_db_columns(int64_t handle, certo_text_t sql) {
+    CertoList* result = certo_list_new_empty();
+    if (handle == 0) return result;
+    PGconn *conn = (PGconn *)(uintptr_t)handle;
+    PGresult *res = PQexec(conn, sql);
+    if (PQresultStatus(res) != PGRES_TUPLES_OK) {
+        PQclear(res);
+        return result;
+    }
+    int ncols = PQnfields(res);
+    for (int c = 0; c < ncols; c++) {
+        result = certo_list_push(result, (void*)certo_db_strdup(PQfname(res, c)));
+    }
+    PQclear(res);
+    return result;
+}
+
+/* ---- typed query -------------------------------------------------- */
+
+/* Run a SELECT and map each row through a Certo function.
+ * mapper :: List<Text> -> T  (CertoFn1 convention: void* -> void*)
+ * Returns List<T>. */
+typedef void* (*CertoFn1)(void*);
+
+CertoList* certo_db_query_typed(int64_t handle, certo_text_t sql,
+                                CertoList* params, CertoFn1 mapper) {
+    CertoList* rows = certo_db_query(handle, sql, params);
+    if (!mapper) return rows;
+    CertoList* result = certo_list_new_empty();
+    for (size_t i = 0; i < rows->len; i++) {
+        void* mapped = mapper(rows->data[i]);
+        result = certo_list_push(result, mapped);
+    }
+    return result;
+}
+
+/* ---- transactions ------------------------------------------------- */
+
+int64_t certo_db_begin(int64_t handle) {
+    if (handle == 0) return -1;
+    PGconn *conn = (PGconn *)(uintptr_t)handle;
+    PGresult *res = PQexec(conn, "BEGIN");
+    int64_t ok = PQresultStatus(res) == PGRES_COMMAND_OK ? 1 : 0;
+    PQclear(res);
+    return ok;
+}
+
+int64_t certo_db_commit(int64_t handle) {
+    if (handle == 0) return -1;
+    PGconn *conn = (PGconn *)(uintptr_t)handle;
+    PGresult *res = PQexec(conn, "COMMIT");
+    int64_t ok = PQresultStatus(res) == PGRES_COMMAND_OK ? 1 : 0;
+    PQclear(res);
+    return ok;
+}
+
+int64_t certo_db_rollback(int64_t handle) {
+    if (handle == 0) return -1;
+    PGconn *conn = (PGconn *)(uintptr_t)handle;
+    PGresult *res = PQexec(conn, "ROLLBACK");
+    int64_t ok = PQresultStatus(res) == PGRES_COMMAND_OK ? 1 : 0;
+    PQclear(res);
+    return ok;
+}
+
+/* ---- withTransaction ---------------------------------------------- */
+
+/* Monotonically increasing counter for savepoint names.
+ * Not thread-safe — acceptable while Certo's async runtime is single-threaded. */
+static int64_t certo_svp_seq = 0;
+
+/* Execute a zero-arg thunk inside a transaction on the given connection.
+ *
+ * Outer call  (no active txn):  issues BEGIN / COMMIT or ROLLBACK.
+ * Nested call (already in txn): issues SAVEPOINT / RELEASE or
+ *                               ROLLBACK TO SAVEPOINT + RELEASE, leaving
+ *                               the outer transaction intact on failure.
+ *
+ * Returns the Result<T,E> from the thunk unchanged in both cases, so ?
+ * propagation in Certo code works naturally at any nesting depth.
+ *
+ * certo_fn_t is void(*)(void) but the compiled thunk returns void*
+ * (a certo_result_t*).  The cast is safe on every ABI Certo targets
+ * because void* and void share the same return register (rax / r0). */
+void* certo_with_transaction(int64_t handle, certo_fn_t thunk) {
+    if (handle == 0 || !thunk) {
+        return certo_err((intptr_t)(certo_text_t)"withTransaction: invalid connection");
+    }
+    PGconn *conn = (PGconn *)(uintptr_t)handle;
+    typedef void* (*thunk_t)(void);
+
+    PGTransactionStatusType txstatus = PQtransactionStatus(conn);
+
+    if (txstatus == PQTRANS_INERROR) {
+        return certo_err((intptr_t)(certo_text_t)
+            "withTransaction: connection is in error state — call dbRollback first");
+    }
+    if (txstatus == PQTRANS_UNKNOWN) {
+        return certo_err((intptr_t)(certo_text_t)
+            "withTransaction: connection is invalid");
+    }
+
+    if (txstatus == PQTRANS_INTRANS) {
+        /* ---- nested: use a savepoint --------------------------------- */
+        char svp_name[40];
+        snprintf(svp_name, sizeof(svp_name), "certo_svp_%" PRId64, ++certo_svp_seq);
+
+        char sql[80];
+        snprintf(sql, sizeof(sql), "SAVEPOINT %s", svp_name);
+        PGresult *svp = PQexec(conn, sql);
+        if (PQresultStatus(svp) != PGRES_COMMAND_OK) {
+            char *msg = certo_db_strdup(PQerrorMessage(conn));
+            PQclear(svp);
+            return certo_err((intptr_t)(certo_text_t)msg);
+        }
+        PQclear(svp);
+
+        void *result = ((thunk_t)thunk)();
+
+        if (__result_is_ok(result)) {
+            snprintf(sql, sizeof(sql), "RELEASE SAVEPOINT %s", svp_name);
+            PGresult *rel = PQexec(conn, sql);
+            PQclear(rel);
+        } else {
+            /* Roll back to the savepoint, then release it to free server resources. */
+            snprintf(sql, sizeof(sql), "ROLLBACK TO SAVEPOINT %s", svp_name);
+            PGresult *rb = PQexec(conn, sql);
+            PQclear(rb);
+            snprintf(sql, sizeof(sql), "RELEASE SAVEPOINT %s", svp_name);
+            PGresult *rel = PQexec(conn, sql);
+            PQclear(rel);
+        }
+
+        return result;
+    } else {
+        /* ---- outer: use BEGIN / COMMIT / ROLLBACK -------------------- */
+        PGresult *begin = PQexec(conn, "BEGIN");
+        if (PQresultStatus(begin) != PGRES_COMMAND_OK) {
+            char *msg = certo_db_strdup(PQerrorMessage(conn));
+            PQclear(begin);
+            return certo_err((intptr_t)(certo_text_t)msg);
+        }
+        PQclear(begin);
+
+        void *result = ((thunk_t)thunk)();
+
+        if (__result_is_ok(result)) {
+            PGresult *res = PQexec(conn, "COMMIT");
+            PQclear(res);
+        } else {
+            PGresult *res = PQexec(conn, "ROLLBACK");
+            PQclear(res);
+        }
+
+        return result;
+    }
+}
+
+/* ---- dbStream ----------------------------------------------------- */
+
+/* Stream query results row-by-row via a server-side cursor.
+ *
+ * Uses DECLARE … CURSOR FOR <sql> then FETCH 100 rows at a time.
+ * Cursors require an active transaction; if none exists one is opened and
+ * committed on exit.  If the connection is already in a transaction the
+ * cursor is declared within it (no implicit BEGIN/COMMIT).
+ *
+ * handler is fn(List<Text?>): Unit compiled as void (*)(CertoList*). */
+static int64_t certo_stream_seq = 0;
+
+int64_t certo_db_stream(int64_t handle, certo_text_t sql, CertoList* params, certo_fn_t handler) {
+    if (handle == 0 || !handler) return -1;
+    PGconn *conn = (PGconn *)(uintptr_t)handle;
+
+    PGTransactionStatusType txstatus = PQtransactionStatus(conn);
+    if (txstatus == PQTRANS_INERROR || txstatus == PQTRANS_UNKNOWN) return -1;
+
+    int own_txn = (txstatus == PQTRANS_IDLE);
+    if (own_txn) {
+        PGresult *b = PQexec(conn, "BEGIN");
+        int ok = PQresultStatus(b) == PGRES_COMMAND_OK;
+        PQclear(b);
+        if (!ok) return -1;
+    }
+
+    /* Unique cursor name for this call. */
+    char cur[64];
+    snprintf(cur, sizeof(cur), "certo_cur_%" PRId64, ++certo_stream_seq);
+
+    /* Build DECLARE <cur> CURSOR FOR <sql> and execute with params. */
+    size_t decl_len = strlen("DECLARE  CURSOR FOR ") + strlen(cur) + strlen(sql) + 1;
+    char *decl = (char*)malloc(decl_len);
+    if (!decl) { if (own_txn) PQexec(conn, "ROLLBACK"); return -1; }
+    snprintf(decl, decl_len, "DECLARE %s CURSOR FOR %s", cur, sql);
+
+    int nparams = 0;
+    const char **pv = certo_db_params(params, &nparams);
+    PGresult *dr = PQexecParams(conn, decl, nparams, NULL, pv, NULL, NULL, 0);
+    free(decl);
+    if (pv) free(pv);
+    if (PQresultStatus(dr) != PGRES_COMMAND_OK) {
+        PQclear(dr);
+        if (own_txn) PQexec(conn, "ROLLBACK");
+        return -1;
+    }
+    PQclear(dr);
+
+    /* FETCH loop — 100 rows per round-trip. */
+    char fetch[128];
+    snprintf(fetch, sizeof(fetch), "FETCH 100 FROM %s", cur);
+    typedef void (*row_handler_t)(CertoList*);
+    int64_t total = 0;
+
+    for (;;) {
+        PGresult *res = PQexec(conn, fetch);
+        if (PQresultStatus(res) != PGRES_TUPLES_OK) { PQclear(res); break; }
+        int nrows = PQntuples(res);
+        if (nrows == 0) { PQclear(res); break; }
+        int ncols = PQnfields(res);
+
+        for (int r = 0; r < nrows; r++) {
+            CertoList *row = certo_list_new_empty();
+            for (int c = 0; c < ncols; c++) {
+                void *cell = PQgetisnull(res, r, c)
+                    ? NULL
+                    : (void*)certo_db_strdup(PQgetvalue(res, r, c));
+                row = certo_list_push(row, cell);
+            }
+            ((row_handler_t)handler)(row);
+            total++;
+        }
+        PQclear(res);
+        if (nrows < 100) break;
+    }
+
+    /* Close the cursor and optionally commit. */
+    char close_sql[128];
+    snprintf(close_sql, sizeof(close_sql), "CLOSE %s", cur);
+    PGresult *cr = PQexec(conn, close_sql);
+    PQclear(cr);
+    if (own_txn) {
+        PGresult *cm = PQexec(conn, "COMMIT");
+        PQclear(cm);
+    }
+
+    return total;
+}
+
+/* ---- withConnection ----------------------------------------------- */
+
+/* Open a connection, call body(conn), then close unconditionally.
+ *
+ * On connect failure returns Err with the libpq error message.
+ * On success or failure of the body, the connection is always closed
+ * before returning — no leak is possible.
+ *
+ * body is fn(Int): Result<T,E>.  certo_fn_t is void(*)(void) but the
+ * compiled lambda actually takes int64_t and returns void*.  The cast
+ * is safe: the argument goes in the first integer register (rdi / r0)
+ * and the void* result comes back in rax / r0 regardless of declared
+ * return type. */
+void* certo_with_connection(certo_text_t connstr, certo_fn_t body) {
+    if (!body) {
+        return certo_err((intptr_t)(certo_text_t)
+            "withConnection: invalid body");
+    }
+
+    int64_t handle = certo_db_connect(connstr);
+    if (handle == 0) {
+        const char *raw = certo_db_last_connect_error
+            ? certo_db_last_connect_error : "withConnection: connection failed";
+        return certo_err((intptr_t)(certo_text_t)certo_db_strdup(raw));
+    }
+
+    typedef void* (*body_t)(int64_t);
+    void *result = ((body_t)body)(handle);
+
+    certo_db_close(handle);
+    return result;
+}
+
+/* Generated by Certo compiler — do not edit */
+
+int64_t certo_html_page(certo_text_t _l1, certo_text_t _l2);
+certo_text_t certo_html_th(void* _l1, int64_t _l2, int64_t _l3, certo_text_t _l4);
+certo_text_t certo_html_td(void* _l1, int64_t _l2, int64_t _l3, certo_text_t _l4);
+int64_t certo_html_tr(void* _l1, int64_t _l2, int64_t _l3, certo_text_t _l4);
+int64_t certo_html_table(void* _l1, void* _l2);
+certo_text_t certo_form_field(certo_text_t _l1, certo_text_t _l2);
+certo_text_t certo_form_field_at(void* _l1, certo_text_t _l2, int64_t _l3);
+int64_t certo_handler(int64_t _l1);
+int64_t certo_handle_customer_list(int64_t _l1);
+int64_t certo_handle_customer_detail(int64_t _l1);
+int64_t certo_handle_subscriber_list(int64_t _l1);
+int64_t certo_handle_subscriber_detail(int64_t _l1);
+int64_t certo_handle_subscription_list(int64_t _l1);
+int64_t certo_handle_product_list(int64_t _l1);
+int64_t certo_handle_create_customer_get(int64_t _l1);
+int64_t certo_handle_create_customer_post(int64_t _l1);
+int64_t certo_handle_edit_customer_get(int64_t _l1);
+int64_t certo_handle_edit_customer_post(int64_t _l1);
+int64_t certo_handle_create_subscriber_get(int64_t _l1);
+int64_t certo_handle_create_subscriber_post(int64_t _l1);
+int64_t certo_handle_edit_subscriber_get(int64_t _l1);
+int64_t certo_handle_edit_subscriber_post(int64_t _l1);
+int64_t certo_handle_create_subscription_get(int64_t _l1);
+int64_t certo_handle_create_subscription_post(int64_t _l1);
+int64_t certo_handle_edit_subscription_get(int64_t _l1);
+int64_t certo_handle_edit_subscription_post(int64_t _l1);
+int64_t certo_handle_create_product_get(int64_t _l1);
+int64_t certo_handle_create_product_post(int64_t _l1);
+int64_t certo_handle_edit_product_get(int64_t _l1);
+int64_t certo_handle_edit_product_post(int64_t _l1);
+int64_t certo_main(void);
+
+static void* certo_db_url = /* expr */0;
+static void* certo_html_css = /* expr */0;
+int64_t certo_html_page(certo_text_t _l1, certo_text_t _l2) {
+    int64_t _l0;
+    int64_t _l3;
+    int64_t _l4;
+    int64_t _l5;
+    int64_t _l6;
+    int64_t _l7;
+    int64_t _l8;
+    int64_t _l9;
+    int64_t _l10;
+    int64_t _l11;
+  bb0:
+    _l3 = certo_text_concat(CERTO_STR("<!DOCTYPE html><html lang=\"en\"><head>"), CERTO_STR("<meta charset=\"UTF-8\">"));
+    _l4 = certo_text_concat(_l3, CERTO_STR("<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"));
+    _l5 = certo_text_concat(_l4, CERTO_STR("<title>"));
+    _l6 = certo_text_concat(_l5, _l1);
+    _l7 = certo_text_concat(_l6, CERTO_STR("</title>"));
+    _l8 = certo_text_concat(_l7, certo_html_css);
+    _l9 = certo_text_concat(_l8, CERTO_STR("</head><body>"));
+    _l10 = certo_text_concat(_l9, _l2);
+    _l11 = certo_text_concat(_l10, CERTO_STR("</body></html>"));
+    _l0 = _l11;
+    return _l0;
+}
+
+certo_text_t certo_html_th(void* _l1, int64_t _l2, int64_t _l3, certo_text_t _l4) {
+    certo_text_t _l0;
+    int64_t _l5;
+    certo_text_t _l6;
+    int64_t _l7;
+    int64_t _l8;
+    int64_t _l9;
+    int64_t _l10;
+    int64_t _l11;
+    certo_text_t _l12;
+  bb0:
+    _l5 = (_l2 >= _l3);
+    if (_l5) goto bb1; else goto bb2;
+  bb1:
+    _l6 = _l4;
+    goto bb3;
+  bb2:
+    _l7 = (_l2 + 1);
+    _l8 = certo_text_concat(_l4, CERTO_STR("<th>"));
+    _l9 = certo_list_get_or_panic(_l1, _l2);
+    goto bb4;
+  bb3:
+    _l0 = _l6;
+    return _l0;
+  bb4:
+    _l10 = certo_text_concat(_l8, _l9);
+    _l11 = certo_text_concat(_l10, CERTO_STR("</th>"));
+    _l12 = certo_html_th(_l1, _l7, _l3, _l11);
+    goto bb5;
+  bb5:
+    _l6 = _l12;
+    goto bb3;
+}
+
+certo_text_t certo_html_td(void* _l1, int64_t _l2, int64_t _l3, certo_text_t _l4) {
+    certo_text_t _l0;
+    int64_t _l5;
+    certo_text_t _l6;
+    int64_t _l7;
+    int64_t _l8;
+    int64_t _l9;
+    int64_t _l10;
+    int64_t _l11;
+    int64_t _l12;
+    certo_text_t _l13;
+  bb0:
+    _l5 = (_l2 >= _l3);
+    if (_l5) goto bb1; else goto bb2;
+  bb1:
+    _l6 = _l4;
+    goto bb3;
+  bb2:
+    _l7 = (_l2 + 1);
+    _l8 = certo_text_concat(_l4, CERTO_STR("<td>"));
+    _l9 = certo_list_get_or_panic(_l1, _l2);
+    goto bb4;
+  bb3:
+    _l0 = _l6;
+    return _l0;
+  bb4:
+    _l10 = (__typeof__(_l10))certo_coalesce((void*)(_l9), (void*)(CERTO_STR("")));
+    _l11 = certo_text_concat(_l8, _l10);
+    _l12 = certo_text_concat(_l11, CERTO_STR("</td>"));
+    _l13 = certo_html_td(_l1, _l7, _l3, _l12);
+    goto bb5;
+  bb5:
+    _l6 = _l13;
+    goto bb3;
+}
+
+int64_t certo_html_tr(void* _l1, int64_t _l2, int64_t _l3, certo_text_t _l4) {
+    int64_t _l0;
+    int64_t _l5;
+    int64_t _l6;
+    int64_t _l7;
+    int64_t _l8;
+    int64_t _l9;
+    int64_t _l10;
+    int64_t _l11;
+    certo_text_t _l12;
+    int64_t _l13;
+    int64_t _l14;
+    certo_text_t _l15;
+  bb0:
+    _l5 = (_l2 >= _l3);
+    if (_l5) goto bb1; else goto bb2;
+  bb1:
+    _l6 = _l4;
+    goto bb3;
+  bb2:
+    _l7 = certo_list_get_or_panic(_l1, _l2);
+    goto bb4;
+  bb3:
+    _l0 = _l6;
+    return _l0;
+  bb4:
+    _l8 = _l7;
+    _l9 = (_l2 + 1);
+    _l10 = certo_text_concat(_l4, CERTO_STR("<tr>"));
+    _l11 = certo_list_len(_l8);
+    goto bb5;
+  bb5:
+    _l12 = certo_html_td(_l8, 0, _l11, CERTO_STR(""));
+    goto bb6;
+  bb6:
+    _l13 = certo_text_concat(_l10, _l12);
+    _l14 = certo_text_concat(_l13, CERTO_STR("</tr>"));
+    _l15 = certo_html_tr(_l1, _l9, _l3, _l14);
+    goto bb7;
+  bb7:
+    _l6 = _l15;
+    goto bb3;
+}
+
+int64_t certo_html_table(void* _l1, void* _l2) {
+    int64_t _l0;
+    int64_t _l3;
+    certo_text_t _l4;
+    int64_t _l5;
+    int64_t _l6;
+    int64_t _l7;
+    certo_text_t _l8;
+    int64_t _l9;
+    int64_t _l10;
+  bb0:
+    _l3 = certo_list_len(_l1);
+    goto bb1;
+  bb1:
+    _l4 = certo_html_th(_l1, 0, _l3, CERTO_STR(""));
+    goto bb2;
+  bb2:
+    _l5 = certo_text_concat(CERTO_STR("<table><thead><tr>"), _l4);
+    _l6 = certo_text_concat(_l5, CERTO_STR("</tr></thead><tbody>"));
+    _l7 = certo_list_len(_l2);
+    goto bb3;
+  bb3:
+    _l8 = certo_html_tr(_l2, 0, _l7, CERTO_STR(""));
+    goto bb4;
+  bb4:
+    _l9 = certo_text_concat(_l6, _l8);
+    _l10 = certo_text_concat(_l9, CERTO_STR("</tbody></table>"));
+    _l0 = _l10;
+    return _l0;
+}
+
+certo_text_t certo_form_field(certo_text_t _l1, certo_text_t _l2) {
+    certo_text_t _l0;
+    int64_t _l3;
+    certo_text_t _l4;
+  bb0:
+    _l3 = certo_text_split(_l1, CERTO_STR("&"));
+    goto bb1;
+  bb1:
+    _l4 = certo_form_field_at(_l3, _l2, 0);
+    goto bb2;
+  bb2:
+    _l0 = _l4;
+    return _l0;
+}
+
+certo_text_t certo_form_field_at(void* _l1, certo_text_t _l2, int64_t _l3) {
+    certo_text_t _l0;
+    int64_t _l4;
+    int64_t _l5;
+    certo_text_t _l6;
+    int64_t _l7;
+    int64_t _l8;
+    int64_t _l9;
+    int64_t _l10;
+    int64_t _l11;
+    int64_t _l12;
+    int64_t _l13;
+    int64_t _l14;
+    certo_text_t _l15;
+    int64_t _l16;
+    int64_t _l17;
+    certo_text_t _l18;
+  bb0:
+    _l4 = certo_list_len(_l1);
+    goto bb1;
+  bb1:
+    _l5 = (_l3 >= _l4);
+    if (_l5) goto bb2; else goto bb3;
+  bb2:
+    _l6 = CERTO_STR("");
+    goto bb4;
+  bb3:
+    _l7 = certo_list_get_or_panic(_l1, _l3);
+    goto bb5;
+  bb4:
+    _l0 = _l6;
+    return _l0;
+  bb5:
+    _l8 = certo_text_split(_l7, CERTO_STR("="));
+    goto bb6;
+  bb6:
+    _l9 = _l8;
+    _l10 = certo_list_len(_l9);
+    goto bb7;
+  bb7:
+    _l11 = (_l10 >= 2);
+    _l12 = certo_list_get_or_panic(_l9, 0);
+    goto bb8;
+  bb8:
+    _l13 = certo_text_eq(_l12, _l2);
+    goto bb9;
+  bb9:
+    _l14 = (_l11 && _l13);
+    if (_l14) goto bb10; else goto bb11;
+  bb10:
+    _l16 = certo_list_get_or_panic(_l9, 1);
+    goto bb13;
+  bb11:
+    _l17 = (_l3 + 1);
+    _l18 = certo_form_field_at(_l1, _l2, _l17);
+    goto bb14;
+  bb12:
+    _l6 = _l15;
+    goto bb4;
+  bb13:
+    _l15 = _l16;
+    goto bb12;
+  bb14:
+    _l15 = _l18;
+    goto bb12;
+}
+
+int64_t certo_handler(int64_t _l1) {
+    int64_t _l0;
+    int64_t _l2;
+    int64_t _l3;
+    int64_t _l4;
+    int64_t _l5;
+    int64_t _l6;
+    int64_t _l7;
+    int64_t _l8;
+    int64_t _l9;
+    int64_t _l10;
+    int64_t _l11;
+    int64_t _l12;
+    int64_t _l13;
+    int64_t _l14;
+    int64_t _l15;
+    int64_t _l16;
+    int64_t _l17;
+    int64_t _l18;
+    int64_t _l19;
+    int64_t _l20;
+    int64_t _l21;
+    int64_t _l22;
+    int64_t _l23;
+    int64_t _l24;
+    int64_t _l25;
+    int64_t _l26;
+    int64_t _l27;
+    int64_t _l28;
+    int64_t _l29;
+    int64_t _l30;
+    int64_t _l31;
+    int64_t _l32;
+    int64_t _l33;
+    int64_t _l34;
+    int64_t _l35;
+    int64_t _l36;
+    int64_t _l37;
+    int64_t _l38;
+    int64_t _l39;
+    int64_t _l40;
+    int64_t _l41;
+    int64_t _l42;
+    int64_t _l43;
+    int64_t _l44;
+    int64_t _l45;
+    int64_t _l46;
+    int64_t _l47;
+    int64_t _l48;
+    int64_t _l49;
+    int64_t _l50;
+    int64_t _l51;
+    int64_t _l52;
+    int64_t _l53;
+    int64_t _l54;
+    int64_t _l55;
+    int64_t _l56;
+    int64_t _l57;
+    int64_t _l58;
+    int64_t _l59;
+    int64_t _l60;
+    int64_t _l61;
+    int64_t _l62;
+    int64_t _l63;
+    int64_t _l64;
+    int64_t _l65;
+    int64_t _l66;
+    int64_t _l67;
+    int64_t _l68;
+    int64_t _l69;
+    int64_t _l70;
+    int64_t _l71;
+    certo_text_t _l72;
+    certo_text_t _l73;
+    certo_text_t _l74;
+    int64_t _l75;
+  bb0:
+    _l2 = certo_http_request_path(_l1);
+    goto bb1;
+  bb1:
+    _l3 = _l2;
+    _l4 = certo_http_request_method(_l1);
+    goto bb2;
+  bb2:
+    _l5 = _l4;
+    _l6 = (certo_text_eq(_l3, CERTO_STR("/customer-list")));
+    if (_l6) goto bb3; else goto bb4;
+  bb3:
+    _l8 = certo_handle_customer_list(_l1);
+    goto bb6;
+  bb4:
+    _l9 = (certo_text_eq(_l3, CERTO_STR("/customer-detail")));
+    if (_l9) goto bb7; else goto bb8;
+  bb5:
+    _l0 = _l7;
+    return _l0;
+  bb6:
+    _l7 = _l8;
+    goto bb5;
+  bb7:
+    _l11 = certo_handle_customer_detail(_l1);
+    goto bb10;
+  bb8:
+    _l12 = (certo_text_eq(_l3, CERTO_STR("/subscriber-list")));
+    if (_l12) goto bb11; else goto bb12;
+  bb9:
+    _l7 = _l10;
+    goto bb5;
+  bb10:
+    _l10 = _l11;
+    goto bb9;
+  bb11:
+    _l14 = certo_handle_subscriber_list(_l1);
+    goto bb14;
+  bb12:
+    _l15 = (certo_text_eq(_l3, CERTO_STR("/subscriber-detail")));
+    if (_l15) goto bb15; else goto bb16;
+  bb13:
+    _l10 = _l13;
+    goto bb9;
+  bb14:
+    _l13 = _l14;
+    goto bb13;
+  bb15:
+    _l17 = certo_handle_subscriber_detail(_l1);
+    goto bb18;
+  bb16:
+    _l18 = (certo_text_eq(_l3, CERTO_STR("/subscription-list")));
+    if (_l18) goto bb19; else goto bb20;
+  bb17:
+    _l13 = _l16;
+    goto bb13;
+  bb18:
+    _l16 = _l17;
+    goto bb17;
+  bb19:
+    _l20 = certo_handle_subscription_list(_l1);
+    goto bb22;
+  bb20:
+    _l21 = (certo_text_eq(_l3, CERTO_STR("/product-list")));
+    if (_l21) goto bb23; else goto bb24;
+  bb21:
+    _l16 = _l19;
+    goto bb17;
+  bb22:
+    _l19 = _l20;
+    goto bb21;
+  bb23:
+    _l23 = certo_handle_product_list(_l1);
+    goto bb26;
+  bb24:
+    _l24 = (certo_text_eq(_l3, CERTO_STR("/create-customer")));
+    if (_l24) goto bb27; else goto bb28;
+  bb25:
+    _l19 = _l22;
+    goto bb21;
+  bb26:
+    _l22 = _l23;
+    goto bb25;
+  bb27:
+    _l26 = (certo_text_eq(_l5, CERTO_STR("POST")));
+    if (_l26) goto bb30; else goto bb31;
+  bb28:
+    _l30 = (certo_text_eq(_l3, CERTO_STR("/edit-customer")));
+    if (_l30) goto bb35; else goto bb36;
+  bb29:
+    _l22 = _l25;
+    goto bb25;
+  bb30:
+    _l28 = certo_handle_create_customer_post(_l1);
+    goto bb33;
+  bb31:
+    _l29 = certo_handle_create_customer_get(_l1);
+    goto bb34;
+  bb32:
+    _l25 = _l27;
+    goto bb29;
+  bb33:
+    _l27 = _l28;
+    goto bb32;
+  bb34:
+    _l27 = _l29;
+    goto bb32;
+  bb35:
+    _l32 = (certo_text_eq(_l5, CERTO_STR("POST")));
+    if (_l32) goto bb38; else goto bb39;
+  bb36:
+    _l36 = (certo_text_eq(_l3, CERTO_STR("/create-subscriber")));
+    if (_l36) goto bb43; else goto bb44;
+  bb37:
+    _l25 = _l31;
+    goto bb29;
+  bb38:
+    _l34 = certo_handle_edit_customer_post(_l1);
+    goto bb41;
+  bb39:
+    _l35 = certo_handle_edit_customer_get(_l1);
+    goto bb42;
+  bb40:
+    _l31 = _l33;
+    goto bb37;
+  bb41:
+    _l33 = _l34;
+    goto bb40;
+  bb42:
+    _l33 = _l35;
+    goto bb40;
+  bb43:
+    _l38 = (certo_text_eq(_l5, CERTO_STR("POST")));
+    if (_l38) goto bb46; else goto bb47;
+  bb44:
+    _l42 = (certo_text_eq(_l3, CERTO_STR("/edit-subscriber")));
+    if (_l42) goto bb51; else goto bb52;
+  bb45:
+    _l31 = _l37;
+    goto bb37;
+  bb46:
+    _l40 = certo_handle_create_subscriber_post(_l1);
+    goto bb49;
+  bb47:
+    _l41 = certo_handle_create_subscriber_get(_l1);
+    goto bb50;
+  bb48:
+    _l37 = _l39;
+    goto bb45;
+  bb49:
+    _l39 = _l40;
+    goto bb48;
+  bb50:
+    _l39 = _l41;
+    goto bb48;
+  bb51:
+    _l44 = (certo_text_eq(_l5, CERTO_STR("POST")));
+    if (_l44) goto bb54; else goto bb55;
+  bb52:
+    _l48 = (certo_text_eq(_l3, CERTO_STR("/create-subscription")));
+    if (_l48) goto bb59; else goto bb60;
+  bb53:
+    _l37 = _l43;
+    goto bb45;
+  bb54:
+    _l46 = certo_handle_edit_subscriber_post(_l1);
+    goto bb57;
+  bb55:
+    _l47 = certo_handle_edit_subscriber_get(_l1);
+    goto bb58;
+  bb56:
+    _l43 = _l45;
+    goto bb53;
+  bb57:
+    _l45 = _l46;
+    goto bb56;
+  bb58:
+    _l45 = _l47;
+    goto bb56;
+  bb59:
+    _l50 = (certo_text_eq(_l5, CERTO_STR("POST")));
+    if (_l50) goto bb62; else goto bb63;
+  bb60:
+    _l54 = (certo_text_eq(_l3, CERTO_STR("/edit-subscription")));
+    if (_l54) goto bb67; else goto bb68;
+  bb61:
+    _l43 = _l49;
+    goto bb53;
+  bb62:
+    _l52 = certo_handle_create_subscription_post(_l1);
+    goto bb65;
+  bb63:
+    _l53 = certo_handle_create_subscription_get(_l1);
+    goto bb66;
+  bb64:
+    _l49 = _l51;
+    goto bb61;
+  bb65:
+    _l51 = _l52;
+    goto bb64;
+  bb66:
+    _l51 = _l53;
+    goto bb64;
+  bb67:
+    _l56 = (certo_text_eq(_l5, CERTO_STR("POST")));
+    if (_l56) goto bb70; else goto bb71;
+  bb68:
+    _l60 = (certo_text_eq(_l3, CERTO_STR("/create-product")));
+    if (_l60) goto bb75; else goto bb76;
+  bb69:
+    _l49 = _l55;
+    goto bb61;
+  bb70:
+    _l58 = certo_handle_edit_subscription_post(_l1);
+    goto bb73;
+  bb71:
+    _l59 = certo_handle_edit_subscription_get(_l1);
+    goto bb74;
+  bb72:
+    _l55 = _l57;
+    goto bb69;
+  bb73:
+    _l57 = _l58;
+    goto bb72;
+  bb74:
+    _l57 = _l59;
+    goto bb72;
+  bb75:
+    _l62 = (certo_text_eq(_l5, CERTO_STR("POST")));
+    if (_l62) goto bb78; else goto bb79;
+  bb76:
+    _l66 = (certo_text_eq(_l3, CERTO_STR("/edit-product")));
+    if (_l66) goto bb83; else goto bb84;
+  bb77:
+    _l55 = _l61;
+    goto bb69;
+  bb78:
+    _l64 = certo_handle_create_product_post(_l1);
+    goto bb81;
+  bb79:
+    _l65 = certo_handle_create_product_get(_l1);
+    goto bb82;
+  bb80:
+    _l61 = _l63;
+    goto bb77;
+  bb81:
+    _l63 = _l64;
+    goto bb80;
+  bb82:
+    _l63 = _l65;
+    goto bb80;
+  bb83:
+    _l68 = (certo_text_eq(_l5, CERTO_STR("POST")));
+    if (_l68) goto bb86; else goto bb87;
+  bb84:
+    _l72 = certo_text_concat(CERTO_STR("No route for "), _l5);
+    _l73 = certo_text_concat(_l72, CERTO_STR(" "));
+    _l74 = certo_text_concat(_l73, _l3);
+    _l75 = certo_http_not_found(_l74);
+    goto bb91;
+  bb85:
+    _l61 = _l67;
+    goto bb77;
+  bb86:
+    _l70 = certo_handle_edit_product_post(_l1);
+    goto bb89;
+  bb87:
+    _l71 = certo_handle_edit_product_get(_l1);
+    goto bb90;
+  bb88:
+    _l67 = _l69;
+    goto bb85;
+  bb89:
+    _l69 = _l70;
+    goto bb88;
+  bb90:
+    _l69 = _l71;
+    goto bb88;
+  bb91:
+    _l67 = _l75;
+    goto bb85;
+}
+
+int64_t certo_handle_customer_list(int64_t _l1) {
+    int64_t _l0;
+    int64_t _l2;
+    int64_t _l3;
+    certo_text_t _l4;
+    int64_t _l5;
+    int64_t _l6;
+    int64_t _l7;
+    int64_t _l8;
+    int64_t _l9;
+    int64_t _l10;
+    certo_text_t _l11;
+    int64_t _l12;
+    int64_t _l13;
+    certo_text_t _l14;
+    int64_t _l15;
+  bb0:
+    _l2 = certo_db_connect(certo_db_url);
+    goto bb1;
+  bb1:
+    _l3 = _l2;
+    _l4 = CERTO_STR("SELECT * FROM customer ORDER BY 1");
+    _l5 = certo_db_columns(_l3, _l4);
+    goto bb2;
+  bb2:
+    _l6 = _l5;
+    _l7 = certo_db_query(_l3, _l4, certo_list_empty);
+    goto bb3;
+  bb3:
+    _l8 = _l7;
+    _l9 = certo_db_close(_l3);
+    goto bb4;
+  bb4:
+    _l10 = certo_text_concat(CERTO_STR("<h1>Customer List</h1>"), CERTO_STR("<nav><a href=\"/create-customer\" class=\"btn\">New customer</a></nav>"));
+    _l11 = certo_html_table(_l6, _l8);
+    goto bb5;
+  bb5:
+    _l12 = certo_text_concat(_l10, _l11);
+    _l13 = _l12;
+    _l14 = certo_html_page(CERTO_STR("Customer List"), _l13);
+    goto bb6;
+  bb6:
+    _l15 = certo_http_ok(_l14, CERTO_STR("text/html"));
+    goto bb7;
+  bb7:
+    _l0 = _l15;
+    return _l0;
+}
+
+int64_t certo_handle_customer_detail(int64_t _l1) {
+    int64_t _l0;
+    certo_text_t _l2;
+    int64_t _l3;
+  bb0:
+    _l2 = certo_html_page(CERTO_STR("Customer Detail"), CERTO_STR("<h1>Customer Detail</h1><div class=\"vstack\">  <h2>Customer Detail</h2>  <div class=\"hstack\">    <button hx-get=\"/customer/edit\" hx-swap=\"outerHTML\">Edit</button>    <button hx-get=\"/customers\" hx-swap=\"outerHTML\">Back</button>  </div>  <div class=\"vstack\">    <h2>Account</h2>    <p>Account Name</p>    <p>Account No</p>    <p>Type</p>    <p>Status</p>  </div>  <div class=\"vstack\">    <h2>Name &amp; Address</h2>    <p>Name</p>    <p>Address</p>    <p>Town</p>    <p>Postcode</p>  </div>  <div class=\"vstack\">    <h2>Contact</h2>    <p>Phone</p>    <p>Email</p>  </div>  <div class=\"vstack\">    <h2>Billing</h2>    <p>Bill Cycle</p>    <p>Next Bill</p>    <p>Credit Code</p>    <p>Limit</p>  </div></div>"));
+    goto bb1;
+  bb1:
+    _l3 = certo_http_ok(_l2, CERTO_STR("text/html"));
+    goto bb2;
+  bb2:
+    _l0 = _l3;
+    return _l0;
+}
+
+int64_t certo_handle_subscriber_list(int64_t _l1) {
+    int64_t _l0;
+    int64_t _l2;
+    int64_t _l3;
+    certo_text_t _l4;
+    int64_t _l5;
+    int64_t _l6;
+    int64_t _l7;
+    int64_t _l8;
+    int64_t _l9;
+    int64_t _l10;
+    certo_text_t _l11;
+    int64_t _l12;
+    int64_t _l13;
+    certo_text_t _l14;
+    int64_t _l15;
+  bb0:
+    _l2 = certo_db_connect(certo_db_url);
+    goto bb1;
+  bb1:
+    _l3 = _l2;
+    _l4 = CERTO_STR("SELECT * FROM subscriber ORDER BY 1");
+    _l5 = certo_db_columns(_l3, _l4);
+    goto bb2;
+  bb2:
+    _l6 = _l5;
+    _l7 = certo_db_query(_l3, _l4, certo_list_empty);
+    goto bb3;
+  bb3:
+    _l8 = _l7;
+    _l9 = certo_db_close(_l3);
+    goto bb4;
+  bb4:
+    _l10 = certo_text_concat(CERTO_STR("<h1>Subscriber List</h1>"), CERTO_STR("<nav><a href=\"/create-subscriber\" class=\"btn\">New subscriber</a></nav>"));
+    _l11 = certo_html_table(_l6, _l8);
+    goto bb5;
+  bb5:
+    _l12 = certo_text_concat(_l10, _l11);
+    _l13 = _l12;
+    _l14 = certo_html_page(CERTO_STR("Subscriber List"), _l13);
+    goto bb6;
+  bb6:
+    _l15 = certo_http_ok(_l14, CERTO_STR("text/html"));
+    goto bb7;
+  bb7:
+    _l0 = _l15;
+    return _l0;
+}
+
+int64_t certo_handle_subscriber_detail(int64_t _l1) {
+    int64_t _l0;
+    certo_text_t _l2;
+    int64_t _l3;
+  bb0:
+    _l2 = certo_html_page(CERTO_STR("Subscriber Detail"), CERTO_STR("<h1>Subscriber Detail</h1><div class=\"vstack\">  <h2>Subscriber Detail</h2>  <div class=\"hstack\">    <button hx-get=\"/subscriber/edit\" hx-swap=\"outerHTML\">Edit</button>    <button hx-get=\"/subscribers\" hx-swap=\"outerHTML\">Back</button>  </div>  <div class=\"vstack\">    <h2>Identity</h2>    <p>Customer No</p>    <p>Subscriber No</p>    <p>Status</p>  </div>  <div class=\"vstack\">    <h2>Name &amp; Address</h2>    <p>Name</p>    <p>Address</p>    <p>Town</p>    <p>Postcode</p>  </div>  <div class=\"vstack\">    <h2>Contact</h2>    <p>Email</p>  </div></div>"));
+    goto bb1;
+  bb1:
+    _l3 = certo_http_ok(_l2, CERTO_STR("text/html"));
+    goto bb2;
+  bb2:
+    _l0 = _l3;
+    return _l0;
+}
+
+int64_t certo_handle_subscription_list(int64_t _l1) {
+    int64_t _l0;
+    int64_t _l2;
+    int64_t _l3;
+    certo_text_t _l4;
+    int64_t _l5;
+    int64_t _l6;
+    int64_t _l7;
+    int64_t _l8;
+    int64_t _l9;
+    int64_t _l10;
+    certo_text_t _l11;
+    int64_t _l12;
+    int64_t _l13;
+    certo_text_t _l14;
+    int64_t _l15;
+  bb0:
+    _l2 = certo_db_connect(certo_db_url);
+    goto bb1;
+  bb1:
+    _l3 = _l2;
+    _l4 = CERTO_STR("SELECT * FROM subscription ORDER BY 1");
+    _l5 = certo_db_columns(_l3, _l4);
+    goto bb2;
+  bb2:
+    _l6 = _l5;
+    _l7 = certo_db_query(_l3, _l4, certo_list_empty);
+    goto bb3;
+  bb3:
+    _l8 = _l7;
+    _l9 = certo_db_close(_l3);
+    goto bb4;
+  bb4:
+    _l10 = certo_text_concat(CERTO_STR("<h1>Subscription List</h1>"), CERTO_STR("<nav><a href=\"/create-subscription\" class=\"btn\">New subscription</a></nav>"));
+    _l11 = certo_html_table(_l6, _l8);
+    goto bb5;
+  bb5:
+    _l12 = certo_text_concat(_l10, _l11);
+    _l13 = _l12;
+    _l14 = certo_html_page(CERTO_STR("Subscription List"), _l13);
+    goto bb6;
+  bb6:
+    _l15 = certo_http_ok(_l14, CERTO_STR("text/html"));
+    goto bb7;
+  bb7:
+    _l0 = _l15;
+    return _l0;
+}
+
+int64_t certo_handle_product_list(int64_t _l1) {
+    int64_t _l0;
+    int64_t _l2;
+    int64_t _l3;
+    certo_text_t _l4;
+    int64_t _l5;
+    int64_t _l6;
+    int64_t _l7;
+    int64_t _l8;
+    int64_t _l9;
+    int64_t _l10;
+    certo_text_t _l11;
+    int64_t _l12;
+    int64_t _l13;
+    certo_text_t _l14;
+    int64_t _l15;
+  bb0:
+    _l2 = certo_db_connect(certo_db_url);
+    goto bb1;
+  bb1:
+    _l3 = _l2;
+    _l4 = CERTO_STR("SELECT * FROM product ORDER BY 1");
+    _l5 = certo_db_columns(_l3, _l4);
+    goto bb2;
+  bb2:
+    _l6 = _l5;
+    _l7 = certo_db_query(_l3, _l4, certo_list_empty);
+    goto bb3;
+  bb3:
+    _l8 = _l7;
+    _l9 = certo_db_close(_l3);
+    goto bb4;
+  bb4:
+    _l10 = certo_text_concat(CERTO_STR("<h1>Product List</h1>"), CERTO_STR("<nav><a href=\"/create-product\" class=\"btn\">New product</a></nav>"));
+    _l11 = certo_html_table(_l6, _l8);
+    goto bb5;
+  bb5:
+    _l12 = certo_text_concat(_l10, _l11);
+    _l13 = _l12;
+    _l14 = certo_html_page(CERTO_STR("Product List"), _l13);
+    goto bb6;
+  bb6:
+    _l15 = certo_http_ok(_l14, CERTO_STR("text/html"));
+    goto bb7;
+  bb7:
+    _l0 = _l15;
+    return _l0;
+}
+
+int64_t certo_handle_create_customer_get(int64_t _l1) {
+    int64_t _l0;
+    int64_t _l2;
+    int64_t _l3;
+    int64_t _l4;
+    int64_t _l5;
+    int64_t _l6;
+    int64_t _l7;
+    int64_t _l8;
+    int64_t _l9;
+    int64_t _l10;
+    int64_t _l11;
+    int64_t _l12;
+    int64_t _l13;
+    int64_t _l14;
+    int64_t _l15;
+    int64_t _l16;
+    int64_t _l17;
+    int64_t _l18;
+    int64_t _l19;
+    int64_t _l20;
+    int64_t _l21;
+    int64_t _l22;
+    int64_t _l23;
+    int64_t _l24;
+    int64_t _l25;
+    int64_t _l26;
+    int64_t _l27;
+    int64_t _l28;
+    int64_t _l29;
+    int64_t _l30;
+    int64_t _l31;
+    int64_t _l32;
+    int64_t _l33;
+    int64_t _l34;
+    int64_t _l35;
+    int64_t _l36;
+    int64_t _l37;
+    int64_t _l38;
+    int64_t _l39;
+    int64_t _l40;
+    certo_text_t _l41;
+    int64_t _l42;
+  bb0:
+    _l2 = certo_text_concat(CERTO_STR("<h1>Create Customer</h1>"), CERTO_STR("<nav><a href=\"/customer-list\">← Back to list</a></nav>"));
+    _l3 = certo_text_concat(_l2, CERTO_STR("<form method=\"POST\" action=\"/create-customer\">"));
+    _l4 = certo_text_concat(_l3, CERTO_STR("<div class=\"field\"><label for=\"custAcctname\">custAcctname</label>"));
+    _l5 = certo_text_concat(_l4, CERTO_STR("<input id=\"custAcctname\" name=\"custAcctname\" type=\"text\" required></div>"));
+    _l6 = certo_text_concat(_l5, CERTO_STR("<div class=\"field\"><label for=\"custNo\">custNo</label>"));
+    _l7 = certo_text_concat(_l6, CERTO_STR("<input id=\"custNo\" name=\"custNo\" type=\"text\" required></div>"));
+    _l8 = certo_text_concat(_l7, CERTO_STR("<div class=\"field\"><label for=\"custType\">custType</label>"));
+    _l9 = certo_text_concat(_l8, CERTO_STR("<input id=\"custType\" name=\"custType\" type=\"text\" required></div>"));
+    _l10 = certo_text_concat(_l9, CERTO_STR("<div class=\"field\"><label for=\"custStatus\">custStatus</label>"));
+    _l11 = certo_text_concat(_l10, CERTO_STR("<input id=\"custStatus\" name=\"custStatus\" type=\"text\" required></div>"));
+    _l12 = certo_text_concat(_l11, CERTO_STR("<div class=\"field\"><label for=\"custName1\">custName1</label>"));
+    _l13 = certo_text_concat(_l12, CERTO_STR("<input id=\"custName1\" name=\"custName1\" type=\"text\" required></div>"));
+    _l14 = certo_text_concat(_l13, CERTO_STR("<div class=\"field\"><label for=\"custName2\">custName2</label>"));
+    _l15 = certo_text_concat(_l14, CERTO_STR("<input id=\"custName2\" name=\"custName2\" type=\"text\" required></div>"));
+    _l16 = certo_text_concat(_l15, CERTO_STR("<div class=\"field\"><label for=\"custAddress1\">custAddress1</label>"));
+    _l17 = certo_text_concat(_l16, CERTO_STR("<input id=\"custAddress1\" name=\"custAddress1\" type=\"text\" required></div>"));
+    _l18 = certo_text_concat(_l17, CERTO_STR("<div class=\"field\"><label for=\"custAddress2\">custAddress2</label>"));
+    _l19 = certo_text_concat(_l18, CERTO_STR("<input id=\"custAddress2\" name=\"custAddress2\" type=\"text\" required></div>"));
+    _l20 = certo_text_concat(_l19, CERTO_STR("<div class=\"field\"><label for=\"custTown\">custTown</label>"));
+    _l21 = certo_text_concat(_l20, CERTO_STR("<input id=\"custTown\" name=\"custTown\" type=\"text\" required></div>"));
+    _l22 = certo_text_concat(_l21, CERTO_STR("<div class=\"field\"><label for=\"custPostcode\">custPostcode</label>"));
+    _l23 = certo_text_concat(_l22, CERTO_STR("<input id=\"custPostcode\" name=\"custPostcode\" type=\"text\" required></div>"));
+    _l24 = certo_text_concat(_l23, CERTO_STR("<div class=\"field\"><label for=\"custContact\">custContact</label>"));
+    _l25 = certo_text_concat(_l24, CERTO_STR("<input id=\"custContact\" name=\"custContact\" type=\"text\" required></div>"));
+    _l26 = certo_text_concat(_l25, CERTO_STR("<div class=\"field\"><label for=\"custPhone\">custPhone</label>"));
+    _l27 = certo_text_concat(_l26, CERTO_STR("<input id=\"custPhone\" name=\"custPhone\" type=\"tel\" required></div>"));
+    _l28 = certo_text_concat(_l27, CERTO_STR("<div class=\"field\"><label for=\"custEmail\">custEmail</label>"));
+    _l29 = certo_text_concat(_l28, CERTO_STR("<input id=\"custEmail\" name=\"custEmail\" type=\"email\" required></div>"));
+    _l30 = certo_text_concat(_l29, CERTO_STR("<div class=\"field\"><label for=\"custBillCycle\">custBillCycle</label>"));
+    _l31 = certo_text_concat(_l30, CERTO_STR("<input id=\"custBillCycle\" name=\"custBillCycle\" type=\"text\" required></div>"));
+    _l32 = certo_text_concat(_l31, CERTO_STR("<div class=\"field\"><label for=\"custNextBill\">custNextBill</label>"));
+    _l33 = certo_text_concat(_l32, CERTO_STR("<input id=\"custNextBill\" name=\"custNextBill\" type=\"text\" required></div>"));
+    _l34 = certo_text_concat(_l33, CERTO_STR("<div class=\"field\"><label for=\"custCreditCde\">custCreditCde</label>"));
+    _l35 = certo_text_concat(_l34, CERTO_STR("<input id=\"custCreditCde\" name=\"custCreditCde\" type=\"text\" required></div>"));
+    _l36 = certo_text_concat(_l35, CERTO_STR("<div class=\"field\"><label for=\"custLimit\">custLimit</label>"));
+    _l37 = certo_text_concat(_l36, CERTO_STR("<input id=\"custLimit\" name=\"custLimit\" type=\"text\" required></div>"));
+    _l38 = certo_text_concat(_l37, CERTO_STR("<button type=\"submit\">Submit</button>"));
+    _l39 = certo_text_concat(_l38, CERTO_STR("</form>"));
+    _l40 = _l39;
+    _l41 = certo_html_page(CERTO_STR("Create Customer"), _l40);
+    goto bb1;
+  bb1:
+    _l42 = certo_http_ok(_l41, CERTO_STR("text/html"));
+    goto bb2;
+  bb2:
+    _l0 = _l42;
+    return _l0;
+}
+
+int64_t certo_handle_create_customer_post(int64_t _l1) {
+    int64_t _l0;
+    int64_t _l2;
+    int64_t _l3;
+    int64_t _l4;
+    int64_t _l5;
+    certo_text_t _l6;
+    certo_text_t _l7;
+    certo_text_t _l8;
+    certo_text_t _l9;
+    certo_text_t _l10;
+    certo_text_t _l11;
+    certo_text_t _l12;
+    certo_text_t _l13;
+    certo_text_t _l14;
+    certo_text_t _l15;
+    certo_text_t _l16;
+    certo_text_t _l17;
+    certo_text_t _l18;
+    certo_text_t _l19;
+    certo_text_t _l20;
+    certo_text_t _l21;
+    certo_text_t _l22;
+    certo_text_t _l23;
+    certo_text_t _l24;
+    certo_text_t _l25;
+    certo_text_t _l26;
+    certo_text_t _l27;
+    certo_text_t _l28;
+    certo_text_t _l29;
+    certo_text_t _l30;
+    certo_text_t _l31;
+    certo_text_t _l32;
+    certo_text_t _l33;
+    certo_text_t _l34;
+    certo_text_t _l35;
+    certo_text_t _l36;
+    certo_text_t _l37;
+    certo_text_t _l38;
+    certo_text_t _l39;
+    int64_t _l40;
+    int64_t _l41;
+    int64_t _l42;
+    int64_t _l43;
+    int64_t _l44;
+    int64_t _l45;
+    int64_t _l46;
+    int64_t _l47;
+    int64_t _l48;
+    int64_t _l49;
+    int64_t _l50;
+    int64_t _l51;
+    int64_t _l52;
+    int64_t _l53;
+    int64_t _l54;
+    int64_t _l55;
+    int64_t _l56;
+    int64_t _l57;
+    int64_t _l58;
+    int64_t _l59;
+    int64_t _l60;
+    int64_t _l61;
+    int64_t _l62;
+    int64_t _l63;
+    int64_t _l64;
+    int64_t _l65;
+    int64_t _l66;
+    int64_t _l67;
+    int64_t _l68;
+    int64_t _l69;
+    int64_t _l70;
+    int64_t _l71;
+    int64_t _l72;
+    int64_t _l73;
+    int64_t _l74;
+    int64_t _l75;
+    int64_t _l76;
+    int64_t _l77;
+    int64_t _l78;
+    certo_text_t _l79;
+    certo_text_t _l80;
+    int64_t _l81;
+    int64_t _l82;
+    int64_t _l83;
+    certo_text_t _l84;
+    int64_t _l85;
+  bb0:
+    _l2 = certo_http_request_body(_l1);
+    goto bb1;
+  bb1:
+    _l3 = _l2;
+    _l4 = certo_db_connect(certo_db_url);
+    goto bb2;
+  bb2:
+    _l5 = _l4;
+    _l6 = certo_form_field(_l3, CERTO_STR("custAcctname"));
+    goto bb3;
+  bb3:
+    _l7 = _l6;
+    _l8 = certo_form_field(_l3, CERTO_STR("custNo"));
+    goto bb4;
+  bb4:
+    _l9 = _l8;
+    _l10 = certo_form_field(_l3, CERTO_STR("custType"));
+    goto bb5;
+  bb5:
+    _l11 = _l10;
+    _l12 = certo_form_field(_l3, CERTO_STR("custStatus"));
+    goto bb6;
+  bb6:
+    _l13 = _l12;
+    _l14 = certo_form_field(_l3, CERTO_STR("custName1"));
+    goto bb7;
+  bb7:
+    _l15 = _l14;
+    _l16 = certo_form_field(_l3, CERTO_STR("custName2"));
+    goto bb8;
+  bb8:
+    _l17 = _l16;
+    _l18 = certo_form_field(_l3, CERTO_STR("custAddress1"));
+    goto bb9;
+  bb9:
+    _l19 = _l18;
+    _l20 = certo_form_field(_l3, CERTO_STR("custAddress2"));
+    goto bb10;
+  bb10:
+    _l21 = _l20;
+    _l22 = certo_form_field(_l3, CERTO_STR("custTown"));
+    goto bb11;
+  bb11:
+    _l23 = _l22;
+    _l24 = certo_form_field(_l3, CERTO_STR("custPostcode"));
+    goto bb12;
+  bb12:
+    _l25 = _l24;
+    _l26 = certo_form_field(_l3, CERTO_STR("custContact"));
+    goto bb13;
+  bb13:
+    _l27 = _l26;
+    _l28 = certo_form_field(_l3, CERTO_STR("custPhone"));
+    goto bb14;
+  bb14:
+    _l29 = _l28;
+    _l30 = certo_form_field(_l3, CERTO_STR("custEmail"));
+    goto bb15;
+  bb15:
+    _l31 = _l30;
+    _l32 = certo_form_field(_l3, CERTO_STR("custBillCycle"));
+    goto bb16;
+  bb16:
+    _l33 = _l32;
+    _l34 = certo_form_field(_l3, CERTO_STR("custNextBill"));
+    goto bb17;
+  bb17:
+    _l35 = _l34;
+    _l36 = certo_form_field(_l3, CERTO_STR("custCreditCde"));
+    goto bb18;
+  bb18:
+    _l37 = _l36;
+    _l38 = certo_form_field(_l3, CERTO_STR("custLimit"));
+    goto bb19;
+  bb19:
+    _l39 = _l38;
+    _l40 = certo_list_empty;
+    _l41 = certo_list_push(_l40, _l7);
+    goto bb20;
+  bb20:
+    _l42 = _l41;
+    _l43 = certo_list_push(_l42, _l9);
+    goto bb21;
+  bb21:
+    _l44 = _l43;
+    _l45 = certo_list_push(_l44, _l11);
+    goto bb22;
+  bb22:
+    _l46 = _l45;
+    _l47 = certo_list_push(_l46, _l13);
+    goto bb23;
+  bb23:
+    _l48 = _l47;
+    _l49 = certo_list_push(_l48, _l15);
+    goto bb24;
+  bb24:
+    _l50 = _l49;
+    _l51 = certo_list_push(_l50, _l17);
+    goto bb25;
+  bb25:
+    _l52 = _l51;
+    _l53 = certo_list_push(_l52, _l19);
+    goto bb26;
+  bb26:
+    _l54 = _l53;
+    _l55 = certo_list_push(_l54, _l21);
+    goto bb27;
+  bb27:
+    _l56 = _l55;
+    _l57 = certo_list_push(_l56, _l23);
+    goto bb28;
+  bb28:
+    _l58 = _l57;
+    _l59 = certo_list_push(_l58, _l25);
+    goto bb29;
+  bb29:
+    _l60 = _l59;
+    _l61 = certo_list_push(_l60, _l27);
+    goto bb30;
+  bb30:
+    _l62 = _l61;
+    _l63 = certo_list_push(_l62, _l29);
+    goto bb31;
+  bb31:
+    _l64 = _l63;
+    _l65 = certo_list_push(_l64, _l31);
+    goto bb32;
+  bb32:
+    _l66 = _l65;
+    _l67 = certo_list_push(_l66, _l33);
+    goto bb33;
+  bb33:
+    _l68 = _l67;
+    _l69 = certo_list_push(_l68, _l35);
+    goto bb34;
+  bb34:
+    _l70 = _l69;
+    _l71 = certo_list_push(_l70, _l37);
+    goto bb35;
+  bb35:
+    _l72 = _l71;
+    _l73 = certo_list_push(_l72, _l39);
+    goto bb36;
+  bb36:
+    _l74 = _l73;
+    _l75 = certo_db_exec(_l5, CERTO_STR("INSERT INTO customer (cust_acctname, cust_no, cust_type, cust_status, cust_name1, cust_name2, cust_address1, cust_address2, cust_town, cust_postcode, cust_contact, cust_phone, cust_email, cust_bill_cycle, cust_next_bill, cust_credit_cde, cust_limit) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)"), _l74);
+    goto bb37;
+  bb37:
+    _l76 = _l75;
+    _l77 = certo_db_close(_l5);
+    goto bb38;
+  bb38:
+    _l78 = (_l76 > 0);
+    if (_l78) goto bb39; else goto bb40;
+  bb39:
+    _l79 = CERTO_STR("Record saved.");
+    goto bb41;
+  bb40:
+    _l79 = CERTO_STR("Save failed — check your input.");
+    goto bb41;
+  bb41:
+    _l80 = _l79;
+    _l81 = certo_text_concat(CERTO_STR("<h2>"), _l80);
+    _l82 = certo_text_concat(_l81, CERTO_STR("</h2><p><a href=\"/customer-list\">← Back to list</a></p>"));
+    _l83 = _l82;
+    _l84 = certo_html_page(CERTO_STR("Done"), _l83);
+    goto bb42;
+  bb42:
+    _l85 = certo_http_ok(_l84, CERTO_STR("text/html"));
+    goto bb43;
+  bb43:
+    _l0 = _l85;
+    return _l0;
+}
+
+int64_t certo_handle_edit_customer_get(int64_t _l1) {
+    int64_t _l0;
+    int64_t _l2;
+    int64_t _l3;
+    int64_t _l4;
+    int64_t _l5;
+    int64_t _l6;
+    int64_t _l7;
+    int64_t _l8;
+    int64_t _l9;
+    int64_t _l10;
+    int64_t _l11;
+    int64_t _l12;
+    int64_t _l13;
+    int64_t _l14;
+    int64_t _l15;
+    int64_t _l16;
+    int64_t _l17;
+    int64_t _l18;
+    int64_t _l19;
+    int64_t _l20;
+    int64_t _l21;
+    int64_t _l22;
+    int64_t _l23;
+    int64_t _l24;
+    int64_t _l25;
+    int64_t _l26;
+    int64_t _l27;
+    int64_t _l28;
+    int64_t _l29;
+    int64_t _l30;
+    int64_t _l31;
+    int64_t _l32;
+    int64_t _l33;
+    int64_t _l34;
+    int64_t _l35;
+    int64_t _l36;
+    certo_text_t _l37;
+    int64_t _l38;
+  bb0:
+    _l2 = certo_text_concat(CERTO_STR("<h1>Edit Customer</h1>"), CERTO_STR("<nav><a href=\"/customer-list\">← Back to list</a></nav>"));
+    _l3 = certo_text_concat(_l2, CERTO_STR("<form method=\"POST\" action=\"/edit-customer\">"));
+    _l4 = certo_text_concat(_l3, CERTO_STR("<div class=\"field\"><label for=\"custType\">custType</label>"));
+    _l5 = certo_text_concat(_l4, CERTO_STR("<input id=\"custType\" name=\"custType\" type=\"text\" required></div>"));
+    _l6 = certo_text_concat(_l5, CERTO_STR("<div class=\"field\"><label for=\"custStatus\">custStatus</label>"));
+    _l7 = certo_text_concat(_l6, CERTO_STR("<input id=\"custStatus\" name=\"custStatus\" type=\"text\" required></div>"));
+    _l8 = certo_text_concat(_l7, CERTO_STR("<div class=\"field\"><label for=\"custName1\">custName1</label>"));
+    _l9 = certo_text_concat(_l8, CERTO_STR("<input id=\"custName1\" name=\"custName1\" type=\"text\" required></div>"));
+    _l10 = certo_text_concat(_l9, CERTO_STR("<div class=\"field\"><label for=\"custName2\">custName2</label>"));
+    _l11 = certo_text_concat(_l10, CERTO_STR("<input id=\"custName2\" name=\"custName2\" type=\"text\" required></div>"));
+    _l12 = certo_text_concat(_l11, CERTO_STR("<div class=\"field\"><label for=\"custAddress1\">custAddress1</label>"));
+    _l13 = certo_text_concat(_l12, CERTO_STR("<input id=\"custAddress1\" name=\"custAddress1\" type=\"text\" required></div>"));
+    _l14 = certo_text_concat(_l13, CERTO_STR("<div class=\"field\"><label for=\"custAddress2\">custAddress2</label>"));
+    _l15 = certo_text_concat(_l14, CERTO_STR("<input id=\"custAddress2\" name=\"custAddress2\" type=\"text\" required></div>"));
+    _l16 = certo_text_concat(_l15, CERTO_STR("<div class=\"field\"><label for=\"custTown\">custTown</label>"));
+    _l17 = certo_text_concat(_l16, CERTO_STR("<input id=\"custTown\" name=\"custTown\" type=\"text\" required></div>"));
+    _l18 = certo_text_concat(_l17, CERTO_STR("<div class=\"field\"><label for=\"custPostcode\">custPostcode</label>"));
+    _l19 = certo_text_concat(_l18, CERTO_STR("<input id=\"custPostcode\" name=\"custPostcode\" type=\"text\" required></div>"));
+    _l20 = certo_text_concat(_l19, CERTO_STR("<div class=\"field\"><label for=\"custContact\">custContact</label>"));
+    _l21 = certo_text_concat(_l20, CERTO_STR("<input id=\"custContact\" name=\"custContact\" type=\"text\" required></div>"));
+    _l22 = certo_text_concat(_l21, CERTO_STR("<div class=\"field\"><label for=\"custPhone\">custPhone</label>"));
+    _l23 = certo_text_concat(_l22, CERTO_STR("<input id=\"custPhone\" name=\"custPhone\" type=\"tel\" required></div>"));
+    _l24 = certo_text_concat(_l23, CERTO_STR("<div class=\"field\"><label for=\"custEmail\">custEmail</label>"));
+    _l25 = certo_text_concat(_l24, CERTO_STR("<input id=\"custEmail\" name=\"custEmail\" type=\"email\" required></div>"));
+    _l26 = certo_text_concat(_l25, CERTO_STR("<div class=\"field\"><label for=\"custBillCycle\">custBillCycle</label>"));
+    _l27 = certo_text_concat(_l26, CERTO_STR("<input id=\"custBillCycle\" name=\"custBillCycle\" type=\"text\" required></div>"));
+    _l28 = certo_text_concat(_l27, CERTO_STR("<div class=\"field\"><label for=\"custNextBill\">custNextBill</label>"));
+    _l29 = certo_text_concat(_l28, CERTO_STR("<input id=\"custNextBill\" name=\"custNextBill\" type=\"text\" required></div>"));
+    _l30 = certo_text_concat(_l29, CERTO_STR("<div class=\"field\"><label for=\"custCreditCde\">custCreditCde</label>"));
+    _l31 = certo_text_concat(_l30, CERTO_STR("<input id=\"custCreditCde\" name=\"custCreditCde\" type=\"text\" required></div>"));
+    _l32 = certo_text_concat(_l31, CERTO_STR("<div class=\"field\"><label for=\"custLimit\">custLimit</label>"));
+    _l33 = certo_text_concat(_l32, CERTO_STR("<input id=\"custLimit\" name=\"custLimit\" type=\"text\" required></div>"));
+    _l34 = certo_text_concat(_l33, CERTO_STR("<button type=\"submit\">Submit</button>"));
+    _l35 = certo_text_concat(_l34, CERTO_STR("</form>"));
+    _l36 = _l35;
+    _l37 = certo_html_page(CERTO_STR("Edit Customer"), _l36);
+    goto bb1;
+  bb1:
+    _l38 = certo_http_ok(_l37, CERTO_STR("text/html"));
+    goto bb2;
+  bb2:
+    _l0 = _l38;
+    return _l0;
+}
+
+int64_t certo_handle_edit_customer_post(int64_t _l1) {
+    int64_t _l0;
+    int64_t _l2;
+    int64_t _l3;
+    int64_t _l4;
+    int64_t _l5;
+    certo_text_t _l6;
+    certo_text_t _l7;
+    certo_text_t _l8;
+    certo_text_t _l9;
+    certo_text_t _l10;
+    certo_text_t _l11;
+    certo_text_t _l12;
+    certo_text_t _l13;
+    certo_text_t _l14;
+    certo_text_t _l15;
+    certo_text_t _l16;
+    certo_text_t _l17;
+    certo_text_t _l18;
+    certo_text_t _l19;
+    certo_text_t _l20;
+    certo_text_t _l21;
+    certo_text_t _l22;
+    certo_text_t _l23;
+    certo_text_t _l24;
+    certo_text_t _l25;
+    certo_text_t _l26;
+    certo_text_t _l27;
+    certo_text_t _l28;
+    certo_text_t _l29;
+    certo_text_t _l30;
+    certo_text_t _l31;
+    certo_text_t _l32;
+    certo_text_t _l33;
+    certo_text_t _l34;
+    certo_text_t _l35;
+    int64_t _l36;
+    int64_t _l37;
+    int64_t _l38;
+    int64_t _l39;
+    int64_t _l40;
+    int64_t _l41;
+    int64_t _l42;
+    int64_t _l43;
+    int64_t _l44;
+    int64_t _l45;
+    int64_t _l46;
+    int64_t _l47;
+    int64_t _l48;
+    int64_t _l49;
+    int64_t _l50;
+    int64_t _l51;
+    int64_t _l52;
+    int64_t _l53;
+    int64_t _l54;
+    int64_t _l55;
+    int64_t _l56;
+    int64_t _l57;
+    int64_t _l58;
+    int64_t _l59;
+    int64_t _l60;
+    int64_t _l61;
+    int64_t _l62;
+    int64_t _l63;
+    int64_t _l64;
+    int64_t _l65;
+    int64_t _l66;
+    int64_t _l67;
+    int64_t _l68;
+    int64_t _l69;
+    int64_t _l70;
+    certo_text_t _l71;
+    certo_text_t _l72;
+    int64_t _l73;
+    int64_t _l74;
+    int64_t _l75;
+    certo_text_t _l76;
+    int64_t _l77;
+  bb0:
+    _l2 = certo_http_request_body(_l1);
+    goto bb1;
+  bb1:
+    _l3 = _l2;
+    _l4 = certo_db_connect(certo_db_url);
+    goto bb2;
+  bb2:
+    _l5 = _l4;
+    _l6 = certo_form_field(_l3, CERTO_STR("custType"));
+    goto bb3;
+  bb3:
+    _l7 = _l6;
+    _l8 = certo_form_field(_l3, CERTO_STR("custStatus"));
+    goto bb4;
+  bb4:
+    _l9 = _l8;
+    _l10 = certo_form_field(_l3, CERTO_STR("custName1"));
+    goto bb5;
+  bb5:
+    _l11 = _l10;
+    _l12 = certo_form_field(_l3, CERTO_STR("custName2"));
+    goto bb6;
+  bb6:
+    _l13 = _l12;
+    _l14 = certo_form_field(_l3, CERTO_STR("custAddress1"));
+    goto bb7;
+  bb7:
+    _l15 = _l14;
+    _l16 = certo_form_field(_l3, CERTO_STR("custAddress2"));
+    goto bb8;
+  bb8:
+    _l17 = _l16;
+    _l18 = certo_form_field(_l3, CERTO_STR("custTown"));
+    goto bb9;
+  bb9:
+    _l19 = _l18;
+    _l20 = certo_form_field(_l3, CERTO_STR("custPostcode"));
+    goto bb10;
+  bb10:
+    _l21 = _l20;
+    _l22 = certo_form_field(_l3, CERTO_STR("custContact"));
+    goto bb11;
+  bb11:
+    _l23 = _l22;
+    _l24 = certo_form_field(_l3, CERTO_STR("custPhone"));
+    goto bb12;
+  bb12:
+    _l25 = _l24;
+    _l26 = certo_form_field(_l3, CERTO_STR("custEmail"));
+    goto bb13;
+  bb13:
+    _l27 = _l26;
+    _l28 = certo_form_field(_l3, CERTO_STR("custBillCycle"));
+    goto bb14;
+  bb14:
+    _l29 = _l28;
+    _l30 = certo_form_field(_l3, CERTO_STR("custNextBill"));
+    goto bb15;
+  bb15:
+    _l31 = _l30;
+    _l32 = certo_form_field(_l3, CERTO_STR("custCreditCde"));
+    goto bb16;
+  bb16:
+    _l33 = _l32;
+    _l34 = certo_form_field(_l3, CERTO_STR("custLimit"));
+    goto bb17;
+  bb17:
+    _l35 = _l34;
+    _l36 = certo_list_empty;
+    _l37 = certo_list_push(_l36, _l7);
+    goto bb18;
+  bb18:
+    _l38 = _l37;
+    _l39 = certo_list_push(_l38, _l9);
+    goto bb19;
+  bb19:
+    _l40 = _l39;
+    _l41 = certo_list_push(_l40, _l11);
+    goto bb20;
+  bb20:
+    _l42 = _l41;
+    _l43 = certo_list_push(_l42, _l13);
+    goto bb21;
+  bb21:
+    _l44 = _l43;
+    _l45 = certo_list_push(_l44, _l15);
+    goto bb22;
+  bb22:
+    _l46 = _l45;
+    _l47 = certo_list_push(_l46, _l17);
+    goto bb23;
+  bb23:
+    _l48 = _l47;
+    _l49 = certo_list_push(_l48, _l19);
+    goto bb24;
+  bb24:
+    _l50 = _l49;
+    _l51 = certo_list_push(_l50, _l21);
+    goto bb25;
+  bb25:
+    _l52 = _l51;
+    _l53 = certo_list_push(_l52, _l23);
+    goto bb26;
+  bb26:
+    _l54 = _l53;
+    _l55 = certo_list_push(_l54, _l25);
+    goto bb27;
+  bb27:
+    _l56 = _l55;
+    _l57 = certo_list_push(_l56, _l27);
+    goto bb28;
+  bb28:
+    _l58 = _l57;
+    _l59 = certo_list_push(_l58, _l29);
+    goto bb29;
+  bb29:
+    _l60 = _l59;
+    _l61 = certo_list_push(_l60, _l31);
+    goto bb30;
+  bb30:
+    _l62 = _l61;
+    _l63 = certo_list_push(_l62, _l33);
+    goto bb31;
+  bb31:
+    _l64 = _l63;
+    _l65 = certo_list_push(_l64, _l35);
+    goto bb32;
+  bb32:
+    _l66 = _l65;
+    _l67 = certo_db_exec(_l5, CERTO_STR("INSERT INTO customer (cust_type, cust_status, cust_name1, cust_name2, cust_address1, cust_address2, cust_town, cust_postcode, cust_contact, cust_phone, cust_email, cust_bill_cycle, cust_next_bill, cust_credit_cde, cust_limit) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)"), _l66);
+    goto bb33;
+  bb33:
+    _l68 = _l67;
+    _l69 = certo_db_close(_l5);
+    goto bb34;
+  bb34:
+    _l70 = (_l68 > 0);
+    if (_l70) goto bb35; else goto bb36;
+  bb35:
+    _l71 = CERTO_STR("Record saved.");
+    goto bb37;
+  bb36:
+    _l71 = CERTO_STR("Save failed — check your input.");
+    goto bb37;
+  bb37:
+    _l72 = _l71;
+    _l73 = certo_text_concat(CERTO_STR("<h2>"), _l72);
+    _l74 = certo_text_concat(_l73, CERTO_STR("</h2><p><a href=\"/customer-list\">← Back to list</a></p>"));
+    _l75 = _l74;
+    _l76 = certo_html_page(CERTO_STR("Done"), _l75);
+    goto bb38;
+  bb38:
+    _l77 = certo_http_ok(_l76, CERTO_STR("text/html"));
+    goto bb39;
+  bb39:
+    _l0 = _l77;
+    return _l0;
+}
+
+int64_t certo_handle_create_subscriber_get(int64_t _l1) {
+    int64_t _l0;
+    int64_t _l2;
+    int64_t _l3;
+    int64_t _l4;
+    int64_t _l5;
+    int64_t _l6;
+    int64_t _l7;
+    int64_t _l8;
+    int64_t _l9;
+    int64_t _l10;
+    int64_t _l11;
+    int64_t _l12;
+    int64_t _l13;
+    int64_t _l14;
+    int64_t _l15;
+    int64_t _l16;
+    int64_t _l17;
+    int64_t _l18;
+    int64_t _l19;
+    int64_t _l20;
+    int64_t _l21;
+    int64_t _l22;
+    int64_t _l23;
+    int64_t _l24;
+    int64_t _l25;
+    int64_t _l26;
+    int64_t _l27;
+    int64_t _l28;
+    int64_t _l29;
+    int64_t _l30;
+    certo_text_t _l31;
+    int64_t _l32;
+  bb0:
+    _l2 = certo_text_concat(CERTO_STR("<h1>Create Subscriber</h1>"), CERTO_STR("<nav><a href=\"/subscriber-list\">← Back to list</a></nav>"));
+    _l3 = certo_text_concat(_l2, CERTO_STR("<form method=\"POST\" action=\"/create-subscriber\">"));
+    _l4 = certo_text_concat(_l3, CERTO_STR("<div class=\"field\"><label for=\"custNo\">custNo</label>"));
+    _l5 = certo_text_concat(_l4, CERTO_STR("<input id=\"custNo\" name=\"custNo\" type=\"text\" required></div>"));
+    _l6 = certo_text_concat(_l5, CERTO_STR("<div class=\"field\"><label for=\"subNo\">subNo</label>"));
+    _l7 = certo_text_concat(_l6, CERTO_STR("<input id=\"subNo\" name=\"subNo\" type=\"text\" required></div>"));
+    _l8 = certo_text_concat(_l7, CERTO_STR("<div class=\"field\"><label for=\"subsName\">subsName</label>"));
+    _l9 = certo_text_concat(_l8, CERTO_STR("<input id=\"subsName\" name=\"subsName\" type=\"text\" required></div>"));
+    _l10 = certo_text_concat(_l9, CERTO_STR("<div class=\"field\"><label for=\"subsName1\">subsName1</label>"));
+    _l11 = certo_text_concat(_l10, CERTO_STR("<input id=\"subsName1\" name=\"subsName1\" type=\"text\" required></div>"));
+    _l12 = certo_text_concat(_l11, CERTO_STR("<div class=\"field\"><label for=\"subsName2\">subsName2</label>"));
+    _l13 = certo_text_concat(_l12, CERTO_STR("<input id=\"subsName2\" name=\"subsName2\" type=\"text\" required></div>"));
+    _l14 = certo_text_concat(_l13, CERTO_STR("<div class=\"field\"><label for=\"subsAddress1\">subsAddress1</label>"));
+    _l15 = certo_text_concat(_l14, CERTO_STR("<input id=\"subsAddress1\" name=\"subsAddress1\" type=\"text\" required></div>"));
+    _l16 = certo_text_concat(_l15, CERTO_STR("<div class=\"field\"><label for=\"subsAddress2\">subsAddress2</label>"));
+    _l17 = certo_text_concat(_l16, CERTO_STR("<input id=\"subsAddress2\" name=\"subsAddress2\" type=\"text\" required></div>"));
+    _l18 = certo_text_concat(_l17, CERTO_STR("<div class=\"field\"><label for=\"subsTown\">subsTown</label>"));
+    _l19 = certo_text_concat(_l18, CERTO_STR("<input id=\"subsTown\" name=\"subsTown\" type=\"text\" required></div>"));
+    _l20 = certo_text_concat(_l19, CERTO_STR("<div class=\"field\"><label for=\"subsPostcode\">subsPostcode</label>"));
+    _l21 = certo_text_concat(_l20, CERTO_STR("<input id=\"subsPostcode\" name=\"subsPostcode\" type=\"text\" required></div>"));
+    _l22 = certo_text_concat(_l21, CERTO_STR("<div class=\"field\"><label for=\"subsEmail\">subsEmail</label>"));
+    _l23 = certo_text_concat(_l22, CERTO_STR("<input id=\"subsEmail\" name=\"subsEmail\" type=\"email\" required></div>"));
+    _l24 = certo_text_concat(_l23, CERTO_STR("<div class=\"field\"><label for=\"subActive\">subActive</label>"));
+    _l25 = certo_text_concat(_l24, CERTO_STR("<input id=\"subActive\" name=\"subActive\" type=\"text\" required></div>"));
+    _l26 = certo_text_concat(_l25, CERTO_STR("<div class=\"field\"><label for=\"subsStatus\">subsStatus</label>"));
+    _l27 = certo_text_concat(_l26, CERTO_STR("<input id=\"subsStatus\" name=\"subsStatus\" type=\"text\" required></div>"));
+    _l28 = certo_text_concat(_l27, CERTO_STR("<button type=\"submit\">Submit</button>"));
+    _l29 = certo_text_concat(_l28, CERTO_STR("</form>"));
+    _l30 = _l29;
+    _l31 = certo_html_page(CERTO_STR("Create Subscriber"), _l30);
+    goto bb1;
+  bb1:
+    _l32 = certo_http_ok(_l31, CERTO_STR("text/html"));
+    goto bb2;
+  bb2:
+    _l0 = _l32;
+    return _l0;
+}
+
+int64_t certo_handle_create_subscriber_post(int64_t _l1) {
+    int64_t _l0;
+    int64_t _l2;
+    int64_t _l3;
+    int64_t _l4;
+    int64_t _l5;
+    certo_text_t _l6;
+    certo_text_t _l7;
+    certo_text_t _l8;
+    certo_text_t _l9;
+    certo_text_t _l10;
+    certo_text_t _l11;
+    certo_text_t _l12;
+    certo_text_t _l13;
+    certo_text_t _l14;
+    certo_text_t _l15;
+    certo_text_t _l16;
+    certo_text_t _l17;
+    certo_text_t _l18;
+    certo_text_t _l19;
+    certo_text_t _l20;
+    certo_text_t _l21;
+    certo_text_t _l22;
+    certo_text_t _l23;
+    certo_text_t _l24;
+    certo_text_t _l25;
+    certo_text_t _l26;
+    certo_text_t _l27;
+    certo_text_t _l28;
+    certo_text_t _l29;
+    int64_t _l30;
+    int64_t _l31;
+    int64_t _l32;
+    int64_t _l33;
+    int64_t _l34;
+    int64_t _l35;
+    int64_t _l36;
+    int64_t _l37;
+    int64_t _l38;
+    int64_t _l39;
+    int64_t _l40;
+    int64_t _l41;
+    int64_t _l42;
+    int64_t _l43;
+    int64_t _l44;
+    int64_t _l45;
+    int64_t _l46;
+    int64_t _l47;
+    int64_t _l48;
+    int64_t _l49;
+    int64_t _l50;
+    int64_t _l51;
+    int64_t _l52;
+    int64_t _l53;
+    int64_t _l54;
+    int64_t _l55;
+    int64_t _l56;
+    int64_t _l57;
+    int64_t _l58;
+    certo_text_t _l59;
+    certo_text_t _l60;
+    int64_t _l61;
+    int64_t _l62;
+    int64_t _l63;
+    certo_text_t _l64;
+    int64_t _l65;
+  bb0:
+    _l2 = certo_http_request_body(_l1);
+    goto bb1;
+  bb1:
+    _l3 = _l2;
+    _l4 = certo_db_connect(certo_db_url);
+    goto bb2;
+  bb2:
+    _l5 = _l4;
+    _l6 = certo_form_field(_l3, CERTO_STR("custNo"));
+    goto bb3;
+  bb3:
+    _l7 = _l6;
+    _l8 = certo_form_field(_l3, CERTO_STR("subNo"));
+    goto bb4;
+  bb4:
+    _l9 = _l8;
+    _l10 = certo_form_field(_l3, CERTO_STR("subsName"));
+    goto bb5;
+  bb5:
+    _l11 = _l10;
+    _l12 = certo_form_field(_l3, CERTO_STR("subsName1"));
+    goto bb6;
+  bb6:
+    _l13 = _l12;
+    _l14 = certo_form_field(_l3, CERTO_STR("subsName2"));
+    goto bb7;
+  bb7:
+    _l15 = _l14;
+    _l16 = certo_form_field(_l3, CERTO_STR("subsAddress1"));
+    goto bb8;
+  bb8:
+    _l17 = _l16;
+    _l18 = certo_form_field(_l3, CERTO_STR("subsAddress2"));
+    goto bb9;
+  bb9:
+    _l19 = _l18;
+    _l20 = certo_form_field(_l3, CERTO_STR("subsTown"));
+    goto bb10;
+  bb10:
+    _l21 = _l20;
+    _l22 = certo_form_field(_l3, CERTO_STR("subsPostcode"));
+    goto bb11;
+  bb11:
+    _l23 = _l22;
+    _l24 = certo_form_field(_l3, CERTO_STR("subsEmail"));
+    goto bb12;
+  bb12:
+    _l25 = _l24;
+    _l26 = certo_form_field(_l3, CERTO_STR("subActive"));
+    goto bb13;
+  bb13:
+    _l27 = _l26;
+    _l28 = certo_form_field(_l3, CERTO_STR("subsStatus"));
+    goto bb14;
+  bb14:
+    _l29 = _l28;
+    _l30 = certo_list_empty;
+    _l31 = certo_list_push(_l30, _l7);
+    goto bb15;
+  bb15:
+    _l32 = _l31;
+    _l33 = certo_list_push(_l32, _l9);
+    goto bb16;
+  bb16:
+    _l34 = _l33;
+    _l35 = certo_list_push(_l34, _l11);
+    goto bb17;
+  bb17:
+    _l36 = _l35;
+    _l37 = certo_list_push(_l36, _l13);
+    goto bb18;
+  bb18:
+    _l38 = _l37;
+    _l39 = certo_list_push(_l38, _l15);
+    goto bb19;
+  bb19:
+    _l40 = _l39;
+    _l41 = certo_list_push(_l40, _l17);
+    goto bb20;
+  bb20:
+    _l42 = _l41;
+    _l43 = certo_list_push(_l42, _l19);
+    goto bb21;
+  bb21:
+    _l44 = _l43;
+    _l45 = certo_list_push(_l44, _l21);
+    goto bb22;
+  bb22:
+    _l46 = _l45;
+    _l47 = certo_list_push(_l46, _l23);
+    goto bb23;
+  bb23:
+    _l48 = _l47;
+    _l49 = certo_list_push(_l48, _l25);
+    goto bb24;
+  bb24:
+    _l50 = _l49;
+    _l51 = certo_list_push(_l50, _l27);
+    goto bb25;
+  bb25:
+    _l52 = _l51;
+    _l53 = certo_list_push(_l52, _l29);
+    goto bb26;
+  bb26:
+    _l54 = _l53;
+    _l55 = certo_db_exec(_l5, CERTO_STR("INSERT INTO subscriber (cust_no, sub_no, subs_name, subs_name1, subs_name2, subs_address1, subs_address2, subs_town, subs_postcode, subs_email, sub_active, subs_status) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)"), _l54);
+    goto bb27;
+  bb27:
+    _l56 = _l55;
+    _l57 = certo_db_close(_l5);
+    goto bb28;
+  bb28:
+    _l58 = (_l56 > 0);
+    if (_l58) goto bb29; else goto bb30;
+  bb29:
+    _l59 = CERTO_STR("Record saved.");
+    goto bb31;
+  bb30:
+    _l59 = CERTO_STR("Save failed — check your input.");
+    goto bb31;
+  bb31:
+    _l60 = _l59;
+    _l61 = certo_text_concat(CERTO_STR("<h2>"), _l60);
+    _l62 = certo_text_concat(_l61, CERTO_STR("</h2><p><a href=\"/subscriber-list\">← Back to list</a></p>"));
+    _l63 = _l62;
+    _l64 = certo_html_page(CERTO_STR("Done"), _l63);
+    goto bb32;
+  bb32:
+    _l65 = certo_http_ok(_l64, CERTO_STR("text/html"));
+    goto bb33;
+  bb33:
+    _l0 = _l65;
+    return _l0;
+}
+
+int64_t certo_handle_edit_subscriber_get(int64_t _l1) {
+    int64_t _l0;
+    int64_t _l2;
+    int64_t _l3;
+    int64_t _l4;
+    int64_t _l5;
+    int64_t _l6;
+    int64_t _l7;
+    int64_t _l8;
+    int64_t _l9;
+    int64_t _l10;
+    int64_t _l11;
+    int64_t _l12;
+    int64_t _l13;
+    int64_t _l14;
+    int64_t _l15;
+    int64_t _l16;
+    int64_t _l17;
+    int64_t _l18;
+    int64_t _l19;
+    int64_t _l20;
+    int64_t _l21;
+    int64_t _l22;
+    int64_t _l23;
+    int64_t _l24;
+    int64_t _l25;
+    int64_t _l26;
+    certo_text_t _l27;
+    int64_t _l28;
+  bb0:
+    _l2 = certo_text_concat(CERTO_STR("<h1>Edit Subscriber</h1>"), CERTO_STR("<nav><a href=\"/subscriber-list\">← Back to list</a></nav>"));
+    _l3 = certo_text_concat(_l2, CERTO_STR("<form method=\"POST\" action=\"/edit-subscriber\">"));
+    _l4 = certo_text_concat(_l3, CERTO_STR("<div class=\"field\"><label for=\"subsName\">subsName</label>"));
+    _l5 = certo_text_concat(_l4, CERTO_STR("<input id=\"subsName\" name=\"subsName\" type=\"text\" required></div>"));
+    _l6 = certo_text_concat(_l5, CERTO_STR("<div class=\"field\"><label for=\"subsName1\">subsName1</label>"));
+    _l7 = certo_text_concat(_l6, CERTO_STR("<input id=\"subsName1\" name=\"subsName1\" type=\"text\" required></div>"));
+    _l8 = certo_text_concat(_l7, CERTO_STR("<div class=\"field\"><label for=\"subsName2\">subsName2</label>"));
+    _l9 = certo_text_concat(_l8, CERTO_STR("<input id=\"subsName2\" name=\"subsName2\" type=\"text\" required></div>"));
+    _l10 = certo_text_concat(_l9, CERTO_STR("<div class=\"field\"><label for=\"subsAddress1\">subsAddress1</label>"));
+    _l11 = certo_text_concat(_l10, CERTO_STR("<input id=\"subsAddress1\" name=\"subsAddress1\" type=\"text\" required></div>"));
+    _l12 = certo_text_concat(_l11, CERTO_STR("<div class=\"field\"><label for=\"subsAddress2\">subsAddress2</label>"));
+    _l13 = certo_text_concat(_l12, CERTO_STR("<input id=\"subsAddress2\" name=\"subsAddress2\" type=\"text\" required></div>"));
+    _l14 = certo_text_concat(_l13, CERTO_STR("<div class=\"field\"><label for=\"subsTown\">subsTown</label>"));
+    _l15 = certo_text_concat(_l14, CERTO_STR("<input id=\"subsTown\" name=\"subsTown\" type=\"text\" required></div>"));
+    _l16 = certo_text_concat(_l15, CERTO_STR("<div class=\"field\"><label for=\"subsPostcode\">subsPostcode</label>"));
+    _l17 = certo_text_concat(_l16, CERTO_STR("<input id=\"subsPostcode\" name=\"subsPostcode\" type=\"text\" required></div>"));
+    _l18 = certo_text_concat(_l17, CERTO_STR("<div class=\"field\"><label for=\"subsEmail\">subsEmail</label>"));
+    _l19 = certo_text_concat(_l18, CERTO_STR("<input id=\"subsEmail\" name=\"subsEmail\" type=\"email\" required></div>"));
+    _l20 = certo_text_concat(_l19, CERTO_STR("<div class=\"field\"><label for=\"subActive\">subActive</label>"));
+    _l21 = certo_text_concat(_l20, CERTO_STR("<input id=\"subActive\" name=\"subActive\" type=\"text\" required></div>"));
+    _l22 = certo_text_concat(_l21, CERTO_STR("<div class=\"field\"><label for=\"subsStatus\">subsStatus</label>"));
+    _l23 = certo_text_concat(_l22, CERTO_STR("<input id=\"subsStatus\" name=\"subsStatus\" type=\"text\" required></div>"));
+    _l24 = certo_text_concat(_l23, CERTO_STR("<button type=\"submit\">Submit</button>"));
+    _l25 = certo_text_concat(_l24, CERTO_STR("</form>"));
+    _l26 = _l25;
+    _l27 = certo_html_page(CERTO_STR("Edit Subscriber"), _l26);
+    goto bb1;
+  bb1:
+    _l28 = certo_http_ok(_l27, CERTO_STR("text/html"));
+    goto bb2;
+  bb2:
+    _l0 = _l28;
+    return _l0;
+}
+
+int64_t certo_handle_edit_subscriber_post(int64_t _l1) {
+    int64_t _l0;
+    int64_t _l2;
+    int64_t _l3;
+    int64_t _l4;
+    int64_t _l5;
+    certo_text_t _l6;
+    certo_text_t _l7;
+    certo_text_t _l8;
+    certo_text_t _l9;
+    certo_text_t _l10;
+    certo_text_t _l11;
+    certo_text_t _l12;
+    certo_text_t _l13;
+    certo_text_t _l14;
+    certo_text_t _l15;
+    certo_text_t _l16;
+    certo_text_t _l17;
+    certo_text_t _l18;
+    certo_text_t _l19;
+    certo_text_t _l20;
+    certo_text_t _l21;
+    certo_text_t _l22;
+    certo_text_t _l23;
+    certo_text_t _l24;
+    certo_text_t _l25;
+    int64_t _l26;
+    int64_t _l27;
+    int64_t _l28;
+    int64_t _l29;
+    int64_t _l30;
+    int64_t _l31;
+    int64_t _l32;
+    int64_t _l33;
+    int64_t _l34;
+    int64_t _l35;
+    int64_t _l36;
+    int64_t _l37;
+    int64_t _l38;
+    int64_t _l39;
+    int64_t _l40;
+    int64_t _l41;
+    int64_t _l42;
+    int64_t _l43;
+    int64_t _l44;
+    int64_t _l45;
+    int64_t _l46;
+    int64_t _l47;
+    int64_t _l48;
+    int64_t _l49;
+    int64_t _l50;
+    certo_text_t _l51;
+    certo_text_t _l52;
+    int64_t _l53;
+    int64_t _l54;
+    int64_t _l55;
+    certo_text_t _l56;
+    int64_t _l57;
+  bb0:
+    _l2 = certo_http_request_body(_l1);
+    goto bb1;
+  bb1:
+    _l3 = _l2;
+    _l4 = certo_db_connect(certo_db_url);
+    goto bb2;
+  bb2:
+    _l5 = _l4;
+    _l6 = certo_form_field(_l3, CERTO_STR("subsName"));
+    goto bb3;
+  bb3:
+    _l7 = _l6;
+    _l8 = certo_form_field(_l3, CERTO_STR("subsName1"));
+    goto bb4;
+  bb4:
+    _l9 = _l8;
+    _l10 = certo_form_field(_l3, CERTO_STR("subsName2"));
+    goto bb5;
+  bb5:
+    _l11 = _l10;
+    _l12 = certo_form_field(_l3, CERTO_STR("subsAddress1"));
+    goto bb6;
+  bb6:
+    _l13 = _l12;
+    _l14 = certo_form_field(_l3, CERTO_STR("subsAddress2"));
+    goto bb7;
+  bb7:
+    _l15 = _l14;
+    _l16 = certo_form_field(_l3, CERTO_STR("subsTown"));
+    goto bb8;
+  bb8:
+    _l17 = _l16;
+    _l18 = certo_form_field(_l3, CERTO_STR("subsPostcode"));
+    goto bb9;
+  bb9:
+    _l19 = _l18;
+    _l20 = certo_form_field(_l3, CERTO_STR("subsEmail"));
+    goto bb10;
+  bb10:
+    _l21 = _l20;
+    _l22 = certo_form_field(_l3, CERTO_STR("subActive"));
+    goto bb11;
+  bb11:
+    _l23 = _l22;
+    _l24 = certo_form_field(_l3, CERTO_STR("subsStatus"));
+    goto bb12;
+  bb12:
+    _l25 = _l24;
+    _l26 = certo_list_empty;
+    _l27 = certo_list_push(_l26, _l7);
+    goto bb13;
+  bb13:
+    _l28 = _l27;
+    _l29 = certo_list_push(_l28, _l9);
+    goto bb14;
+  bb14:
+    _l30 = _l29;
+    _l31 = certo_list_push(_l30, _l11);
+    goto bb15;
+  bb15:
+    _l32 = _l31;
+    _l33 = certo_list_push(_l32, _l13);
+    goto bb16;
+  bb16:
+    _l34 = _l33;
+    _l35 = certo_list_push(_l34, _l15);
+    goto bb17;
+  bb17:
+    _l36 = _l35;
+    _l37 = certo_list_push(_l36, _l17);
+    goto bb18;
+  bb18:
+    _l38 = _l37;
+    _l39 = certo_list_push(_l38, _l19);
+    goto bb19;
+  bb19:
+    _l40 = _l39;
+    _l41 = certo_list_push(_l40, _l21);
+    goto bb20;
+  bb20:
+    _l42 = _l41;
+    _l43 = certo_list_push(_l42, _l23);
+    goto bb21;
+  bb21:
+    _l44 = _l43;
+    _l45 = certo_list_push(_l44, _l25);
+    goto bb22;
+  bb22:
+    _l46 = _l45;
+    _l47 = certo_db_exec(_l5, CERTO_STR("INSERT INTO subscriber (subs_name, subs_name1, subs_name2, subs_address1, subs_address2, subs_town, subs_postcode, subs_email, sub_active, subs_status) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)"), _l46);
+    goto bb23;
+  bb23:
+    _l48 = _l47;
+    _l49 = certo_db_close(_l5);
+    goto bb24;
+  bb24:
+    _l50 = (_l48 > 0);
+    if (_l50) goto bb25; else goto bb26;
+  bb25:
+    _l51 = CERTO_STR("Record saved.");
+    goto bb27;
+  bb26:
+    _l51 = CERTO_STR("Save failed — check your input.");
+    goto bb27;
+  bb27:
+    _l52 = _l51;
+    _l53 = certo_text_concat(CERTO_STR("<h2>"), _l52);
+    _l54 = certo_text_concat(_l53, CERTO_STR("</h2><p><a href=\"/subscriber-list\">← Back to list</a></p>"));
+    _l55 = _l54;
+    _l56 = certo_html_page(CERTO_STR("Done"), _l55);
+    goto bb28;
+  bb28:
+    _l57 = certo_http_ok(_l56, CERTO_STR("text/html"));
+    goto bb29;
+  bb29:
+    _l0 = _l57;
+    return _l0;
+}
+
+int64_t certo_handle_create_subscription_get(int64_t _l1) {
+    int64_t _l0;
+    int64_t _l2;
+    int64_t _l3;
+    int64_t _l4;
+    int64_t _l5;
+    int64_t _l6;
+    int64_t _l7;
+    int64_t _l8;
+    int64_t _l9;
+    int64_t _l10;
+    int64_t _l11;
+    int64_t _l12;
+    int64_t _l13;
+    int64_t _l14;
+    int64_t _l15;
+    int64_t _l16;
+    int64_t _l17;
+    int64_t _l18;
+    int64_t _l19;
+    int64_t _l20;
+    int64_t _l21;
+    int64_t _l22;
+    int64_t _l23;
+    int64_t _l24;
+    int64_t _l25;
+    int64_t _l26;
+    certo_text_t _l27;
+    int64_t _l28;
+  bb0:
+    _l2 = certo_text_concat(CERTO_STR("<h1>Create Subscription</h1>"), CERTO_STR("<nav><a href=\"/subscription-list\">← Back to list</a></nav>"));
+    _l3 = certo_text_concat(_l2, CERTO_STR("<form method=\"POST\" action=\"/create-subscription\">"));
+    _l4 = certo_text_concat(_l3, CERTO_STR("<div class=\"field\"><label for=\"custNo\">custNo</label>"));
+    _l5 = certo_text_concat(_l4, CERTO_STR("<input id=\"custNo\" name=\"custNo\" type=\"text\" required></div>"));
+    _l6 = certo_text_concat(_l5, CERTO_STR("<div class=\"field\"><label for=\"subNo\">subNo</label>"));
+    _l7 = certo_text_concat(_l6, CERTO_STR("<input id=\"subNo\" name=\"subNo\" type=\"text\" required></div>"));
+    _l8 = certo_text_concat(_l7, CERTO_STR("<div class=\"field\"><label for=\"subTyper\">subTyper</label>"));
+    _l9 = certo_text_concat(_l8, CERTO_STR("<input id=\"subTyper\" name=\"subTyper\" type=\"text\" required></div>"));
+    _l10 = certo_text_concat(_l9, CERTO_STR("<div class=\"field\"><label for=\"productCode\">productCode</label>"));
+    _l11 = certo_text_concat(_l10, CERTO_STR("<input id=\"productCode\" name=\"productCode\" type=\"text\" required></div>"));
+    _l12 = certo_text_concat(_l11, CERTO_STR("<div class=\"field\"><label for=\"subCopies\">subCopies</label>"));
+    _l13 = certo_text_concat(_l12, CERTO_STR("<input id=\"subCopies\" name=\"subCopies\" type=\"text\" required></div>"));
+    _l14 = certo_text_concat(_l13, CERTO_STR("<div class=\"field\"><label for=\"invoiceFreq\">invoiceFreq</label>"));
+    _l15 = certo_text_concat(_l14, CERTO_STR("<input id=\"invoiceFreq\" name=\"invoiceFreq\" type=\"text\" required></div>"));
+    _l16 = certo_text_concat(_l15, CERTO_STR("<div class=\"field\"><label for=\"invoiceMnth\">invoiceMnth</label>"));
+    _l17 = certo_text_concat(_l16, CERTO_STR("<input id=\"invoiceMnth\" name=\"invoiceMnth\" type=\"text\" required></div>"));
+    _l18 = certo_text_concat(_l17, CERTO_STR("<div class=\"field\"><label for=\"labelsCount\">labelsCount</label>"));
+    _l19 = certo_text_concat(_l18, CERTO_STR("<input id=\"labelsCount\" name=\"labelsCount\" type=\"text\" required></div>"));
+    _l20 = certo_text_concat(_l19, CERTO_STR("<div class=\"field\"><label for=\"localCode\">localCode</label>"));
+    _l21 = certo_text_concat(_l20, CERTO_STR("<input id=\"localCode\" name=\"localCode\" type=\"text\" required></div>"));
+    _l22 = certo_text_concat(_l21, CERTO_STR("<div class=\"field\"><label for=\"sourceMnth\">sourceMnth</label>"));
+    _l23 = certo_text_concat(_l22, CERTO_STR("<input id=\"sourceMnth\" name=\"sourceMnth\" type=\"text\" required></div>"));
+    _l24 = certo_text_concat(_l23, CERTO_STR("<button type=\"submit\">Submit</button>"));
+    _l25 = certo_text_concat(_l24, CERTO_STR("</form>"));
+    _l26 = _l25;
+    _l27 = certo_html_page(CERTO_STR("Create Subscription"), _l26);
+    goto bb1;
+  bb1:
+    _l28 = certo_http_ok(_l27, CERTO_STR("text/html"));
+    goto bb2;
+  bb2:
+    _l0 = _l28;
+    return _l0;
+}
+
+int64_t certo_handle_create_subscription_post(int64_t _l1) {
+    int64_t _l0;
+    int64_t _l2;
+    int64_t _l3;
+    int64_t _l4;
+    int64_t _l5;
+    certo_text_t _l6;
+    certo_text_t _l7;
+    certo_text_t _l8;
+    certo_text_t _l9;
+    certo_text_t _l10;
+    certo_text_t _l11;
+    certo_text_t _l12;
+    certo_text_t _l13;
+    certo_text_t _l14;
+    certo_text_t _l15;
+    certo_text_t _l16;
+    certo_text_t _l17;
+    certo_text_t _l18;
+    certo_text_t _l19;
+    certo_text_t _l20;
+    certo_text_t _l21;
+    certo_text_t _l22;
+    certo_text_t _l23;
+    certo_text_t _l24;
+    certo_text_t _l25;
+    int64_t _l26;
+    int64_t _l27;
+    int64_t _l28;
+    int64_t _l29;
+    int64_t _l30;
+    int64_t _l31;
+    int64_t _l32;
+    int64_t _l33;
+    int64_t _l34;
+    int64_t _l35;
+    int64_t _l36;
+    int64_t _l37;
+    int64_t _l38;
+    int64_t _l39;
+    int64_t _l40;
+    int64_t _l41;
+    int64_t _l42;
+    int64_t _l43;
+    int64_t _l44;
+    int64_t _l45;
+    int64_t _l46;
+    int64_t _l47;
+    int64_t _l48;
+    int64_t _l49;
+    int64_t _l50;
+    certo_text_t _l51;
+    certo_text_t _l52;
+    int64_t _l53;
+    int64_t _l54;
+    int64_t _l55;
+    certo_text_t _l56;
+    int64_t _l57;
+  bb0:
+    _l2 = certo_http_request_body(_l1);
+    goto bb1;
+  bb1:
+    _l3 = _l2;
+    _l4 = certo_db_connect(certo_db_url);
+    goto bb2;
+  bb2:
+    _l5 = _l4;
+    _l6 = certo_form_field(_l3, CERTO_STR("custNo"));
+    goto bb3;
+  bb3:
+    _l7 = _l6;
+    _l8 = certo_form_field(_l3, CERTO_STR("subNo"));
+    goto bb4;
+  bb4:
+    _l9 = _l8;
+    _l10 = certo_form_field(_l3, CERTO_STR("subTyper"));
+    goto bb5;
+  bb5:
+    _l11 = _l10;
+    _l12 = certo_form_field(_l3, CERTO_STR("productCode"));
+    goto bb6;
+  bb6:
+    _l13 = _l12;
+    _l14 = certo_form_field(_l3, CERTO_STR("subCopies"));
+    goto bb7;
+  bb7:
+    _l15 = _l14;
+    _l16 = certo_form_field(_l3, CERTO_STR("invoiceFreq"));
+    goto bb8;
+  bb8:
+    _l17 = _l16;
+    _l18 = certo_form_field(_l3, CERTO_STR("invoiceMnth"));
+    goto bb9;
+  bb9:
+    _l19 = _l18;
+    _l20 = certo_form_field(_l3, CERTO_STR("labelsCount"));
+    goto bb10;
+  bb10:
+    _l21 = _l20;
+    _l22 = certo_form_field(_l3, CERTO_STR("localCode"));
+    goto bb11;
+  bb11:
+    _l23 = _l22;
+    _l24 = certo_form_field(_l3, CERTO_STR("sourceMnth"));
+    goto bb12;
+  bb12:
+    _l25 = _l24;
+    _l26 = certo_list_empty;
+    _l27 = certo_list_push(_l26, _l7);
+    goto bb13;
+  bb13:
+    _l28 = _l27;
+    _l29 = certo_list_push(_l28, _l9);
+    goto bb14;
+  bb14:
+    _l30 = _l29;
+    _l31 = certo_list_push(_l30, _l11);
+    goto bb15;
+  bb15:
+    _l32 = _l31;
+    _l33 = certo_list_push(_l32, _l13);
+    goto bb16;
+  bb16:
+    _l34 = _l33;
+    _l35 = certo_list_push(_l34, _l15);
+    goto bb17;
+  bb17:
+    _l36 = _l35;
+    _l37 = certo_list_push(_l36, _l17);
+    goto bb18;
+  bb18:
+    _l38 = _l37;
+    _l39 = certo_list_push(_l38, _l19);
+    goto bb19;
+  bb19:
+    _l40 = _l39;
+    _l41 = certo_list_push(_l40, _l21);
+    goto bb20;
+  bb20:
+    _l42 = _l41;
+    _l43 = certo_list_push(_l42, _l23);
+    goto bb21;
+  bb21:
+    _l44 = _l43;
+    _l45 = certo_list_push(_l44, _l25);
+    goto bb22;
+  bb22:
+    _l46 = _l45;
+    _l47 = certo_db_exec(_l5, CERTO_STR("INSERT INTO subscription (cust_no, sub_no, sub_typer, product_code, sub_copies, invoice_freq, invoice_mnth, labels_count, local_code, source_mnth) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)"), _l46);
+    goto bb23;
+  bb23:
+    _l48 = _l47;
+    _l49 = certo_db_close(_l5);
+    goto bb24;
+  bb24:
+    _l50 = (_l48 > 0);
+    if (_l50) goto bb25; else goto bb26;
+  bb25:
+    _l51 = CERTO_STR("Record saved.");
+    goto bb27;
+  bb26:
+    _l51 = CERTO_STR("Save failed — check your input.");
+    goto bb27;
+  bb27:
+    _l52 = _l51;
+    _l53 = certo_text_concat(CERTO_STR("<h2>"), _l52);
+    _l54 = certo_text_concat(_l53, CERTO_STR("</h2><p><a href=\"/subscription-list\">← Back to list</a></p>"));
+    _l55 = _l54;
+    _l56 = certo_html_page(CERTO_STR("Done"), _l55);
+    goto bb28;
+  bb28:
+    _l57 = certo_http_ok(_l56, CERTO_STR("text/html"));
+    goto bb29;
+  bb29:
+    _l0 = _l57;
+    return _l0;
+}
+
+int64_t certo_handle_edit_subscription_get(int64_t _l1) {
+    int64_t _l0;
+    int64_t _l2;
+    int64_t _l3;
+    int64_t _l4;
+    int64_t _l5;
+    int64_t _l6;
+    int64_t _l7;
+    int64_t _l8;
+    int64_t _l9;
+    int64_t _l10;
+    int64_t _l11;
+    int64_t _l12;
+    int64_t _l13;
+    int64_t _l14;
+    int64_t _l15;
+    int64_t _l16;
+    int64_t _l17;
+    int64_t _l18;
+    int64_t _l19;
+    int64_t _l20;
+    int64_t _l21;
+    int64_t _l22;
+    certo_text_t _l23;
+    int64_t _l24;
+  bb0:
+    _l2 = certo_text_concat(CERTO_STR("<h1>Edit Subscription</h1>"), CERTO_STR("<nav><a href=\"/subscription-list\">← Back to list</a></nav>"));
+    _l3 = certo_text_concat(_l2, CERTO_STR("<form method=\"POST\" action=\"/edit-subscription\">"));
+    _l4 = certo_text_concat(_l3, CERTO_STR("<div class=\"field\"><label for=\"subTyper\">subTyper</label>"));
+    _l5 = certo_text_concat(_l4, CERTO_STR("<input id=\"subTyper\" name=\"subTyper\" type=\"text\" required></div>"));
+    _l6 = certo_text_concat(_l5, CERTO_STR("<div class=\"field\"><label for=\"productCode\">productCode</label>"));
+    _l7 = certo_text_concat(_l6, CERTO_STR("<input id=\"productCode\" name=\"productCode\" type=\"text\" required></div>"));
+    _l8 = certo_text_concat(_l7, CERTO_STR("<div class=\"field\"><label for=\"subCopies\">subCopies</label>"));
+    _l9 = certo_text_concat(_l8, CERTO_STR("<input id=\"subCopies\" name=\"subCopies\" type=\"text\" required></div>"));
+    _l10 = certo_text_concat(_l9, CERTO_STR("<div class=\"field\"><label for=\"invoiceFreq\">invoiceFreq</label>"));
+    _l11 = certo_text_concat(_l10, CERTO_STR("<input id=\"invoiceFreq\" name=\"invoiceFreq\" type=\"text\" required></div>"));
+    _l12 = certo_text_concat(_l11, CERTO_STR("<div class=\"field\"><label for=\"invoiceMnth\">invoiceMnth</label>"));
+    _l13 = certo_text_concat(_l12, CERTO_STR("<input id=\"invoiceMnth\" name=\"invoiceMnth\" type=\"text\" required></div>"));
+    _l14 = certo_text_concat(_l13, CERTO_STR("<div class=\"field\"><label for=\"labelsCount\">labelsCount</label>"));
+    _l15 = certo_text_concat(_l14, CERTO_STR("<input id=\"labelsCount\" name=\"labelsCount\" type=\"text\" required></div>"));
+    _l16 = certo_text_concat(_l15, CERTO_STR("<div class=\"field\"><label for=\"localCode\">localCode</label>"));
+    _l17 = certo_text_concat(_l16, CERTO_STR("<input id=\"localCode\" name=\"localCode\" type=\"text\" required></div>"));
+    _l18 = certo_text_concat(_l17, CERTO_STR("<div class=\"field\"><label for=\"sourceMnth\">sourceMnth</label>"));
+    _l19 = certo_text_concat(_l18, CERTO_STR("<input id=\"sourceMnth\" name=\"sourceMnth\" type=\"text\" required></div>"));
+    _l20 = certo_text_concat(_l19, CERTO_STR("<button type=\"submit\">Submit</button>"));
+    _l21 = certo_text_concat(_l20, CERTO_STR("</form>"));
+    _l22 = _l21;
+    _l23 = certo_html_page(CERTO_STR("Edit Subscription"), _l22);
+    goto bb1;
+  bb1:
+    _l24 = certo_http_ok(_l23, CERTO_STR("text/html"));
+    goto bb2;
+  bb2:
+    _l0 = _l24;
+    return _l0;
+}
+
+int64_t certo_handle_edit_subscription_post(int64_t _l1) {
+    int64_t _l0;
+    int64_t _l2;
+    int64_t _l3;
+    int64_t _l4;
+    int64_t _l5;
+    certo_text_t _l6;
+    certo_text_t _l7;
+    certo_text_t _l8;
+    certo_text_t _l9;
+    certo_text_t _l10;
+    certo_text_t _l11;
+    certo_text_t _l12;
+    certo_text_t _l13;
+    certo_text_t _l14;
+    certo_text_t _l15;
+    certo_text_t _l16;
+    certo_text_t _l17;
+    certo_text_t _l18;
+    certo_text_t _l19;
+    certo_text_t _l20;
+    certo_text_t _l21;
+    int64_t _l22;
+    int64_t _l23;
+    int64_t _l24;
+    int64_t _l25;
+    int64_t _l26;
+    int64_t _l27;
+    int64_t _l28;
+    int64_t _l29;
+    int64_t _l30;
+    int64_t _l31;
+    int64_t _l32;
+    int64_t _l33;
+    int64_t _l34;
+    int64_t _l35;
+    int64_t _l36;
+    int64_t _l37;
+    int64_t _l38;
+    int64_t _l39;
+    int64_t _l40;
+    int64_t _l41;
+    int64_t _l42;
+    certo_text_t _l43;
+    certo_text_t _l44;
+    int64_t _l45;
+    int64_t _l46;
+    int64_t _l47;
+    certo_text_t _l48;
+    int64_t _l49;
+  bb0:
+    _l2 = certo_http_request_body(_l1);
+    goto bb1;
+  bb1:
+    _l3 = _l2;
+    _l4 = certo_db_connect(certo_db_url);
+    goto bb2;
+  bb2:
+    _l5 = _l4;
+    _l6 = certo_form_field(_l3, CERTO_STR("subTyper"));
+    goto bb3;
+  bb3:
+    _l7 = _l6;
+    _l8 = certo_form_field(_l3, CERTO_STR("productCode"));
+    goto bb4;
+  bb4:
+    _l9 = _l8;
+    _l10 = certo_form_field(_l3, CERTO_STR("subCopies"));
+    goto bb5;
+  bb5:
+    _l11 = _l10;
+    _l12 = certo_form_field(_l3, CERTO_STR("invoiceFreq"));
+    goto bb6;
+  bb6:
+    _l13 = _l12;
+    _l14 = certo_form_field(_l3, CERTO_STR("invoiceMnth"));
+    goto bb7;
+  bb7:
+    _l15 = _l14;
+    _l16 = certo_form_field(_l3, CERTO_STR("labelsCount"));
+    goto bb8;
+  bb8:
+    _l17 = _l16;
+    _l18 = certo_form_field(_l3, CERTO_STR("localCode"));
+    goto bb9;
+  bb9:
+    _l19 = _l18;
+    _l20 = certo_form_field(_l3, CERTO_STR("sourceMnth"));
+    goto bb10;
+  bb10:
+    _l21 = _l20;
+    _l22 = certo_list_empty;
+    _l23 = certo_list_push(_l22, _l7);
+    goto bb11;
+  bb11:
+    _l24 = _l23;
+    _l25 = certo_list_push(_l24, _l9);
+    goto bb12;
+  bb12:
+    _l26 = _l25;
+    _l27 = certo_list_push(_l26, _l11);
+    goto bb13;
+  bb13:
+    _l28 = _l27;
+    _l29 = certo_list_push(_l28, _l13);
+    goto bb14;
+  bb14:
+    _l30 = _l29;
+    _l31 = certo_list_push(_l30, _l15);
+    goto bb15;
+  bb15:
+    _l32 = _l31;
+    _l33 = certo_list_push(_l32, _l17);
+    goto bb16;
+  bb16:
+    _l34 = _l33;
+    _l35 = certo_list_push(_l34, _l19);
+    goto bb17;
+  bb17:
+    _l36 = _l35;
+    _l37 = certo_list_push(_l36, _l21);
+    goto bb18;
+  bb18:
+    _l38 = _l37;
+    _l39 = certo_db_exec(_l5, CERTO_STR("INSERT INTO subscription (sub_typer, product_code, sub_copies, invoice_freq, invoice_mnth, labels_count, local_code, source_mnth) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)"), _l38);
+    goto bb19;
+  bb19:
+    _l40 = _l39;
+    _l41 = certo_db_close(_l5);
+    goto bb20;
+  bb20:
+    _l42 = (_l40 > 0);
+    if (_l42) goto bb21; else goto bb22;
+  bb21:
+    _l43 = CERTO_STR("Record saved.");
+    goto bb23;
+  bb22:
+    _l43 = CERTO_STR("Save failed — check your input.");
+    goto bb23;
+  bb23:
+    _l44 = _l43;
+    _l45 = certo_text_concat(CERTO_STR("<h2>"), _l44);
+    _l46 = certo_text_concat(_l45, CERTO_STR("</h2><p><a href=\"/subscription-list\">← Back to list</a></p>"));
+    _l47 = _l46;
+    _l48 = certo_html_page(CERTO_STR("Done"), _l47);
+    goto bb24;
+  bb24:
+    _l49 = certo_http_ok(_l48, CERTO_STR("text/html"));
+    goto bb25;
+  bb25:
+    _l0 = _l49;
+    return _l0;
+}
+
+int64_t certo_handle_create_product_get(int64_t _l1) {
+    int64_t _l0;
+    int64_t _l2;
+    int64_t _l3;
+    int64_t _l4;
+    int64_t _l5;
+    int64_t _l6;
+    int64_t _l7;
+    int64_t _l8;
+    int64_t _l9;
+    int64_t _l10;
+    int64_t _l11;
+    int64_t _l12;
+    int64_t _l13;
+    int64_t _l14;
+    int64_t _l15;
+    int64_t _l16;
+    int64_t _l17;
+    int64_t _l18;
+    int64_t _l19;
+    int64_t _l20;
+    int64_t _l21;
+    int64_t _l22;
+    int64_t _l23;
+    int64_t _l24;
+    certo_text_t _l25;
+    int64_t _l26;
+  bb0:
+    _l2 = certo_text_concat(CERTO_STR("<h1>Create Product</h1>"), CERTO_STR("<nav><a href=\"/product-list\">← Back to list</a></nav>"));
+    _l3 = certo_text_concat(_l2, CERTO_STR("<form method=\"POST\" action=\"/create-product\">"));
+    _l4 = certo_text_concat(_l3, CERTO_STR("<div class=\"field\"><label for=\"productCde\">productCde</label>"));
+    _l5 = certo_text_concat(_l4, CERTO_STR("<input id=\"productCde\" name=\"productCde\" type=\"text\" required></div>"));
+    _l6 = certo_text_concat(_l5, CERTO_STR("<div class=\"field\"><label for=\"productDesc1\">productDesc1</label>"));
+    _l7 = certo_text_concat(_l6, CERTO_STR("<input id=\"productDesc1\" name=\"productDesc1\" type=\"text\" required></div>"));
+    _l8 = certo_text_concat(_l7, CERTO_STR("<div class=\"field\"><label for=\"productDesc2\">productDesc2</label>"));
+    _l9 = certo_text_concat(_l8, CERTO_STR("<input id=\"productDesc2\" name=\"productDesc2\" type=\"text\" required></div>"));
+    _l10 = certo_text_concat(_l9, CERTO_STR("<div class=\"field\"><label for=\"productPrice\">productPrice</label>"));
+    _l11 = certo_text_concat(_l10, CERTO_STR("<input id=\"productPrice\" name=\"productPrice\" type=\"text\" required></div>"));
+    _l12 = certo_text_concat(_l11, CERTO_STR("<div class=\"field\"><label for=\"productGst\">productGst</label>"));
+    _l13 = certo_text_concat(_l12, CERTO_STR("<input id=\"productGst\" name=\"productGst\" type=\"text\" required></div>"));
+    _l14 = certo_text_concat(_l13, CERTO_STR("<div class=\"field\"><label for=\"productMonthlyWrapper\">productMonthlyWrapper</label>"));
+    _l15 = certo_text_concat(_l14, CERTO_STR("<input id=\"productMonthlyWrapper\" name=\"productMonthlyWrapper\" type=\"text\" required></div>"));
+    _l16 = certo_text_concat(_l15, CERTO_STR("<div class=\"field\"><label for=\"productLabelCountDefault\">productLabelCountDefault</label>"));
+    _l17 = certo_text_concat(_l16, CERTO_STR("<input id=\"productLabelCountDefault\" name=\"productLabelCountDefault\" type=\"text\" required></div>"));
+    _l18 = certo_text_concat(_l17, CERTO_STR("<div class=\"field\"><label for=\"invoiceCycle\">invoiceCycle</label>"));
+    _l19 = certo_text_concat(_l18, CERTO_STR("<input id=\"invoiceCycle\" name=\"invoiceCycle\" type=\"text\" required></div>"));
+    _l20 = certo_text_concat(_l19, CERTO_STR("<div class=\"field\"><label for=\"pdfOnly\">pdfOnly</label>"));
+    _l21 = certo_text_concat(_l20, CERTO_STR("<input id=\"pdfOnly\" name=\"pdfOnly\" type=\"text\" required></div>"));
+    _l22 = certo_text_concat(_l21, CERTO_STR("<button type=\"submit\">Submit</button>"));
+    _l23 = certo_text_concat(_l22, CERTO_STR("</form>"));
+    _l24 = _l23;
+    _l25 = certo_html_page(CERTO_STR("Create Product"), _l24);
+    goto bb1;
+  bb1:
+    _l26 = certo_http_ok(_l25, CERTO_STR("text/html"));
+    goto bb2;
+  bb2:
+    _l0 = _l26;
+    return _l0;
+}
+
+int64_t certo_handle_create_product_post(int64_t _l1) {
+    int64_t _l0;
+    int64_t _l2;
+    int64_t _l3;
+    int64_t _l4;
+    int64_t _l5;
+    certo_text_t _l6;
+    certo_text_t _l7;
+    certo_text_t _l8;
+    certo_text_t _l9;
+    certo_text_t _l10;
+    certo_text_t _l11;
+    certo_text_t _l12;
+    certo_text_t _l13;
+    certo_text_t _l14;
+    certo_text_t _l15;
+    certo_text_t _l16;
+    certo_text_t _l17;
+    certo_text_t _l18;
+    certo_text_t _l19;
+    certo_text_t _l20;
+    certo_text_t _l21;
+    certo_text_t _l22;
+    certo_text_t _l23;
+    int64_t _l24;
+    int64_t _l25;
+    int64_t _l26;
+    int64_t _l27;
+    int64_t _l28;
+    int64_t _l29;
+    int64_t _l30;
+    int64_t _l31;
+    int64_t _l32;
+    int64_t _l33;
+    int64_t _l34;
+    int64_t _l35;
+    int64_t _l36;
+    int64_t _l37;
+    int64_t _l38;
+    int64_t _l39;
+    int64_t _l40;
+    int64_t _l41;
+    int64_t _l42;
+    int64_t _l43;
+    int64_t _l44;
+    int64_t _l45;
+    int64_t _l46;
+    certo_text_t _l47;
+    certo_text_t _l48;
+    int64_t _l49;
+    int64_t _l50;
+    int64_t _l51;
+    certo_text_t _l52;
+    int64_t _l53;
+  bb0:
+    _l2 = certo_http_request_body(_l1);
+    goto bb1;
+  bb1:
+    _l3 = _l2;
+    _l4 = certo_db_connect(certo_db_url);
+    goto bb2;
+  bb2:
+    _l5 = _l4;
+    _l6 = certo_form_field(_l3, CERTO_STR("productCde"));
+    goto bb3;
+  bb3:
+    _l7 = _l6;
+    _l8 = certo_form_field(_l3, CERTO_STR("productDesc1"));
+    goto bb4;
+  bb4:
+    _l9 = _l8;
+    _l10 = certo_form_field(_l3, CERTO_STR("productDesc2"));
+    goto bb5;
+  bb5:
+    _l11 = _l10;
+    _l12 = certo_form_field(_l3, CERTO_STR("productPrice"));
+    goto bb6;
+  bb6:
+    _l13 = _l12;
+    _l14 = certo_form_field(_l3, CERTO_STR("productGst"));
+    goto bb7;
+  bb7:
+    _l15 = _l14;
+    _l16 = certo_form_field(_l3, CERTO_STR("productMonthlyWrapper"));
+    goto bb8;
+  bb8:
+    _l17 = _l16;
+    _l18 = certo_form_field(_l3, CERTO_STR("productLabelCountDefault"));
+    goto bb9;
+  bb9:
+    _l19 = _l18;
+    _l20 = certo_form_field(_l3, CERTO_STR("invoiceCycle"));
+    goto bb10;
+  bb10:
+    _l21 = _l20;
+    _l22 = certo_form_field(_l3, CERTO_STR("pdfOnly"));
+    goto bb11;
+  bb11:
+    _l23 = _l22;
+    _l24 = certo_list_empty;
+    _l25 = certo_list_push(_l24, _l7);
+    goto bb12;
+  bb12:
+    _l26 = _l25;
+    _l27 = certo_list_push(_l26, _l9);
+    goto bb13;
+  bb13:
+    _l28 = _l27;
+    _l29 = certo_list_push(_l28, _l11);
+    goto bb14;
+  bb14:
+    _l30 = _l29;
+    _l31 = certo_list_push(_l30, _l13);
+    goto bb15;
+  bb15:
+    _l32 = _l31;
+    _l33 = certo_list_push(_l32, _l15);
+    goto bb16;
+  bb16:
+    _l34 = _l33;
+    _l35 = certo_list_push(_l34, _l17);
+    goto bb17;
+  bb17:
+    _l36 = _l35;
+    _l37 = certo_list_push(_l36, _l19);
+    goto bb18;
+  bb18:
+    _l38 = _l37;
+    _l39 = certo_list_push(_l38, _l21);
+    goto bb19;
+  bb19:
+    _l40 = _l39;
+    _l41 = certo_list_push(_l40, _l23);
+    goto bb20;
+  bb20:
+    _l42 = _l41;
+    _l43 = certo_db_exec(_l5, CERTO_STR("INSERT INTO product (product_cde, product_desc1, product_desc2, product_price, product_gst, product_monthly_wrapper, product_label_count_default, invoice_cycle, pdf_only) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)"), _l42);
+    goto bb21;
+  bb21:
+    _l44 = _l43;
+    _l45 = certo_db_close(_l5);
+    goto bb22;
+  bb22:
+    _l46 = (_l44 > 0);
+    if (_l46) goto bb23; else goto bb24;
+  bb23:
+    _l47 = CERTO_STR("Record saved.");
+    goto bb25;
+  bb24:
+    _l47 = CERTO_STR("Save failed — check your input.");
+    goto bb25;
+  bb25:
+    _l48 = _l47;
+    _l49 = certo_text_concat(CERTO_STR("<h2>"), _l48);
+    _l50 = certo_text_concat(_l49, CERTO_STR("</h2><p><a href=\"/product-list\">← Back to list</a></p>"));
+    _l51 = _l50;
+    _l52 = certo_html_page(CERTO_STR("Done"), _l51);
+    goto bb26;
+  bb26:
+    _l53 = certo_http_ok(_l52, CERTO_STR("text/html"));
+    goto bb27;
+  bb27:
+    _l0 = _l53;
+    return _l0;
+}
+
+int64_t certo_handle_edit_product_get(int64_t _l1) {
+    int64_t _l0;
+    int64_t _l2;
+    int64_t _l3;
+    int64_t _l4;
+    int64_t _l5;
+    int64_t _l6;
+    int64_t _l7;
+    int64_t _l8;
+    int64_t _l9;
+    int64_t _l10;
+    int64_t _l11;
+    int64_t _l12;
+    int64_t _l13;
+    int64_t _l14;
+    int64_t _l15;
+    int64_t _l16;
+    int64_t _l17;
+    int64_t _l18;
+    int64_t _l19;
+    int64_t _l20;
+    int64_t _l21;
+    int64_t _l22;
+    certo_text_t _l23;
+    int64_t _l24;
+  bb0:
+    _l2 = certo_text_concat(CERTO_STR("<h1>Edit Product</h1>"), CERTO_STR("<nav><a href=\"/product-list\">← Back to list</a></nav>"));
+    _l3 = certo_text_concat(_l2, CERTO_STR("<form method=\"POST\" action=\"/edit-product\">"));
+    _l4 = certo_text_concat(_l3, CERTO_STR("<div class=\"field\"><label for=\"productDesc1\">productDesc1</label>"));
+    _l5 = certo_text_concat(_l4, CERTO_STR("<input id=\"productDesc1\" name=\"productDesc1\" type=\"text\" required></div>"));
+    _l6 = certo_text_concat(_l5, CERTO_STR("<div class=\"field\"><label for=\"productDesc2\">productDesc2</label>"));
+    _l7 = certo_text_concat(_l6, CERTO_STR("<input id=\"productDesc2\" name=\"productDesc2\" type=\"text\" required></div>"));
+    _l8 = certo_text_concat(_l7, CERTO_STR("<div class=\"field\"><label for=\"productPrice\">productPrice</label>"));
+    _l9 = certo_text_concat(_l8, CERTO_STR("<input id=\"productPrice\" name=\"productPrice\" type=\"text\" required></div>"));
+    _l10 = certo_text_concat(_l9, CERTO_STR("<div class=\"field\"><label for=\"productGst\">productGst</label>"));
+    _l11 = certo_text_concat(_l10, CERTO_STR("<input id=\"productGst\" name=\"productGst\" type=\"text\" required></div>"));
+    _l12 = certo_text_concat(_l11, CERTO_STR("<div class=\"field\"><label for=\"productMonthlyWrapper\">productMonthlyWrapper</label>"));
+    _l13 = certo_text_concat(_l12, CERTO_STR("<input id=\"productMonthlyWrapper\" name=\"productMonthlyWrapper\" type=\"text\" required></div>"));
+    _l14 = certo_text_concat(_l13, CERTO_STR("<div class=\"field\"><label for=\"productLabelCountDefault\">productLabelCountDefault</label>"));
+    _l15 = certo_text_concat(_l14, CERTO_STR("<input id=\"productLabelCountDefault\" name=\"productLabelCountDefault\" type=\"text\" required></div>"));
+    _l16 = certo_text_concat(_l15, CERTO_STR("<div class=\"field\"><label for=\"invoiceCycle\">invoiceCycle</label>"));
+    _l17 = certo_text_concat(_l16, CERTO_STR("<input id=\"invoiceCycle\" name=\"invoiceCycle\" type=\"text\" required></div>"));
+    _l18 = certo_text_concat(_l17, CERTO_STR("<div class=\"field\"><label for=\"pdfOnly\">pdfOnly</label>"));
+    _l19 = certo_text_concat(_l18, CERTO_STR("<input id=\"pdfOnly\" name=\"pdfOnly\" type=\"text\" required></div>"));
+    _l20 = certo_text_concat(_l19, CERTO_STR("<button type=\"submit\">Submit</button>"));
+    _l21 = certo_text_concat(_l20, CERTO_STR("</form>"));
+    _l22 = _l21;
+    _l23 = certo_html_page(CERTO_STR("Edit Product"), _l22);
+    goto bb1;
+  bb1:
+    _l24 = certo_http_ok(_l23, CERTO_STR("text/html"));
+    goto bb2;
+  bb2:
+    _l0 = _l24;
+    return _l0;
+}
+
+int64_t certo_handle_edit_product_post(int64_t _l1) {
+    int64_t _l0;
+    int64_t _l2;
+    int64_t _l3;
+    int64_t _l4;
+    int64_t _l5;
+    certo_text_t _l6;
+    certo_text_t _l7;
+    certo_text_t _l8;
+    certo_text_t _l9;
+    certo_text_t _l10;
+    certo_text_t _l11;
+    certo_text_t _l12;
+    certo_text_t _l13;
+    certo_text_t _l14;
+    certo_text_t _l15;
+    certo_text_t _l16;
+    certo_text_t _l17;
+    certo_text_t _l18;
+    certo_text_t _l19;
+    certo_text_t _l20;
+    certo_text_t _l21;
+    int64_t _l22;
+    int64_t _l23;
+    int64_t _l24;
+    int64_t _l25;
+    int64_t _l26;
+    int64_t _l27;
+    int64_t _l28;
+    int64_t _l29;
+    int64_t _l30;
+    int64_t _l31;
+    int64_t _l32;
+    int64_t _l33;
+    int64_t _l34;
+    int64_t _l35;
+    int64_t _l36;
+    int64_t _l37;
+    int64_t _l38;
+    int64_t _l39;
+    int64_t _l40;
+    int64_t _l41;
+    int64_t _l42;
+    certo_text_t _l43;
+    certo_text_t _l44;
+    int64_t _l45;
+    int64_t _l46;
+    int64_t _l47;
+    certo_text_t _l48;
+    int64_t _l49;
+  bb0:
+    _l2 = certo_http_request_body(_l1);
+    goto bb1;
+  bb1:
+    _l3 = _l2;
+    _l4 = certo_db_connect(certo_db_url);
+    goto bb2;
+  bb2:
+    _l5 = _l4;
+    _l6 = certo_form_field(_l3, CERTO_STR("productDesc1"));
+    goto bb3;
+  bb3:
+    _l7 = _l6;
+    _l8 = certo_form_field(_l3, CERTO_STR("productDesc2"));
+    goto bb4;
+  bb4:
+    _l9 = _l8;
+    _l10 = certo_form_field(_l3, CERTO_STR("productPrice"));
+    goto bb5;
+  bb5:
+    _l11 = _l10;
+    _l12 = certo_form_field(_l3, CERTO_STR("productGst"));
+    goto bb6;
+  bb6:
+    _l13 = _l12;
+    _l14 = certo_form_field(_l3, CERTO_STR("productMonthlyWrapper"));
+    goto bb7;
+  bb7:
+    _l15 = _l14;
+    _l16 = certo_form_field(_l3, CERTO_STR("productLabelCountDefault"));
+    goto bb8;
+  bb8:
+    _l17 = _l16;
+    _l18 = certo_form_field(_l3, CERTO_STR("invoiceCycle"));
+    goto bb9;
+  bb9:
+    _l19 = _l18;
+    _l20 = certo_form_field(_l3, CERTO_STR("pdfOnly"));
+    goto bb10;
+  bb10:
+    _l21 = _l20;
+    _l22 = certo_list_empty;
+    _l23 = certo_list_push(_l22, _l7);
+    goto bb11;
+  bb11:
+    _l24 = _l23;
+    _l25 = certo_list_push(_l24, _l9);
+    goto bb12;
+  bb12:
+    _l26 = _l25;
+    _l27 = certo_list_push(_l26, _l11);
+    goto bb13;
+  bb13:
+    _l28 = _l27;
+    _l29 = certo_list_push(_l28, _l13);
+    goto bb14;
+  bb14:
+    _l30 = _l29;
+    _l31 = certo_list_push(_l30, _l15);
+    goto bb15;
+  bb15:
+    _l32 = _l31;
+    _l33 = certo_list_push(_l32, _l17);
+    goto bb16;
+  bb16:
+    _l34 = _l33;
+    _l35 = certo_list_push(_l34, _l19);
+    goto bb17;
+  bb17:
+    _l36 = _l35;
+    _l37 = certo_list_push(_l36, _l21);
+    goto bb18;
+  bb18:
+    _l38 = _l37;
+    _l39 = certo_db_exec(_l5, CERTO_STR("INSERT INTO product (product_desc1, product_desc2, product_price, product_gst, product_monthly_wrapper, product_label_count_default, invoice_cycle, pdf_only) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)"), _l38);
+    goto bb19;
+  bb19:
+    _l40 = _l39;
+    _l41 = certo_db_close(_l5);
+    goto bb20;
+  bb20:
+    _l42 = (_l40 > 0);
+    if (_l42) goto bb21; else goto bb22;
+  bb21:
+    _l43 = CERTO_STR("Record saved.");
+    goto bb23;
+  bb22:
+    _l43 = CERTO_STR("Save failed — check your input.");
+    goto bb23;
+  bb23:
+    _l44 = _l43;
+    _l45 = certo_text_concat(CERTO_STR("<h2>"), _l44);
+    _l46 = certo_text_concat(_l45, CERTO_STR("</h2><p><a href=\"/product-list\">← Back to list</a></p>"));
+    _l47 = _l46;
+    _l48 = certo_html_page(CERTO_STR("Done"), _l47);
+    goto bb24;
+  bb24:
+    _l49 = certo_http_ok(_l48, CERTO_STR("text/html"));
+    goto bb25;
+  bb25:
+    _l0 = _l49;
+    return _l0;
+}
+
+int64_t certo_main(void) {
+    int64_t _l0;
+    int64_t _l1;
+    int64_t _l2;
+    int64_t _l3;
+    int64_t _l4;
+    int64_t _l5;
+    int64_t _l6;
+    certo_text_t _l7;
+    certo_text_t _l8;
+    int64_t _l9;
+    int64_t _l10;
+  bb0:
+    _l1 = certo_arg(1);
+    goto bb1;
+  bb1:
+    _l2 = (__typeof__(_l2))certo_coalesce((void*)(_l1), (void*)(CERTO_STR("8080")));
+    _l3 = certo_parse_int(_l2);
+    goto bb2;
+  bb2:
+    _l4 = (__typeof__(_l4))certo_coalesce((void*)(_l3), (void*)(8080));
+    _l5 = _l4;
+    _l6 = certo_int_to_text(_l5);
+    goto bb3;
+  bb3:
+    _l7 = certo_text_concat(CERTO_STR("Serving on http://localhost:"), _l6);
+    _l8 = certo_text_concat(_l7, CERTO_STR("/"));
+    _l9 = certo_println(_l8);
+    goto bb4;
+  bb4:
+    _l10 = certo_http_serve(_l5, certo_handler);
+    goto bb5;
+  bb5:
+    _l0 = _l10;
+    return _l0;
+}
+
+#ifdef _WIN32
+int wmain(int argc, wchar_t** argv) {
+    char** u8 = (char**)malloc((size_t)argc * sizeof(char*));
+    for (int i = 0; i < argc; i++) {
+        int n = WideCharToMultiByte(CP_UTF8,0,argv[i],-1,NULL,0,NULL,NULL);
+        u8[i] = (char*)malloc((size_t)n);
+        WideCharToMultiByte(CP_UTF8,0,argv[i],-1,u8[i],n,NULL,NULL);
+    }
+    certo_main_init(argc, (const char**)u8);
+    certo_main();
+    return 0;
+}
+#else
+int main(int argc, const char** argv) {
+    certo_main_init(argc, argv);
+    certo_main();
+    return 0;
+}
+#endif
