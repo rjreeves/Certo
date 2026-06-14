@@ -417,10 +417,16 @@ pub fn infer(expr: &S<Expr>, ctx: &mut Ctx<'_>) -> Ty {
                     });
                 }
             }
-            // When written as `TypeName { ... }`, return the named type so callers
-            // that expect `Ty::Named { name: "TypeName" }` unify correctly.
+            // When written as `TypeName { ... }`, unify each field value against
+            // the declared field type so mismatches are caught at compile time.
             if let Some(name) = ty_name {
-                // Still infer field types to surface any errors, but discard the structural type.
+                if let Some(declared) = ctx.env.record_fields.get(name.as_str()).cloned() {
+                    for (fname, found_ty) in &field_tys {
+                        if let Some((_, expected_ty)) = declared.iter().find(|(n, _)| n == fname) {
+                            ctx.unify(expected_ty.clone(), found_ty.clone(), *span);
+                        }
+                    }
+                }
                 Ty::Named { name: name.clone(), args: vec![] }
             } else {
                 Ty::Record(field_tys)
