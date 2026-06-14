@@ -12,10 +12,20 @@ pub fn parse_type(cur: &mut Cursor<'_>) -> Result<S<TypeExpr>, ParseError> {
 
     let mut ty = parse_type_atom(cur)?;
 
-    // `T?`  →  Option<T>
-    while let Some((_, q_span)) = cur.eat(|t| matches!(t, Token::Question)) {
-        let span = ty.span.to(q_span);
-        ty = S::new(TypeExpr::Option { inner: Box::new(ty), span }, span);
+    // `T?`  →  Option<T>   `T??`  →  Option<Option<T>>
+    loop {
+        if let Some((_, q_span)) = cur.eat(|t| matches!(t, Token::Question)) {
+            let span = ty.span.to(q_span);
+            ty = S::new(TypeExpr::Option { inner: Box::new(ty), span }, span);
+        } else if let Some((_, q_span)) = cur.eat(|t| matches!(t, Token::DoubleQuestion)) {
+            // `??` lexed as one token — expand as two Option wraps
+            let span1 = ty.span.to(q_span);
+            ty = S::new(TypeExpr::Option { inner: Box::new(ty), span: span1 }, span1);
+            let span2 = span1.to(q_span);
+            ty = S::new(TypeExpr::Option { inner: Box::new(ty), span: span2 }, span2);
+        } else {
+            break;
+        }
     }
 
     // `A => B`  — function type (right-associative)

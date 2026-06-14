@@ -88,7 +88,8 @@ $examples = @(
     @{ src = "examples\db_users.cto";     out = "dist\db_users.exe" },
     @{ src = "examples\http_server.cto";  out = "dist\http_server.exe" },
     @{ src = "examples\littleQ.cto";      out = "dist\littleQ.exe" },
-    @{ src = "examples\pgcheck.cto";      out = "dist\pgcheck.exe" }
+    @{ src = "examples\pgcheck.cto";      out = "dist\pgcheck.exe" },
+    @{ src = "examples\result_test.cto";  out = "dist\result_test.exe" }
 )
 
 $ok = 0; $fail = 0

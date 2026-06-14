@@ -20,8 +20,7 @@ pub fn ty_to_c(ty: &Ty) -> String {
         Ty::List(_)     => "void*".into(),
         Ty::Map(k, v)   => format!("certo_map_{}_{}_t", mangle(k), mangle(v)),
         Ty::Tuple(ts)   => {
-            if ts.is_empty() { return "certo_unit_t".into(); }
-            format!("certo_tuple_{}_t", ts.iter().map(mangle).collect::<Vec<_>>().join("_"))
+            if ts.is_empty() { "int64_t".into() } else { "void*".into() }
         }
 
         // Http opaque handles — passed as int64_t (pointer-sized) through the runtime ABI.

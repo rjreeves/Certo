@@ -1,5 +1,5 @@
 use std::fmt::Write as FmtWrite;
-use certo_mir::{MirFn, MirStmt, Rvalue, Operand, MirConst, Terminator, AggregateKind, BlockId};
+use certo_mir::{MirFn, MirStmt, MirLocalDecl, Rvalue, Operand, MirConst, Terminator, AggregateKind, BlockId};
 use certo_hir::{BinOp, UnOp};
 use certo_typeck::Ty;
 use crate::ty_to_c::{ty_to_c, ret_ty_to_c};
@@ -44,7 +44,7 @@ fn emit_fn_inner(f: &MirFn, prefix: &str, out: &mut String) {
     for bb in &f.blocks {
         writeln!(out, "  bb{}:", bb.id).unwrap();
         for stmt in &bb.stmts {
-            emit_stmt(stmt, out);
+            emit_stmt(stmt, &f.locals, out);
         }
         if let Some(term) = &bb.terminator {
             emit_terminator(term, ret_ty, out);
@@ -54,7 +54,7 @@ fn emit_fn_inner(f: &MirFn, prefix: &str, out: &mut String) {
     writeln!(out, "}}").unwrap();
 }
 
-fn emit_stmt(stmt: &MirStmt, out: &mut String) {
+fn emit_stmt(stmt: &MirStmt, locals: &[MirLocalDecl], out: &mut String) {
     let MirStmt::Assign { dest, rvalue } = stmt;
     let lhs = local_name(*dest);
     match rvalue {
@@ -62,7 +62,7 @@ fn emit_stmt(stmt: &MirStmt, out: &mut String) {
             writeln!(out, "    {} = {};", lhs, emit_operand(op)).unwrap();
         }
         Rvalue::BinOp { op, lhs: l, rhs: r } => {
-            let expr = emit_binop(op, l, r);
+            let expr = emit_binop(op, l, r, locals);
             // NullCoalesce returns void* — cast back to the destination's type.
             if matches!(op, BinOp::NullCoalesce) {
                 writeln!(out, "    {} = (__typeof__({})){};", lhs, lhs, expr).unwrap();
@@ -84,11 +84,13 @@ fn emit_stmt(stmt: &MirStmt, out: &mut String) {
         Rvalue::Aggregate(kind, ops) => {
             match kind {
                 AggregateKind::Tuple => {
-                    // Emit as struct literal initialiser.
-                    let fields = ops.iter().enumerate()
-                        .map(|(i, o)| format!(".f{} = {}", i, emit_operand(o)))
-                        .collect::<Vec<_>>().join(", ");
-                    writeln!(out, "    {} = (typeof({})){{ {} }};", lhs, lhs, fields).unwrap();
+                    // Represent tuples as CertoList* — same as arrays.
+                    if ops.is_empty() {
+                        writeln!(out, "    {} = (void*)0;", lhs).unwrap();
+                    } else {
+                        let elems = ops.iter().map(|o| format!("(void*)(intptr_t)({})", emit_operand(o))).collect::<Vec<_>>().join(", ");
+                        writeln!(out, "    {} = certo_list_of({}, {});", lhs, ops.len(), elems).unwrap();
+                    }
                 }
                 AggregateKind::Record(names) => {
                     let fields = names.iter().zip(ops.iter())
@@ -168,7 +170,15 @@ fn emit_const(c: &MirConst) -> String {
     }
 }
 
-fn emit_binop(op: &BinOp, l: &Operand, r: &Operand) -> String {
+fn operand_is_text(op: &Operand, locals: &[MirLocalDecl]) -> bool {
+    match op {
+        Operand::Local(id) => locals.iter().any(|l| l.id == *id && (matches!(l.ty, Ty::Text) || matches!(&l.ty, Ty::Option(t) if matches!(t.as_ref(), Ty::Text)))),
+        Operand::Const(MirConst::Str(_)) => true,
+        _ => false,
+    }
+}
+
+fn emit_binop(op: &BinOp, l: &Operand, r: &Operand, locals: &[MirLocalDecl]) -> String {
     let lhs = emit_operand(l);
     let rhs = emit_operand(r);
     match op {
@@ -178,8 +188,20 @@ fn emit_binop(op: &BinOp, l: &Operand, r: &Operand) -> String {
         BinOp::Div  => format!("({} / {})", lhs, rhs),
         BinOp::Rem  => format!("({} % {})", lhs, rhs),
         BinOp::Pow  => format!("certo_pow({}, {})", lhs, rhs),
-        BinOp::Eq   => format!("({} == {})", lhs, rhs),
-        BinOp::NotEq => format!("({} != {})", lhs, rhs),
+        BinOp::Eq   => {
+            if operand_is_text(l, locals) || operand_is_text(r, locals) {
+                format!("(certo_text_eq({}, {}))", lhs, rhs)
+            } else {
+                format!("({} == {})", lhs, rhs)
+            }
+        }
+        BinOp::NotEq => {
+            if operand_is_text(l, locals) || operand_is_text(r, locals) {
+                format!("(!certo_text_eq({}, {}))", lhs, rhs)
+            } else {
+                format!("({} != {})", lhs, rhs)
+            }
+        }
         BinOp::Lt   => format!("({} < {})", lhs, rhs),
         BinOp::LtEq => format!("({} <= {})", lhs, rhs),
         BinOp::Gt   => format!("({} > {})", lhs, rhs),

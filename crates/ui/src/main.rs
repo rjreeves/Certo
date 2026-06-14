@@ -1,4 +1,4 @@
-//! `certo-ui` — compile Certo view/form declarations to Htmx HTML files.
+//! `certo-ui` — compile Certo view/form declarations to a runnable HTTP server.
 //!
 //! # Usage
 //!
@@ -7,7 +7,8 @@
 //! # Options
 //!
 //!   -o <dir>       Output directory (default: current directory)
-//!   --stdout       Print all generated files to stdout instead of writing
+//!   --html         Legacy mode: emit one .html file per view/form instead of server.cto
+//!   --stdout       Print generated output to stdout instead of writing files
 //!   --no-color     Disable ANSI colour in status messages
 //!
 //! # Exit codes
@@ -20,7 +21,7 @@ use std::path::PathBuf;
 use std::process;
 
 use certo_parser::parse;
-use certo_ui::emit_module;
+use certo_ui::{emit_module, emit_html};
 
 fn main() {
     let mut args    = std::env::args().skip(1).peekable();
@@ -28,6 +29,7 @@ fn main() {
     let mut out_dir: PathBuf         = PathBuf::from(".");
     let mut stdout   = false;
     let mut color    = true;
+    let mut html_mode = false;
 
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -36,8 +38,9 @@ fn main() {
                     args.next().unwrap_or_else(|| die("-o requires a directory", 2))
                 );
             }
-            "--stdout"   => stdout = true,
-            "--no-color" => color  = false,
+            "--stdout"   => stdout    = true,
+            "--no-color" => color     = false,
+            "--html"     => html_mode = true,
             other if other.starts_with('-') => {
                 die(&format!("unknown option '{}'", other), 2);
             }
@@ -50,6 +53,9 @@ fn main() {
 
     let input = input.unwrap_or_else(|| {
         eprintln!("usage: certo-ui [OPTIONS] <file.cto>");
+        eprintln!("       --html       emit HTML files instead of server.cto");
+        eprintln!("       -o <dir>     output directory (default: .)");
+        eprintln!("       --stdout     print to stdout");
         process::exit(2);
     });
 
@@ -64,18 +70,22 @@ fn main() {
     });
 
     // ── Emit ──────────────────────────────────────────────────────────
-    let files = emit_module(&module).unwrap_or_else(|e| {
+    let files = if html_mode {
+        emit_html(&module)
+    } else {
+        emit_module(&module)
+    }.unwrap_or_else(|e| {
         eprintln!("error: {}", e);
         process::exit(1);
     });
 
-    for (filename, html) in &files {
+    for (filename, content) in &files {
         if stdout {
             println!("=== {} ===", filename);
-            print!("{}", html);
+            print!("{}", content);
         } else {
             let path = out_dir.join(filename);
-            std::fs::write(&path, html).unwrap_or_else(|e| {
+            std::fs::write(&path, content).unwrap_or_else(|e| {
                 eprintln!("error writing {}: {}", path.display(), e);
                 process::exit(1);
             });

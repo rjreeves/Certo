@@ -383,6 +383,28 @@ fn lower_expr(expr: &HirExpr, b: &mut Builder) -> Operand {
                             }
                         }
                     }
+                    HirPat::Tuple(fields) => {
+                        // Tuple is stored as a CertoList*. Extract each field by index.
+                        for (i, field_pat) in fields.iter().enumerate() {
+                            if let HirPat::Bind { local, name: fname } = field_pat {
+                                let elem_local = b.map_hir_local(*local, fname, Ty::Error);
+                                let next_bb = b.new_block();
+                                b.terminate(Terminator::Call {
+                                    func: Operand::Global("__tuple_get".into()),
+                                    args: vec![
+                                        scrut_op.clone(),
+                                        Operand::Const(MirConst::Int(i as i64)),
+                                    ],
+                                    dest: elem_local,
+                                    next: next_bb,
+                                });
+                                b.switch_to(next_bb);
+                            }
+                        }
+                        let after_pat = if arm.guard.is_some() { b.new_block() } else { arm_bb };
+                        b.terminate(Terminator::Goto(after_pat));
+                        if arm.guard.is_some() { b.switch_to(after_pat); }
+                    }
                     _ => {
                         let after_pat = if arm.guard.is_some() { b.new_block() } else { arm_bb };
                         b.terminate(Terminator::Goto(after_pat));

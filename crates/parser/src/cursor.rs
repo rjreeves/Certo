@@ -210,6 +210,7 @@ fn token_matches(a: &Token<'_>, b: &Token<'static>) -> bool {
         (Validator, Validator) |
         (Migration, Migration) |
         (View,      View)      |
+        (Form,      Form)      |
         (Test,      Test)      |
         (Property,  Property)  |
         (DbTest,    DbTest)    |

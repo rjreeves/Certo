@@ -617,7 +617,11 @@ fn parse_if(cur: &mut Cursor<'_>) -> Result<S<Expr>, ParseError> {
         let scrutinee = parse_expr(cur)?;
         let body = parse_block(cur)?;
         let else_expr = if cur.eat(|t| matches!(t, Token::Else)).is_some() {
-            parse_block(cur)?
+            if matches!(cur.peek(), Some(Token::If)) {
+                parse_expr(cur)?
+            } else {
+                parse_block(cur)?
+            }
         } else {
             let sp = body.span;
             S::new(Expr::Lit { value: Lit::Unit, span: sp }, sp)
