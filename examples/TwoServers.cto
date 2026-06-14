@@ -1,0 +1,35 @@
+module TwoServers
+
+import Stdlib.Db
+
+type User = {
+    id:    Int
+    name:  Text
+    email: Text
+}
+
+fn main(): Unit [io] = {
+
+    val u = User { id: 123, name: "Alice", email: "alice@example.com" }
+    
+    val conn1 = dbConnect("host=192.168.0.2 port=5432 dbname=postgres user=postgres password=postgres1")
+    val conn2 = dbConnect("postgres://postgres:postgres1@192.168.0.2:5433/postgres")
+   
+    if conn1 == 0 then {
+        println("Failed to connect to server1: " ++ dbError(conn1))
+        dbClose(conn2)
+    } else if conn2 == 0 then {
+        println("Failed to connect to server2: " ++ dbError(conn2))
+        dbClose(conn1)
+    } else {
+        println("Server 1 version code:   " ++ intToText(dbServerVersion(conn1)))
+        println("Server 1 version string: " ++ dbVersionString(conn1))
+        println("")
+        println("Server 2 version code:   " ++ intToText(dbServerVersion(conn2)))
+        println("Server 2 version string: " ++ dbVersionString(conn2))
+        println("Number Jumble1 " ++ intToText(conn1))
+        println("Number Jumble2 " ++ intToText(conn2))
+        dbClose(conn1)
+        dbClose(conn2)
+    }
+}
