@@ -43,8 +43,11 @@ pub fn emit_server(module: &Module) -> Result<String, UiError> {
 
     emit_header(&mod_name, &mut out);
     emit_shared_helpers(&mut out);
-    emit_row_actions_helper(&mut out);
+    emit_pk_col_index_helper(&mut out);
     emit_col_value_helper(&mut out);
+    for v in &views {
+        emit_row_actions_for_view(v, &forms, &views, &mut out);
+    }
     emit_router(&views, &forms, &mut out);
 
     for v in &views {
@@ -92,6 +95,8 @@ fn emit_shared_helpers(out: &mut String) {
     writeln!(out, "    \"input,select,textarea{{padding:0.4rem;border:1px solid #ccc;border-radius:4px;width:100%;max-width:420px;box-sizing:border-box;}}\" ++").unwrap();
     writeln!(out, "    \"button{{padding:0.5rem 1.25rem;background:#0066cc;color:#fff;border:none;border-radius:4px;cursor:pointer;margin-top:0.5rem;}}\" ++").unwrap();
     writeln!(out, "    \"a.btn{{display:inline-block;padding:0.4rem 1rem;background:#0066cc;color:#fff;border-radius:4px;text-decoration:none;font-size:0.9rem;}}\" ++").unwrap();
+    writeln!(out, "    \".row-actions{{margin:2px 0;font-size:0.85rem;}}\" ++").unwrap();
+    writeln!(out, "    \".row-actions a{{margin-right:0.75rem;color:#0066cc;}}\" ++").unwrap();
     writeln!(out, "    \"</style>\"").unwrap();
     writeln!(out).unwrap();
 
@@ -207,20 +212,6 @@ fn emit_view_handler(v: &ViewDecl, forms: &[&FormDecl], all_views: &[&ViewDecl],
             let fl = f.name.node.to_lowercase();
             fl.starts_with("create") && fl.contains(&entity.to_lowercase())
         });
-        let edit_form = forms.iter().find(|f| {
-            let fl = f.name.node.to_lowercase();
-            fl.starts_with("edit") && fl.contains(&entity.to_lowercase())
-        });
-
-        // Child views whose filter_by matches our pk column
-        let child_views: Vec<&&ViewDecl> = all_views.iter().filter(|cv| {
-            if let Some(ref cfb) = cv.filter_by {
-                let cfb_snake = camel_to_snake(cfb);
-                pk_col.as_deref() == Some(cfb_snake.as_str())
-            } else {
-                false
-            }
-        }).collect();
 
         writeln!(out, "fn {fn_name}(req: HttpRequest): HttpResponse = {{").unwrap();
         writeln!(out, "    val conn = dbConnect(dbUrl())").unwrap();
@@ -259,34 +250,13 @@ fn emit_view_handler(v: &ViewDecl, forms: &[&FormDecl], all_views: &[&ViewDecl],
 
         writeln!(out, "    val _tbl  = htmlTable(cols, rows)").unwrap();
 
-        // Per-row action columns: edit link and child-view links
-        // We add these by generating a supplemental table with action buttons
-        // using a recursive helper that reads pk from each row
-        if let (Some(ref pk), Some(ref edit_f)) = (&v.pk, edit_form) {
-            let edit_slug = slugify(&edit_f.name.node);
-            let pk_snake  = camel_to_snake(pk);
-            // Find pk column index hint (we'll use a runtime helper)
-            writeln!(out, "    val _pkCol = \"{pk_snake}\"").unwrap();
-            writeln!(out, "    val _editSlug = \"/{edit_slug}\"").unwrap();
-
-            // Build child nav links string
-            let mut child_links = String::new();
-            for cv in &child_views {
-                let cv_slug = slugify(&cv.name.node);
-                let cv_title = to_title(&cv.name.node);
-                let filter_param = cv.filter_by.as_deref().map(camel_to_snake).unwrap_or_default();
-                child_links.push_str(&format!(
-                    " ++ \"<a href=\\\"/{cv_slug}?{filter_param}=\\\" class=\\\"btn\\\">{cv_title}</a>\""
-                ));
-            }
-
-            writeln!(out, "    val _actions = rowActions(cols, rows, _pkCol, _editSlug, 0, \"\")").unwrap();
-            // Store child link template so rowActions can append it
-            let _ = child_links; // used below in helper emission
+        if v.pk.is_some() {
+            let ra_fn = format!("rowActions{name}");
+            writeln!(out, "    val _actions = {ra_fn}(cols, rows, 0, \"\")").unwrap();
             writeln!(out, "    val body = \"<h1>{title}</h1>\" ++").unwrap();
             writeln!(out, "        {nav_html}\"\" ++").unwrap();
             writeln!(out, "        _tbl ++").unwrap();
-            writeln!(out, "        _actions").unwrap();
+            writeln!(out, "        \"<div class=\\\"actions-section\\\">\" ++ _actions ++ \"</div>\"").unwrap();
         } else {
             writeln!(out, "    val body = \"<h1>{title}</h1>\" ++").unwrap();
             writeln!(out, "        {nav_html}\"\" ++").unwrap();
@@ -314,25 +284,78 @@ fn emit_view_handler(v: &ViewDecl, forms: &[&FormDecl], all_views: &[&ViewDecl],
     writeln!(out).unwrap();
 }
 
-// ── Row-actions helper (emitted once) ─────────────────────────────────────────
+// ── pkColIndex helper (emitted once, shared by all views) ─────────────────────
 
-fn emit_row_actions_helper(out: &mut String) {
-    writeln!(out, "// ── Per-row edit/view action links ───────────────────────────────────────────").unwrap();
-    // Find pk column index in cols list
+fn emit_pk_col_index_helper(out: &mut String) {
+    writeln!(out, "// ── Column index lookup ──────────────────────────────────────────────────────").unwrap();
     writeln!(out, "fn pkColIndex(cols: List<Text>, pk: Text, i: Int): Int =").unwrap();
     writeln!(out, "    if i >= List.len(cols) then -1").unwrap();
     writeln!(out, "    else if Text.eq(List.getOrPanic(cols, i), pk) then i").unwrap();
     writeln!(out, "    else pkColIndex(cols, pk, i + 1)").unwrap();
     writeln!(out).unwrap();
+}
 
-    writeln!(out, "fn rowActions(cols: List<Text>, rows: List<List<Text?>>, pk: Text, editSlug: Text, i: Int, acc: Text): Text =").unwrap();
+// ── Per-view row-action function ──────────────────────────────────────────────
+
+/// Emit `fn rowActionsXxx(cols, rows, i, acc): Text` with hardcoded edit + child links.
+fn emit_row_actions_for_view(v: &ViewDecl, forms: &[&FormDecl], all_views: &[&ViewDecl], out: &mut String) {
+    let pk = match &v.pk { Some(p) => p, None => return };
+    let name    = &v.name.node;
+    let fn_name = format!("rowActions{}", name);
+    let pk_col  = camel_to_snake(pk);
+
+    // Edit form for this entity
+    let entity = match find_for_entity(&v.layout.node) { Some(e) => e, None => return };
+    let edit_form = forms.iter().find(|f| {
+        let fl = f.name.node.to_lowercase();
+        fl.starts_with("edit") && fl.contains(&entity.to_lowercase())
+    });
+
+    // Child views whose filter_by matches our pk
+    let child_views: Vec<&&ViewDecl> = all_views.iter().filter(|cv| {
+        cv.filter_by.as_deref().map(camel_to_snake).as_deref() == Some(pk_col.as_str())
+    }).collect();
+
+    writeln!(out, "fn {fn_name}(cols: List<Text>, rows: List<List<Text?>>, i: Int, acc: Text): Text =").unwrap();
     writeln!(out, "    if i >= List.len(rows) then acc").unwrap();
     writeln!(out, "    else {{").unwrap();
     writeln!(out, "        val row   = List.getOrPanic(rows, i)").unwrap();
-    writeln!(out, "        val pkIdx = pkColIndex(cols, pk, 0)").unwrap();
+    writeln!(out, "        val pkIdx = pkColIndex(cols, \"{pk_col}\", 0)").unwrap();
     writeln!(out, "        val pkVal = if pkIdx >= 0 then (List.getOrPanic(row, pkIdx) ?? \"\") else \"\"").unwrap();
-    writeln!(out, "        val link  = \"<a href=\\\"\" ++ editSlug ++ \"?id=\" ++ pkVal ++ \"\\\">Edit</a>\"").unwrap();
-    writeln!(out, "        rowActions(cols, rows, pk, editSlug, i + 1, acc ++ link)").unwrap();
+
+    // Build URL vals and links expression.
+    // Each URL is a separate val so pkVal is concatenated as an operator, not
+    // embedded as literal text inside a string.
+    let mut url_vals: Vec<String>  = vec![];
+    let mut link_parts: Vec<String> = vec![];
+
+    if let Some(ef) = edit_form {
+        let es = slugify(&ef.name.node);
+        url_vals.push(format!("        val editUrl = \"/{es}?id=\" ++ pkVal"));
+        link_parts.push("\"<a href=\\\"\" ++ editUrl ++ \"\\\">Edit</a>\"".to_string());
+    }
+
+    for (idx, cv) in child_views.iter().enumerate() {
+        let cv_slug      = slugify(&cv.name.node);
+        let cv_label     = to_title(&cv.name.node);
+        let filter_param = cv.filter_by.as_deref().map(camel_to_snake).unwrap_or_default();
+        let url_var      = format!("childUrl{idx}");
+        url_vals.push(format!("        val {url_var} = \"/{cv_slug}?{filter_param}=\" ++ pkVal"));
+        link_parts.push(format!("\"<a href=\\\"\" ++ {url_var} ++ \"\\\">{cv_label}</a>\""));
+    }
+
+    for uv in &url_vals {
+        writeln!(out, "{uv}").unwrap();
+    }
+
+    let links_expr = if link_parts.is_empty() {
+        "\"\"".to_string()
+    } else {
+        link_parts.join(" ++ \" &nbsp; \" ++ ")
+    };
+
+    writeln!(out, "        val links = {links_expr}").unwrap();
+    writeln!(out, "        {fn_name}(cols, rows, i + 1, acc ++ \"<div class=\\\"row-actions\\\">\" ++ links ++ \"</div>\")").unwrap();
     writeln!(out, "    }}").unwrap();
     writeln!(out).unwrap();
 }
@@ -357,7 +380,6 @@ fn emit_form_get_handler(f: &FormDecl, out: &mut String) {
     if is_edit {
         if let Some(ref pk_field) = f.pk {
             let pk_col = camel_to_snake(pk_field);
-            // Pre-fill by fetching existing record
             writeln!(out, "    val _qry  = HttpRequest.query(req)").unwrap();
             writeln!(out, "    val _id   = formField(_qry, \"id\")").unwrap();
             writeln!(out, "    val conn  = dbConnect(dbUrl())").unwrap();
@@ -366,26 +388,23 @@ fn emit_form_get_handler(f: &FormDecl, out: &mut String) {
             writeln!(out, "    val _rows = dbQuery(conn, \"SELECT * FROM {table} WHERE {pk_col} = $1 LIMIT 1\", _p1)").unwrap();
             writeln!(out, "    val _cols = dbColumns(conn, \"SELECT * FROM {table} LIMIT 1\")").unwrap();
             writeln!(out, "    dbClose(conn)").unwrap();
-            writeln!(out, "    val body =").unwrap();
-            writeln!(out, "        \"<h1>{title}</h1>\" ++").unwrap();
-            writeln!(out, "        \"<nav><a href=\\\"/{list_slug}\\\">← Back to list</a></nav>\" ++").unwrap();
-            writeln!(out, "        \"<form method=\\\"POST\\\" action=\\\"/{slug}?id=\\\" \" ++ _id ++ \"\\\">\" ++").unwrap();
 
+            // Emit each field as its own val to avoid deep ++ chains
             for (i, field) in f.fields.iter().enumerate() {
                 let fname  = &field.name.node;
                 let fcol   = camel_to_snake(fname);
                 let label  = field.label.as_deref().unwrap_or(fname.as_str());
                 let itype  = infer_input_type(fname, &field.field_type);
-                // Look up field value from row at runtime via colValue helper
                 writeln!(out,
-                    "        \"<div class=\\\"field\\\"><label for=\\\"{fname}\\\">{label}</label>\" ++").unwrap();
-                writeln!(out,
-                    "        \"<input id=\\\"{fname}\\\" name=\\\"{fname}\\\" type=\\\"{itype}\\\" value=\\\"\" ++ colValue(_rows, _cols, \"{fcol}\") ++ \"\\\" required></div>\" ++").unwrap();
-                let _ = i;
+                    "    val _ef{i} = \"<div class=\\\"field\\\"><label for=\\\"{fname}\\\">{label}</label>\" ++ \"<input id=\\\"{fname}\\\" name=\\\"{fname}\\\" type=\\\"{itype}\\\" value=\\\"\" ++ colValue(_rows, _cols, \"{fcol}\") ++ \"\\\" required></div>\"").unwrap();
             }
 
-            writeln!(out, "        \"<button type=\\\"submit\\\">Save changes</button>\" ++").unwrap();
-            writeln!(out, "        \"</form>\"").unwrap();
+            // Build body by joining field vars in small chains
+            let n = f.fields.len();
+            writeln!(out, "    val _hdr = \"<h1>{title}</h1>\" ++ \"<nav><a href=\\\"/{list_slug}\\\">← Back to list</a></nav>\" ++ \"<form method=\\\"POST\\\" action=\\\"/{slug}?id=\\\" \" ++ _id ++ \"\\\">\"").unwrap();
+            emit_field_concat_tree(out, n, "    ");
+            writeln!(out, "    val _footer = \"<button type=\\\"submit\\\">Save changes</button>\" ++ \"</form>\"").unwrap();
+            writeln!(out, "    val body = _hdr ++ _fields ++ _footer").unwrap();
             writeln!(out, "    Http.ok(htmlPage(\"{title}\", body), \"text/html\")").unwrap();
             writeln!(out, "}}").unwrap();
             writeln!(out).unwrap();
@@ -393,24 +412,20 @@ fn emit_form_get_handler(f: &FormDecl, out: &mut String) {
         }
     }
 
-    // Create form (no pre-fill)
-    writeln!(out, "    val body =").unwrap();
-    writeln!(out, "        \"<h1>{title}</h1>\" ++").unwrap();
-    writeln!(out, "        \"<nav><a href=\\\"/{list_slug}\\\">← Back to list</a></nav>\" ++").unwrap();
-    writeln!(out, "        \"<form method=\\\"POST\\\" action=\\\"/{slug}\\\">\" ++").unwrap();
-
-    for field in &f.fields {
+    // Create form (no pre-fill) — emit each field as its own val
+    for (i, field) in f.fields.iter().enumerate() {
         let fname = &field.name.node;
         let label = field.label.as_deref().unwrap_or(fname.as_str());
         let itype = infer_input_type(fname, &field.field_type);
         writeln!(out,
-            "        \"<div class=\\\"field\\\"><label for=\\\"{fname}\\\">{label}</label>\" ++").unwrap();
-        writeln!(out,
-            "        \"<input id=\\\"{fname}\\\" name=\\\"{fname}\\\" type=\\\"{itype}\\\" required></div>\" ++").unwrap();
+            "    val _ef{i} = \"<div class=\\\"field\\\"><label for=\\\"{fname}\\\">{label}</label>\" ++ \"<input id=\\\"{fname}\\\" name=\\\"{fname}\\\" type=\\\"{itype}\\\" required></div>\"").unwrap();
     }
 
-    writeln!(out, "        \"<button type=\\\"submit\\\">Submit</button>\" ++").unwrap();
-    writeln!(out, "        \"</form>\"").unwrap();
+    let n = f.fields.len();
+    writeln!(out, "    val _hdr = \"<h1>{title}</h1>\" ++ \"<nav><a href=\\\"/{list_slug}\\\">← Back to list</a></nav>\" ++ \"<form method=\\\"POST\\\" action=\\\"/{slug}\\\">\"").unwrap();
+    emit_field_concat_tree(out, n, "    ");
+    writeln!(out, "    val _footer = \"<button type=\\\"submit\\\">Submit</button>\" ++ \"</form>\"").unwrap();
+    writeln!(out, "    val body = _hdr ++ _fields ++ _footer").unwrap();
     writeln!(out, "    Http.ok(htmlPage(\"{title}\", body), \"text/html\")").unwrap();
     writeln!(out, "}}").unwrap();
     writeln!(out).unwrap();
@@ -428,6 +443,33 @@ fn emit_col_value_helper(out: &mut String) {
     writeln!(out, "        if idx < 0 then \"\" else (List.getOrPanic(row, idx) ?? \"\")").unwrap();
     writeln!(out, "    }}").unwrap();
     writeln!(out).unwrap();
+}
+
+/// Emit `val _fields = _ef0 ++ _ef1 ++ ...` using a flat chain of at most
+/// 4 terms per `val` so the parser never recurses more than a few levels deep.
+fn emit_field_concat_tree(out: &mut String, n: usize, indent: &str) {
+    if n == 0 {
+        writeln!(out, "{indent}val _fields = \"\"").unwrap();
+        return;
+    }
+    // Group _ef vars into chunks of 4, each assigned to an intermediate val
+    let vars: Vec<String> = (0..n).map(|i| format!("_ef{i}")).collect();
+    let mut level_vars = vars;
+    let mut pass = 0usize;
+    while level_vars.len() > 1 {
+        let mut next: Vec<String> = vec![];
+        for chunk in level_vars.chunks(4) {
+            let joined = chunk.join(" ++ ");
+            let var = format!("_fc{pass}_{}", next.len());
+            writeln!(out, "{indent}val {var} = {joined}").unwrap();
+            next.push(var);
+        }
+        level_vars = next;
+        pass += 1;
+    }
+    // Rename the single survivor to _fields
+    let survivor = &level_vars[0];
+    writeln!(out, "{indent}val _fields = {survivor}").unwrap();
 }
 
 // ── Form POST handler ─────────────────────────────────────────────────────────
