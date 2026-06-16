@@ -29,6 +29,12 @@ pub enum TypeErrorKind {
 
     /// E0206 — name was not found in the type environment (should be caught by resolve, but belt+suspenders).
     UnboundName(String),
+
+    /// E0708 — temporal declaration body does not resolve to Duration.
+    TemporalNotDuration { found: Ty },
+
+    /// E0709 — `.age` used on a non-Timestamp expression.
+    AgeOnNonTimestamp { found: Ty },
 }
 
 impl TypeError {
@@ -48,6 +54,10 @@ impl TypeError {
                 format!("E0205: type `{}` has no field `{}`", on.display(), field),
             TypeErrorKind::UnboundName(name) =>
                 format!("E0206: unbound name `{}`", name),
+            TypeErrorKind::TemporalNotDuration { found } =>
+                format!("E0708: temporal body must resolve to Duration, found `{}`", found.display()),
+            TypeErrorKind::AgeOnNonTimestamp { found } =>
+                format!("E0709: `.age` is only valid on Timestamp or Timestamp?, found `{}`", found.display()),
         }
     }
 }

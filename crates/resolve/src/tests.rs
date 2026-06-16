@@ -123,3 +123,124 @@ fn f(): Int = {
 }");
     assert!(matches!(kind, ResolveErrorKind::UndefinedIdent(n) if n == "y"));
 }
+
+// ------------------------------------------------------------------ //
+// Phase 3 — validator feature name resolution
+// ------------------------------------------------------------------ //
+
+const MINIMAL_VALIDATOR: &str = "module A
+validator V for Order errors OE {
+    rule r { require true else Err(OE.X) }
+}";
+
+#[test]
+fn constraint_hoisted() {
+    ok("module A\nconstraint WithinCredit = order.total <= credit");
+}
+
+#[test]
+fn constraint_pub_hoisted() {
+    ok("module A\npub constraint UserIsAdmin = user.role == admin");
+}
+
+#[test]
+fn temporal_hoisted() {
+    ok("module A\ntemporal GracePeriod = Duration.days(30)");
+}
+
+#[test]
+fn temporal_pub_hoisted() {
+    ok("module A\npub temporal VoidWindow = Duration.days(30)");
+}
+
+#[test]
+fn validator_hoisted() {
+    ok(MINIMAL_VALIDATOR);
+}
+
+#[test]
+fn validator_pub_hoisted() {
+    ok("module A
+pub validator V for Order errors OE {
+    rule r { require true else Err(OE.X) }
+}");
+}
+
+#[test]
+fn validator_after_existing_rule_ok() {
+    ok("module A
+validator V for Order errors OE {
+    rule a { require true else Err(OE.X) }
+    rule b { after a  require true else Err(OE.X) }
+}");
+}
+
+#[test]
+fn validator_after_multiple_ok() {
+    ok("module A
+validator V for Order errors OE {
+    rule a { require true else Err(OE.X) }
+    rule b { require true else Err(OE.X) }
+    rule c { after a  after b  require true else Err(OE.X) }
+}");
+}
+
+#[test]
+fn validator_overrides_existing_rule_ok() {
+    ok("module A
+validator V for Order errors OE {
+    rule a { require true else Err(OE.X) }
+    rule b { overrides a  require true else Err(OE.X) }
+}");
+}
+
+#[test]
+fn validator_after_missing_rule_e0701() {
+    let kind = first_error_kind("module A
+validator V for Order errors OE {
+    rule b { after nonexistent  require true else Err(OE.X) }
+}");
+    assert!(matches!(kind, ResolveErrorKind::AfterRuleNotFound { after_name, .. } if after_name == "nonexistent"));
+}
+
+#[test]
+fn validator_overrides_missing_rule_e0702() {
+    let kind = first_error_kind("module A
+validator V for Order errors OE {
+    rule b { overrides ghost  require true else Err(OE.X) }
+}");
+    assert!(matches!(kind, ResolveErrorKind::OverridesRuleNotFound { overrides_name, .. } if overrides_name == "ghost"));
+}
+
+#[test]
+fn validator_rule_cycle_e0700() {
+    let kind = first_error_kind("module A
+validator V for Order errors OE {
+    rule a { after b  require true else Err(OE.X) }
+    rule b { after a  require true else Err(OE.X) }
+}");
+    assert!(matches!(kind, ResolveErrorKind::RuleCycle { validator, .. } if validator == "V"));
+}
+
+#[test]
+fn validator_no_cycle_chain_ok() {
+    // a → b → c is a valid chain with no cycle
+    ok("module A
+validator V for Order errors OE {
+    rule a { require true else Err(OE.X) }
+    rule b { after a  require true else Err(OE.X) }
+    rule c { after b  require true else Err(OE.X) }
+}");
+}
+
+#[test]
+fn duplicate_validator_names_e0102() {
+    let kind = first_error_kind("module A
+validator V for Order errors OE {
+    rule r { require true else Err(OE.X) }
+}
+validator V for Order errors OE {
+    rule r { require true else Err(OE.X) }
+}");
+    assert!(matches!(kind, ResolveErrorKind::DuplicateDefinition { name, .. } if name == "V"));
+}

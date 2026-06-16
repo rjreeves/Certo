@@ -2,6 +2,7 @@ mod cmd_doc;
 mod cmd_watch;
 mod cmd_repl;
 mod cmd_lint;
+mod cmd_generate;
 
 
 use std::path::{Path, PathBuf};
@@ -70,7 +71,8 @@ fn main() {
             "fmt"     => cmd_fmt(&args[2..]),
             "test"    => cmd_test(&args[2..]),
             "lint"    => cmd_lint(&args[2..]),
-            "bench"   => cmd_bench(&args[2..]),
+            "bench"    => cmd_bench(&args[2..]),
+            "generate" => cmd_generate::cmd_generate(&args[2..]),
             "new"     => cmd_new(&args[2..]),
             "migrate" => cmd_migrate(&args[2..]),
             "db"      => cmd_db(&args[2..]),
@@ -856,6 +858,22 @@ pub(crate) fn type_error_to_diagnostic(e: &TypeError) -> Diagnostic {
             }
             d
         }
+
+        TypeErrorKind::TemporalNotDuration { found } => {
+            let names = assign_var_names(&[found]);
+            Diagnostic::error("E0708",
+                format!("temporal body must be a Duration, found `{}`", found.display_named(&names)))
+                .with_span(e.span)
+                .with_note("use Duration.days(N), Duration.hours(N), etc.")
+        }
+
+        TypeErrorKind::AgeOnNonTimestamp { found } => {
+            let names = assign_var_names(&[found]);
+            Diagnostic::error("E0709",
+                format!("`.age` requires a Timestamp field, found `{}`", found.display_named(&names)))
+                .with_span(e.span)
+                .with_note("only fields of type Timestamp support `.age`")
+        }
     }
 }
 
@@ -1635,6 +1653,7 @@ fn print_top_help() {
     eprintln!("  certo test  <file.cto>...      Run test blocks");
     eprintln!("  certo lint  <file.cto>...      Lint for unused params / dead code");
     eprintln!("  certo bench <file.cto>...      Run bench_ functions");
+  eprintln!("  certo generate validators ...  Generate .cto from YAML definitions");
     eprintln!("  certo db <subcommand>            Database tools (migrate, rollback, status, pull)");
     eprintln!("  certo migrate <subcommand>       Alias for certo db
   certo --version                  Print version and exit");

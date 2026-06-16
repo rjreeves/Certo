@@ -1,6 +1,7 @@
 use certo_parser::parse;
 use certo_resolve::resolve;
 use crate::infer_decl::check_module;
+use crate::error::TypeErrorKind;
 
 fn check(src: &str) -> Result<(), Vec<crate::error::TypeError>> {
     let module = parse(src).expect("parse error");
@@ -12,6 +13,10 @@ fn check_err(src: &str) -> Vec<crate::error::TypeError> {
     let module = parse(src).expect("parse error");
     let _ = resolve(&module); // may have errors for unknown names
     check_module(&module).unwrap_err()
+}
+
+fn first_error_kind(src: &str) -> TypeErrorKind {
+    check_err(src).into_iter().next().expect("expected at least one error").kind
 }
 
 // ------------------------------------------------------------------ //
@@ -110,4 +115,146 @@ fn fact(n: Int) = if n == 0 then 1 else n * fact(n - 1)"
     );
     assert!(!errs.is_empty(), "expected E0203");
     assert!(errs[0].message().contains("E0203"), "got: {}", errs[0].message());
+}
+
+// ------------------------------------------------------------------ //
+// Phase 4 — validator feature type checking
+// ------------------------------------------------------------------ //
+
+// Temporal
+
+#[test]
+fn temporal_duration_days_ok() {
+    check("module A\ntemporal GracePeriod = Duration.days(30)").unwrap();
+}
+
+#[test]
+fn temporal_duration_hours_ok() {
+    check("module A\ntemporal Window = Duration.hours(48)").unwrap();
+}
+
+#[test]
+fn temporal_int_body_e0708() {
+    let kind = first_error_kind("module A\ntemporal Bad = 42");
+    assert!(matches!(kind, TypeErrorKind::TemporalNotDuration { .. }), "expected E0708, got {kind:?}");
+}
+
+#[test]
+fn temporal_text_body_e0708() {
+    let kind = first_error_kind("module A\ntemporal Bad = \"30 days\"");
+    assert!(matches!(kind, TypeErrorKind::TemporalNotDuration { .. }), "expected E0708, got {kind:?}");
+}
+
+#[test]
+fn temporal_name_has_duration_type() {
+    // Once declared, a temporal name is usable as Duration in expressions.
+    check("module A
+temporal GracePeriod = Duration.days(30)
+fn uses(d: Duration): Bool = true").unwrap();
+}
+
+// .age
+
+#[test]
+fn age_on_timestamp_field_ok() {
+    // Validator with a Timestamp field — .age should typecheck and produce Duration.
+    check("module A
+type Invoice = { createdAt: Timestamp }
+type IE = | X
+temporal VoidWindow = Duration.days(30)
+validator V for Invoice errors IE {
+    rule r { require invoice.createdAt.age < VoidWindow else true }
+}").unwrap();
+}
+
+#[test]
+fn age_on_int_field_e0709() {
+    // .age on an Int field must be E0709.
+    let kind = first_error_kind("module A
+type Invoice = { total: Int }
+type IE = | X
+validator V for Invoice errors IE {
+    rule r { require invoice.total.age < invoice.total else true }
+}");
+    assert!(matches!(kind, TypeErrorKind::AgeOnNonTimestamp { .. }), "expected E0709, got {kind:?}");
+}
+
+#[test]
+fn age_in_standalone_expr_ok() {
+    // .age on an unresolved base — optimistic: the type checker should not emit E0709.
+    // (resolve will flag the unknown name; we only care the typeck itself doesn't add E0709)
+    let module = parse("module A\nfn f(ts: Timestamp): Duration = ts.age").expect("parse error");
+    let _ = resolve(&module);
+    check_module(&module).unwrap();
+}
+
+// Constraint
+
+#[test]
+fn constraint_name_is_bool() {
+    check("module A
+constraint Active = status == active
+validator V for Order errors OE {
+    rule r { require Active else true }
+}").unwrap();
+}
+
+// Validator
+
+#[test]
+fn validator_require_true_ok() {
+    check("module A
+validator V for Order errors OE {
+    rule r { require true else true }
+}").unwrap();
+}
+
+#[test]
+fn validator_require_entity_field_ok() {
+    check("module A
+type Order = { total: Int }
+validator V for Order errors OE {
+    rule r { require order.total > 0 else true }
+}").unwrap();
+}
+
+#[test]
+fn validator_require_non_bool_e0200() {
+    let errs = check_err("module A
+validator V for Order errors OE {
+    rule r { require 42 else true }
+}");
+    assert!(!errs.is_empty(), "expected type error");
+    assert!(errs[0].message().contains("E020"), "expected E020x, got: {}", errs[0].message());
+}
+
+#[test]
+fn validator_context_field_in_scope() {
+    check("module A
+type Order = { id: Int }
+type Customer = { active: Bool }
+validator V for Order errors OE {
+    context { customer: Customer }
+    rule r { require customer.active else true }
+}").unwrap();
+}
+
+#[test]
+fn validator_multiple_rules_ok() {
+    check("module A
+type Order = { total: Int, valid: Bool }
+validator V for Order errors OE {
+    rule a { require order.total > 0 else true }
+    rule b { require order.valid else true }
+}").unwrap();
+}
+
+#[test]
+fn validator_validate_fn_registered() {
+    // After hoisting, V.validate should be callable.
+    check("module A
+validator V for Order errors OE {
+    rule r { require true else true }
+}
+fn callIt(o: Order): Result<Unit, OE> = V.validate(o)").unwrap();
 }

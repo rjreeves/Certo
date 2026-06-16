@@ -121,6 +121,17 @@ impl TypeEnv {
             });
         }
 
+        // Duration constructors: Duration.days / .hours / .minutes / .seconds :: Int → Duration
+        {
+            let dur = Ty::Named { name: "Duration".into(), args: vec![] };
+            for method in &["days", "hours", "minutes", "seconds", "milliseconds"] {
+                self.define(
+                    format!("Duration.{}", method),
+                    Ty::Fn { params: vec![Ty::Int], ret: Box::new(dur.clone()) },
+                );
+            }
+        }
+
         // Ok  :: ∀T E. T → Result<T, E>
         // Err :: ∀T E. E → Result<T, E>
         {

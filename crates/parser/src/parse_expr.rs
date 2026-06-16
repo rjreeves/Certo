@@ -178,16 +178,21 @@ fn parse_postfix(cur: &mut Cursor<'_>) -> Result<S<Expr>, ParseError> {
 
     loop {
         match cur.peek() {
-            // `expr.field`
+            // `expr.age` — temporal age property (only valid on Timestamp fields; type checker enforces)
+            // `expr.field` — regular field access
             Some(Token::Dot) => {
                 cur.bump();
                 let (field, field_span) = cur.expect_ident()?;
                 let span = expr.span.to(field_span);
-                expr = S::new(Expr::Field {
-                    expr: Box::new(expr),
-                    field: S::new(field, field_span),
-                    span,
-                }, span);
+                if field == "age" {
+                    expr = S::new(Expr::Age { expr: Box::new(expr), span }, span);
+                } else {
+                    expr = S::new(Expr::Field {
+                        expr:  Box::new(expr),
+                        field: S::new(field, field_span),
+                        span,
+                    }, span);
+                }
             }
             // `expr?.field`
             Some(Token::SafeDot) => {

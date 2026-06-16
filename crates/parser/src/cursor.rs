@@ -226,6 +226,19 @@ fn token_matches(a: &Token<'_>, b: &Token<'static>) -> bool {
         (Require,   Require)   |
         (Ensure,    Ensure)    |
         (Defer,     Defer)     |
-        (With,      With)
+        (With,      With)      |
+        (On,        On)        |
+        (Constraint, Constraint) |
+        (Temporal,  Temporal)  |
+        (Rule,      Rule)      |
+        (After,     After)     |
+        (Overrides, Overrides) |
+        (Priority,  Priority)  |
+        (Trigger,   Trigger)   |
+        (Context,   Context)   |
+        (Errors,    Errors)    |
+        (Loaded,    Loaded)    |
+        (RuleTest,  RuleTest)  |
+        (ValidatorTest, ValidatorTest)
     )
 }

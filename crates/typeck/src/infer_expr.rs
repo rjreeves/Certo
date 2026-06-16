@@ -492,6 +492,25 @@ pub fn infer(expr: &S<Expr>, ctx: &mut Ctx<'_>) -> Ty {
             infer(body, ctx);
             Ty::Unit
         }
+        Expr::Age { expr, span } => {
+            let base_ty = infer(expr, ctx);
+            let base_ty = ctx.uf.apply(&base_ty);
+            let is_timestamp = match &base_ty {
+                Ty::Named { name, .. } if name == "Timestamp" => true,
+                Ty::Option(inner) => matches!(inner.as_ref(), Ty::Named { name, .. } if name == "Timestamp"),
+                Ty::Var(_) => true, // unresolved — optimistically allow
+                _ => false,
+            };
+            if is_timestamp {
+                Ty::Named { name: "Duration".to_string(), args: vec![] }
+            } else {
+                ctx.errors.push(TypeError {
+                    kind: TypeErrorKind::AgeOnNonTimestamp { found: base_ty },
+                    span: *span,
+                });
+                Ty::Error
+            }
+        }
     }
 }
 

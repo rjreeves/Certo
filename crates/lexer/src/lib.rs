@@ -93,6 +93,8 @@ pub enum Token<'src> {
     #[token("test")]        Test,
     #[token("property")]    Property,
     #[token("dbTest")]      DbTest,
+    #[token("ruleTest")]    RuleTest,
+    #[token("validatorTest")] ValidatorTest,
     #[token("true")]        True,
     #[token("false")]       False,
     #[token("unit")]        Unit,
@@ -101,11 +103,22 @@ pub enum Token<'src> {
     #[token("not")]         Not,
     #[token("and")]         And,
     #[token("or")]          Or,
+    #[token("on")]          On,
     #[token("guard")]       Guard,
     #[token("require")]     Require,
     #[token("ensure")]      Ensure,
     #[token("defer")]       Defer,
     #[token("with")]        With,
+    #[token("constraint")]  Constraint,
+    #[token("temporal")]    Temporal,
+    #[token("rule")]        Rule,
+    #[token("after")]       After,
+    #[token("overrides")]   Overrides,
+    #[token("priority")]    Priority,
+    #[token("trigger")]     Trigger,
+    #[token("context")]     Context,
+    #[token("errors")]      Errors,
+    #[token("loaded")]      Loaded,
 
     // ------------------------------------------------------------------ //
     // Identifiers  (after keywords so keywords take priority)
@@ -313,5 +326,67 @@ mod tests {
     fn range_operators() {
         assert_eq!(tok("1..10"),  vec![Token::Integer("1"), Token::DotDot,    Token::Integer("10")]);
         assert_eq!(tok("1...10"), vec![Token::Integer("1"), Token::DotDotDot, Token::Integer("10")]);
+    }
+
+    // ------------------------------------------------------------------ //
+    // Phase 1 — validator feature keywords
+    // ------------------------------------------------------------------ //
+
+    #[test]
+    fn validator_feature_keywords() {
+        assert_eq!(tok("constraint"),    vec![Token::Constraint]);
+        assert_eq!(tok("temporal"),      vec![Token::Temporal]);
+        assert_eq!(tok("rule"),          vec![Token::Rule]);
+        assert_eq!(tok("after"),         vec![Token::After]);
+        assert_eq!(tok("overrides"),     vec![Token::Overrides]);
+        assert_eq!(tok("priority"),      vec![Token::Priority]);
+        assert_eq!(tok("trigger"),       vec![Token::Trigger]);
+        assert_eq!(tok("context"),       vec![Token::Context]);
+        assert_eq!(tok("errors"),        vec![Token::Errors]);
+        assert_eq!(tok("loaded"),        vec![Token::Loaded]);
+        assert_eq!(tok("on"),            vec![Token::On]);
+        assert_eq!(tok("ruleTest"),      vec![Token::RuleTest]);
+        assert_eq!(tok("validatorTest"), vec![Token::ValidatorTest]);
+    }
+
+    #[test]
+    fn validator_already_present() {
+        // validator and require were already in the lexer — verify they still work
+        assert_eq!(tok("validator"), vec![Token::Validator]);
+        assert_eq!(tok("require"),   vec![Token::Require]);
+    }
+
+    #[test]
+    fn keywords_do_not_swallow_adjacent_identifiers() {
+        assert_eq!(tok("validator_name"), vec![Token::Ident("validator_name")]);
+        assert_eq!(tok("rule_id"),        vec![Token::Ident("rule_id")]);
+        assert_eq!(tok("context_data"),   vec![Token::Ident("context_data")]);
+        assert_eq!(tok("after_tax"),      vec![Token::Ident("after_tax")]);
+        assert_eq!(tok("errors_list"),    vec![Token::Ident("errors_list")]);
+        assert_eq!(tok("loaded_by"),      vec![Token::Ident("loaded_by")]);
+        assert_eq!(tok("trigger_fn"),     vec![Token::Ident("trigger_fn")]);
+        assert_eq!(tok("priority_1"),     vec![Token::Ident("priority_1")]);
+    }
+
+    #[test]
+    fn keywords_inside_strings_not_tokenised() {
+        assert_eq!(tok(r#""validator""#),  vec![Token::StringLit("validator")]);
+        assert_eq!(tok(r#""constraint""#), vec![Token::StringLit("constraint")]);
+        assert_eq!(tok(r#""rule""#),       vec![Token::StringLit("rule")]);
+        assert_eq!(tok(r#""context""#),    vec![Token::StringLit("context")]);
+    }
+
+    #[test]
+    fn loaded_by_two_token_sequence() {
+        // 'loaded by' is two tokens — the parser pairs them, not the lexer
+        let tokens = tok("loaded by");
+        assert_eq!(tokens, vec![Token::Loaded, Token::Ident("by")]);
+    }
+
+    #[test]
+    fn not_in_two_token_sequence() {
+        // 'not in' is two tokens — parser handles the operator pairing
+        let tokens = tok("not in");
+        assert_eq!(tokens, vec![Token::Not, Token::In]);
     }
 }

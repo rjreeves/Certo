@@ -217,3 +217,264 @@ fn block_with_val() {
 fn missing_module_decl_is_error() {
     err("fn add(a: Int): Int = a");
 }
+
+// ------------------------------------------------------------------ //
+// Phase 2 — validator feature declarations
+// ------------------------------------------------------------------ //
+
+#[test]
+fn constraint_decl_simple() {
+    let m = ok("module A\nconstraint WithinCredit = order.total <= customer.availableCredit");
+    match &m.decls[0].node {
+        Decl::Constraint(c) => {
+            assert_eq!(c.name.node, "WithinCredit");
+            assert!(!c.is_pub);
+        }
+        _ => panic!("expected Constraint decl"),
+    }
+}
+
+#[test]
+fn constraint_decl_pub() {
+    let m = ok("module A\npub constraint UserIsAdmin = user.role == Admin");
+    match &m.decls[0].node {
+        Decl::Constraint(c) => {
+            assert_eq!(c.name.node, "UserIsAdmin");
+            assert!(c.is_pub);
+        }
+        _ => panic!("expected Constraint decl"),
+    }
+}
+
+#[test]
+fn temporal_decl_simple() {
+    let m = ok("module A\ntemporal GracePeriod = Duration.hours(48)");
+    match &m.decls[0].node {
+        Decl::Temporal(t) => assert_eq!(t.name.node, "GracePeriod"),
+        _ => panic!("expected Temporal decl"),
+    }
+}
+
+#[test]
+fn temporal_decl_pub() {
+    let m = ok("module A\npub temporal VoidWindow = Duration.days(30)");
+    match &m.decls[0].node {
+        Decl::Temporal(t) => {
+            assert_eq!(t.name.node, "VoidWindow");
+            assert!(t.is_pub);
+        }
+        _ => panic!("expected Temporal decl"),
+    }
+}
+
+#[test]
+fn validator_decl_minimal() {
+    let m = ok("module A\nvalidator V for Order errors OrderError {\n    rule r { require true else Err(OrderError.X) }\n}");
+    match &m.decls[0].node {
+        Decl::Validator(v) => {
+            assert_eq!(v.name.node, "V");
+            assert!(!v.is_pub);
+            assert_eq!(v.rules.len(), 1);
+            assert_eq!(v.rules[0].name.node, "r");
+            assert!(v.trigger.is_none());
+            assert!(v.context.is_empty());
+        }
+        _ => panic!("expected Validator decl"),
+    }
+}
+
+#[test]
+fn validator_decl_pub() {
+    let m = ok("module A\npub validator V for Order errors OrderError {\n    rule r { require true else Err(OrderError.X) }\n}");
+    match &m.decls[0].node {
+        Decl::Validator(v) => assert!(v.is_pub),
+        _ => panic!(),
+    }
+}
+
+#[test]
+fn validator_decl_trigger_insert() {
+    let m = ok("module A\nvalidator V for Order errors OE\n    trigger on Insert\n{\n    rule r { require true else Err(OE.X) }\n}");
+    match &m.decls[0].node {
+        Decl::Validator(v) => {
+            let t = v.trigger.as_ref().expect("trigger missing");
+            assert!(matches!(t.op, certo_ast::decl::TriggerOp::Insert));
+            assert!(t.condition.is_none());
+        }
+        _ => panic!(),
+    }
+}
+
+#[test]
+fn validator_decl_trigger_update_when_eq() {
+    let m = ok("module A\nvalidator V for Order errors OE\n    trigger on Update when status == Submitted\n{\n    rule r { require true else Err(OE.X) }\n}");
+    match &m.decls[0].node {
+        Decl::Validator(v) => {
+            let t = v.trigger.as_ref().expect("trigger missing");
+            assert!(matches!(t.op, certo_ast::decl::TriggerOp::Update));
+            let cond = t.condition.as_ref().expect("condition missing");
+            assert_eq!(cond.field.node, "status");
+            assert!(matches!(cond.op, certo_ast::decl::TriggerCondOp::Eq));
+        }
+        _ => panic!(),
+    }
+}
+
+#[test]
+fn validator_decl_trigger_update_when_neq() {
+    let m = ok("module A\nvalidator V for Order errors OE\n    trigger on Update when status != OLD.status\n{\n    rule r { require true else Err(OE.X) }\n}");
+    match &m.decls[0].node {
+        Decl::Validator(v) => {
+            let cond = v.trigger.as_ref().unwrap().condition.as_ref().unwrap();
+            assert!(matches!(cond.op, certo_ast::decl::TriggerCondOp::NotEq));
+        }
+        _ => panic!(),
+    }
+}
+
+#[test]
+fn validator_decl_context_block() {
+    let m = ok("module A\nvalidator V for Order errors OE {\n    context {\n        customer: Customer\n        user: User\n    }\n    rule r { require true else Err(OE.X) }\n}");
+    match &m.decls[0].node {
+        Decl::Validator(v) => {
+            assert_eq!(v.context.len(), 2);
+            assert_eq!(v.context[0].name.node, "customer");
+            assert_eq!(v.context[1].name.node, "user");
+            assert!(v.context[0].loaded_by.is_none());
+        }
+        _ => panic!(),
+    }
+}
+
+#[test]
+fn validator_decl_context_loaded_by() {
+    let m = ok("module A\nvalidator V for Order errors OE {\n    context {\n        customer: Customer loaded by db.customers.find(order.customerId)\n    }\n    rule r { require true else Err(OE.X) }\n}");
+    match &m.decls[0].node {
+        Decl::Validator(v) => {
+            assert!(v.context[0].loaded_by.is_some(), "loaded_by should be present");
+        }
+        _ => panic!(),
+    }
+}
+
+#[test]
+fn validator_rule_multiple_afters() {
+    let m = ok("module A\nvalidator V for Order errors OE {\n    rule a { require true else Err(OE.X) }\n    rule b {\n        after a\n        require true\n        else Err(OE.X)\n    }\n}");
+    match &m.decls[0].node {
+        Decl::Validator(v) => {
+            let b = &v.rules[1];
+            assert_eq!(b.after.len(), 1);
+            assert_eq!(b.after[0].node, "a");
+        }
+        _ => panic!(),
+    }
+}
+
+#[test]
+fn validator_rule_overrides_and_priority() {
+    let m = ok("module A\nvalidator V for Order errors OE {\n    rule a { require true else Err(OE.X) }\n    rule b {\n        overrides a\n        priority 100\n        require true\n        else Err(OE.X)\n    }\n}");
+    match &m.decls[0].node {
+        Decl::Validator(v) => {
+            let b = &v.rules[1];
+            assert_eq!(b.overrides.as_ref().unwrap().node, "a");
+            assert_eq!(b.priority, Some(100));
+        }
+        _ => panic!(),
+    }
+}
+
+#[test]
+fn validator_rule_all_modifiers_any_order() {
+    // after, overrides, priority can appear in any order
+    let m = ok("module A\nvalidator V for Order errors OE {\n    rule base { require true else Err(OE.X) }\n    rule b {\n        priority 10\n        after base\n        overrides base\n        require true\n        else Err(OE.X)\n    }\n}");
+    match &m.decls[0].node {
+        Decl::Validator(v) => {
+            let b = &v.rules[1];
+            assert_eq!(b.priority, Some(10));
+            assert_eq!(b.after.len(), 1);
+            assert!(b.overrides.is_some());
+        }
+        _ => panic!(),
+    }
+}
+
+#[test]
+fn rule_test_decl_pass() {
+    let m = ok("module A\nruleTest OrderSubmit.customer_active \"passes for active\" {\n    entity: Order { id: 1 }\n    context: defaultCtx\n    expect: pass\n}");
+    match &m.decls[0].node {
+        Decl::RuleTest(rt) => {
+            assert_eq!(rt.validator.len(), 2);
+            assert_eq!(rt.validator[0].node, "OrderSubmit");
+            assert_eq!(rt.validator[1].node, "customer_active");
+            assert_eq!(rt.label, "passes for active");
+            assert!(matches!(rt.expect, certo_ast::decl::TestExpectation::Pass));
+        }
+        _ => panic!("expected RuleTest decl"),
+    }
+}
+
+#[test]
+fn rule_test_decl_fail() {
+    let m = ok("module A\nruleTest OrderSubmit.customer_active \"fails when inactive\" {\n    entity: Order { id: 1 }\n    context: defaultCtx\n    expect: fail\n}");
+    match &m.decls[0].node {
+        Decl::RuleTest(rt) => {
+            assert!(matches!(rt.expect, certo_ast::decl::TestExpectation::Fail { with: None }));
+        }
+        _ => panic!(),
+    }
+}
+
+#[test]
+fn validator_test_decl_fail_with() {
+    let m = ok("module A\nvalidatorTest OrderSubmit \"label\" {\n    entity: validOrder\n    context: defaultCtx\n    expect: fail with OrderError.CustomerNotActive\n}");
+    match &m.decls[0].node {
+        Decl::ValidatorTest(vt) => {
+            assert_eq!(vt.validator.node, "OrderSubmit");
+            assert!(matches!(&vt.expect, certo_ast::decl::TestExpectation::Fail { with: Some(_) }));
+        }
+        _ => panic!("expected ValidatorTest decl"),
+    }
+}
+
+#[test]
+fn dot_age_postfix() {
+    let m = ok("module A\nval x = invoice.createdAt.age");
+    match &m.decls[0].node {
+        Decl::Val(v) => {
+            assert!(matches!(v.value.node, Expr::Age { .. }), "expected Age expr, got {:?}", v.value.node);
+        }
+        _ => panic!(),
+    }
+}
+
+#[test]
+fn dot_age_in_expression() {
+    // .age can appear in a comparison
+    let m = ok("module A\nval x = invoice.createdAt.age < limit");
+    match &m.decls[0].node {
+        Decl::Val(v) => assert!(matches!(v.value.node, Expr::BinOp { op: BinOp::Lt, .. })),
+        _ => panic!(),
+    }
+}
+
+// Parse errors
+
+#[test]
+fn validator_missing_errors_keyword() {
+    err("module A\nvalidator V for Order { rule r { require true else Err(OE.X) } }");
+}
+
+#[test]
+fn validator_missing_for_keyword() {
+    err("module A\nvalidator V errors OE for Order { }");
+}
+
+#[test]
+fn rule_missing_else() {
+    err("module A\nvalidator V for Order errors OE { rule r { require true } }");
+}
+
+#[test]
+fn context_loaded_missing_by() {
+    err("module A\nvalidator V for Order errors OE { context { customer: Customer loaded } rule r { require true else Err(OE.X) } }");
+}

@@ -16,10 +16,14 @@ pub fn fmt_decl(decl: &Decl, indent: usize) -> String {
         Decl::Property(p)     => fmt_test_decl("property", &p.name, &p.body.node, indent),
         Decl::DbTest(d)       => fmt_test_decl("dbTest", &d.name, &d.body.node, indent),
         Decl::StateMachine(sm) => fmt_statemachine(sm, indent),
-        Decl::Validator(v)    => fmt_validator(v, indent),
-        Decl::View(v)         => fmt_view(v, indent),
-        Decl::Form(f)         => fmt_form(f, indent),
-        Decl::Import(i)       => format!("import {}", i.path.join(".")),
+        Decl::Validator(v)      => fmt_validator(v, indent),
+        Decl::Constraint(c)     => fmt_constraint(c),
+        Decl::Temporal(t)       => fmt_temporal(t),
+        Decl::RuleTest(rt)      => fmt_rule_test(rt),
+        Decl::ValidatorTest(vt) => fmt_validator_test(vt),
+        Decl::View(v)           => fmt_view(v, indent),
+        Decl::Form(f)           => fmt_form(f, indent),
+        Decl::Import(i)         => format!("import {}", i.path.join(".")),
     }
 }
 
@@ -244,10 +248,30 @@ fn fmt_statemachine(sm: &StateMachineDecl, indent: usize) -> String {
 }
 
 fn fmt_validator(v: &ValidatorDecl, indent: usize) -> String {
+    let pub_ = if v.is_pub { "pub " } else { "" };
     let rules: Vec<String> = v.rules.iter()
-        .map(|r| format!("{}    {} => {}", ind(indent), r.field.node, fmt_expr(&r.expr.node, indent + 1)))
+        .map(|r| format!("{}    rule {} {{ ... }}", ind(indent), r.name.node))
         .collect();
-    format!("validator {} {{\n{}\n{}}}", v.name.node, rules.join("\n"), ind(indent))
+    format!("{}validator {} for ... errors ... {{\n{}\n{}}}", pub_, v.name.node, rules.join("\n"), ind(indent))
+}
+
+fn fmt_constraint(c: &ConstraintDecl) -> String {
+    let pub_ = if c.is_pub { "pub " } else { "" };
+    format!("{}constraint {} = {}", pub_, c.name.node, fmt_expr(&c.body.node, 0))
+}
+
+fn fmt_temporal(t: &TemporalDecl) -> String {
+    let pub_ = if t.is_pub { "pub " } else { "" };
+    format!("{}temporal {} = {}", pub_, t.name.node, fmt_expr(&t.body.node, 0))
+}
+
+fn fmt_rule_test(rt: &RuleTestDecl) -> String {
+    let path: Vec<_> = rt.validator.iter().map(|s| s.node.as_str()).collect();
+    format!("ruleTest {} \"{}\" {{ ... }}", path.join("."), rt.label)
+}
+
+fn fmt_validator_test(vt: &ValidatorTestDecl) -> String {
+    format!("validatorTest {} \"{}\" {{ ... }}", vt.validator.node, vt.label)
 }
 
 // ------------------------------------------------------------------ //

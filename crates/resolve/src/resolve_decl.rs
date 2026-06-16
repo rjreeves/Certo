@@ -1,6 +1,8 @@
+use std::collections::{HashMap, HashSet};
 use certo_ast::decl::*;
-use certo_ast::span::S;
+use certo_ast::span::{S, Span};
 use crate::scope::{ScopeChain, Res};
+use crate::error::{ResolveError, ResolveErrorKind};
 use crate::resolve_expr::resolve_expr;
 
 /// Walk a declaration and resolve all names inside it.
@@ -37,8 +39,12 @@ pub fn resolve_decl(decl: &S<Decl>, scope: &mut ScopeChain) {
             resolve_expr(&d.body, scope);
             scope.pop();
         }
-        Decl::Validator(_) => {}
-        Decl::Import(_) => {}
+        Decl::Validator(v)     => resolve_validator(v, decl.span, scope),
+        Decl::Constraint(_)    => {}  // body checked lazily at use site in type checker
+        Decl::Temporal(t)      => resolve_expr(&t.body, scope),
+        Decl::RuleTest(_)      => {}  // test bodies resolved by test runner
+        Decl::ValidatorTest(_) => {}  // test bodies resolved by test runner
+        Decl::Import(_)        => {}
     }
 }
 
@@ -75,6 +81,104 @@ fn resolve_fn(f: &FnDecl, scope: &mut ScopeChain) {
     }
 
     scope.pop();
+}
+
+fn resolve_validator(v: &ValidatorDecl, validator_span: Span, scope: &mut ScopeChain) {
+    // Build a local map of rule names so after/overrides can be validated.
+    let rule_map: HashMap<&str, Span> = v.rules.iter()
+        .map(|r| (r.name.node.as_str(), r.name.span))
+        .collect();
+
+    let mut has_ref_errors = false;
+    for rule in &v.rules {
+        for after_ref in &rule.after {
+            if !rule_map.contains_key(after_ref.node.as_str()) {
+                scope.errors.push(ResolveError {
+                    kind: ResolveErrorKind::AfterRuleNotFound {
+                        rule_name:  rule.name.node.clone(),
+                        after_name: after_ref.node.clone(),
+                    },
+                    span: after_ref.span,
+                });
+                has_ref_errors = true;
+            }
+        }
+        if let Some(ov) = &rule.overrides {
+            if !rule_map.contains_key(ov.node.as_str()) {
+                scope.errors.push(ResolveError {
+                    kind: ResolveErrorKind::OverridesRuleNotFound {
+                        rule_name:      rule.name.node.clone(),
+                        overrides_name: ov.node.clone(),
+                    },
+                    span: ov.span,
+                });
+                has_ref_errors = true;
+            }
+        }
+    }
+
+    // Cycle detection — only meaningful when all references resolved.
+    if !has_ref_errors {
+        detect_rule_cycles(&v.name.node, &v.rules, validator_span, scope);
+    }
+}
+
+fn detect_rule_cycles(
+    validator_name: &str,
+    rules:          &[RuleDecl],
+    validator_span: Span,
+    scope:          &mut ScopeChain,
+) {
+    let adj: HashMap<&str, Vec<&str>> = rules.iter()
+        .map(|r| (r.name.node.as_str(), r.after.iter().map(|a| a.node.as_str()).collect()))
+        .collect();
+
+    let mut visited:   HashSet<&str> = HashSet::new();
+    let mut rec_stack: Vec<&str>     = Vec::new();
+
+    for rule in rules {
+        let name = rule.name.node.as_str();
+        if !visited.contains(name) {
+            if let Some(cycle) = dfs_cycle(name, &adj, &mut visited, &mut rec_stack) {
+                scope.errors.push(ResolveError {
+                    kind: ResolveErrorKind::RuleCycle {
+                        validator: validator_name.to_string(),
+                        cycle,
+                    },
+                    span: validator_span,
+                });
+                return; // report only the first cycle
+            }
+        }
+    }
+}
+
+fn dfs_cycle<'a>(
+    node:      &'a str,
+    adj:       &HashMap<&'a str, Vec<&'a str>>,
+    visited:   &mut HashSet<&'a str>,
+    rec_stack: &mut Vec<&'a str>,
+) -> Option<Vec<String>> {
+    visited.insert(node);
+    rec_stack.push(node);
+
+    if let Some(neighbors) = adj.get(node) {
+        for &next in neighbors {
+            if !visited.contains(next) {
+                if let Some(cycle) = dfs_cycle(next, adj, visited, rec_stack) {
+                    return Some(cycle);
+                }
+            } else if rec_stack.contains(&next) {
+                let start = rec_stack.iter().position(|&n| n == next).unwrap();
+                let mut cycle: Vec<String> = rec_stack[start..].iter().map(|&n| n.to_string()).collect();
+                cycle.push(next.to_string());
+                return Some(cycle);
+            }
+        }
+    }
+
+    rec_stack.pop();
+    None
 }
 
 fn resolve_statemachine(sm: &StateMachineDecl, scope: &mut ScopeChain) {

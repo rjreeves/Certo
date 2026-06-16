@@ -172,6 +172,7 @@ fn walk_expr(
         Expr::Transaction { body, .. } | Expr::Unsafe { body, .. } => {
             walk_expr(body, fn_ret, db, errors);
         }
+        Expr::Age { expr, .. } => walk_expr(expr, fn_ret, db, errors),
         // Terminals — nothing to recurse into
         Expr::Lit { .. } | Expr::Path { .. } => {}
     }

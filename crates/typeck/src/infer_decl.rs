@@ -2,6 +2,7 @@ use certo_ast::module::Module;
 use certo_ast::decl::Decl;
 use certo_ast::span::S;
 use certo_ast::expr::Expr;
+use certo_ast::types::TypeExpr;
 use crate::ty::Ty;
 use crate::env::TypeEnv;
 use crate::unify::UnionFind;
@@ -188,6 +189,31 @@ fn hoist_decl(
                 Ty::Fn { params: vec![machine_ty.clone()], ret: Box::new(state_ty) },
             );
         }
+        // Constraint names resolve to Bool at use sites.
+        Decl::Constraint(c) => {
+            env.define(c.name.node.clone(), Ty::Bool);
+        }
+        // Temporal names resolve to Duration at use sites.
+        Decl::Temporal(t) => {
+            env.define(t.name.node.clone(), Ty::Named { name: "Duration".to_string(), args: vec![] });
+        }
+        // Validator: register the generated validate/validateAll functions.
+        Decl::Validator(v) => {
+            let entity_ty  = type_expr_to_ty(&v.entity.node,  &mut Ctx { env, uf, errors, counter });
+            let errors_ty  = type_expr_to_ty(&v.errors.node,  &mut Ctx { env, uf, errors, counter });
+            let result_ty  = Ty::Result(Box::new(Ty::Unit), Box::new(errors_ty.clone()));
+            let result_list = Ty::List(Box::new(errors_ty));
+            // validate(entity) -> Result<Unit, ErrorsType>
+            env.define(
+                format!("{}.validate", v.name.node),
+                Ty::Fn { params: vec![entity_ty.clone()], ret: Box::new(result_ty) },
+            );
+            // validateAll(entity) -> List<ErrorsType>
+            env.define(
+                format!("{}.validateAll", v.name.node),
+                Ty::Fn { params: vec![entity_ty], ret: Box::new(result_list) },
+            );
+        }
         _ => {} // Other decls handled later or not yet
     }
 }
@@ -253,6 +279,47 @@ fn check_decl(decl: &Decl, ctx: &mut Ctx<'_>) {
             ctx.env.define(v.name.node.clone(), inferred);
         }
 
+        Decl::Temporal(t) => {
+            let body_ty = infer(&t.body, ctx);
+            let body_ty = ctx.uf.apply(&body_ty);
+            let dur_ty  = Ty::Named { name: "Duration".to_string(), args: vec![] };
+            match &body_ty {
+                Ty::Var(_) | Ty::Error => {} // unresolved or already errored
+                other if other != &dur_ty => {
+                    ctx.errors.push(TypeError {
+                        kind: TypeErrorKind::TemporalNotDuration { found: body_ty.clone() },
+                        span: t.span,
+                    });
+                }
+                _ => {}
+            }
+        }
+
+        Decl::Validator(v) => {
+            ctx.env.push();
+
+            // Bind entity variable: `Order` → `order: Order`
+            if let Some(entity_name) = type_expr_simple_name(&v.entity.node) {
+                let entity_ty = type_expr_to_ty(&v.entity.node, ctx);
+                ctx.env.define(lowercase_first(&entity_name), entity_ty);
+            }
+
+            // Bind context fields
+            for field in &v.context {
+                let field_ty = type_expr_to_ty(&field.type_ref.node, ctx);
+                ctx.env.define(field.name.node.clone(), field_ty);
+            }
+
+            // Type-check each rule
+            for rule in &v.rules {
+                let req_ty = infer(&rule.require, ctx);
+                ctx.unify(req_ty, Ty::Bool, rule.require.span);
+                infer(&rule.else_, ctx); // deferred strict check (E0703)
+            }
+
+            ctx.env.pop();
+        }
+
         // Other decls: skip for now (traits, impls, state machines, etc.)
         _ => {}
     }
@@ -267,6 +334,22 @@ fn infer_fn_body(body: &S<Expr>, ctx: &mut Ctx<'_>) -> Ty {
             ty
         }
         _ => infer(body, ctx),
+    }
+}
+
+fn type_expr_simple_name(te: &TypeExpr) -> Option<String> {
+    if let TypeExpr::Named { path, .. } = te {
+        path.segments.last().map(|s| s.node.clone())
+    } else {
+        None
+    }
+}
+
+fn lowercase_first(s: &str) -> String {
+    let mut chars = s.chars();
+    match chars.next() {
+        None    => String::new(),
+        Some(c) => c.to_lowercase().to_string() + chars.as_str(),
     }
 }
 
