@@ -469,7 +469,7 @@ fn build_validator_fn(
     temporal_map:   &HashMap<&str, &TemporalDef>,
 ) -> String {
     let ts        = timestamp_comment();
-    let func_name = format!("validate_{}_{}", to_snake(entity), trigger);
+    let func_name = format!("validate_{}_{}", to_plural_snake(entity), trigger);
     let ordered   = topo_sort_rules(rules);
 
     // Sets of rule IDs used for dependency tracking.
@@ -663,34 +663,19 @@ fn build_rule_triggers(groups: &[(String, String, Vec<&RuleDef>)]) -> String {
             sb.push_str("    IF TG_OP = 'INSERT' THEN\n        NULL;\n");
         }
 
-        // UPDATE triggers — state-transition based where trigger ≠ create/update
-        let update_triggers: Vec<&&str> = triggers.iter()
-            .filter(|t| **t != "create" && **t != "update")
-            .collect();
+        // Named action triggers (e.g. submit, void, apply_discount) are not
+        // wired here — they are called explicitly via preflight_* API helpers
+        // from the application before committing DML. The DB trigger covers
+        // only the generic create/update cases as a safety net.
         let has_plain_update = triggers.iter().any(|t| *t == "update");
 
-        if !update_triggers.is_empty() || has_plain_update {
+        if has_plain_update {
             sb.push_str("    ELSIF TG_OP = 'UPDATE' THEN\n");
-            if has_plain_update {
-                sb.push_str(&format!(
-                    "        PERFORM {func_name_base}_update(v_record, v_context);\n"
-                ));
-            }
-            if !update_triggers.is_empty() {
-                // Emit CASE on status column for named transitions.
-                sb.push_str("        IF OLD.status IS DISTINCT FROM NEW.status THEN\n");
-                sb.push_str("            CASE NEW.status\n");
-                for t in &update_triggers {
-                    // Map trigger name to expected status value (UPPER_SNAKE).
-                    let status_val = t.to_uppercase();
-                    sb.push_str(&format!(
-                        "                WHEN '{status_val}' THEN\n                    PERFORM {func_name_base}_{t}(v_record, v_context);\n"
-                    ));
-                }
-                sb.push_str("                ELSE NULL;\n            END CASE;\n        END IF;\n");
-            }
+            sb.push_str(&format!(
+                "        PERFORM {func_name_base}_update(v_record, v_context);\n"
+            ));
         } else {
-            sb.push_str("    ELSIF TG_OP = 'UPDATE' THEN\n        NULL;\n");
+            sb.push_str("    ELSIF TG_OP = 'UPDATE' THEN\n        NULL; -- named-action validators called via preflight_* API helpers\n");
         }
 
         sb.push_str(
@@ -865,14 +850,14 @@ fn emit_sql_condition(
         }
 
         ConditionNode::TemporalRef { temporal, field, operator } => {
-            // Resolve temporal to its duration in days.
             let days = if let Some(t) = temporal_map.get(temporal.as_str()) {
                 let (_, amount) = temporal_to_duration(t);
                 amount
             } else {
                 30
             };
-            let col = field_to_sql_col(field);
+            // JSONB ->> returns text; cast to TIMESTAMPTZ for record_age_days().
+            let col = format!("{}::TIMESTAMPTZ", field_to_sql_col(field));
             match operator.as_str() {
                 "age_lt"  => format!("record_age_days({}) < {}", col, days),
                 "age_gt"  => format!("record_age_days({}) > {}", col, days),
@@ -909,13 +894,14 @@ fn emit_sql_condition(
 
         ConditionNode::Leaf { field, operator, value, .. } => {
             let col = field_to_sql_col(field);
+            let typed_col = sql_cast_col(&col, value);
             match operator.as_str() {
-                "eq"          => format!("{} = {}", col, sql_val(value)),
-                "not_eq"      => format!("{} != {}", col, sql_val(value)),
-                "gt"          => format!("{} > {}", col, sql_val(value)),
-                "gte"         => format!("{} >= {}", col, sql_val(value)),
-                "lt"          => format!("{} < {}", col, sql_val(value)),
-                "lte"         => format!("{} <= {}", col, sql_val(value)),
+                "eq"          => format!("{} = {}", typed_col, sql_val(value)),
+                "not_eq"      => format!("{} != {}", typed_col, sql_val(value)),
+                "gt"          => format!("{} > {}", typed_col, sql_val(value)),
+                "gte"         => format!("{} >= {}", typed_col, sql_val(value)),
+                "lt"          => format!("{} < {}", typed_col, sql_val(value)),
+                "lte"         => format!("{} <= {}", typed_col, sql_val(value)),
                 "in"          => format!("{} IN ({})", col, sql_list_val(value)),
                 "not_in"      => format!("{} NOT IN ({})", col, sql_list_val(value)),
                 "exists"      => format!("{} IS NOT NULL", col),
@@ -924,7 +910,7 @@ fn emit_sql_condition(
                 "not_matches" => format!("{} !~ {}", col, sql_val(value)),
                 "contains"    => format!("{} ILIKE '%%' || {} || '%%'", col, sql_val(value)),
                 "starts_with" => format!("{} ILIKE {} || '%%'", col, sql_val(value)),
-                other         => format!("{} {} {}", col, other.to_uppercase(), sql_val(value)),
+                other         => format!("{} {} {}", typed_col, other.to_uppercase(), sql_val(value)),
             }
         }
     }
@@ -946,11 +932,13 @@ fn cond_for_pass(
 // Field path → SQL column expression
 // ================================================================== //
 
-/// `order.total` → `(p_record->>'order_total')`
-/// `user.role`   → `(p_context->>'user_role')`  (context fields)
+/// Returns a bare JSONB ->> accessor with no type cast.
+/// The caller applies a cast based on the comparison value type.
+///
+/// `order.total` → `(p_record->>'total')`
+/// `user.role`   → `(p_context->>'user_role')`
 /// `status`      → `(p_record->>'status')`
 fn field_to_sql_col(field: &str) -> String {
-    // Fields rooted at a known context entity go to p_context.
     let ctx_roots = ["user", "operator", "actor"];
     if let Some(dot) = field.find('.') {
         let root = &field[..dot];
@@ -958,14 +946,21 @@ fn field_to_sql_col(field: &str) -> String {
         if ctx_roots.contains(&root) {
             return format!("(p_context->>'{}_{}')", root, rest);
         }
-        // Composite field path: order.total → p_record->>'order_total' (for joined context)
-        // or just p_record->>'<field_snake>'
-        let col = to_snake(&format!("{}_{}", root, rest));
-        return format!("(p_record->>'{}')::TEXT", col);
+        let col = camel_to_snake(&rest);
+        return format!("(p_record->>'{}')", col);
     }
-    // Simple field on the record.
     let col = camel_to_snake(field);
-    format!("(p_record->>'{}')::TEXT", col)
+    format!("(p_record->>'{}')", col)
+}
+
+/// Wraps a bare JSONB accessor with the appropriate Postgres cast
+/// based on what we're comparing it to.
+fn sql_cast_col(col: &str, value: &Option<serde_yaml::Value>) -> String {
+    match value {
+        Some(serde_yaml::Value::Number(_)) => format!("{}::NUMERIC", col),
+        Some(serde_yaml::Value::Bool(_))   => format!("{}::BOOLEAN", col),
+        _                                   => col.to_string(),
+    }
 }
 
 // ================================================================== //
@@ -999,11 +994,13 @@ fn sql_val(v: &Option<serde_yaml::Value>) -> String {
         Some(serde_yaml::Value::Number(n)) => n.to_string(),
         Some(serde_yaml::Value::Null)      => "NULL".into(),
         Some(serde_yaml::Value::String(s)) => {
-            // Field reference (lowercase dot path) → SQL column expression
-            if s.contains('.') || s.chars().next().map(|c| c.is_lowercase()).unwrap_or(false) {
-                field_to_sql_col(s)
+            // Lowercase identifier or dot-path = field reference, not a string literal.
+            let is_field_ref = s.chars().next().map(|c| c.is_lowercase()).unwrap_or(false)
+                && s.chars().all(|c| c.is_alphanumeric() || c == '.' || c == '_');
+            if is_field_ref {
+                // Numeric field references need a cast so comparisons work correctly.
+                format!("{}::NUMERIC", field_to_sql_col(s))
             } else {
-                // String literal or enum value
                 format!("'{}'", s.replace('\'', "''"))
             }
         }
