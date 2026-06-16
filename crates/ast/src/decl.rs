@@ -30,8 +30,20 @@ pub enum Decl {
     /// `statemachine Name { ... }`
     StateMachine(StateMachineDecl),
 
-    /// `validator Name { ... }`
+    /// `pub? validator Name for Type errors Type { ... }`
     Validator(ValidatorDecl),
+
+    /// `pub? constraint Name = expr`
+    Constraint(ConstraintDecl),
+
+    /// `pub? temporal Name = expr`
+    Temporal(TemporalDecl),
+
+    /// `ruleTest Validator.rule "label" { ... }`
+    RuleTest(RuleTestDecl),
+
+    /// `validatorTest Validator "label" { ... }`
+    ValidatorTest(ValidatorTestDecl),
 
     /// `migration "name" { up { ... } down { ... } }`
     Migration(MigrationDecl),
@@ -225,21 +237,113 @@ pub struct Invariant {
 }
 
 // ------------------------------------------------------------------ //
+// Constraint declaration
+// ------------------------------------------------------------------ //
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ConstraintDecl {
+    pub is_pub: bool,
+    pub name:   Ident,
+    pub body:   S<Expr>,   // boolean expression — type checked lazily at use site
+    pub span:   Span,
+}
+
+// ------------------------------------------------------------------ //
+// Temporal declaration
+// ------------------------------------------------------------------ //
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct TemporalDecl {
+    pub is_pub: bool,
+    pub name:   Ident,
+    pub body:   S<Expr>,   // must resolve to Duration — verified in type checker
+    pub span:   Span,
+}
+
+// ------------------------------------------------------------------ //
 // Validator declaration
 // ------------------------------------------------------------------ //
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ValidatorDecl {
-    pub name:  Ident,
-    pub rules: Vec<ValidatorRule>,
+    pub is_pub:  bool,
+    pub name:    Ident,
+    pub entity:  S<TypeExpr>,            // the `for` type
+    pub errors:  S<TypeExpr>,            // the `errors` type
+    pub trigger: Option<TriggerDecl>,
+    pub context: Vec<ContextField>,
+    pub rules:   Vec<RuleDecl>,
+    pub span:    Span,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct TriggerDecl {
+    pub op:        TriggerOp,
+    pub condition: Option<TriggerCondition>,
+    pub span:      Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TriggerOp { Insert, Update }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TriggerCondOp { Eq, NotEq }
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct TriggerCondition {
+    pub field: Ident,
+    pub op:    TriggerCondOp,
+    pub value: S<Expr>,
     pub span:  Span,
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct ValidatorRule {
-    pub field: Ident,
-    pub expr:  S<Expr>,
-    pub span:  Span,
+pub struct ContextField {
+    pub name:      Ident,
+    pub type_ref:  S<TypeExpr>,
+    pub loaded_by: Option<S<Expr>>,
+    pub span:      Span,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct RuleDecl {
+    pub name:      Ident,
+    pub after:     Vec<Ident>,        // prerequisite rule names
+    pub overrides: Option<Ident>,     // rule this suspends
+    pub priority:  Option<i64>,
+    pub require:   S<Expr>,           // boolean condition
+    pub else_:     S<Expr>,           // produces errors type
+    pub span:      Span,
+}
+
+// ------------------------------------------------------------------ //
+// Test declarations
+// ------------------------------------------------------------------ //
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct RuleTestDecl {
+    pub validator: Vec<Ident>,   // qualified path: [ValidatorName, rule_name]
+    pub label:     String,
+    pub entity:    S<Expr>,
+    pub context:   S<Expr>,
+    pub expect:    TestExpectation,
+    pub span:      Span,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ValidatorTestDecl {
+    pub validator: Ident,
+    pub label:     String,
+    pub entity:    S<Expr>,
+    pub context:   S<Expr>,
+    pub expect:    TestExpectation,
+    pub span:      Span,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum TestExpectation {
+    Pass,
+    Fail { with: Option<S<Expr>> },
 }
 
 // ------------------------------------------------------------------ //

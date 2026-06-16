@@ -1,0 +1,256 @@
+# =============================================================================
+# PREPARED ITEMS SCHEMA
+# =============================================================================
+# Shared vocabulary layer. Defines reusable types, enums, temporal windows,
+# and constraint fragments referenced by entity and rule definitions.
+#
+# This file is the foundation. Entity and rule definitions cannot reference
+# types, enums, or constraints that are not declared here first.
+# =============================================================================
+
+version: "1.0"
+
+# -----------------------------------------------------------------------------
+# OPERATORS
+# Controlled vocabulary of condition operators available in rule definitions.
+# Generators use this list to validate rule conditions and emit correct code.
+# -----------------------------------------------------------------------------
+operators:
+  # Equality
+  - eq                # equal to
+  - not_eq            # not equal to
+
+  # Numeric comparison
+  - gt                # greater than
+  - gte               # greater than or equal to
+  - lt                # less than
+  - lte               # less than or equal to
+
+  # Set membership
+  - in                # value is in list
+  - not_in            # value is not in list
+
+  # Existence
+  - exists            # field is not null
+  - not_exists        # field is null
+
+  # Temporal (used with unit field)
+  - age_lt            # record age less than duration
+  - age_gt            # record age greater than duration
+  - age_lte           # record age less than or equal to duration
+  - age_gte           # record age greater than or equal to duration
+
+  # String
+  - matches           # matches regex pattern
+  - not_matches       # does not match regex pattern
+  - contains          # string contains substring
+  - starts_with       # string starts with prefix
+
+# -----------------------------------------------------------------------------
+# TYPES
+# Named scalar types with base Postgres types, validation, and constraints.
+# Referenced in entity field definitions using the type id.
+#
+# Schema:
+#   id:           string    REQUIRED unique identifier (snake_case)
+#   description:  string    human readable description
+#   base:         string    REQUIRED postgres base type
+#                           text | decimal | integer | boolean | uuid
+#                           timestamp | date | time | jsonb | bytea
+#   validation:   string    regex pattern (text types only)
+#   error:        string    validation error message shown to user
+#   precision:    integer   total digits (decimal types only)
+#   scale:        integer   decimal places (decimal types only)
+#   currency_aware: bool    whether type carries currency context
+#   constraints:  list      value constraints applied to this type
+#     - operator: string    operator from operators list above
+#       value:    any       comparison value
+# -----------------------------------------------------------------------------
+types:
+  - id: email
+    description: RFC-compliant email address
+    base: text
+    validation: '^[^@\s]+@[^@\s]+\.[^@\s]+$'
+    error: "Must be a valid email address"
+
+  - id: money
+    description: Monetary amount with two decimal places, non-negative
+    base: decimal
+    precision: 10
+    scale: 2
+    currency_aware: true
+    constraints:
+      - operator: gte
+        value: 0
+
+  - id: percentage
+    description: Percentage value between 0 and 100
+    base: decimal
+    precision: 5
+    scale: 2
+    constraints:
+      - operator: gte
+        value: 0
+      - operator: lte
+        value: 100
+
+  - id: short_text
+    description: Short free text, max 255 characters
+    base: text
+    constraints:
+      - operator: lte
+        value: 255
+
+  - id: long_text
+    description: Long free text, no length constraint
+    base: text
+
+  - id: positive_integer
+    description: Whole number greater than zero
+    base: integer
+    constraints:
+      - operator: gt
+        value: 0
+
+  - id: non_negative_integer
+    description: Whole number zero or greater
+    base: integer
+    constraints:
+      - operator: gte
+        value: 0
+
+  - id: url
+    description: HTTP or HTTPS URL
+    base: text
+    validation: '^https?:\/\/.+'
+    error: "Must be a valid URL starting with http:// or https://"
+
+  - id: phone
+    description: International phone number
+    base: text
+    validation: '^\+?[1-9]\d{6,14}$'
+    error: "Must be a valid international phone number"
+
+# -----------------------------------------------------------------------------
+# ENUMS
+# Named enumeration types with values and optional state transition rules.
+# Referenced in entity field definitions using the enum id.
+#
+# Schema:
+#   id:           string    REQUIRED unique identifier (snake_case)
+#   description:  string    human readable description
+#   values:       list      REQUIRED list of enum value strings (UPPER_CASE)
+#   transitions:  map       optional valid state transitions
+#                           key:   current state value
+#                           value: list of reachable state values
+#                           omit entirely if no transition rules needed
+# -----------------------------------------------------------------------------
+enums:
+  - id: order_status
+    description: Lifecycle states of an order
+    values:
+      - DRAFT
+      - PLACED
+      - FULFILLED
+      - VOIDED
+    transitions:
+      DRAFT:      [PLACED, VOIDED]
+      PLACED:     [FULFILLED, VOIDED]
+      FULFILLED:  []
+      VOIDED:     []
+
+  - id: invoice_status
+    description: Lifecycle states of an invoice
+    values:
+      - DRAFT
+      - ISSUED
+      - PAID
+      - VOIDED
+      - OVERDUE
+    transitions:
+      DRAFT:    [ISSUED]
+      ISSUED:   [PAID, VOIDED, OVERDUE]
+      PAID:     []
+      VOIDED:   []
+      OVERDUE:  [PAID, VOIDED]
+
+  - id: user_role
+    description: Access role assigned to a user
+    values:
+      - ADMIN
+      - MEMBER
+      - GUEST
+    # No transitions — role changes are unconstrained
+
+  - id: payment_method
+    description: Supported payment methods
+    values:
+      - CREDIT_CARD
+      - BANK_TRANSFER
+      - PREPAID
+      - INVOICE
+
+# -----------------------------------------------------------------------------
+# TEMPORAL
+# Named time windows used in rule conditions involving age or duration.
+# Referenced in rule conditions using the temporal id.
+#
+# Schema:
+#   id:           string    REQUIRED unique identifier (snake_case)
+#   description:  string    human readable description
+#   duration:     integer   REQUIRED numeric duration value
+#   unit:         string    REQUIRED time unit
+#                           minutes | hours | days | weeks | months | years
+# -----------------------------------------------------------------------------
+temporal:
+  - id: standard_void_window
+    description: Standard window within which a document can be voided
+    duration: 30
+    unit: days
+
+  - id: payment_grace_period
+    description: Grace period after due date before invoice is overdue
+    duration: 7
+    unit: days
+
+  - id: session_expiry
+    description: Duration after which a user session expires
+    duration: 8
+    unit: hours
+
+  - id: short_term_window
+    description: Short operational window for time-sensitive operations
+    duration: 24
+    unit: hours
+
+# -----------------------------------------------------------------------------
+# CONSTRAINTS
+# Named reusable condition fragments referenced by rule definitions.
+# Keeps rules DRY when the same condition appears across multiple rules.
+#
+# Schema:
+#   id:           string        REQUIRED unique identifier (snake_case)
+#   description:  string        human readable description
+#   condition:    ConditionNode REQUIRED see rule schema for condition structure
+# -----------------------------------------------------------------------------
+constraints:
+  - id: within_credit_limit
+    description: Order total does not exceed the user's credit limit
+    condition:
+      field: order.total
+      operator: lte
+      value: user.credit_limit
+
+  - id: user_is_verified
+    description: The acting user has a verified account
+    condition:
+      field: user.verified
+      operator: eq
+      value: true
+
+  - id: user_is_admin
+    description: The acting user has the ADMIN role
+    condition:
+      field: user.role
+      operator: eq
+      value: ADMIN

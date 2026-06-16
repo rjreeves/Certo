@@ -49,7 +49,10 @@ fn hoist_decls(module: &Module, scope: &mut ScopeChain) {
             Decl::Trait(t)        => (t.name.node.clone(), t.name.span),
             Decl::StateMachine(s) => (s.name.node.clone(), s.name.span),
             Decl::View(v)         => (v.name.node.clone(), v.name.span),
-            // impl / migration / test / validator don't introduce a module-level name
+            Decl::Constraint(c)   => (c.name.node.clone(), c.name.span),
+            Decl::Temporal(t)     => (t.name.node.clone(), t.name.span),
+            Decl::Validator(v)    => (v.name.node.clone(), v.name.span),
+            // impl / migration / test / rule-test don't introduce a module-level name
             _ => continue,
         };
         scope.define_top_level(

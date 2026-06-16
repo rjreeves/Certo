@@ -140,6 +140,11 @@ fn skip_to_next_decl(cur: &mut Cursor<'_>) {
             | Some(Token::Test)
             | Some(Token::Property)
             | Some(Token::DbTest)
+            | Some(Token::Validator)
+            | Some(Token::Constraint)
+            | Some(Token::Temporal)
+            | Some(Token::RuleTest)
+            | Some(Token::ValidatorTest)
             | Some(Token::Pub) => break,
             _ => { cur.bump(); }
         }

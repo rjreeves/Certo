@@ -202,6 +202,13 @@ pub enum Expr {
         body: Box<S<Expr>>,
         span: Span,
     },
+
+    /// `expr.age` — computed temporal age; only valid on Timestamp / Timestamp? fields.
+    /// Produces Duration. Validated by the type checker (Phase 4).
+    Age {
+        expr: Box<S<Expr>>,
+        span: Span,
+    },
 }
 
 // ------------------------------------------------------------------ //

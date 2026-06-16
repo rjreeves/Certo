@@ -153,6 +153,9 @@ pub fn fmt_expr(expr: &Expr, indent: usize) -> String {
                 fmt_expr(&body.node, indent + 1),
                 ind(indent))
         }
+        Expr::Age { expr, .. } => {
+            format!("{}.age", fmt_expr(&expr.node, indent))
+        }
     }
 }
 

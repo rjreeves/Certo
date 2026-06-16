@@ -747,6 +747,8 @@ fn lower_expr(expr: &S<Expr>, cx: &mut Cx) -> HirExpr {
                 span,
             }
         }
+        // `.age` lowering is implemented in Phase 5; for now lower the inner expression
+        Expr::Age { expr, .. } => lower_expr(expr, cx),
     }
 }
 
