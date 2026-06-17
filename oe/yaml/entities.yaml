@@ -1,0 +1,91 @@
+entities:
+  - id: Order
+    fields:
+      - name: id
+        type: Uuid
+      - name: status
+        type: Text
+      - name: customerId
+        type: Uuid
+      - name: total
+        type: Decimal
+      - name: availableCredit
+        type: Decimal
+      - name: lineCount
+        type: Int
+      - name: linesAllDigital
+        type: Bool
+      - name: shippingAddressId
+        type: Uuid
+        nullable: true
+      - name: billingAddressId
+        type: Uuid
+        nullable: true
+      - name: createdAt
+        type: Timestamp
+
+  - id: OrderLine
+    fields:
+      - name: id
+        type: Uuid
+      - name: orderId
+        type: Uuid
+      - name: productId
+        type: Uuid
+      - name: unitPrice
+        type: Decimal
+      - name: quantity
+        type: Int
+      - name: discountPercent
+        type: Decimal
+      - name: discountAmount
+        type: Decimal
+      - name: total
+        type: Decimal
+
+  - id: Invoice
+    fields:
+      - name: id
+        type: Uuid
+      - name: orderId
+        type: Uuid
+      - name: customerId
+        type: Uuid
+      - name: status
+        type: Text
+      - name: amount
+        type: Decimal
+      - name: amountOutstanding
+        type: Decimal
+      - name: currency
+        type: Text
+      - name: createdAt
+        type: Timestamp
+
+  - id: Payment
+    fields:
+      - name: id
+        type: Uuid
+      - name: invoiceId
+        type: Uuid
+      - name: amount
+        type: Decimal
+      - name: currency
+        type: Text
+      - name: status
+        type: Text
+      - name: createdAt
+        type: Timestamp
+
+  - id: Customer
+    fields:
+      - name: id
+        type: Uuid
+      - name: status
+        type: Text
+      - name: creditLimit
+        type: Decimal
+      - name: outstandingBalance
+        type: Decimal
+      - name: currency
+        type: Text

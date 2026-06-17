@@ -1,0 +1,30 @@
+module OrderValidators
+
+validator OrderSubmit for Order errors OrderError {
+    rule customer_must_be_active_to_order {
+        require status == ACTIVE
+        else OrderError.CUSTOMER_NOT_ACTIVE
+    }
+    rule order_must_have_lines_to_submit {
+        require lineCount > 0
+        else OrderError.ORDER_HAS_NO_LINES
+    }
+    rule order_must_have_shipping_address {
+        require shippingAddressId.isSome() or linesAllDigital == true
+        else OrderError.NO_SHIPPING_ADDRESS
+    }
+    rule order_must_have_billing_address {
+        require billingAddressId.isSome()
+        else OrderError.NO_BILLING_ADDRESS
+    }
+    rule credit_limit_override_requires_admin {
+        overrides customer_credit_limit_not_exceeded
+        require UserIsAdmin
+        else OrderError.CREDIT_LIMIT_OVERRIDE_NOT_ADMIN
+    }
+    rule customer_credit_limit_not_exceeded {
+        after customer_must_be_active_to_order
+        require total <= availableCredit
+        else OrderError.CREDIT_LIMIT_EXCEEDED
+    }
+}

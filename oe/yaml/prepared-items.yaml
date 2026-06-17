@@ -1,0 +1,51 @@
+temporal:
+  - id: invoice_void_window
+    duration: 30
+    unit: days
+
+  - id: recent_order_window
+    duration: 7
+    unit: days
+
+constraints:
+  - id: user_is_admin
+    condition:
+      field: user.role
+      operator: eq
+      value: ADMIN
+
+  - id: user_is_accounts
+    condition:
+      any:
+        - field: user.role
+          operator: eq
+          value: ADMIN
+        - field: user.role
+          operator: eq
+          value: ACCOUNTS
+
+  - id: invoice_is_payable
+    condition:
+      field: status
+      operator: in
+      value: [ISSUED, PARTIALLY_PAID, OVERDUE]
+
+  - id: invoice_is_voidable
+    condition:
+      none:
+        - field: status
+          operator: in
+          value: [PAID, WRITTEN_OFF]
+
+enums:
+  - id: user_role
+    values: [ADMIN, SALES, ACCOUNTS, WAREHOUSE]
+
+  - id: order_status
+    values: [DRAFT, SUBMITTED, FULFILLED, CANCELLED]
+
+  - id: invoice_status
+    values: [DRAFT, ISSUED, PARTIALLY_PAID, PAID, OVERDUE, VOIDED, WRITTEN_OFF]
+
+  - id: payment_status
+    values: [PENDING, CLEARED, REVERSED]

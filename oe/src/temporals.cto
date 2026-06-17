@@ -1,0 +1,4 @@
+module Temporals
+
+temporal InvoiceVoidWindow = Duration.days(30)
+temporal RecentOrderWindow = Duration.days(7)
