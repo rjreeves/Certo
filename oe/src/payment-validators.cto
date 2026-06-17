@@ -1,0 +1,20 @@
+module PaymentValidators
+
+validator PaymentCreate for Payment errors PaymentError {
+    rule payment_requires_accounts_role {
+        require UserIsAccounts
+        else PaymentError.NOT_AUTHORISED_PAYMENT
+    }
+    rule payment_requires_issued_invoice {
+        require InvoiceIsPayable
+        else PaymentError.INVOICE_NOT_PAYABLE
+    }
+    rule payment_cannot_exceed_outstanding_balance {
+        require amount <= amountOutstanding
+        else PaymentError.PAYMENT_EXCEEDS_BALANCE
+    }
+    rule payment_currency_must_match_invoice {
+        require currency == currency
+        else PaymentError.PAYMENT_CURRENCY_MISMATCH
+    }
+}

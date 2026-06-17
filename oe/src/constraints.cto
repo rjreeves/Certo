@@ -1,0 +1,6 @@
+module Constraints
+
+constraint UserIsAdmin = user.role == ADMIN
+constraint UserIsAccounts = user.role == ADMIN or user.role == ACCOUNTS
+constraint InvoiceIsPayable = status in Sequence [String("ISSUED"), String("PARTIALLY_PAID"), String("OVERDUE")]
+constraint InvoiceIsVoidable = not (status in Sequence [String("PAID"), String("WRITTEN_OFF")])
