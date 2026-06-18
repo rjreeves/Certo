@@ -200,6 +200,8 @@ public class SecurityService
         if (string.IsNullOrWhiteSpace(username)) return (false, "Username is required.");
         if (password.Length < 6)                 return (false, "Password must be at least 6 characters.");
 
+        var hash = BC.HashPassword(password, workFactor: 10);
+
         using var conn = Open();
         try
         {
@@ -209,7 +211,7 @@ public class SecurityService
                 VALUES ($u, $hash, $role, 1)
                 """;
             cmd.Parameters.AddWithValue("$u",    username.Trim());
-            cmd.Parameters.AddWithValue("$hash", BC.HashPassword(password, workFactor: 10));
+            cmd.Parameters.AddWithValue("$hash", hash);
             cmd.Parameters.AddWithValue("$role", role);
             cmd.ExecuteNonQuery();
             return (true, "");
@@ -232,6 +234,15 @@ public class SecurityService
         cmd.Parameters.AddWithValue("$role", role);
         cmd.Parameters.AddWithValue("$mcp",  mustChangePwd ? 1 : 0);
         cmd.Parameters.AddWithValue("$id",   id);
+        return cmd.ExecuteNonQuery() > 0;
+    }
+
+    public bool DeleteUser(int id)
+    {
+        using var conn = Open();
+        using var cmd  = conn.CreateCommand();
+        cmd.CommandText = "DELETE FROM nex_users WHERE id = $id AND is_enabled = 0";
+        cmd.Parameters.AddWithValue("$id", id);
         return cmd.ExecuteNonQuery() > 0;
     }
 

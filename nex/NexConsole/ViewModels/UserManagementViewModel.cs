@@ -45,6 +45,12 @@ public partial class UserManagementViewModel : ObservableObject
         _security.SetEnabled(row.Record.Id, !row.Record.IsEnabled);
         Reload();
     }
+
+    internal void Delete(UserRowViewModel row)
+    {
+        _security.DeleteUser(row.Record.Id);
+        Reload();
+    }
 }
 
 public partial class UserRowViewModel : ObservableObject
@@ -68,6 +74,9 @@ public partial class UserRowViewModel : ObservableObject
         _parent = parent;
     }
 
-    [RelayCommand] private void Edit()         => _parent.OpenEdit(this);
+    public bool IsDisabled => !Record.IsEnabled;
+
+    [RelayCommand] private void Edit()          => _parent.OpenEdit(this);
     [RelayCommand] private void ToggleEnabled() => _parent.ToggleEnabled(this);
+    [RelayCommand] private void Delete()        => _parent.Delete(this);
 }

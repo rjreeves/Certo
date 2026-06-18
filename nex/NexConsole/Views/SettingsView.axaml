@@ -111,6 +111,7 @@
                                                     Orientation="Horizontal" Spacing="6"
                                                     VerticalAlignment="Center">
                                             <Button Command="{Binding EditCommand}"
+                                                    IsVisible="{Binding !IsDisabled}"
                                                     Background="#2a2a2a"
                                                     Foreground="#7ab3e0"
                                                     BorderThickness="0"
@@ -125,6 +126,15 @@
                                                     FontSize="11" Padding="8,4"
                                                     CornerRadius="4">
                                                 <TextBlock Text="{Binding ToggleLabel}"/>
+                                            </Button>
+                                            <Button Command="{Binding DeleteCommand}"
+                                                    IsVisible="{Binding IsDisabled}"
+                                                    Background="#3a1a1a"
+                                                    Foreground="#e25c5c"
+                                                    BorderThickness="0"
+                                                    FontSize="11" Padding="8,4"
+                                                    CornerRadius="4">
+                                                Remove
                                             </Button>
                                         </StackPanel>
 
