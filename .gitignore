@@ -1,2 +1,14 @@
 /target
 examples/out/
+
+# .NET build artifacts
+**/bin/
+**/obj/
+
+# SQLite runtime databases (auto-created on first run)
+**/*.db
+**/*.db-shm
+**/*.db-wal
+
+# Login cache (contains saved usernames)
+**/nex.login.json
