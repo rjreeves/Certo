@@ -1,0 +1,55 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:vm="using:NexConsole.ViewModels"
+             x:Class="NexConsole.Views.ModulesView"
+             x:DataType="vm:ModulesViewModel"
+             Background="#1a1a1a">
+    <ScrollViewer>
+        <StackPanel Margin="28,24" Spacing="20">
+
+            <TextBlock Text="Modules" FontSize="20" FontWeight="SemiBold" Foreground="#ffffff"/>
+
+            <ItemsControl ItemsSource="{Binding Modules}">
+                <ItemsControl.ItemsPanel>
+                    <ItemsPanelTemplate>
+                        <UniformGrid Columns="2"/>
+                    </ItemsPanelTemplate>
+                </ItemsControl.ItemsPanel>
+                <ItemsControl.ItemTemplate>
+                    <DataTemplate x:DataType="vm:AppModuleViewModel">
+                        <Border Background="#242424" CornerRadius="8"
+                                Padding="18,16" Margin="0,0,12,12">
+                            <StackPanel Spacing="8">
+                                <!-- Name row -->
+                                <StackPanel Orientation="Horizontal" Spacing="10">
+                                    <Ellipse Width="8" Height="8"
+                                             Fill="{Binding StatusBrush}"
+                                             VerticalAlignment="Center"/>
+                                    <TextBlock Text="{Binding Name}"
+                                               FontSize="14" FontWeight="SemiBold"
+                                               Foreground="#eeeeee"/>
+                                </StackPanel>
+                                <!-- Description -->
+                                <TextBlock Text="{Binding Description}"
+                                           FontSize="12" Foreground="#666666"
+                                           TextWrapping="Wrap"/>
+                                <!-- Footer -->
+                                <Grid ColumnDefinitions="*,Auto" Margin="0,4,0,0">
+                                    <TextBlock Text="{Binding Status}"
+                                               FontSize="11"
+                                               Foreground="{Binding StatusBrush}"
+                                               VerticalAlignment="Center"/>
+                                    <TextBlock Grid.Column="1"
+                                               Text="{Binding Version}"
+                                               FontSize="11" Foreground="#444444"
+                                               VerticalAlignment="Center"/>
+                                </Grid>
+                            </StackPanel>
+                        </Border>
+                    </DataTemplate>
+                </ItemsControl.ItemTemplate>
+            </ItemsControl>
+
+        </StackPanel>
+    </ScrollViewer>
+</UserControl>

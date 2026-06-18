@@ -1,0 +1,7 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:vm="using:NexConsole.ViewModels"
+             x:Class="NexConsole.Views.SettingsView"
+             x:DataType="vm:SettingsViewModel">
+    <TextBlock Text="Settings" FontSize="24" Margin="24"/>
+</UserControl>
