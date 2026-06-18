@@ -9,9 +9,10 @@ public partial class AppSession : ObservableObject
     [ObservableProperty] private string _username = "";
     [ObservableProperty] private string _role = "";
 
-    public bool IsAdmin    => Role == "Admin";
-    public bool IsOperator => Role == "Operator";
-    public bool IsViewer   => Role == "Viewer";
+    public int  Level          => RoleLevel.For(Role);
+    public bool IsOwner        => Level >= RoleLevel.Owner;
+    public bool IsAdministrator => Level >= RoleLevel.Administrator;
+    public bool CanManage      => Level >= RoleLevel.Administrator; // L3+
 
     public void Begin(string username, string role)
     {

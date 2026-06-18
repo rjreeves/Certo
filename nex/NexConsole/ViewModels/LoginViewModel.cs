@@ -9,7 +9,9 @@ namespace NexConsole.ViewModels;
 public partial class LoginViewModel : ObservableObject
 {
     private readonly ConfigService _config = new();
-    private readonly SecurityService _security = new();
+
+    // Initialised on a background thread so BCrypt seeding never blocks the UI
+    private readonly Task<SecurityService> _securityTask = SecurityService.InitAsync;
 
     public string[] Roles { get; } = ["Administrator", "Application", "Owner", "ReadOnly"];
 
@@ -49,7 +51,6 @@ public partial class LoginViewModel : ObservableObject
         }
     }
 
-    // Unchecking Remember Me immediately removes the saved login
     partial void OnRememberMeChanged(bool value)
     {
         if (!value) _config.ClearLogin();
@@ -65,7 +66,9 @@ public partial class LoginViewModel : ObservableObject
 
         try
         {
-            var result = await Task.Run(() => _security.Authenticate(Username, Password));
+            // Await the background init (instant if already done, waits if still hashing)
+            var security = await _securityTask;
+            var result   = await Task.Run(() => security.Authenticate(Username, Password));
 
             if (!result.Success)
             {
@@ -73,17 +76,22 @@ public partial class LoginViewModel : ObservableObject
                 return;
             }
 
-            // Role from the UI is the operator's chosen context; DB role is authoritative for auth
-            var effectiveRole = string.IsNullOrWhiteSpace(SelectedRole) ? "Application" : SelectedRole;
-            AppSession.Current.Begin(Username, effectiveRole);
+            var selectedRole = string.IsNullOrWhiteSpace(SelectedRole) ? "Application" : SelectedRole;
+            if (RoleLevel.For(selectedRole) > RoleLevel.For(result.Role))
+            {
+                ErrorMessage = $"Your account is not authorised for the '{selectedRole}' role.";
+                return;
+            }
+
+            AppSession.Current.Begin(Username, selectedRole);
 
             if (RememberMe)
-                _config.SaveLogin(Username, effectiveRole, Password);
+                _config.SaveLogin(Username, selectedRole, Password);
 
             if (result.MustChangePassword)
                 MustChangePassword?.Invoke(Username);
             else
-                LoginSucceeded?.Invoke(effectiveRole);
+                LoginSucceeded?.Invoke(selectedRole);
         }
         finally
         {

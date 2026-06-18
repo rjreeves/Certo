@@ -11,17 +11,16 @@ public partial class LoginWindow : Window
     {
         DataContext = vm;
 
-        vm.LoginSucceeded += role => OpenMain();
+        vm.LoginSucceeded += _ => OpenMain();
 
-        vm.MustChangePassword += username =>
+        vm.MustChangePassword += async username =>
         {
             var cpVm = new ChangePasswordViewModel(username, isForced: true);
             var cpWin = new ChangePasswordWindow(cpVm);
 
-            cpVm.ChangeSucceeded += () => OpenMain();
-            // Forced reset — no cancel path; window closes via ChangeSucceeded only
+            cpVm.ChangeSucceeded += () => { cpWin.Close(); OpenMain(); };
 
-            cpWin.ShowDialog(this);
+            await cpWin.ShowDialog(this);
         };
     }
 

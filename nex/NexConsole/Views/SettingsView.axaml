@@ -12,29 +12,128 @@
             <!-- Account card -->
             <Border Background="#242424" CornerRadius="8" Padding="20">
                 <StackPanel Spacing="16">
-                    <TextBlock Text="Account" FontSize="13" FontWeight="SemiBold"
-                               Foreground="#aaaaaa"/>
-
+                    <TextBlock Text="Account" FontSize="13" FontWeight="SemiBold" Foreground="#aaaaaa"/>
                     <Grid ColumnDefinitions="*,Auto">
                         <StackPanel Spacing="2">
                             <TextBlock Text="{Binding Session.Username}"
-                                       FontSize="14" FontWeight="SemiBold"
-                                       Foreground="#eeeeee"/>
+                                       FontSize="14" FontWeight="SemiBold" Foreground="#eeeeee"/>
                             <TextBlock Text="{Binding Session.Role}"
                                        FontSize="12" Foreground="#666666"/>
                         </StackPanel>
-
                         <Button Grid.Column="1"
                                 Command="{Binding ChangePasswordCommand}"
-                                Background="#1e3a5f"
-                                Foreground="#7ab3e0"
-                                BorderThickness="0"
-                                FontSize="12"
-                                Padding="14,7"
-                                CornerRadius="5">
+                                Background="#1e3a5f" Foreground="#7ab3e0"
+                                BorderThickness="0" FontSize="12"
+                                Padding="14,7" CornerRadius="5">
                             Change Password
                         </Button>
                     </Grid>
+                </StackPanel>
+            </Border>
+
+            <!-- User Management card -->
+            <Border Background="#242424" CornerRadius="8" Padding="20"
+                    DataContext="{Binding UserManagement}"
+                    x:DataType="vm:UserManagementViewModel">
+                <StackPanel Spacing="16">
+
+                    <!-- Header -->
+                    <Grid ColumnDefinitions="*,Auto">
+                        <TextBlock Text="Users" FontSize="13" FontWeight="SemiBold"
+                                   Foreground="#aaaaaa" VerticalAlignment="Center"/>
+                        <Button Grid.Column="1"
+                                Command="{Binding AddUserCommand}"
+                                Background="#4caf7d" Foreground="#ffffff"
+                                BorderThickness="0" FontSize="12"
+                                Padding="14,7" CornerRadius="5">
+                            + Add User
+                        </Button>
+                    </Grid>
+
+                    <!-- Column headers -->
+                    <Grid ColumnDefinitions="*,120,80,80,100,80" Margin="0,0,0,4">
+                        <TextBlock Text="Username"   FontSize="11" Foreground="#555555"/>
+                        <TextBlock Grid.Column="1" Text="Role"     FontSize="11" Foreground="#555555"/>
+                        <TextBlock Grid.Column="2" Text="Status"   FontSize="11" Foreground="#555555"/>
+                        <TextBlock Grid.Column="3" Text="Pwd Reset" FontSize="11" Foreground="#555555"/>
+                        <TextBlock Grid.Column="4" Text="Created"  FontSize="11" Foreground="#555555"/>
+                        <TextBlock Grid.Column="5" Text="Actions"  FontSize="11" Foreground="#555555"/>
+                    </Grid>
+
+                    <!-- User rows -->
+                    <ItemsControl ItemsSource="{Binding Users}">
+                        <ItemsControl.ItemTemplate>
+                            <DataTemplate x:DataType="vm:UserRowViewModel">
+                                <Border Background="#1e1e1e" CornerRadius="6"
+                                        Padding="0,9" Margin="0,0,0,4">
+                                    <Grid ColumnDefinitions="*,120,80,80,100,80" Margin="12,0">
+
+                                        <!-- Username -->
+                                        <TextBlock Text="{Binding Username}"
+                                                   FontSize="13" Foreground="#eeeeee"
+                                                   FontWeight="SemiBold"
+                                                   VerticalAlignment="Center"/>
+
+                                        <!-- Role -->
+                                        <TextBlock Grid.Column="1"
+                                                   Text="{Binding Role}"
+                                                   FontSize="12" Foreground="#aaaaaa"
+                                                   VerticalAlignment="Center"/>
+
+                                        <!-- Status dot + label -->
+                                        <StackPanel Grid.Column="2"
+                                                    Orientation="Horizontal" Spacing="6"
+                                                    VerticalAlignment="Center">
+                                            <Ellipse Width="7" Height="7"
+                                                     Fill="{Binding StatusBrush}"/>
+                                            <TextBlock Text="{Binding StatusText}"
+                                                       FontSize="11"
+                                                       Foreground="{Binding StatusBrush}"/>
+                                        </StackPanel>
+
+                                        <!-- Must change pwd flag -->
+                                        <TextBlock Grid.Column="3"
+                                                   Text="⚠"
+                                                   FontSize="13"
+                                                   Foreground="#f0a030"
+                                                   IsVisible="{Binding MustChangePwd}"
+                                                   VerticalAlignment="Center"
+                                                   HorizontalAlignment="Center"/>
+
+                                        <!-- Created date -->
+                                        <TextBlock Grid.Column="4"
+                                                   Text="{Binding CreatedAt}"
+                                                   FontSize="11" Foreground="#555555"
+                                                   VerticalAlignment="Center"/>
+
+                                        <!-- Action buttons -->
+                                        <StackPanel Grid.Column="5"
+                                                    Orientation="Horizontal" Spacing="6"
+                                                    VerticalAlignment="Center">
+                                            <Button Command="{Binding EditCommand}"
+                                                    Background="#2a2a2a"
+                                                    Foreground="#7ab3e0"
+                                                    BorderThickness="0"
+                                                    FontSize="11" Padding="8,4"
+                                                    CornerRadius="4">
+                                                Edit
+                                            </Button>
+                                            <Button Command="{Binding ToggleEnabledCommand}"
+                                                    Background="#2a2a2a"
+                                                    Foreground="#aaaaaa"
+                                                    BorderThickness="0"
+                                                    FontSize="11" Padding="8,4"
+                                                    CornerRadius="4">
+                                                <TextBlock Text="{Binding ToggleLabel}"/>
+                                            </Button>
+                                        </StackPanel>
+
+                                    </Grid>
+                                </Border>
+                            </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+
                 </StackPanel>
             </Border>
 
