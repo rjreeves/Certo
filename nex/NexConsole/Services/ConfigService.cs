@@ -1,5 +1,7 @@
 using System;
 using System.IO;
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using NexConsole.Models;
 
@@ -61,18 +63,47 @@ public class ConfigService
         catch { return null; }
     }
 
-    public void SaveLogin(string username, string role)
+    public void SaveLogin(string username, string role, string password)
     {
         try
         {
-            File.WriteAllText(LoginCachePath,
-                JsonSerializer.Serialize(new SavedLogin { Username = username, Role = role }, WriteOptions));
-            Config.Login = new SavedLogin { Username = username, Role = role };
+            var saved = new SavedLogin
+            {
+                Username          = username,
+                Role              = role,
+                ProtectedPassword = ProtectPassword(password),
+            };
+            File.WriteAllText(LoginCachePath, JsonSerializer.Serialize(saved, WriteOptions));
+            Config.Login = saved;
         }
         catch (Exception ex)
         {
             Console.Error.WriteLine($"[ConfigService] Failed to save login: {ex.Message}");
         }
+    }
+
+    // Returns null if decryption fails (e.g. different Windows user or corrupted cache)
+    public static string? UnprotectPassword(string? protectedBase64)
+    {
+        if (string.IsNullOrEmpty(protectedBase64)) return null;
+        try
+        {
+            var cipher  = Convert.FromBase64String(protectedBase64);
+            var plain   = ProtectedData.Unprotect(cipher, null, DataProtectionScope.CurrentUser);
+            return Encoding.UTF8.GetString(plain);
+        }
+        catch { return null; }
+    }
+
+    private static string? ProtectPassword(string password)
+    {
+        try
+        {
+            var plain  = Encoding.UTF8.GetBytes(password);
+            var cipher = ProtectedData.Protect(plain, null, DataProtectionScope.CurrentUser);
+            return Convert.ToBase64String(cipher);
+        }
+        catch { return null; }
     }
 
     public void ClearLogin()

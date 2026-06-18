@@ -94,7 +94,7 @@
                             <Setter Property="Background" Value="#2a2a2a"/>
                         </Style>
                     </CheckBox.Styles>
-                    Remember me
+                    Remember my login details
                 </CheckBox>
 
                 <!-- Error message -->
@@ -113,7 +113,15 @@
                         Padding="0,12"
                         CornerRadius="6"
                         BorderThickness="0">
-                    Sign In
+                    <Panel>
+                        <TextBlock Text="Sign In"
+                                   IsVisible="{Binding !IsBusy}"
+                                   HorizontalAlignment="Center"/>
+                        <TextBlock Text="Signing in…"
+                                   IsVisible="{Binding IsBusy}"
+                                   HorizontalAlignment="Center"
+                                   Opacity="0.7"/>
+                    </Panel>
                 </Button>
 
             </StackPanel>

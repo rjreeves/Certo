@@ -9,6 +9,14 @@ public partial class MainWindowViewModel : ViewModelBase
 {
     public AppSession Session => AppSession.Current;
 
+    [RelayCommand]
+    private void ChangePassword()
+    {
+        var vm  = new ChangePasswordViewModel(Session.Username, isForced: false);
+        var win = new Views.ChangePasswordWindow(vm);
+        win.Show();
+    }
+
     [ObservableProperty]
     private ViewModelBase _currentPage;
 
