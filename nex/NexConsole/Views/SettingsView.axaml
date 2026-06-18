@@ -2,6 +2,42 @@
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
              xmlns:vm="using:NexConsole.ViewModels"
              x:Class="NexConsole.Views.SettingsView"
-             x:DataType="vm:SettingsViewModel">
-    <TextBlock Text="Settings" FontSize="24" Margin="24"/>
+             x:DataType="vm:SettingsViewModel"
+             Background="#1a1a1a">
+    <ScrollViewer>
+        <StackPanel Margin="28,24" Spacing="20">
+
+            <TextBlock Text="Settings" FontSize="20" FontWeight="SemiBold" Foreground="#ffffff"/>
+
+            <!-- Account card -->
+            <Border Background="#242424" CornerRadius="8" Padding="20">
+                <StackPanel Spacing="16">
+                    <TextBlock Text="Account" FontSize="13" FontWeight="SemiBold"
+                               Foreground="#aaaaaa"/>
+
+                    <Grid ColumnDefinitions="*,Auto">
+                        <StackPanel Spacing="2">
+                            <TextBlock Text="{Binding Session.Username}"
+                                       FontSize="14" FontWeight="SemiBold"
+                                       Foreground="#eeeeee"/>
+                            <TextBlock Text="{Binding Session.Role}"
+                                       FontSize="12" Foreground="#666666"/>
+                        </StackPanel>
+
+                        <Button Grid.Column="1"
+                                Command="{Binding ChangePasswordCommand}"
+                                Background="#1e3a5f"
+                                Foreground="#7ab3e0"
+                                BorderThickness="0"
+                                FontSize="12"
+                                Padding="14,7"
+                                CornerRadius="5">
+                            Change Password
+                        </Button>
+                    </Grid>
+                </StackPanel>
+            </Border>
+
+        </StackPanel>
+    </ScrollViewer>
 </UserControl>

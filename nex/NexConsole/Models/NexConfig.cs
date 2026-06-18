@@ -12,6 +12,8 @@ public class SavedLogin
 {
     public string Username { get; set; } = "";
     public string Role { get; set; } = "";
+    // DPAPI-encrypted password, Base64-encoded — only decryptable by the same Windows user
+    public string? ProtectedPassword { get; set; }
 }
 
 public class ConnectionEntry
