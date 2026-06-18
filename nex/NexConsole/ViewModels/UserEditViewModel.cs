@@ -78,8 +78,11 @@ public partial class UserEditViewModel : ObservableObject
             var security = await _securityTask;
             if (IsNew)
             {
-                var (ok, err) = await Task.Run(() =>
-                    security.AddUser(Username.Trim(), Password, SelectedRole));
+                // Snapshot on the UI thread before the thread-pool call
+                var uname = Username.Trim();
+                var pwd   = Password;
+                var role  = SelectedRole;
+                var (ok, err) = await Task.Run(() => security.AddUser(uname, pwd, role));
                 if (!ok) { ErrorMessage = err; return; }
             }
             else
