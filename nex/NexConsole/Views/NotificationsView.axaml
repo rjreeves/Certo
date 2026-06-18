@@ -1,0 +1,75 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:vm="using:NexConsole.ViewModels"
+             x:Class="NexConsole.Views.NotificationsView"
+             x:DataType="vm:NotificationsViewModel"
+             Background="#1a1a1a">
+    <ScrollViewer>
+        <StackPanel Margin="28,24" Spacing="20">
+
+            <!-- Header -->
+            <Grid ColumnDefinitions="*,Auto">
+                <StackPanel Orientation="Horizontal" Spacing="12">
+                    <TextBlock Text="Notifications"
+                               FontSize="20" FontWeight="SemiBold" Foreground="#ffffff"
+                               VerticalAlignment="Center"/>
+                    <Border Background="#1e3a5f" CornerRadius="10" Padding="8,2"
+                            IsVisible="{Binding UnreadCount}">
+                        <TextBlock Text="{Binding UnreadCount}"
+                                   FontSize="11" Foreground="#7ab3e0"/>
+                    </Border>
+                </StackPanel>
+                <Button Grid.Column="1"
+                        Command="{Binding MarkAllReadCommand}"
+                        Background="Transparent" BorderThickness="1"
+                        BorderBrush="#333333" Foreground="#888888"
+                        FontSize="12" Padding="12,6" CornerRadius="4">
+                    Mark all read
+                </Button>
+            </Grid>
+
+            <!-- List -->
+            <ItemsControl ItemsSource="{Binding Items}">
+                <ItemsControl.ItemTemplate>
+                    <DataTemplate x:DataType="vm:NotificationViewModel">
+                        <Border CornerRadius="8" Margin="0,0,0,8" ClipToBounds="True">
+                            <Grid ColumnDefinitions="4,*">
+                                <!-- Colour accent bar -->
+                                <Border Grid.Column="0"
+                                        Background="{Binding LevelBrush}"/>
+                                <!-- Content -->
+                                <Border Grid.Column="1"
+                                        Background="#242424"
+                                        Padding="16,12">
+                                    <Grid ColumnDefinitions="*,Auto">
+                                        <StackPanel Spacing="4">
+                                            <TextBlock Text="{Binding Title}"
+                                                       FontSize="13" FontWeight="SemiBold"
+                                                       Foreground="#eeeeee"/>
+                                            <TextBlock Text="{Binding Body}"
+                                                       FontSize="12" Foreground="#888888"
+                                                       TextWrapping="Wrap"/>
+                                        </StackPanel>
+                                        <StackPanel Grid.Column="1" Spacing="6"
+                                                    HorizontalAlignment="Right"
+                                                    VerticalAlignment="Top"
+                                                    Margin="16,0,0,0">
+                                            <TextBlock Text="{Binding CreatedText}"
+                                                       FontSize="11" Foreground="#555555"
+                                                       HorizontalAlignment="Right"/>
+                                            <Ellipse Width="7" Height="7"
+                                                     HorizontalAlignment="Right"
+                                                     Fill="{Binding LevelBrush}"
+                                                     IsVisible="{Binding !IsRead}"/>
+                                        </StackPanel>
+                                    </Grid>
+                                </Border>
+                            </Grid>
+                        </Border>
+                    </DataTemplate>
+                </ItemsControl.ItemTemplate>
+            </ItemsControl>
+
+        </StackPanel>
+    </ScrollViewer>
+</UserControl>

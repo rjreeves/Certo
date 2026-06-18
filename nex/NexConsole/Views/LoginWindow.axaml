@@ -1,0 +1,131 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:vm="using:NexConsole.ViewModels"
+        x:Class="NexConsole.Views.LoginWindow"
+        x:DataType="vm:LoginViewModel"
+        Title="Nex Console"
+        Width="420" Height="500"
+        CanResize="False"
+        WindowStartupLocation="CenterScreen"
+        Background="#2c2c2c">
+
+    <Grid RowDefinitions="*,Auto,*">
+
+        <!-- Centered card -->
+        <Border Grid.Row="1"
+                Background="#363636" CornerRadius="12"
+                Padding="36,32" Margin="24,0"
+                BoxShadow="0 8 32 0 #44000000">
+            <StackPanel Spacing="0">
+
+                <!-- Logo / App name -->
+                <StackPanel Orientation="Horizontal" Spacing="14"
+                            HorizontalAlignment="Center" Margin="0,0,0,28">
+                    <!-- Icon: monitor/dashboard glyph -->
+                    <Viewbox Width="38" Height="38" VerticalAlignment="Center">
+                        <Canvas Width="24" Height="24">
+                            <Path Fill="#4caf7d"
+                                  Data="M21 2H3c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h7l-2 3v1h8v-1l-2-3h7c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm0 12H3V4h18v10z"/>
+                        </Canvas>
+                    </Viewbox>
+                    <!-- Title + subtitle -->
+                    <StackPanel Spacing="3" VerticalAlignment="Center">
+                        <TextBlock Text="NEX CONSOLE"
+                                   FontSize="22" FontWeight="Bold"
+                                   Foreground="#eeeeee"
+                                   LetterSpacing="4"/>
+                        <TextBlock Text="Operational Dashboard"
+                                   FontSize="12" Foreground="#aaaaaa"/>
+                    </StackPanel>
+                </StackPanel>
+
+                <!-- Username -->
+                <StackPanel Spacing="6" Margin="0,0,0,16">
+                    <TextBlock Text="Username" FontSize="12" Foreground="#aaaaaa"/>
+                    <TextBox Text="{Binding Username}"
+                             PlaceholderText="Enter username"
+                             Background="#2a2a2a"
+                             Foreground="#eeeeee"
+                             BorderBrush="#4a4a4a"
+                             BorderThickness="1"
+                             CornerRadius="6"
+                             Padding="12,10"
+                             FontSize="13"/>
+                </StackPanel>
+
+                <!-- Password -->
+                <StackPanel Spacing="6" Margin="0,0,0,16">
+                    <TextBlock Text="Password" FontSize="12" Foreground="#aaaaaa"/>
+                    <TextBox Text="{Binding Password}"
+                             PasswordChar="●"
+                             PlaceholderText="Enter password"
+                             Background="#2a2a2a"
+                             Foreground="#eeeeee"
+                             BorderBrush="#4a4a4a"
+                             BorderThickness="1"
+                             CornerRadius="6"
+                             Padding="12,10"
+                             FontSize="13"/>
+                </StackPanel>
+
+                <!-- Role -->
+                <StackPanel Spacing="6" Margin="0,0,0,24">
+                    <TextBlock Text="Role" FontSize="12" Foreground="#aaaaaa"/>
+                    <ComboBox ItemsSource="{Binding Roles}"
+                              SelectedItem="{Binding SelectedRole}"
+                              Background="#2a2a2a"
+                              Foreground="#eeeeee"
+                              BorderBrush="#4a4a4a"
+                              BorderThickness="1"
+                              CornerRadius="6"
+                              Padding="10,8"
+                              FontSize="13"
+                              HorizontalAlignment="Stretch"/>
+                </StackPanel>
+
+                <!-- Remember me -->
+                <CheckBox IsChecked="{Binding RememberMe}"
+                          Foreground="#dddddd"
+                          FontSize="13"
+                          Margin="0,0,0,24">
+                    <CheckBox.Styles>
+                        <Style Selector="CheckBox /template/ Border#NormalRectangle">
+                            <Setter Property="BorderBrush" Value="#888888"/>
+                            <Setter Property="Background" Value="#2a2a2a"/>
+                        </Style>
+                    </CheckBox.Styles>
+                    Remember me
+                </CheckBox>
+
+                <!-- Error message -->
+                <TextBlock Text="{Binding ErrorMessage}"
+                           FontSize="12" Foreground="#e25c5c"
+                           IsVisible="{Binding ErrorMessage.Length}"
+                           Margin="0,0,0,12"/>
+
+                <!-- Login button -->
+                <Button Command="{Binding LoginCommand}"
+                        HorizontalAlignment="Stretch"
+                        HorizontalContentAlignment="Center"
+                        Background="#4caf7d"
+                        Foreground="#ffffff"
+                        FontSize="14" FontWeight="SemiBold"
+                        Padding="0,12"
+                        CornerRadius="6"
+                        BorderThickness="0">
+                    Sign In
+                </Button>
+
+            </StackPanel>
+        </Border>
+
+        <!-- Footer -->
+        <TextBlock Grid.Row="2"
+                   Text="© Nex Console"
+                   FontSize="11" Foreground="#666666"
+                   HorizontalAlignment="Center"
+                   VerticalAlignment="Top"
+                   Margin="0,16,0,0"/>
+    </Grid>
+
+</Window>

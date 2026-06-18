@@ -1,0 +1,94 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:vm="using:NexConsole.ViewModels"
+        xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+        xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+        mc:Ignorable="d" d:DesignWidth="1024" d:DesignHeight="700"
+        x:Class="NexConsole.Views.MainWindow"
+        x:DataType="vm:MainWindowViewModel"
+        Icon="/Assets/avalonia-logo.ico"
+        Title="Nex Console"
+        MinWidth="700" MinHeight="500"
+        Width="1024" Height="700">
+
+    <Design.DataContext>
+        <vm:MainWindowViewModel/>
+    </Design.DataContext>
+
+    <Window.Styles>
+        <Style Selector="Button.nav-item">
+            <Setter Property="Background" Value="Transparent"/>
+            <Setter Property="Foreground" Value="#aaaaaa"/>
+            <Setter Property="BorderThickness" Value="0"/>
+            <Setter Property="Padding" Value="12,10"/>
+            <Setter Property="HorizontalAlignment" Value="Stretch"/>
+            <Setter Property="HorizontalContentAlignment" Value="Left"/>
+            <Setter Property="CornerRadius" Value="6"/>
+            <Setter Property="Cursor" Value="Hand"/>
+        </Style>
+        <Style Selector="Button.nav-item:pointerover /template/ ContentPresenter">
+            <Setter Property="Background" Value="#2a2a2a"/>
+        </Style>
+        <Style Selector="Button.nav-item.selected">
+            <Setter Property="Background" Value="#1e3a5f"/>
+            <Setter Property="Foreground" Value="#ffffff"/>
+        </Style>
+        <Style Selector="Button.nav-item.selected /template/ ContentPresenter">
+            <Setter Property="Background" Value="#1e3a5f"/>
+        </Style>
+    </Window.Styles>
+
+    <Grid ColumnDefinitions="200,*">
+
+        <!-- Left sidebar -->
+        <Border Grid.Column="0"
+                Background="#141414"
+                BorderBrush="#2a2a2a"
+                BorderThickness="0,0,1,0">
+            <DockPanel>
+
+                <!-- App title -->
+                <Border DockPanel.Dock="Top"
+                        Padding="16,20,16,16"
+                        BorderBrush="#2a2a2a"
+                        BorderThickness="0,0,0,1">
+                    <TextBlock Text="Nex Console"
+                               FontSize="15"
+                               FontWeight="SemiBold"
+                               Foreground="#ffffff"/>
+                </Border>
+
+                <!-- Nav items -->
+                <ItemsControl DockPanel.Dock="Top"
+                              ItemsSource="{Binding NavItems}"
+                              Margin="8,8,8,0">
+                    <ItemsControl.ItemTemplate>
+                        <DataTemplate x:DataType="vm:NavItem">
+                            <Button Classes="nav-item"
+                                    Classes.selected="{Binding IsSelected}"
+                                    Command="{Binding $parent[Window].DataContext.NavigateCommand}"
+                                    CommandParameter="{Binding}"
+                                    Margin="0,2">
+                                <StackPanel Orientation="Horizontal" Spacing="10">
+                                    <Path Data="{Binding IconPath}"
+                                          Fill="{Binding $parent[Button].Foreground}"
+                                          Width="16" Height="16"
+                                          Stretch="Uniform"/>
+                                    <TextBlock Text="{Binding Label}" VerticalAlignment="Center" FontSize="13"/>
+                                </StackPanel>
+                            </Button>
+                        </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                </ItemsControl>
+
+            </DockPanel>
+        </Border>
+
+        <!-- Main content -->
+        <Border Grid.Column="1" Background="#1a1a1a">
+            <ContentControl Content="{Binding CurrentPage}"/>
+        </Border>
+
+    </Grid>
+
+</Window>

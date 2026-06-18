@@ -1,0 +1,32 @@
+<Application xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             x:Class="NexConsole.App"
+             xmlns:local="using:NexConsole"
+             RequestedThemeVariant="Dark">
+
+    <Application.DataTemplates>
+        <local:ViewLocator/>
+    </Application.DataTemplates>
+
+    <Application.Styles>
+        <FluentTheme />
+
+        <!-- ComboBox dropdown item: highlight with dark teal, not white-on-white -->
+        <Style Selector="ComboBoxItem:pointerover /template/ ContentPresenter">
+            <Setter Property="Background" Value="#2a5f4f"/>
+        </Style>
+        <Style Selector="ComboBoxItem:selected /template/ ContentPresenter">
+            <Setter Property="Background" Value="#1e4d3f"/>
+            <Setter Property="TextBlock.Foreground" Value="#eeeeee"/>
+        </Style>
+        <Style Selector="ComboBoxItem:selected:pointerover /template/ ContentPresenter">
+            <Setter Property="Background" Value="#2a5f4f"/>
+        </Style>
+
+        <!-- TextBox selection highlight -->
+        <Style Selector="TextBox">
+            <Setter Property="SelectionBrush" Value="#2a5f4f"/>
+            <Setter Property="SelectionForegroundBrush" Value="#eeeeee"/>
+        </Style>
+    </Application.Styles>
+</Application>

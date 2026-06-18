@@ -1,0 +1,69 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:vm="using:NexConsole.ViewModels"
+             x:Class="NexConsole.Views.WorkflowsView"
+             x:DataType="vm:WorkflowsViewModel"
+             Background="#1a1a1a">
+    <ScrollViewer>
+        <StackPanel Margin="28,24" Spacing="20">
+
+            <TextBlock Text="Workflows" FontSize="20" FontWeight="SemiBold" Foreground="#ffffff"/>
+
+            <Border Background="#242424" CornerRadius="8" Padding="20">
+                <StackPanel Spacing="0">
+
+                    <!-- Header -->
+                    <Grid ColumnDefinitions="*,140,90,120" Margin="0,0,0,10">
+                        <TextBlock Text="Workflow"   FontSize="11" Foreground="#555555"/>
+                        <TextBlock Grid.Column="1" Text="State"    FontSize="11" Foreground="#555555"/>
+                        <TextBlock Grid.Column="2" Text="Duration" FontSize="11" Foreground="#555555"/>
+                        <TextBlock Grid.Column="3" Text="Started"  FontSize="11" Foreground="#555555"/>
+                    </Grid>
+
+                    <ItemsControl ItemsSource="{Binding Runs}">
+                        <ItemsControl.ItemTemplate>
+                            <DataTemplate x:DataType="vm:WorkflowRunViewModel">
+                                <Border Background="#1e1e1e" CornerRadius="6"
+                                        Padding="14,11" Margin="0,0,0,6">
+                                    <Grid ColumnDefinitions="*,140,90,120">
+                                        <!-- Name + dot -->
+                                        <StackPanel Orientation="Horizontal" Spacing="10">
+                                            <Ellipse Width="8" Height="8"
+                                                     Fill="{Binding StateBrush}"
+                                                     VerticalAlignment="Center"/>
+                                            <TextBlock Text="{Binding WorkflowName}"
+                                                       FontSize="13" Foreground="#eeeeee"
+                                                       FontWeight="SemiBold"
+                                                       VerticalAlignment="Center"/>
+                                        </StackPanel>
+                                        <!-- State badge -->
+                                        <Border Grid.Column="1"
+                                                Background="#2a2a2a" CornerRadius="4"
+                                                Padding="8,3" HorizontalAlignment="Left"
+                                                VerticalAlignment="Center">
+                                            <TextBlock Text="{Binding State}"
+                                                       FontSize="11"
+                                                       Foreground="{Binding StateBrush}"/>
+                                        </Border>
+                                        <!-- Duration -->
+                                        <TextBlock Grid.Column="2"
+                                                   Text="{Binding DurationText}"
+                                                   FontSize="12" Foreground="#666666"
+                                                   VerticalAlignment="Center"/>
+                                        <!-- Started -->
+                                        <TextBlock Grid.Column="3"
+                                                   Text="{Binding StartedText}"
+                                                   FontSize="12" Foreground="#666666"
+                                                   VerticalAlignment="Center"/>
+                                    </Grid>
+                                </Border>
+                            </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+
+                </StackPanel>
+            </Border>
+
+        </StackPanel>
+    </ScrollViewer>
+</UserControl>
