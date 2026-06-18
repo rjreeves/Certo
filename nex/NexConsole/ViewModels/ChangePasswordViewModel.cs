@@ -8,7 +8,7 @@ namespace NexConsole.ViewModels;
 
 public partial class ChangePasswordViewModel : ObservableObject
 {
-    private readonly SecurityService _security = new();
+    private readonly Task<SecurityService> _securityTask = SecurityService.InitAsync;
     private readonly string _username;
 
     public string Username => _username;
@@ -70,10 +70,10 @@ public partial class ChangePasswordViewModel : ObservableObject
         IsBusy = true;
         try
         {
+            var security = await _securityTask;
             if (!IsForced)
             {
-                // Verify current password before allowing change
-                var check = await Task.Run(() => _security.Authenticate(_username, CurrentPassword));
+                var check = await Task.Run(() => security.Authenticate(_username, CurrentPassword));
                 if (!check.Success)
                 {
                     ErrorMessage = "Current password is incorrect.";
@@ -81,7 +81,7 @@ public partial class ChangePasswordViewModel : ObservableObject
                 }
             }
 
-            var ok = await Task.Run(() => _security.ChangePassword(_username, NewPassword));
+            var ok = await Task.Run(() => security.ChangePassword(_username, NewPassword));
             if (!ok)
             {
                 ErrorMessage = "Failed to update password. Please try again.";

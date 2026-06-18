@@ -7,6 +7,7 @@ namespace NexConsole.ViewModels;
 public partial class SettingsViewModel : ViewModelBase
 {
     public AppSession Session => AppSession.Current;
+    public UserManagementViewModel UserManagement { get; } = new();
 
     [RelayCommand]
     private void ChangePassword()

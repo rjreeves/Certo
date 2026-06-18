@@ -1,0 +1,106 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:vm="using:NexConsole.ViewModels"
+        x:Class="NexConsole.Views.UserEditWindow"
+        x:DataType="vm:UserEditViewModel"
+        Title="{Binding Title}"
+        Width="400" Height="420"
+        CanResize="False"
+        WindowStartupLocation="CenterOwner"
+        Background="#2c2c2c">
+
+    <Grid RowDefinitions="*,Auto,*">
+        <Border Grid.Row="1"
+                Background="#363636" CornerRadius="12"
+                Padding="32,28" Margin="24,0"
+                BoxShadow="0 8 32 0 #44000000">
+            <StackPanel Spacing="0">
+
+                <TextBlock Text="{Binding Title}"
+                           FontSize="18" FontWeight="Bold"
+                           Foreground="#eeeeee" Margin="0,0,0,22"/>
+
+                <!-- Username -->
+                <StackPanel Spacing="6" Margin="0,0,0,16">
+                    <TextBlock Text="Username" FontSize="12" Foreground="#aaaaaa"/>
+                    <TextBox Text="{Binding Username}"
+                             IsEnabled="{Binding IsNew}"
+                             PlaceholderText="Enter username"
+                             Background="#2a2a2a" Foreground="#eeeeee"
+                             BorderBrush="#4a4a4a" BorderThickness="1"
+                             CornerRadius="6" Padding="12,10" FontSize="13"/>
+                </StackPanel>
+
+                <!-- Password (new user only) -->
+                <StackPanel Spacing="6" Margin="0,0,0,16"
+                            IsVisible="{Binding IsNew}">
+                    <TextBlock Text="Password" FontSize="12" Foreground="#aaaaaa"/>
+                    <TextBox Text="{Binding Password}"
+                             PasswordChar="●"
+                             PlaceholderText="At least 6 characters"
+                             Background="#2a2a2a" Foreground="#eeeeee"
+                             BorderBrush="#4a4a4a" BorderThickness="1"
+                             CornerRadius="6" Padding="12,10" FontSize="13"/>
+                </StackPanel>
+
+                <!-- Role -->
+                <StackPanel Spacing="6" Margin="0,0,0,16">
+                    <TextBlock Text="Role" FontSize="12" Foreground="#aaaaaa"/>
+                    <ComboBox ItemsSource="{Binding Roles}"
+                              SelectedItem="{Binding SelectedRole}"
+                              Background="#2a2a2a" Foreground="#eeeeee"
+                              BorderBrush="#4a4a4a" BorderThickness="1"
+                              CornerRadius="6" Padding="10,8" FontSize="13"
+                              HorizontalAlignment="Stretch"/>
+                </StackPanel>
+
+                <!-- Must change password -->
+                <CheckBox IsChecked="{Binding MustChangePassword}"
+                          Foreground="#dddddd" FontSize="13"
+                          Margin="0,0,0,24">
+                    <CheckBox.Styles>
+                        <Style Selector="CheckBox /template/ Border#NormalRectangle">
+                            <Setter Property="BorderBrush" Value="#888888"/>
+                            <Setter Property="Background" Value="#2a2a2a"/>
+                        </Style>
+                    </CheckBox.Styles>
+                    Require password change on next login
+                </CheckBox>
+
+                <!-- Error -->
+                <TextBlock Text="{Binding ErrorMessage}"
+                           FontSize="12" Foreground="#e25c5c"
+                           IsVisible="{Binding ErrorMessage.Length}"
+                           TextWrapping="Wrap" Margin="0,0,0,12"/>
+
+                <!-- Buttons -->
+                <Grid ColumnDefinitions="*,12,*">
+                    <Button Grid.Column="0"
+                            Command="{Binding CancelCommand}"
+                            HorizontalAlignment="Stretch"
+                            HorizontalContentAlignment="Center"
+                            Background="#2a2a2a" Foreground="#aaaaaa"
+                            FontSize="13" Padding="0,11" CornerRadius="6"
+                            BorderBrush="#4a4a4a" BorderThickness="1">
+                        Cancel
+                    </Button>
+                    <Button Grid.Column="2"
+                            Command="{Binding SaveCommand}"
+                            HorizontalAlignment="Stretch"
+                            HorizontalContentAlignment="Center"
+                            Background="#4caf7d" Foreground="#ffffff"
+                            FontSize="13" FontWeight="SemiBold"
+                            Padding="0,11" CornerRadius="6" BorderThickness="0">
+                        <Panel>
+                            <TextBlock Text="Save" IsVisible="{Binding !IsBusy}"
+                                       HorizontalAlignment="Center"/>
+                            <TextBlock Text="Saving…" IsVisible="{Binding IsBusy}"
+                                       HorizontalAlignment="Center" Opacity="0.7"/>
+                        </Panel>
+                    </Button>
+                </Grid>
+
+            </StackPanel>
+        </Border>
+    </Grid>
+</Window>

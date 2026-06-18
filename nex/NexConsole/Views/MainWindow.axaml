@@ -66,6 +66,7 @@
                         <DataTemplate x:DataType="vm:NavItem">
                             <Button Classes="nav-item"
                                     Classes.selected="{Binding IsSelected}"
+                                    IsVisible="{Binding IsVisible}"
                                     Command="{Binding $parent[Window].DataContext.NavigateCommand}"
                                     CommandParameter="{Binding}"
                                     Margin="0,2">
