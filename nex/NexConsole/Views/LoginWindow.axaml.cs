@@ -26,7 +26,8 @@ public partial class LoginWindow : Window
 
     private void OpenMain()
     {
-        var main = new MainWindow { DataContext = new MainWindowViewModel() };
+        var vm   = new MainWindowViewModel();
+        var main = new MainWindow(vm);
         main.Show();
         Close();
     }

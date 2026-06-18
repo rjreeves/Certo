@@ -17,6 +17,15 @@ public partial class MainWindowViewModel : ViewModelBase
         win.Show();
     }
 
+    public event System.Action? LogoutRequested;
+
+    [RelayCommand]
+    private void Logout()
+    {
+        AppSession.Current.End();
+        LogoutRequested?.Invoke();
+    }
+
     [ObservableProperty]
     private ViewModelBase _currentPage;
 
