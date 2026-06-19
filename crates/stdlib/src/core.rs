@@ -162,7 +162,7 @@ void* certo_coalesce(void* opt, void* fallback) {
 
 /* Read one line from stdin (strips trailing newline).
    Returns a heap-allocated string, or NULL on EOF / error. */
-certo_text_t certo_read_line(void) {
+void* certo_read_line(void) {
     char*  buf  = NULL;
     size_t cap  = 0;
     size_t len  = 0;
@@ -182,7 +182,7 @@ certo_text_t certo_read_line(void) {
     if (len == 0 && c == EOF) { free(buf); return NULL; }
     if (!buf) { buf = (char*)malloc(1); if (!buf) certo_panic("out of memory"); }
     buf[len] = '\0';
-    return buf;
+    return (void*)buf;
 }
 
 /* Read all of stdin into a single heap-allocated string. */
@@ -224,9 +224,9 @@ int64_t certo_arg_count(void) {
 }
 
 /* Returns NULL (None) if index is out of range. */
-certo_text_t certo_arg(int64_t i) {
+void* certo_arg(int64_t i) {
     if (i < 0 || i >= (int64_t)__certo_argc) return NULL;
-    return __certo_argv[i];
+    return (void*)__certo_argv[i];
 }
 
 /* ---- parseInt / parseFloat ---- */

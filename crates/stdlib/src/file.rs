@@ -8,7 +8,7 @@ pub const FILE_C: &str = r#"
 #include <string.h>
 
 /* Returns file contents as a heap string, or NULL on error. */
-certo_text_t certo_read_file(certo_text_t path) {
+void* certo_read_file(certo_text_t path) {
     if (!path) return NULL;
     FILE* f = fopen(path, "rb");
     if (!f) return NULL;
@@ -21,7 +21,7 @@ certo_text_t certo_read_file(certo_text_t path) {
     size_t got = fread(buf, 1, (size_t)size, f);
     buf[got] = '\0';
     fclose(f);
-    return buf;
+    return (void*)buf;
 }
 
 /* Write text to path; returns true on success. */

@@ -6,7 +6,7 @@ pub const ENV_C: &str = r#"
 #include <stdlib.h>
 #include <string.h>
 
-certo_text_t certo_get_env(certo_text_t key) {
+void* certo_get_env(certo_text_t key) {
     if (!key) return NULL;
     char* val = getenv(key);
     if (!val) return NULL;
@@ -14,7 +14,7 @@ certo_text_t certo_get_env(certo_text_t key) {
     char* copy = (char*)malloc(len);
     if (!copy) certo_panic("out of memory");
     memcpy(copy, val, len);
-    return copy;
+    return (void*)copy;
 }
 
 int64_t certo_set_env(certo_text_t key, certo_text_t val) {
