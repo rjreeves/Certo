@@ -72,7 +72,7 @@ certo_text_t certo_path_dirname(certo_text_t path) {
 }
 
 /* Extension of the last component (after the last dot), or NULL if none. */
-certo_text_t certo_path_extension(certo_text_t path) {
+void* certo_path_extension(certo_text_t path) {
     if (!path || !*path) return NULL;
     size_t len = strlen(path);
     int64_t sep = last_sep(path, len);
@@ -84,7 +84,7 @@ certo_text_t certo_path_extension(certo_text_t path) {
     char* out = (char*)malloc(elen + 1);
     if (!out) certo_panic("out of memory");
     memcpy(out, dot + 1, elen + 1);
-    return out;
+    return (void*)out;
 }
 
 /* Strip the extension from a path. */

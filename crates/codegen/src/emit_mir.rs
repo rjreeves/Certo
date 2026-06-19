@@ -1,5 +1,5 @@
 use std::fmt::Write as FmtWrite;
-use certo_mir::{MirFn, MirStmt, MirLocalDecl, Rvalue, Operand, MirConst, Terminator, AggregateKind, BlockId};
+use certo_mir::{MirFn, MirStmt, MirLocalDecl, Rvalue, Operand, MirConst, Terminator, AggregateKind};
 use certo_hir::{BinOp, UnOp};
 use certo_typeck::Ty;
 use crate::ty_to_c::{ty_to_c, ret_ty_to_c};
@@ -47,7 +47,7 @@ fn emit_fn_inner(f: &MirFn, prefix: &str, out: &mut String) {
             emit_stmt(stmt, &f.locals, out);
         }
         if let Some(term) = &bb.terminator {
-            emit_terminator(term, ret_ty, out);
+            emit_terminator(term, ret_ty, &f.locals, out);
         }
     }
 
@@ -57,9 +57,11 @@ fn emit_fn_inner(f: &MirFn, prefix: &str, out: &mut String) {
 fn emit_stmt(stmt: &MirStmt, locals: &[MirLocalDecl], out: &mut String) {
     let MirStmt::Assign { dest, rvalue } = stmt;
     let lhs = local_name(*dest);
+    let dest_ty = local_ty(*dest, locals);
     match rvalue {
         Rvalue::Use(op) => {
-            writeln!(out, "    {} = {};", lhs, emit_operand(op)).unwrap();
+            let expr = cast_for_assignment(dest_ty, emit_operand(op));
+            writeln!(out, "    {} = {};", lhs, expr).unwrap();
         }
         Rvalue::BinOp { op, lhs: l, rhs: r } => {
             let expr = emit_binop(op, l, r, locals);
@@ -75,8 +77,9 @@ fn emit_stmt(stmt: &MirStmt, locals: &[MirLocalDecl], out: &mut String) {
             writeln!(out, "    {} = {}({});", lhs, sym, emit_operand(arg)).unwrap();
         }
         Rvalue::Call { func, args } => {
-            let args_str = args.iter().map(emit_operand).collect::<Vec<_>>().join(", ");
-            writeln!(out, "    {} = {}({});", lhs, emit_operand(func), args_str).unwrap();
+            let args_str = emit_call_args(func, args, locals);
+            let expr = cast_for_call_assignment(dest_ty, func, format!("{}({})", emit_operand(func), args_str));
+            writeln!(out, "    {} = {};", lhs, expr).unwrap();
         }
         Rvalue::Field { base, field } => {
             writeln!(out, "    {} = {}.{};", lhs, emit_operand(base), field).unwrap();
@@ -111,7 +114,7 @@ fn emit_stmt(stmt: &MirStmt, locals: &[MirLocalDecl], out: &mut String) {
     }
 }
 
-fn emit_terminator(term: &Terminator, ret_ty: &Ty, out: &mut String) {
+fn emit_terminator(term: &Terminator, ret_ty: &Ty, locals: &[MirLocalDecl], out: &mut String) {
     match term {
         Terminator::Goto(bb) => {
             writeln!(out, "    goto bb{};", bb).unwrap();
@@ -131,7 +134,7 @@ fn emit_terminator(term: &Terminator, ret_ty: &Ty, out: &mut String) {
             writeln!(out, "    __builtin_unreachable();").unwrap();
         }
         Terminator::Call { func, args, dest, next } => {
-            let args_str = args.iter().map(emit_operand).collect::<Vec<_>>().join(", ");
+            let args_str = emit_call_args(func, args, locals);
             writeln!(out, "    {} = {}({});", local_name(*dest), emit_operand(func), args_str).unwrap();
             writeln!(out, "    goto bb{};", next).unwrap();
         }
@@ -183,6 +186,55 @@ fn operand_ty<'a>(op: &Operand, locals: &'a [MirLocalDecl]) -> Option<&'a Ty> {
         Operand::Local(id) => locals.iter().find(|l| l.id == *id).map(|l| &l.ty),
         _ => None,
     }
+}
+
+fn local_ty<'a>(id: u32, locals: &'a [MirLocalDecl]) -> Option<&'a Ty> {
+    locals.iter().find(|l| l.id == id).map(|l| &l.ty)
+}
+
+fn cast_for_assignment(dest_ty: Option<&Ty>, expr: String) -> String {
+    match dest_ty {
+        Some(Ty::Option(inner)) if matches!(inner.as_ref(), Ty::Text) => format!("(void*)({})", expr),
+        _ => expr,
+    }
+}
+
+fn cast_for_call_assignment(dest_ty: Option<&Ty>, func: &Operand, expr: String) -> String {
+    if returns_erased_text_option(func) {
+        format!("(void*)({})", expr)
+    } else {
+        cast_for_assignment(dest_ty, expr)
+    }
+}
+
+fn returns_erased_text_option(func: &Operand) -> bool {
+    match func {
+        Operand::Global(name) => matches!(
+            name.as_str(),
+            "arg" | "readLine" | "readFile" | "getEnv" | "Path.extension"
+        ),
+        _ => false,
+    }
+}
+
+fn emit_call_args(func: &Operand, args: &[Operand], locals: &[MirLocalDecl]) -> String {
+    let func_name = match func {
+        Operand::Global(name) => Some(name.as_str()),
+        _ => None,
+    };
+
+    args.iter()
+        .enumerate()
+        .map(|(i, arg)| {
+            let expr = emit_operand(arg);
+            if func_name == Some("List.push") && i == 1 && operand_is_text(arg, locals) {
+                format!("(void*)({})", expr)
+            } else {
+                expr
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn emit_binop(op: &BinOp, l: &Operand, r: &Operand, locals: &[MirLocalDecl]) -> String {
