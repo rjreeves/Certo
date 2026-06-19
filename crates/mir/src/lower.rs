@@ -285,21 +285,77 @@ fn lower_expr(expr: &HirExpr, b: &mut Builder) -> Operand {
                                 if arm.guard.is_some() { b.switch_to(after_pat); }
                             }
                             "Some" => {
-                                // Some(n): scrutinee != NULL; bind n = (intptr_t)scrutinee
+                                // Some(n): scrutinee != NULL; bind boxed scalar payloads
+                                // only after the null check succeeds.
                                 let cmp = b.declare_local("_cmp", Ty::Bool);
                                 b.assign(cmp, Rvalue::BinOp {
                                     op: certo_hir::BinOp::NotEq,
                                     lhs: scrut_op.clone(),
                                     rhs: Operand::Global("__NULL".into()),
                                 });
+                                let bind_bb = b.new_block();
+                                b.terminate(Terminator::If {
+                                    cond: Operand::Local(cmp),
+                                    true_bb: bind_bb,
+                                    false_bb: next_arm_bb,
+                                });
+
+                                b.switch_to(bind_bb);
+                                let option_inner_ty = match &scrutinee.ty {
+                                    Ty::Option(inner) => *inner.clone(),
+                                    _ => match &scrut_op {
+                                        Operand::Local(local) => b.locals
+                                            .get(*local as usize)
+                                            .and_then(|decl| match &decl.ty {
+                                                Ty::Option(inner) => Some(*inner.clone()),
+                                                _ => None,
+                                            })
+                                            .unwrap_or(Ty::Error),
+                                        _ => Ty::Error,
+                                    },
+                                };
                                 for field_pat in fields.iter() {
                                     if let HirPat::Bind { local, name: fname } = field_pat {
-                                        let ml = b.map_hir_local(*local, fname, Ty::Error);
-                                        b.assign(ml, Rvalue::Use(scrut_op.clone()));
+                                        let ml = b.map_hir_local(*local, fname, option_inner_ty.clone());
+                                        match &option_inner_ty {
+                                            Ty::Int => {
+                                                let unwrap_bb = b.new_block();
+                                                b.terminate(Terminator::Call {
+                                                    func: Operand::Global("__option_unwrap_int".into()),
+                                                    args: vec![scrut_op.clone()],
+                                                    dest: ml,
+                                                    next: unwrap_bb,
+                                                });
+                                                b.switch_to(unwrap_bb);
+                                            }
+                                            Ty::Float => {
+                                                let unwrap_bb = b.new_block();
+                                                b.terminate(Terminator::Call {
+                                                    func: Operand::Global("__option_unwrap_float".into()),
+                                                    args: vec![scrut_op.clone()],
+                                                    dest: ml,
+                                                    next: unwrap_bb,
+                                                });
+                                                b.switch_to(unwrap_bb);
+                                            }
+                                            Ty::Bool => {
+                                                let unwrap_bb = b.new_block();
+                                                b.terminate(Terminator::Call {
+                                                    func: Operand::Global("__option_unwrap_bool".into()),
+                                                    args: vec![scrut_op.clone()],
+                                                    dest: ml,
+                                                    next: unwrap_bb,
+                                                });
+                                                b.switch_to(unwrap_bb);
+                                            }
+                                            _ => {
+                                                b.assign(ml, Rvalue::Use(scrut_op.clone()));
+                                            }
+                                        }
                                     }
                                 }
                                 let after_pat = if arm.guard.is_some() { b.new_block() } else { arm_bb };
-                                b.terminate(Terminator::If { cond: Operand::Local(cmp), true_bb: after_pat, false_bb: next_arm_bb });
+                                b.terminate(Terminator::Goto(after_pat));
                                 if arm.guard.is_some() { b.switch_to(after_pat); }
                             }
                             "Ok" => {

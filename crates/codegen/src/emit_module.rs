@@ -505,17 +505,55 @@ certo_text_t certo_text_concat(certo_text_t a, certo_text_t b);
 int64_t      certo_text_len(certo_text_t t);
 bool         certo_text_eq(certo_text_t a, certo_text_t b);
 
+/* Panic */
+__attribute__((noreturn)) void certo_panic(certo_text_t msg);
+
 /* UUID */
 typedef struct { uint8_t bytes[16]; } certo_uuid_t;
 #define CERTO_UUID(s) certo_uuid_parse(s)
 certo_uuid_t certo_uuid_parse(const char* s);
 certo_uuid_t certo_uuid_new(void);
 
-/* Generic option (pointer-sized tag + value) */
+/* Generic option: None is NULL; scalar Some payloads are heap-boxed. */
 typedef struct { bool has_value; void* value; } certo_option_t;
-/* Option constructors — None is a null pointer, Some wraps any value as void* */
 #define certo_none ((void*)0)
-#define certo_some(x) ((void*)(intptr_t)(x))
+static inline void* __option_box_int(int64_t v) {
+    int64_t* p = (int64_t*)malloc(sizeof(int64_t));
+    if (!p) certo_panic("out of memory");
+    *p = v;
+    return p;
+}
+static inline void* __option_box_c_int(int v) { return __option_box_int((int64_t)v); }
+static inline void* __option_box_c_long(long v) { return __option_box_int((int64_t)v); }
+static inline void* __option_box_c_ulong(unsigned long v) { return __option_box_int((int64_t)v); }
+static inline void* __option_box_c_ulong_long(unsigned long long v) { return __option_box_int((int64_t)v); }
+static inline void* __option_box_float(double v) {
+    double* p = (double*)malloc(sizeof(double));
+    if (!p) certo_panic("out of memory");
+    *p = v;
+    return p;
+}
+static inline void* __option_box_c_float(float v) { return __option_box_float((double)v); }
+static inline void* __option_box_bool(bool v) {
+    bool* p = (bool*)malloc(sizeof(bool));
+    if (!p) certo_panic("out of memory");
+    *p = v;
+    return p;
+}
+static inline void* __option_box_ptr(void* v) { return v; }
+static inline void* __option_box_text(certo_text_t v) { return (void*)v; }
+#define certo_some(x) _Generic((x), \
+    int: __option_box_c_int, \
+    long: __option_box_c_long, \
+    unsigned long: __option_box_c_ulong, \
+    long long: __option_box_int, \
+    unsigned long long: __option_box_c_ulong_long, \
+    float: __option_box_c_float, \
+    double: __option_box_float, \
+    bool: __option_box_bool, \
+    certo_text_t: __option_box_text, \
+    default: __option_box_ptr \
+)(x)
 typedef struct { void* value; } certo_tuple_t;
 typedef void (*certo_fn_t)(void);
 typedef void* certo_error_t;
@@ -543,6 +581,9 @@ static inline void* certo_err(intptr_t e) {
 static inline bool     __result_is_ok(void* r) { return ((certo_result_t*)r)->is_ok; }
 static inline intptr_t __result_unwrap(void* r) { return ((certo_result_t*)r)->payload; }
 static inline intptr_t __tuple_get(void* t, int64_t i) { return (intptr_t)((certo_list_base_t*)t)->data[i]; }
+static inline int64_t  __option_unwrap_int(void* opt) { return *((int64_t*)opt); }
+static inline double   __option_unwrap_float(void* opt) { return *((double*)opt); }
+static inline bool     __option_unwrap_bool(void* opt) { return *((bool*)opt); }
 
 /* Arithmetic helpers */
 int64_t certo_pow(int64_t base, int64_t exp);
@@ -551,8 +592,6 @@ void*   certo_coalesce(void* opt, void* fallback);
 /* NULL constant used by Option pattern matching (cast to int64_t for comparison) */
 #define __NULL ((int64_t)0)
 
-/* Panic */
-__attribute__((noreturn)) void certo_panic(certo_text_t msg);
 #define certo_unreachable() certo_panic("unreachable")
 #define certo_todo()        certo_panic("not yet implemented")
 

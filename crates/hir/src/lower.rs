@@ -19,6 +19,8 @@ struct Cx {
     next_fn:    FnId,
     /// Name → LocalId for the current scope stack.
     locals:     Vec<HashMap<String, LocalId>>,
+    /// LocalId → inferred or annotated type.
+    local_tys:  HashMap<LocalId, Ty>,
     /// Name → FnId for top-level functions.
     globals:    HashMap<String, FnId>,
     /// Name → param list for user-defined functions (for labeled/default arg normalization).
@@ -44,6 +46,7 @@ impl Cx {
             next_local:    0,
             next_fn:       0,
             locals:        vec![HashMap::new()],
+            local_tys:     HashMap::new(),
             globals:       HashMap::new(),
             fn_params:     HashMap::new(),
             stdlib_params: stdlib_param_names(),
@@ -72,6 +75,14 @@ impl Cx {
         let id = self.fresh_local();
         self.locals.last_mut().unwrap().insert(name.to_string(), id);
         id
+    }
+
+    fn set_local_ty(&mut self, local: LocalId, ty: Ty) {
+        self.local_tys.insert(local, ty);
+    }
+
+    fn local_ty(&self, local: LocalId) -> Ty {
+        self.local_tys.get(&local).cloned().unwrap_or(Ty::Error)
     }
 
     fn lookup_local(&self, name: &str) -> Option<LocalId> {
@@ -174,6 +185,21 @@ fn stdlib_param_names() -> HashMap<&'static str, &'static [&'static str]> {
     m
 }
 
+fn stdlib_return_type(name: &str) -> Option<Ty> {
+    match name {
+        "parseInt" | "Text.indexOf" => Some(Ty::Option(Box::new(Ty::Int))),
+        "parseFloat" => Some(Ty::Option(Box::new(Ty::Float))),
+        "arg" | "readLine" | "readFile" | "getEnv" | "Path.extension" => {
+            Some(Ty::Option(Box::new(Ty::Text)))
+        }
+        "Text.len" => Some(Ty::Int),
+        "Text.slice" | "Text.trim" | "Text.replace" => Some(Ty::Text),
+        "Text.eq" | "Text.startsWith" | "Text.endsWith" => Some(Ty::Bool),
+        "fileExists" => Some(Ty::Bool),
+        _ => None,
+    }
+}
+
 // ------------------------------------------------------------------ //
 // Entry point
 // ------------------------------------------------------------------ //
@@ -246,6 +272,7 @@ pub fn lower_module(module: &Module) -> Result<HirModule, Vec<LowerError>> {
                 let params: Vec<HirParam> = f.params.iter().map(|p| {
                     let local = cx.define_local(&p.name.node);
                     let ty = ast_ty_to_ty_with_params(&p.ty.node, &tp_names);
+                    cx.set_local_ty(local, ty.clone());
                     HirParam { local, name: p.name.node.clone(), ty, span: p.span }
                 }).collect();
 
@@ -326,7 +353,7 @@ fn lower_expr(expr: &S<Expr>, cx: &mut Cx) -> HirExpr {
         Expr::Path { path, .. } => {
             let name = path.segments.last().map(|s| s.node.as_str()).unwrap_or("");
             if let Some(local) = cx.lookup_local(name) {
-                HirExpr { kind: HirExprKind::Local(local), ty: Ty::Error, span }
+                HirExpr { kind: HirExprKind::Local(local), ty: cx.local_ty(local), span }
             } else {
                 let ty = cx.global_types.get(name).cloned().unwrap_or(Ty::Error);
                 HirExpr { kind: HirExprKind::Global(name.to_string()), ty, span }
@@ -364,7 +391,13 @@ fn lower_expr(expr: &S<Expr>, cx: &mut Cx) -> HirExpr {
                     let short = path.segments.last().map(|s| s.node.clone());
                     (Some(full), short)
                 }
-                _ => (None, None),
+                _ => match &func_hir.kind {
+                    HirExprKind::Global(name) => {
+                        let short = name.rsplit('.').next().map(|s| s.to_string());
+                        (Some(name.clone()), short)
+                    }
+                    _ => (None, None),
+                },
             };
             let has_labels = args.iter().any(|a| a.label.is_some());
 
@@ -441,6 +474,8 @@ fn lower_expr(expr: &S<Expr>, cx: &mut Cx) -> HirExpr {
             let short = fn_short_name.as_deref().unwrap_or("");
             let call_ty = fn_full_path.as_deref()
                 .and_then(|fp| cx.sm_returns.get(fp).cloned())
+                .or_else(|| fn_full_path.as_deref().and_then(stdlib_return_type))
+                .or_else(|| stdlib_return_type(short))
                 .or_else(|| cx.fn_ret_types.get(short).cloned())
                 .unwrap_or(Ty::Error);
 
@@ -569,6 +604,7 @@ fn lower_expr(expr: &S<Expr>, cx: &mut Cx) -> HirExpr {
             cx.push_scope();
             let hir_params: Vec<HirParam> = params.iter().map(|p| {
                 let local = cx.define_local(&p.name.node);
+                cx.set_local_ty(local, Ty::Error);
                 HirParam { local, name: p.name.node.clone(), ty: Ty::Error, span: p.span }
             }).collect();
             let body = lower_expr(body, cx);
@@ -720,6 +756,7 @@ fn lower_expr(expr: &S<Expr>, cx: &mut Cx) -> HirExpr {
             let iter_hir = lower_expr(iter, cx);
             cx.push_scope();
             let local = cx.define_local(&binding.node);
+            cx.set_local_ty(local, Ty::Error);
             let body_hir = lower_expr(body, cx);
             cx.pop_scope();
             HirExpr {
@@ -804,12 +841,16 @@ fn lower_block(stmts: &[Stmt], span: Span, cx: &mut Cx) -> HirExpr {
     for (i, stmt) in stmts.iter().enumerate() {
         let is_last = i == stmts.len() - 1;
         match stmt {
-            Stmt::Val { pattern, value, .. } => {
+            Stmt::Val { pattern, ty: annotated_ty, value, .. } => {
                 let init = lower_expr(value, cx);
                 match &pattern.node {
                     Pattern::Ident { name, .. } => {
                         let local = cx.define_local(&name.node);
-                        let ty = init.ty.clone(); // propagate init type (e.g. statemachine return type)
+                        let ty = annotated_ty
+                            .as_ref()
+                            .map(|t| ast_ty_to_ty(&t.node))
+                            .unwrap_or_else(|| init.ty.clone()); // propagate init type (e.g. statemachine return type)
+                        cx.set_local_ty(local, ty.clone());
                         hir_stmts.push(HirStmt::Let { local, name: name.node.clone(), ty, init });
                     }
                     Pattern::Wildcard { .. } => {
@@ -821,6 +862,7 @@ fn lower_block(stmts: &[Stmt], span: Span, cx: &mut Cx) -> HirExpr {
                         for (i, elem) in elements.iter().enumerate() {
                             if let Pattern::Ident { name, .. } = &elem.node {
                                 let local = cx.define_local(&name.node);
+                                cx.set_local_ty(local, Ty::Error);
                                 let base = HirExpr { kind: HirExprKind::Local(tmp), ty: Ty::Error, span };
                                 let field_expr = HirExpr {
                                     kind: HirExprKind::Field { base: Box::new(base), field: i.to_string() },
@@ -840,6 +882,7 @@ fn lower_block(stmts: &[Stmt], span: Span, cx: &mut Cx) -> HirExpr {
                                 pf.name.node.clone()
                             };
                             let local = cx.define_local(&binding_name);
+                            cx.set_local_ty(local, Ty::Error);
                             let base = HirExpr { kind: HirExprKind::Local(tmp), ty: Ty::Error, span };
                             let field_expr = HirExpr {
                                 kind: HirExprKind::Field { base: Box::new(base), field: pf.name.node.clone() },
@@ -855,10 +898,14 @@ fn lower_block(stmts: &[Stmt], span: Span, cx: &mut Cx) -> HirExpr {
                     }
                 }
             }
-            Stmt::Var { name, value, .. } => {
+            Stmt::Var { name, ty: annotated_ty, value, .. } => {
                 let init = lower_expr(value, cx);
-                let ty = init.ty.clone();
+                let ty = annotated_ty
+                    .as_ref()
+                    .map(|t| ast_ty_to_ty(&t.node))
+                    .unwrap_or_else(|| init.ty.clone());
                 let local = cx.define_local(&name.node);
+                cx.set_local_ty(local, ty.clone());
                 hir_stmts.push(HirStmt::Let { local, name: name.node.clone(), ty, init });
             }
             Stmt::Assign { target, value, .. } => {
@@ -900,6 +947,7 @@ fn lower_pat(pat: &S<certo_ast::pattern::Pattern>, cx: &mut Cx) -> HirPat {
         Pattern::Wildcard { .. } => HirPat::Wildcard,
         Pattern::Ident { name, .. } => {
             let local = cx.define_local(&name.node);
+            cx.set_local_ty(local, Ty::Error);
             HirPat::Bind { local, name: name.node.clone() }
         }
         Pattern::Literal { value, .. } => HirPat::Lit(match value {

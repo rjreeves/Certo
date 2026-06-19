@@ -1,0 +1,27 @@
+module OptionIntRegression
+
+import Stdlib.Core
+import Stdlib.Text
+
+fn main(): Unit [io] = {
+    val explicitZero: Int? = Some(0)
+    if let Some(n) = explicitZero {
+        println(intToText(n))
+    } else {
+        println("missing")
+    }
+
+    println(intToText(parseInt("0") ?? 99))
+
+    if let Some(i) = Text.indexOf("abc", "a") {
+        println(intToText(i))
+    } else {
+        println("missing")
+    }
+
+    if let Some(j) = Text.indexOf("abc", "b") {
+        println(intToText(j))
+    } else {
+        println("missing")
+    }
+}
