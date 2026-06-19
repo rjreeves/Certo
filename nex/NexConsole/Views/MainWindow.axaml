@@ -6,7 +6,7 @@
         mc:Ignorable="d" d:DesignWidth="1024" d:DesignHeight="700"
         x:Class="NexConsole.Views.MainWindow"
         x:DataType="vm:MainWindowViewModel"
-        Icon="/Assets/avalonia-logo.ico"
+        Icon="/Assets/syntra-icon-32.png"
         Title="Nex Console"
         MinWidth="700" MinHeight="500"
         Width="1024" Height="700">
@@ -47,16 +47,6 @@
                 BorderThickness="0,0,1,0">
             <DockPanel>
 
-                <!-- App title -->
-                <Border DockPanel.Dock="Top"
-                        Padding="16,20,16,16"
-                        BorderBrush="#2a2a2a"
-                        BorderThickness="0,0,0,1">
-                    <TextBlock Text="Nex Console"
-                               FontSize="15"
-                               FontWeight="SemiBold"
-                               Foreground="#ffffff"/>
-                </Border>
 
                 <!-- Nav items -->
                 <ItemsControl DockPanel.Dock="Top"

@@ -178,6 +178,13 @@ fn operand_is_text(op: &Operand, locals: &[MirLocalDecl]) -> bool {
     }
 }
 
+fn operand_ty<'a>(op: &Operand, locals: &'a [MirLocalDecl]) -> Option<&'a Ty> {
+    match op {
+        Operand::Local(id) => locals.iter().find(|l| l.id == *id).map(|l| &l.ty),
+        _ => None,
+    }
+}
+
 fn emit_binop(op: &BinOp, l: &Operand, r: &Operand, locals: &[MirLocalDecl]) -> String {
     let lhs = emit_operand(l);
     let rhs = emit_operand(r);
@@ -208,7 +215,20 @@ fn emit_binop(op: &BinOp, l: &Operand, r: &Operand, locals: &[MirLocalDecl]) -> 
         BinOp::GtEq => format!("({} >= {})", lhs, rhs),
         BinOp::And  => format!("({} && {})", lhs, rhs),
         BinOp::Or   => format!("({} || {})", lhs, rhs),
-        BinOp::NullCoalesce => format!("certo_coalesce((void*)({lhs}), (void*)({rhs}))"),
+        BinOp::NullCoalesce => {
+            match operand_ty(l, locals) {
+                Some(Ty::Option(inner)) if matches!(inner.as_ref(), Ty::Int) => {
+                    format!("(({lhs}) ? __option_unwrap_int((void*)({lhs})) : ({rhs}))")
+                }
+                Some(Ty::Option(inner)) if matches!(inner.as_ref(), Ty::Float) => {
+                    format!("(({lhs}) ? __option_unwrap_float((void*)({lhs})) : ({rhs}))")
+                }
+                Some(Ty::Option(inner)) if matches!(inner.as_ref(), Ty::Bool) => {
+                    format!("(({lhs}) ? __option_unwrap_bool((void*)({lhs})) : ({rhs}))")
+                }
+                _ => format!("certo_coalesce((void*)({lhs}), (void*)({rhs}))"),
+            }
+        }
         BinOp::Concat       => format!("certo_text_concat({}, {})", lhs, rhs),
     }
 }
