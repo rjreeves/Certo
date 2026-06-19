@@ -175,6 +175,7 @@ fn stdlib_param_names() -> HashMap<&'static str, &'static [&'static str]> {
 
     // Process
     m.insert("Process.exec",   &["cmd", "args"]);
+    m.insert("Process.quit",   &["code"]);
 
     // Json
     m.insert("JsonValue.at",   &["value", "index"]);
@@ -193,6 +194,7 @@ fn stdlib_return_type(name: &str) -> Option<Ty> {
             Some(Ty::Option(Box::new(Ty::Text)))
         }
         "Text.len" => Some(Ty::Int),
+        "Process.quit" => Some(Ty::Unit),
         "Text.slice" | "Text.trim" | "Text.replace" => Some(Ty::Text),
         "Text.eq" | "Text.startsWith" | "Text.endsWith" => Some(Ty::Bool),
         "fileExists" => Some(Ty::Bool),

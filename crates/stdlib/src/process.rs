@@ -90,10 +90,17 @@ CertoProcessResult* certo_process_exec(certo_text_t cmd, CertoList* args) {
     snprintf(err_tmp, sizeof(err_tmp), "/tmp/certo_err_%d.tmp", (int)getpid());
 #endif
 
-    size_t full_cap = pos + strlen(out_tmp) + strlen(err_tmp) + 32;
+    size_t full_cap = pos + strlen(out_tmp) + strlen(err_tmp) + 64;
     char*  full_cmd = (char*)malloc(full_cap);
     if (!full_cmd) certo_panic("out of memory");
+    /* On Windows, system() calls cmd.exe /c which strips the first and last "
+       when the string starts with ". Prefix with "@echo off & " so the string
+       starts with '@', preventing that stripping while still running the command. */
+#ifdef _WIN32
+    snprintf(full_cmd, full_cap, "@echo off & %s > \"%s\" 2> \"%s\"", cbuf, out_tmp, err_tmp);
+#else
     snprintf(full_cmd, full_cap, "%s > \"%s\" 2> \"%s\"", cbuf, out_tmp, err_tmp);
+#endif
     free(cbuf);
 
     int rc = system(full_cmd);
@@ -153,10 +160,14 @@ CertoProcessResult* certo_process_exec_with_input(certo_text_t cmd, CertoList* a
 #endif
 
     /* Use popen to write stdin, redirect stdout/stderr to temp files. */
-    size_t full_cap = pos + strlen(out_tmp) + strlen(err_tmp) + 32;
+    size_t full_cap = pos + strlen(out_tmp) + strlen(err_tmp) + 64;
     char* full_cmd = (char*)malloc(full_cap);
     if (!full_cmd) certo_panic("out of memory");
+#ifdef _WIN32
+    snprintf(full_cmd, full_cap, "@echo off & %s > \"%s\" 2> \"%s\"", cbuf, out_tmp, err_tmp);
+#else
     snprintf(full_cmd, full_cap, "%s > \"%s\" 2> \"%s\"", cbuf, out_tmp, err_tmp);
+#endif
     free(cbuf);
 
 #ifdef _WIN32
@@ -222,9 +233,9 @@ int64_t certo_process_lines(certo_text_t cmd, CertoList* args,
 
     /* Redirect stderr to /dev/null so only stdout streams to us. */
 #ifdef _WIN32
-    size_t full_cap = pos + 20;
+    size_t full_cap = pos + 32;
     char* full_cmd = (char*)malloc(full_cap);
-    snprintf(full_cmd, full_cap, "%s 2>NUL", cbuf);
+    snprintf(full_cmd, full_cap, "@echo off & %s 2>NUL", cbuf);
     FILE* proc = _popen(full_cmd, "r");
 #else
     size_t full_cap = pos + 20;
@@ -278,9 +289,9 @@ int64_t certo_process_lines_certo(certo_text_t cmd, CertoList* args, CertoFnText
     cbuf[pos] = '\0';
 
 #ifdef _WIN32
-    size_t full_cap = pos + 20;
+    size_t full_cap = pos + 32;
     char* full_cmd = (char*)malloc(full_cap);
-    snprintf(full_cmd, full_cap, "%s 2>NUL", cbuf);
+    snprintf(full_cmd, full_cap, "@echo off & %s 2>NUL", cbuf);
     FILE* proc = _popen(full_cmd, "r");
 #else
     size_t full_cap = pos + 20;
@@ -312,6 +323,11 @@ int64_t certo_process_lines_certo(certo_text_t cmd, CertoList* args, CertoFnText
     return WIFEXITED(rc) ? (int64_t)WEXITSTATUS(rc) : -1;
 #endif
 }
+
+int64_t certo_process_quit(int64_t code) {
+    exit((int)code);
+    return 0;
+}
 "#;
 
 pub const PROCESS_CERTO: &str = r#"
@@ -338,4 +354,7 @@ fn ProcessResult.stdout(r: ProcessResult): Text
 
 /// Captured standard error from a ProcessResult.
 fn ProcessResult.stderr(r: ProcessResult): Text
+
+/// Exit the current process with the given code.
+fn Process.quit(code: Int): Unit [io]
 "#;

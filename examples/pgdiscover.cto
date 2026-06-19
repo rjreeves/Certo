@@ -1,0 +1,296 @@
+module pgdiscover
+
+import Stdlib.Core
+import Stdlib.Db
+import Stdlib.Process
+import Stdlib.File
+import Stdlib.Env
+import Stdlib.Text
+import Stdlib.Collections
+
+// ---------------------------------------------------------------------------
+// pgdiscover — find every PostgreSQL installation on this Windows machine,
+//              check whether the service is running, connect using credentials
+//              from the local pgpass file, and report the server version.
+//
+// Discovery strategy
+//   1. Read both the 64-bit and 32-bit views of the Windows registry under
+//        HKLM\SOFTWARE\PostgreSQL\Services          (native / 64-bit)
+//        HKLM\SOFTWARE\WOW6432Node\PostgreSQL\Services  (32-bit WOW)
+//   2. For each service sub-key query Port (REG_DWORD) from Services and
+//      Version (REG_SZ) from the sibling Installations key.
+//   3. Ask the SCM whether that Windows service is currently RUNNING.
+//   4. Look up matching credentials in %APPDATA%\postgresql\pgpass.conf.
+//   5. Open a libpq connection and call SELECT version().
+// ---------------------------------------------------------------------------
+
+
+// ── Registry helpers ─────────────────────────────────────────────────────────
+//
+// reg.exe uses HKLM\ (no colon); its output expands to HKEY_LOCAL_MACHINE\.
+// We avoid closures capturing outer variables to keep the codegen happy.
+
+// Convert a Certo path string (HKLM:\\...) to what reg.exe expects (HKLM\...).
+fn toRegPath(path: Text): Text =
+    Text.replace(path, "HKLM:\\", "HKLM\\")
+
+// Expand HKLM\ to the full name that reg.exe echoes back in its output.
+fn expandHive(path: Text): Text =
+    Text.replace(path, "HKLM\\", "HKEY_LOCAL_MACHINE\\")
+
+// List immediate child key names under regPath.
+// reg.exe output per line: HKEY_LOCAL_MACHINE\SOFTWARE\PostgreSQL\Services\postgresql-x64-18
+// We keep only lines that start with the expanded prefix and have no further \.
+fn regSubkeys(regPath: Text): List<Text> [io] = {
+    val rePath  = toRegPath(regPath)
+    val r       = Process.exec("reg", ["query", rePath])
+    if ProcessResult.exitCode(r) != 0 then {
+        []
+    } else {
+        val lines     = Text.split(ProcessResult.stdout(r), "\n")
+        val prefix    = expandHive(rePath) ++ "\\"
+        val prefixLen = Text.len(prefix)
+        var result: List<Text> = []
+        var i = 0
+        while i < List.len(lines) {
+            val line = Text.trim(List.getOrPanic(lines, i))
+            if Text.startsWith(line, prefix) then {
+                val name    = Text.slice(line, prefixLen, Text.len(line))
+                val hasMore = Text.contains(name, "\\")
+                if not Text.eq(name, "") and not hasMore then {
+                    result = List.push(result, name)
+                }
+            }
+            i = i + 1
+        }
+        result
+    }
+}
+
+// Read a REG_SZ value.  reg.exe output line looks like:
+//     ValueName    REG_SZ    the actual value
+// Returns "" if not found.
+fn regGetString(keyPath: Text, valueName: Text): Text [io] = {
+    val r = Process.exec("reg", ["query", toRegPath(keyPath), "/v", valueName])
+    if ProcessResult.exitCode(r) != 0 then {
+        ""
+    } else {
+        val lines = Text.split(ProcessResult.stdout(r), "\n")
+        var found = ""
+        var i = 0
+        while i < List.len(lines) {
+            val t = Text.trim(List.getOrPanic(lines, i))
+            if Text.contains(t, "REG_SZ") and Text.eq(found, "") then {
+                val parts = Text.split(t, "REG_SZ")
+                if List.len(parts) >= 2 then {
+                    found = Text.trim(List.getOrPanic(parts, 1))
+                }
+            }
+            i = i + 1
+        }
+        found
+    }
+}
+
+
+// ── Port from REG_DWORD ───────────────────────────────────────────────────────
+//
+// reg.exe emits DWORD values in hex:  Port    REG_DWORD    0x1538
+// We parse the hex ourselves since parseInt only handles base-10.
+
+fn hexDigit(ch: Text): Int = {
+    if Text.eq(ch, "0") then { 0 } else
+    if Text.eq(ch, "1") then { 1 } else
+    if Text.eq(ch, "2") then { 2 } else
+    if Text.eq(ch, "3") then { 3 } else
+    if Text.eq(ch, "4") then { 4 } else
+    if Text.eq(ch, "5") then { 5 } else
+    if Text.eq(ch, "6") then { 6 } else
+    if Text.eq(ch, "7") then { 7 } else
+    if Text.eq(ch, "8") then { 8 } else
+    if Text.eq(ch, "9") then { 9 } else
+    if Text.eq(ch, "a") or Text.eq(ch, "A") then { 10 } else
+    if Text.eq(ch, "b") or Text.eq(ch, "B") then { 11 } else
+    if Text.eq(ch, "c") or Text.eq(ch, "C") then { 12 } else
+    if Text.eq(ch, "d") or Text.eq(ch, "D") then { 13 } else
+    if Text.eq(ch, "e") or Text.eq(ch, "E") then { 14 } else
+    { 15 }
+}
+
+fn parseHex(s: Text): Int = {
+    var start = 0
+    if Text.startsWith(Text.toLower(s), "0x") then {
+        start = 2
+    }
+    val slen = Text.len(s)
+    var v = 0
+    var i = start
+    while i < slen {
+        val ch = Text.slice(s, i, i + 1)
+        v = v * 16 + hexDigit(ch)
+        i = i + 1
+    }
+    v
+}
+
+// Returns "" if not found, decimal port string otherwise ("5432", "5433", ...).
+fn regGetPort(keyPath: Text): Text [io] = {
+    val r = Process.exec("reg", ["query", toRegPath(keyPath), "/v", "Port"])
+    if ProcessResult.exitCode(r) != 0 then {
+        ""
+    } else {
+        val lines = Text.split(ProcessResult.stdout(r), "\n")
+        var found = ""
+        var i = 0
+        while i < List.len(lines) {
+            val t = Text.trim(List.getOrPanic(lines, i))
+            if Text.contains(t, "REG_DWORD") and Text.eq(found, "") then {
+                val parts = Text.split(t, "REG_DWORD")
+                if List.len(parts) >= 2 then {
+                    val hex = Text.trim(List.getOrPanic(parts, 1))
+                    found = intToText(parseHex(hex))
+                }
+            }
+            i = i + 1
+        }
+        found
+    }
+}
+
+
+// ── Service status ────────────────────────────────────────────────────────────
+
+fn serviceRunning(svcName: Text): Bool [io] = {
+    val r = Process.exec("sc", ["query", svcName])
+    Text.contains(ProcessResult.stdout(r), "RUNNING")
+}
+
+
+// ── pgpass lookup ─────────────────────────────────────────────────────────────
+//
+// File: %APPDATA%\postgresql\pgpass.conf
+// Format per line: hostname:port:database:username:password  (* = wildcard)
+//
+// Matches on port only (not host), then builds the connection string using the
+// host recorded in the pgpass line so the caller connects the same way the
+// user intended — not necessarily via "localhost".
+// Returns "" if no matching entry is found.
+
+fn pgpassLookup(port: Text): Text [io] = {
+    val appdata  = getEnv("APPDATA") ?? ""
+    val pgpass   = appdata ++ "\\postgresql\\pgpass.conf"
+    val contents = readFile(pgpass) ?? ""
+    val lines    = Text.split(contents, "\n")
+    var found = ""
+    var i = 0
+    while i < List.len(lines) {
+        val t = Text.trim(List.getOrPanic(lines, i))
+        if not Text.startsWith(t, "#") and not Text.eq(t, "") and Text.eq(found, "") then {
+            val parts = Text.split(t, ":")
+            if List.len(parts) >= 5 then {
+                val host  = List.getOrPanic(parts, 0)
+                val pport = List.getOrPanic(parts, 1)
+                val pdb   = List.getOrPanic(parts, 2)
+                val user  = List.getOrPanic(parts, 3)
+                val pass  = List.getOrPanic(parts, 4)
+                val portOk = Text.eq(pport, "*") or Text.eq(pport, port)
+                if portOk then {
+                    val connHost = if Text.eq(host, "*") then "localhost" else host
+                    val db       = if Text.eq(pdb,  "*") then "postgres"  else pdb
+                    found = "host=" ++ connHost ++ " port=" ++ port ++ " dbname=" ++ db ++ " user=" ++ user ++ " password=" ++ pass
+                }
+            }
+        }
+        i = i + 1
+    }
+    found
+}
+
+
+// ── Connection probe ──────────────────────────────────────────────────────────
+
+fn probeConnection(connstr: Text): Unit [io] = {
+    val conn = dbConnect(connstr)
+    if conn == 0 then {
+        println("  Connect      : FAILED")
+        println("  Error        : " ++ dbError(0))
+    } else {
+        val rows = dbQuery(conn, "SELECT version()", [])
+        val ver =
+            if let Some(row) = List.first(rows) {
+                List.getOrPanic(row, 0) ?? "(null)"
+            } else {
+                "(no rows returned)"
+            }
+        println("  Connect      : OK")
+        println("  version()    : " ++ ver)
+        dbClose(conn)
+    }
+}
+
+
+// ── Per-installation handler ──────────────────────────────────────────────────
+//
+// PostgreSQL splits its registry data:
+//   Services\<name>      — Port (REG_DWORD)
+//   Installations\<name> — Version (REG_SZ)
+
+fn probeInstallation(svcRegPath: Text, subkey: Text): Unit [io] = {
+    val svcKeyPath  = svcRegPath ++ "\\" ++ subkey
+    val instKeyPath = Text.replace(svcRegPath, "\\Services", "\\Installations") ++ "\\" ++ subkey
+
+    val portRaw = regGetPort(svcKeyPath)
+    val portStr = if Text.eq(portRaw, "") then "5432" else portRaw
+    val verRaw  = regGetString(instKeyPath, "Version")
+    val version = if Text.eq(verRaw, "") then "(unknown)" else verRaw
+
+    println("")
+    println("  Service      : " ++ subkey)
+    println("  Version      : " ++ version)
+    println("  Port         : " ++ portStr ++ "  (registry)")
+
+    val running = serviceRunning(subkey)
+    println("  Status       : " ++ if running then "RUNNING" else "STOPPED")
+}
+
+
+// ── Main ──────────────────────────────────────────────────────────────────────
+
+fn main(): Unit [io] = {
+    println("PostgreSQL Discovery")
+    println("====================")
+
+    val hives = [
+        "HKLM:\\SOFTWARE\\PostgreSQL\\Services",
+        "HKLM:\\SOFTWARE\\WOW6432Node\\PostgreSQL\\Services"
+    ]
+
+    var hi = 0
+    while hi < List.len(hives) {
+        val regPath = List.getOrPanic(hives, hi)
+        val bits    = if Text.contains(regPath, "WOW6432Node") then "32-bit" else "64-bit"
+
+        println("")
+        println("Scanning " ++ bits ++ " registry ...")
+        println("  " ++ regPath)
+
+        val subkeys = regSubkeys(regPath)
+
+        if List.len(subkeys) == 0 then {
+            println("  (no installations found)")
+        } else {
+            var si = 0
+            while si < List.len(subkeys) {
+                val subkey = List.getOrPanic(subkeys, si)
+                println("  Found: " ++ subkey)
+                probeInstallation(regPath, subkey)
+                si = si + 1
+            }
+        }
+
+        hi = hi + 1
+    }
+
+    println("")
+    println("Done.")
+}

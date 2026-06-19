@@ -411,6 +411,7 @@ pub fn seed_stdlib(env: &mut TypeEnv, counter: &mut u32) {
         def!("Process.exec",           fn2(Ty::Text, list_text.clone(), pr.clone()));
         def!("Process.execWithInput",  Ty::Fn { params: vec![Ty::Text, list_text.clone(), Ty::Text], ret: Box::new(pr.clone()) });
         def!("Process.lines",          Ty::Fn { params: vec![Ty::Text, list_text.clone(), handler], ret: Box::new(Ty::Int) });
+        def!("Process.quit",           fn1(Ty::Int, Ty::Unit));
         def!("ProcessResult.exitCode", fn1(pr.clone(), Ty::Int));
         def!("ProcessResult.stdout",   fn1(pr.clone(), Ty::Text));
         def!("ProcessResult.stderr",   fn1(pr.clone(), Ty::Text));
@@ -745,6 +746,7 @@ pub fn seed_stdlib(env: &mut TypeEnv, counter: &mut u32) {
     pm!("Process.exec",          "cmd", "args");
     pm!("Process.execWithInput", "cmd", "args", "input");
     pm!("Process.lines",         "cmd", "args", "handler");
+    pm!("Process.quit",          "code");
 
     // Json
     pm!("JsonValue.at",   "value", "index");
