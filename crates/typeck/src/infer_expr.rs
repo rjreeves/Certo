@@ -114,15 +114,17 @@ pub fn infer(expr: &S<Expr>, ctx: &mut Ctx<'_>) -> Ty {
         Expr::Lit { value, .. } => infer_lit(value),
 
         Expr::Path { path, span } => {
-            let name = path.segments.last().map(|s| s.node.as_str()).unwrap_or("");
-            match ctx.env.lookup(name) {
+            let full_name = path.segments.iter().map(|s| s.node.as_str()).collect::<Vec<_>>().join(".");
+            let short_name = path.segments.last().map(|s| s.node.as_str()).unwrap_or("");
+            let lookup_name = if full_name.is_empty() { short_name } else { full_name.as_str() };
+            match ctx.env.lookup(lookup_name).or_else(|| ctx.env.lookup(short_name)) {
                 Some(ty) => {
                     let ty = ty.clone();
                     ctx.instantiate(ty)
                 }
                 None => {
                     ctx.errors.push(TypeError {
-                        kind: TypeErrorKind::UnboundName(name.to_string()),
+                        kind: TypeErrorKind::UnboundName(lookup_name.to_string()),
                         span: *span,
                     });
                     Ty::Error
