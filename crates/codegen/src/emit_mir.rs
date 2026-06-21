@@ -1,5 +1,5 @@
 use std::fmt::Write as FmtWrite;
-use certo_mir::{MirFn, MirStmt, MirLocalDecl, Rvalue, Operand, MirConst, Terminator, AggregateKind};
+use certo_mir::{MirFn, MirStmt, MirLocalDecl, Rvalue, Operand, MirConst, Terminator, AggregateKind, BasicBlock};
 use certo_hir::{BinOp, UnOp};
 use certo_typeck::Ty;
 use crate::ty_to_c::{ty_to_c, ret_ty_to_c};
@@ -16,6 +16,48 @@ pub fn emit_fn_with_prefix(f: &MirFn, prefix: &str, out: &mut String) {
 /// Emit a single MIR function as a C function definition.
 pub fn emit_fn(f: &MirFn, out: &mut String) {
     emit_fn_inner(f, "", out);
+}
+
+/// Emit the spawn-wrapper struct typedefs and worker functions for all SpawnCall sites
+/// in the given MirFn. Must be emitted BEFORE the function that contains the spawn calls.
+pub fn emit_spawn_preamble(f: &MirFn, out: &mut String) {
+    let fn_safe = c_fn_name(&f.name);
+    for bb in &f.blocks {
+        emit_spawn_preamble_for_block(bb, &fn_safe, out);
+    }
+}
+
+fn emit_spawn_preamble_for_block(bb: &BasicBlock, fn_safe: &str, out: &mut String) {
+    for stmt in &bb.stmts {
+        if let MirStmt::Assign { rvalue: Rvalue::SpawnCall { spawn_id, func, args }, .. } = stmt {
+            let key    = format!("{fn_safe}_{spawn_id}");
+            let n_args = args.len();
+
+            // Typed ctx struct: fixed header (thr + result) followed by arg slots.
+            writeln!(out, "typedef struct {{").unwrap();
+            writeln!(out, "    pthread_t __thr; int64_t __result;").unwrap();
+            if n_args > 0 {
+                writeln!(out, "    int64_t __args[{n_args}];").unwrap();
+            }
+            writeln!(out, "}} __certo_spawn_ctx_{key}_t;").unwrap();
+
+            // Worker function called by pthread_create.
+            let args_str = (0..n_args)
+                .map(|i| format!("_c->__args[{i}]"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let func_call = match func {
+                Operand::Global(name) => format!("{}({args_str})", c_fn_name(name)),
+                Operand::Local(id)    => format!("((int64_t(*)())(intptr_t){})({})", local_name(*id), args_str),
+                Operand::Const(_)     => "0".into(),
+            };
+            writeln!(out, "static void* __certo_spawn_worker_{key}(void* _raw) {{").unwrap();
+            writeln!(out, "    __certo_spawn_ctx_{key}_t* _c = (__certo_spawn_ctx_{key}_t*)_raw;").unwrap();
+            writeln!(out, "    _c->__result = (int64_t)(intptr_t)({func_call});").unwrap();
+            writeln!(out, "    return NULL;").unwrap();
+            writeln!(out, "}}").unwrap();
+        }
+    }
 }
 
 fn emit_fn_inner(f: &MirFn, prefix: &str, out: &mut String) {
@@ -43,8 +85,9 @@ fn emit_fn_inner(f: &MirFn, prefix: &str, out: &mut String) {
     // Emit each basic block as a labeled section.
     for bb in &f.blocks {
         writeln!(out, "  bb{}:", bb.id).unwrap();
+        let fn_safe = c_fn_name(&f.name);
         for stmt in &bb.stmts {
-            emit_stmt(stmt, &f.locals, out);
+            emit_stmt(stmt, &f.locals, &fn_safe, out);
         }
         if let Some(term) = &bb.terminator {
             emit_terminator(term, ret_ty, &f.locals, out);
@@ -54,7 +97,7 @@ fn emit_fn_inner(f: &MirFn, prefix: &str, out: &mut String) {
     writeln!(out, "}}").unwrap();
 }
 
-fn emit_stmt(stmt: &MirStmt, locals: &[MirLocalDecl], out: &mut String) {
+fn emit_stmt(stmt: &MirStmt, locals: &[MirLocalDecl], fn_safe: &str, out: &mut String) {
     let MirStmt::Assign { dest, rvalue } = stmt;
     let lhs = local_name(*dest);
     let dest_ty = local_ty(*dest, locals);
@@ -110,6 +153,22 @@ fn emit_stmt(stmt: &MirStmt, locals: &[MirLocalDecl], out: &mut String) {
                     }
                 }
             }
+        }
+        Rvalue::SpawnCall { spawn_id, func: _, args } => {
+            let key = format!("{fn_safe}_{spawn_id}");
+            writeln!(out, "    {{ __certo_spawn_ctx_{key}_t* _sc = (__certo_spawn_ctx_{key}_t*)malloc(sizeof(*_sc));").unwrap();
+            for (i, arg) in args.iter().enumerate() {
+                writeln!(out, "    _sc->__args[{i}] = (int64_t)(intptr_t)({});", emit_operand(arg)).unwrap();
+            }
+            writeln!(out, "    pthread_create(&_sc->__thr, NULL, __certo_spawn_worker_{key}, _sc);").unwrap();
+            writeln!(out, "    {lhs} = (int64_t)(intptr_t)_sc; }}").unwrap();
+        }
+        Rvalue::JoinTask(task_op) => {
+            let task = emit_operand(task_op);
+            writeln!(out, "    {{ __certo_task_hdr_t* _th = (__certo_task_hdr_t*)(intptr_t)({task});").unwrap();
+            writeln!(out, "    pthread_join(_th->__thr, NULL);").unwrap();
+            writeln!(out, "    {lhs} = _th->__result;").unwrap();
+            writeln!(out, "    free(_th); }}").unwrap();
         }
     }
 }

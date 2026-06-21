@@ -21,6 +21,8 @@ struct Builder {
     /// Deferred expressions accumulated by `defer { ... }` statements.
     /// Emitted in LIFO order before every `Return` terminator.
     defers:      Vec<certo_hir::HirExpr>,
+    /// Counter for generating unique spawn_ids within this function.
+    spawn_count: u32,
 }
 
 impl Builder {
@@ -36,6 +38,7 @@ impl Builder {
             lambda_count: 0,
             fn_name: fn_name.to_string(),
             defers:    Vec::new(),
+            spawn_count: 0,
         }
     }
 
@@ -713,24 +716,35 @@ fn lower_expr(expr: &HirExpr, b: &mut Builder) -> Operand {
         }
 
         HirExprKind::Spawn { fn_name: _, args } => {
-            // Single-threaded stub: spawn f(a) evaluates immediately, returns the result
-            // cast to int64_t as an opaque "task handle".
-            // args[0] is the lowered inner call expression.
+            // Real threading: if the inner expression is a Call, lift it into a SpawnCall
+            // which codegen will turn into pthread_create + a typed wrapper function.
+            if let Some(inner) = args.first() {
+                if let HirExprKind::Call { func, args: call_args } = &inner.kind {
+                    let func_op  = lower_expr(func, b);
+                    let arg_ops: Vec<Operand> = call_args.iter().map(|a| lower_expr(a, b)).collect();
+                    let spawn_id = b.spawn_count;
+                    b.spawn_count += 1;
+                    let dest = b.declare_local("__task", certo_typeck::Ty::Int);
+                    b.assign(dest, Rvalue::SpawnCall { spawn_id, func: func_op, args: arg_ops });
+                    return Operand::Local(dest);
+                }
+            }
+            // Fallback for non-Call spawns: eager evaluation (no threading).
             let inner_op = if let Some(inner) = args.first() {
                 lower_expr(inner, b)
             } else {
                 Operand::Const(MirConst::Int(0))
             };
-            let dest = b.declare_local("__task", certo_typeck::Ty::Error);
+            let dest = b.declare_local("__task", certo_typeck::Ty::Int);
             b.assign(dest, Rvalue::Use(inner_op));
             Operand::Local(dest)
         }
 
         HirExprKind::Await(inner) => {
-            // Single-threaded stub: await task returns the task value directly.
+            // Join the spawned task via pthread_join; retrieve result from task header.
             let task_op = lower_expr(inner, b);
-            let dest = b.declare_local("__await_result", certo_typeck::Ty::Error);
-            b.assign(dest, Rvalue::Use(task_op));
+            let dest    = b.declare_local("__await_result", certo_typeck::Ty::Int);
+            b.assign(dest, Rvalue::JoinTask(task_op));
             Operand::Local(dest)
         }
     }
