@@ -1,6 +1,6 @@
 [package]
 name    = "certo"
-version = "1.0.33"
+version = "1.0.36"
 edition = "2024"
 
 [[bin]]

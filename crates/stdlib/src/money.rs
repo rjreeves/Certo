@@ -8,6 +8,35 @@ pub const MONEY_C: &str = r#"
    e.g. $19.99 → { value: 1999, scale: 2 }
    ================================================================ */
 
+/* ---- Windows compiler-rt shims ----
+   lld-link does not ship __divti3 / __modti3 (128-bit signed division).
+   Provide them here so the decimal division code links on Windows. */
+#if defined(_WIN32) && (defined(__clang__) || defined(__GNUC__))
+typedef unsigned __int128 certo__u128;
+
+static certo__u128 certo__udiv128(certo__u128 n, certo__u128 d) {
+    if (d == 0) return 0;
+    certo__u128 q = 0, r = 0;
+    for (int i = 127; i >= 0; i--) {
+        r = (r << 1) | ((n >> i) & 1);
+        if (r >= d) { r -= d; q |= (certo__u128)1 << i; }
+    }
+    return q;
+}
+
+__int128 __divti3(__int128 a, __int128 b) {
+    int s = (a < 0) ^ (b < 0);
+    certo__u128 ua = a < 0 ? -(certo__u128)a : (certo__u128)a;
+    certo__u128 ub = b < 0 ? -(certo__u128)b : (certo__u128)b;
+    certo__u128 q  = certo__udiv128(ua, ub);
+    return s ? -(__int128)q : (__int128)q;
+}
+
+__int128 __modti3(__int128 a, __int128 b) {
+    return a - __divti3(a, b) * b;
+}
+#endif
+
 /* ---- Decimal parse / format ---- */
 
 certo_decimal_t certo_decimal_parse(const char* s) {
