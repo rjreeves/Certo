@@ -39,6 +39,8 @@ pub fn ty_to_c(ty: &Ty) -> String {
         // Represent them as void* — consistent with List<T>, Option<T>, etc.
         Ty::Var(_)    => "void*".into(),
         Ty::Forall { body, .. } => ty_to_c(body),
+        // Overload is resolved before codegen; if it reaches here the first candidate is used.
+        Ty::Overload(cs) => cs.first().map(ty_to_c).unwrap_or_else(|| "void*".into()),
         Ty::Error     => "int64_t".into(),
     }
 }

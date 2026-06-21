@@ -1699,6 +1699,7 @@ pub(crate) fn stderr_is_tty() -> bool {
 fn cmd_db_diff(args: &[String]) {
     let mut schema_name = "public".to_string();
     let mut src_path: Option<PathBuf> = None;
+    let mut json_out = false;
 
     let mut i = 0;
     while i < args.len() {
@@ -1709,14 +1710,16 @@ fn cmd_db_diff(args: &[String]) {
                     .unwrap_or_else(|| die("--schema requires a name", 2))
                     .clone();
             }
+            "--json" => { json_out = true; }
             "--help" | "-h" => {
-                println!("Usage: certo db diff <file.cto> [--schema <name>]");
+                println!("Usage: certo db diff <file.cto> [--schema <name>] [--json]");
                 println!();
                 println!("Compare the type declarations in <file.cto> against the live");
                 println!("PostgreSQL database and report any schema drift.");
                 println!();
                 println!("Options:");
                 println!("  --schema <name>  PostgreSQL schema to inspect (default: public)");
+                println!("  --json           Output drift report as JSON (exit 1 if drift found)");
                 println!();
                 println!("Reads DATABASE_URL from the environment or .env file.");
                 println!("Requires psql on PATH.");
@@ -1808,10 +1811,12 @@ fn cmd_db_diff(args: &[String]) {
     }
 
     // ── Diff ─────────────────────────────────────────────────────────
-    let mut diffs: Vec<String> = Vec::new();
+    #[derive(Debug)]
+    struct DiffItem { kind: &'static str, table: String, column: Option<String>, detail: String }
+
+    let mut items: Vec<DiffItem> = Vec::new();
     let mut ok_count = 0usize;
 
-    // Only diff tables that are declared as types (ignore migration-only helpers).
     let mut expected_names: Vec<&str> = expected.tables.keys().map(|s| s.as_str()).collect();
     expected_names.sort();
 
@@ -1819,91 +1824,114 @@ fn cmd_db_diff(args: &[String]) {
         let expected_table = &expected.tables[*table_name];
         match live.get(*table_name) {
             None => {
-                diffs.push(format!("  MISSING TABLE  {}", table_name));
+                items.push(DiffItem {
+                    kind: "MISSING_TABLE", table: table_name.to_string(),
+                    column: None, detail: String::new(),
+                });
             }
             Some(live_cols) => {
                 let live_map: HashMap<&str, (&str, bool)> = live_cols.iter()
                     .map(|(c, t, n)| (c.as_str(), (t.as_str(), *n)))
                     .collect();
 
-                let mut table_diffs: Vec<String> = Vec::new();
+                let before = items.len();
 
-                // Columns expected but missing from live.
                 for ec in &expected_table.columns {
                     match live_map.get(ec.name.as_str()) {
                         None => {
-                            table_diffs.push(format!(
-                                "    MISSING COLUMN  {}.{}: {}{}",
-                                table_name, ec.name, ec.ty,
-                                if ec.nullable { "?" } else { "" }
-                            ));
+                            items.push(DiffItem {
+                                kind: "MISSING_COLUMN", table: table_name.to_string(),
+                                column: Some(ec.name.clone()),
+                                detail: format!("{}{}",
+                                    ec.ty, if ec.nullable { "?" } else { "" }),
+                            });
                         }
                         Some((live_ty, live_null)) => {
-                            // Type mismatch.
                             if !types_match(&ec.ty, live_ty) {
-                                table_diffs.push(format!(
-                                    "    TYPE MISMATCH   {}.{} — code: `{}`, db: `{}`",
-                                    table_name, ec.name, ec.ty, live_ty
-                                ));
+                                items.push(DiffItem {
+                                    kind: "TYPE_MISMATCH", table: table_name.to_string(),
+                                    column: Some(ec.name.clone()),
+                                    detail: format!("code={} db={}", ec.ty, live_ty),
+                                });
                             }
-                            // Nullable mismatch.
                             if ec.nullable != *live_null {
-                                table_diffs.push(format!(
-                                    "    NULLABLE DRIFT  {}.{} — code: {}, db: {}",
-                                    table_name, ec.name,
-                                    if ec.nullable { "nullable" } else { "NOT NULL" },
-                                    if *live_null  { "nullable" } else { "NOT NULL" },
-                                ));
+                                items.push(DiffItem {
+                                    kind: "NULLABLE_DRIFT", table: table_name.to_string(),
+                                    column: Some(ec.name.clone()),
+                                    detail: format!("code={} db={}",
+                                        if ec.nullable { "nullable" } else { "NOT NULL" },
+                                        if *live_null  { "nullable" } else { "NOT NULL" }),
+                                });
                             }
                         }
                     }
                 }
 
-                // Columns in live but not in the type declaration.
                 let expected_cols: std::collections::HashSet<&str> =
                     expected_table.columns.iter().map(|c| c.name.as_str()).collect();
                 for (live_col, live_ty, live_null) in live_cols {
                     if !expected_cols.contains(live_col.as_str()) {
-                        table_diffs.push(format!(
-                            "    EXTRA COLUMN    {}.{}: {}{}",
-                            table_name, live_col, live_ty,
-                            if *live_null { "?" } else { "" }
-                        ));
+                        items.push(DiffItem {
+                            kind: "EXTRA_COLUMN", table: table_name.to_string(),
+                            column: Some(live_col.clone()),
+                            detail: format!("{}{}",
+                                live_ty, if *live_null { "?" } else { "" }),
+                        });
                     }
                 }
 
-                if table_diffs.is_empty() {
-                    ok_count += 1;
-                } else {
-                    diffs.push(format!("  TABLE  {}", table_name));
-                    diffs.extend(table_diffs);
-                }
+                if items.len() == before { ok_count += 1; }
             }
         }
     }
 
-    // Tables in live DB but not declared as types (informational only).
     let mut extra_tables: Vec<&str> = live.keys()
         .filter(|t| !expected.tables.contains_key(t.as_str()))
         .map(|t| t.as_str())
         .collect();
     extra_tables.sort();
     for t in &extra_tables {
-        diffs.push(format!("  EXTRA TABLE     {} (not declared as a type)", t));
+        items.push(DiffItem {
+            kind: "EXTRA_TABLE", table: t.to_string(),
+            column: None, detail: String::new(),
+        });
     }
 
     // ── Report ───────────────────────────────────────────────────────
-    if diffs.is_empty() {
-        println!("schema in sync — {} table(s) match the live database", ok_count);
-    } else {
+    let has_drift = !items.is_empty();
+
+    if json_out {
+        // Minimal hand-rolled JSON — no serde dependency needed in the CLI.
+        print!("{{\"in_sync\":{},\"tables_ok\":{},\"issues\":[",
+            !has_drift, ok_count);
+        for (idx, item) in items.iter().enumerate() {
+            if idx > 0 { print!(","); }
+            let col_json = match &item.column {
+                Some(c) => format!("\"{}\"", c.replace('"', "\\\"")),
+                None    => "null".to_string(),
+            };
+            print!("{{\"kind\":\"{}\",\"table\":\"{}\",\"column\":{},\"detail\":\"{}\"}}",
+                item.kind,
+                item.table.replace('"', "\\\""),
+                col_json,
+                item.detail.replace('"', "\\\""));
+        }
+        println!("]}}");
+    } else if has_drift {
         println!("schema drift detected:\n");
-        for line in &diffs {
-            println!("{}", line);
+        for item in &items {
+            match item.column.as_deref() {
+                None    => println!("  {}  {}", item.kind, item.table),
+                Some(c) => println!("  {}  {}.{}  {}", item.kind, item.table, c, item.detail),
+            }
         }
         println!();
-        println!("{} issue(s) found, {} table(s) ok", diffs.len(), ok_count);
-        process::exit(1);
+        println!("{} issue(s) found, {} table(s) ok", items.len(), ok_count);
+    } else {
+        println!("schema in sync — {} table(s) match the live database", ok_count);
     }
+
+    if has_drift { process::exit(1); }
 }
 
 /// Loose type comparison — ignores casing, treats nullable-stripped types as equal.
@@ -2203,6 +2231,180 @@ fn cmd_db_pull(args: &[String]) {
         let col_count = columns.get(table).map(|c| c.len()).unwrap_or(0);
         eprintln!("  {}  ({} column(s))", snake_to_pascal(table), col_count);
     }
+
+    // --json: also write schema.json snapshot (the committed artifact for
+    // compile-time checks and drift-check diffing).
+    let json_path = {
+        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        cwd.join("db").join("schema.json")
+    };
+    let snapshot = build_schema_snapshot(&tables, &columns);
+    snapshot.save(&json_path).unwrap_or_else(|e| {
+        eprintln!("warning: could not write schema snapshot: {}", e);
+    });
+    eprintln!("wrote {}", json_path.display());
+}
+
+/// Build a `certo_dbschema::Schema` from the psql-pulled column data.
+fn build_schema_snapshot(
+    tables:  &[String],
+    columns: &std::collections::HashMap<String, Vec<(String, String, bool)>>,
+) -> certo_dbschema::Schema {
+    use certo_dbschema::{Schema, SchemaTable, SchemaColumn};
+    let mut schema = Schema::default();
+    for table in tables {
+        let type_name = snake_to_pascal(table);
+        let cols = columns.get(table).map(|v| v.as_slice()).unwrap_or(&[]);
+        let schema_cols = cols.iter().map(|(name, ty, nullable)| SchemaColumn {
+            name:     name.clone(),
+            ty:       ty.clone(),
+            nullable: *nullable,
+        }).collect();
+        schema.tables.insert(type_name.clone(), SchemaTable {
+            name: type_name,
+            columns: schema_cols,
+        });
+    }
+    schema
+}
+
+// ------------------------------------------------------------------ //
+// db drift-check
+// ------------------------------------------------------------------ //
+
+/// Compare a committed `schema.json` snapshot against the live database.
+/// Exits non-zero if any drift is found — designed for CI.
+fn cmd_db_drift_check(args: &[String]) {
+    let mut snapshot_path: Option<PathBuf> = None;
+    let mut schema_name = "public".to_string();
+
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--snapshot" | "-s" => {
+                i += 1;
+                snapshot_path = Some(PathBuf::from(
+                    args.get(i).unwrap_or_else(|| die("--snapshot requires a path", 2))
+                ));
+            }
+            "--schema" => {
+                i += 1;
+                schema_name = args.get(i)
+                    .unwrap_or_else(|| die("--schema requires a name", 2))
+                    .clone();
+            }
+            "--help" | "-h" => {
+                println!("Usage: certo db drift-check [--snapshot db/schema.json]");
+                println!();
+                println!("Compare the committed schema.json snapshot against the live");
+                println!("PostgreSQL database.  Exits 1 if drift is detected (for CI).");
+                println!();
+                println!("Options:");
+                println!("  --snapshot <path>  Path to schema.json (default: db/schema.json)");
+                println!("  --schema <name>    PostgreSQL schema to inspect (default: public)");
+                println!();
+                println!("Reads DATABASE_URL from the environment or .env file.");
+                println!("Run `certo db pull` to update the snapshot after migrations.");
+                return;
+            }
+            other if other.starts_with('-') => {
+                eprintln!("Unknown option: {}", other);
+                process::exit(2);
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let snap_path = snapshot_path.unwrap_or_else(|| cwd.join("db").join("schema.json"));
+
+    let snapshot = certo_dbschema::Schema::load(&snap_path).unwrap_or_else(|e| {
+        eprintln!("error: {}", e);
+        eprintln!("       Run `certo db pull` to generate the snapshot first.");
+        process::exit(1);
+    });
+
+    // Resolve DATABASE_URL.
+    let db_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| {
+        if let Ok(contents) = std::fs::read_to_string(cwd.join(".env")) {
+            for line in contents.lines() {
+                let line = line.trim();
+                if let Some(val) = line.strip_prefix("DATABASE_URL=") {
+                    return val.trim().trim_matches('"').to_string();
+                }
+            }
+        }
+        eprintln!("error: DATABASE_URL is not set");
+        process::exit(1);
+    });
+
+    // Query live schema from information_schema.
+    let psql_ok = std::process::Command::new("psql")
+        .arg("--version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if !psql_ok {
+        eprintln!("error: psql not found on PATH");
+        process::exit(1);
+    }
+
+    let col_query = format!(
+        "SELECT table_name, column_name, data_type, is_nullable \
+         FROM information_schema.columns \
+         WHERE table_schema = '{}' \
+         ORDER BY table_name, ordinal_position;",
+        schema_name.replace('\'', "")
+    );
+    let col_out = std::process::Command::new("psql")
+        .arg("-d").arg(&db_url)
+        .arg("--no-align").arg("--tuples-only").arg("--field-separator=|")
+        .arg("--command").arg(&col_query)
+        .output()
+        .unwrap_or_else(|e| { eprintln!("error running psql: {}", e); process::exit(1); });
+    if !col_out.status.success() {
+        eprintln!("error: psql failed: {}", String::from_utf8_lossy(&col_out.stderr).trim());
+        process::exit(1);
+    }
+
+    let col_text = String::from_utf8_lossy(&col_out.stdout);
+    let mut live_tables: Vec<String> = Vec::new();
+    let mut live_columns: std::collections::HashMap<String, Vec<(String, String, bool)>> =
+        std::collections::HashMap::new();
+    for line in col_text.lines() {
+        let line = line.trim();
+        if line.is_empty() { continue; }
+        let parts: Vec<&str> = line.splitn(4, '|').collect();
+        if parts.len() < 4 { continue; }
+        let table    = parts[0].trim();
+        let col      = parts[1].trim();
+        let pg_type  = parts[2].trim();
+        let nullable = parts[3].trim().eq_ignore_ascii_case("YES");
+        let certo_ty = pg_type_to_certo(pg_type);
+        if !live_tables.contains(&table.to_string()) {
+            live_tables.push(table.to_string());
+        }
+        live_columns.entry(table.to_string()).or_default()
+            .push((col.to_string(), certo_ty, nullable));
+    }
+
+    let live = build_schema_snapshot(&live_tables, &live_columns);
+    let drift = snapshot.diff(&live);
+
+    if drift.is_empty() {
+        println!("schema in sync — {} table(s) match snapshot", snapshot.tables.len());
+    } else {
+        println!("schema drift detected ({} issue(s)):\n", drift.len());
+        for item in &drift {
+            println!("  {}", item);
+        }
+        println!();
+        eprintln!("Run `certo db pull` after applying migrations to update the snapshot.");
+        process::exit(1);
+    }
 }
 
 /// Map a PostgreSQL type name to the closest Certo type.
@@ -2339,8 +2541,9 @@ fn cmd_db(args: &[String]) {
             fwd.extend_from_slice(&args[1..]);
             cmd_migrate(&fwd);
         }
-        "pull" => cmd_db_pull(&args[1..]),
-        "diff" => cmd_db_diff(&args[1..]),
+        "pull"         => cmd_db_pull(&args[1..]),
+        "diff"         => cmd_db_diff(&args[1..]),
+        "drift-check"  => cmd_db_drift_check(&args[1..]),
         "--help" | "-h" | "" => {
             println!("Usage: certo db <subcommand> [options]");
             println!();
@@ -2349,8 +2552,9 @@ fn cmd_db(args: &[String]) {
             println!("  rollback [N]                 Roll back N migrations (default 1)");
             println!("  status                       Show applied vs pending migrations");
             println!("  create <name>                Scaffold a new migration file");
-            println!("  pull [-o <file>]             Introspect live DB → db/schema.cto");
+            println!("  pull [-o <file>]             Introspect live DB → db/schema.cto + schema.json");
             println!("  diff <file.cto>              Compare type declarations to live DB");
+            println!("  drift-check [--snapshot]     Diff schema.json snapshot vs live DB (CI)");
             println!();
             println!("Set DATABASE_URL in your environment or .env file.");
         }

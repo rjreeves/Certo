@@ -239,7 +239,12 @@ fn fmt_statemachine(sm: &StateMachineDecl, indent: usize) -> String {
     let states: Vec<String> = sm.states.iter().map(|s| format!("{}    state {}", ind(indent), s.node)).collect();
     let transitions: Vec<String> = sm.transitions.iter().map(|t| {
         let params: Vec<String> = t.params.iter().map(|p| format!("{}: {}", p.name.node, fmt_type(&p.ty.node, 0))).collect();
-        format!("{}    transition {} -{}-{}({})", ind(indent), t.from.node, t.event.node, t.to.node, params.join(", "))
+        let from_str = if t.from.len() == 1 {
+            t.from[0].node.clone()
+        } else {
+            format!("[{}]", t.from.iter().map(|s| s.node.as_str()).collect::<Vec<_>>().join(", "))
+        };
+        format!("{}    transition {} -{}-{}({})", ind(indent), from_str, t.event.node, t.to.node, params.join(", "))
     }).collect();
     let mut lines = Vec::new();
     lines.extend(states);

@@ -408,14 +408,27 @@ fn parse_statemachine(cur: &mut Cursor<'_>) -> Result<StateMachineDecl, ParseErr
             }
             "transitions" => {
                 cur.expect(&Token::Colon)?;
-                while let Some(Token::Ident(_)) = cur.peek() {
+                while let Some(Token::Ident(_) | Token::LBracket) = cur.peek() {
                     // Peek before consuming — section keywords end the transitions block.
                     if let Some(Token::Ident(s)) = cur.peek() {
                         if ["on_enter", "invariant"].contains(&s.as_ref()) { break; }
                     }
-                    let (from, from_span) = cur.expect_ident()?;
-                    // `→` arrow may be tokenised as `->` or we allow `→` as an ident
-                    // Support both Token::Arrow and the Unicode arrow
+                    // Parse `from` — either a single state or `[State1, State2, ...]`.
+                    let (from_states, from_span) = if cur.peek() == Some(&Token::LBracket) {
+                        let open = cur.expect(&Token::LBracket)?;
+                        let mut froms = Vec::new();
+                        loop {
+                            let (s, ss) = cur.expect_ident()?;
+                            froms.push(S::new(s, ss));
+                            if cur.eat(|t| matches!(t, Token::Comma)).is_none() { break; }
+                        }
+                        let close = cur.expect(&Token::RBracket)?;
+                        (froms, open.to(close))
+                    } else {
+                        let (s, ss) = cur.expect_ident()?;
+                        (vec![S::new(s, ss)], ss)
+                    };
+                    // `→` or `->`
                     if cur.peek() == Some(&Token::Arrow) {
                         cur.bump();
                     } else {
@@ -440,8 +453,8 @@ fn parse_statemachine(cur: &mut Cursor<'_>) -> Result<StateMachineDecl, ParseErr
                     }
                     let span = from_span.to(event_span);
                     transitions.push(Transition {
-                        from: S::new(from, from_span),
-                        to:   S::new(to, to_span),
+                        from:  from_states,
+                        to:    S::new(to, to_span),
                         event: S::new(event, event_span),
                         params,
                         span,

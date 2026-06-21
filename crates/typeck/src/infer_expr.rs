@@ -133,7 +133,34 @@ pub fn infer(expr: &S<Expr>, ctx: &mut Ctx<'_>) -> Ty {
         }
 
         Expr::App { func, args, span } => {
-            let func_ty = infer(func, ctx);
+            let func_ty_raw = infer(func, ctx);
+            // Overload resolution: when a state-machine transition has multiple from-states,
+            // it is stored as Ty::Overload([candidate, ...]). Pick the first candidate whose
+            // first-parameter type is consistent with the first argument's inferred type.
+            let func_ty = match ctx.uf.apply(&func_ty_raw) {
+                Ty::Overload(candidates) if !args.is_empty() => {
+                    let first_arg_raw = infer(&args[0].value, ctx);
+                    let first_arg_ty = ctx.uf.apply(&first_arg_raw);
+                    candidates.into_iter()
+                        .find(|c| {
+                            let c_applied = ctx.uf.apply(c);
+                            let first_param = match c_applied {
+                                Ty::Fn { ref params, .. } => params.first().cloned(),
+                                Ty::Forall { ref body, .. } => match **body {
+                                    Ty::Fn { ref params, .. } => params.first().cloned(),
+                                    _ => None,
+                                },
+                                _ => None,
+                            };
+                            first_param.map_or(false, |p| {
+                                let p_applied = ctx.uf.apply(&p);
+                                types_compatible(&first_arg_ty, &p_applied)
+                            })
+                        })
+                        .unwrap_or(Ty::Error)
+                }
+                other => other,
+            };
 
             let has_labels = args.iter().any(|a| a.label.is_some());
             // Build both a full-qualified path (for stdlib) and a short name (for user-defined).
@@ -519,6 +546,20 @@ pub fn infer(expr: &S<Expr>, ctx: &mut Ctx<'_>) -> Ty {
 // ------------------------------------------------------------------ //
 // Helpers
 // ------------------------------------------------------------------ //
+
+/// Shallow structural check: are two fully-applied types compatible (i.e. would
+/// unification succeed without side effects)? Used only by overload resolution
+/// to pick among candidates — not a substitute for real unification.
+fn types_compatible(a: &Ty, b: &Ty) -> bool {
+    match (a, b) {
+        (Ty::Var(_), _) | (_, Ty::Var(_)) => true,   // unknown — optimistically compatible
+        (Ty::Named { name: n1, args: a1 }, Ty::Named { name: n2, args: a2 }) =>
+            n1 == n2 && a1.len() == a2.len()
+            && a1.iter().zip(a2.iter()).all(|(x, y)| types_compatible(x, y)),
+        (Ty::Error, _) | (_, Ty::Error) => true,
+        (a, b) => a == b,
+    }
+}
 
 fn infer_lit(lit: &Lit) -> Ty {
     match lit {

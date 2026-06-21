@@ -6,6 +6,7 @@ use certo_ast::module::Module;
 use certo_ast::span::{S, Span};
 use certo_ast::types::{TypeExpr, ModulePath};
 use crate::{check_module, DbErrorKind};
+use crate::schema::{Schema, SchemaColumn, SchemaTable, DriftItem};
 
 const DUMMY: Span = Span::DUMMY;
 
@@ -292,4 +293,144 @@ fn foreign_key_to_unknown_table() {
     let errs = check_module(&m).unwrap_err();
     assert!(has(&errs, |k| matches!(k, DbErrorKind::UnknownForeignKeyTarget { references, .. } if references == "Post")),
         "expected E0502: {:?}", errs.iter().map(|e| e.message()).collect::<Vec<_>>());
+}
+
+// ── Schema snapshot tests ────────────────────────────────────────────────────
+
+fn make_schema(tables: &[(&str, &[(&str, &str, bool)])]) -> Schema {
+    let mut schema = Schema { version: 1, ..Default::default() };
+    for (table_name, cols) in tables {
+        let columns = cols.iter().map(|(col, ty, nullable)| SchemaColumn {
+            name:     col.to_string(),
+            ty:       ty.to_string(),
+            nullable: *nullable,
+        }).collect();
+        schema.tables.insert(table_name.to_string(), SchemaTable {
+            name:    table_name.to_string(),
+            columns,
+        });
+    }
+    schema
+}
+
+#[test]
+fn schema_save_load_roundtrip() {
+    let original = make_schema(&[
+        ("Order",  &[("id", "UUID", false), ("total", "Decimal", false)]),
+        ("Customer", &[("id", "UUID", false), ("name", "Text", true)]),
+    ]);
+    let dir = std::env::temp_dir();
+    let path = dir.join("certo_test_schema_roundtrip.json");
+    original.save(&path).expect("save failed");
+    let loaded = Schema::load(&path).expect("load failed");
+    assert_eq!(original, loaded);
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn schema_load_missing_file_returns_error() {
+    let result = Schema::load(std::path::Path::new("/nonexistent/schema.json"));
+    assert!(result.is_err());
+    assert!(result.unwrap_err().contains("cannot read"));
+}
+
+#[test]
+fn schema_diff_no_drift() {
+    let snap = make_schema(&[("Order", &[("id", "UUID", false)])]);
+    let live = make_schema(&[("Order", &[("id", "UUID", false)])]);
+    assert!(snap.diff(&live).is_empty());
+}
+
+#[test]
+fn schema_diff_missing_table() {
+    let snap = make_schema(&[("Order", &[("id", "UUID", false)]), ("Invoice", &[("id", "UUID", false)])]);
+    let live = make_schema(&[("Order", &[("id", "UUID", false)])]);
+    let drift = snap.diff(&live);
+    assert!(drift.iter().any(|d| matches!(d, DriftItem::TableMissing { table } if table == "Invoice")),
+        "expected TableMissing(Invoice): {:?}", drift);
+}
+
+#[test]
+fn schema_diff_extra_table() {
+    let snap = make_schema(&[("Order", &[("id", "UUID", false)])]);
+    let live = make_schema(&[("Order", &[("id", "UUID", false)]), ("Audit", &[("id", "UUID", false)])]);
+    let drift = snap.diff(&live);
+    assert!(drift.iter().any(|d| matches!(d, DriftItem::TableExtra { table } if table == "Audit")),
+        "expected TableExtra(Audit): {:?}", drift);
+}
+
+#[test]
+fn schema_diff_missing_column() {
+    let snap = make_schema(&[("Order", &[("id", "UUID", false), ("total", "Decimal", false)])]);
+    let live = make_schema(&[("Order", &[("id", "UUID", false)])]);
+    let drift = snap.diff(&live);
+    assert!(drift.iter().any(|d| matches!(d,
+        DriftItem::ColumnMissing { table, column } if table == "Order" && column == "total")),
+        "expected ColumnMissing(Order.total): {:?}", drift);
+}
+
+#[test]
+fn schema_diff_extra_column() {
+    let snap = make_schema(&[("Order", &[("id", "UUID", false)])]);
+    let live = make_schema(&[("Order", &[("id", "UUID", false), ("note", "Text", true)])]);
+    let drift = snap.diff(&live);
+    assert!(drift.iter().any(|d| matches!(d,
+        DriftItem::ColumnExtra { table, column } if table == "Order" && column == "note")),
+        "expected ColumnExtra(Order.note): {:?}", drift);
+}
+
+#[test]
+fn schema_diff_type_drift() {
+    let snap = make_schema(&[("Order", &[("id", "UUID", false), ("amount", "Int", false)])]);
+    let live = make_schema(&[("Order", &[("id", "UUID", false), ("amount", "Decimal", false)])]);
+    let drift = snap.diff(&live);
+    assert!(drift.iter().any(|d| matches!(d,
+        DriftItem::ColumnTypeDrift { table, column, snapshot, live }
+        if table == "Order" && column == "amount" && snapshot == "Int" && live == "Decimal")),
+        "expected ColumnTypeDrift: {:?}", drift);
+}
+
+#[test]
+fn schema_diff_nullability_drift() {
+    let snap = make_schema(&[("Order", &[("note", "Text", false)])]);
+    let live = make_schema(&[("Order", &[("note", "Text", true)])]);
+    let drift = snap.diff(&live);
+    assert!(drift.iter().any(|d| matches!(d,
+        DriftItem::NullabilityDrift { table, column, snapshot, live }
+        if table == "Order" && column == "note" && !snapshot && *live)),
+        "expected NullabilityDrift: {:?}", drift);
+}
+
+#[test]
+fn drift_item_display() {
+    assert_eq!(
+        DriftItem::TableMissing { table: "Order".into() }.to_string(),
+        "MISSING  table  Order"
+    );
+    assert_eq!(
+        DriftItem::TableExtra { table: "Audit".into() }.to_string(),
+        "EXTRA    table  Audit"
+    );
+    assert_eq!(
+        DriftItem::ColumnMissing { table: "Order".into(), column: "total".into() }.to_string(),
+        "MISSING  column Order.total"
+    );
+    assert_eq!(
+        DriftItem::ColumnExtra { table: "Order".into(), column: "note".into() }.to_string(),
+        "EXTRA    column Order.note"
+    );
+    assert_eq!(
+        DriftItem::ColumnTypeDrift {
+            table: "Order".into(), column: "amount".into(),
+            snapshot: "Int".into(), live: "Decimal".into()
+        }.to_string(),
+        "TYPE     Order.amount  snapshot=Int  live=Decimal"
+    );
+    assert_eq!(
+        DriftItem::NullabilityDrift {
+            table: "Order".into(), column: "note".into(),
+            snapshot: false, live: true
+        }.to_string(),
+        "NULLABLE Order.note  snapshot=false  live=true"
+    );
 }
