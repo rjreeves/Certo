@@ -72,7 +72,7 @@ checksum = "8ae3f5d315924270530207e2a68396c3cc547f6dca3fbdca317cfb1a51edb593"
 
 [[package]]
 name = "certo"
-version = "1.0.33"
+version = "1.0.36"
 dependencies = [
  "certo-ast",
  "certo-codegen",
