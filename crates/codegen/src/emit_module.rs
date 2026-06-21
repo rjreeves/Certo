@@ -3,7 +3,7 @@ use certo_ast::decl::{Decl, TypeBody, StateMachineDecl};
 use certo_ast::module::Module;
 use certo_hir::{HirModule, HirItem, lower_module};
 use certo_mir::lower_fn;
-use crate::emit_mir::{emit_fn_with_prefix, c_fn_name};
+use crate::emit_mir::{emit_fn_with_prefix, emit_spawn_preamble, c_fn_name};
 use crate::ty_to_c::{ty_to_c, ret_ty_to_c, c_ident};
 use certo_typeck::Ty;
 
@@ -176,6 +176,7 @@ pub fn emit_module(module: &Module, opts: &CodegenOptions) -> String {
 
     // Emit lifted lambda bodies before user functions.
     for mir in &lifted_fns {
+        emit_spawn_preamble(mir, &mut out);
         emit_fn_with_prefix(mir, "static ", &mut out);
         writeln!(out).unwrap();
     }
@@ -189,6 +190,7 @@ pub fn emit_module(module: &Module, opts: &CodegenOptions) -> String {
             HirItem::Fn(_) => {
                 if let Some((mir, name)) = mir_iter.next() {
                     let pfx = if pub_fns.contains(name) { export(name) } else { "" };
+                    emit_spawn_preamble(&mir, &mut out);
                     emit_fn_with_prefix(&mir, pfx, &mut out);
                     writeln!(out).unwrap();
                 }
@@ -639,8 +641,20 @@ void* __db_transaction(certo_fn_t thunk);
 /* Record update */
 void* __record_update(void* base, void* updates);
 
-/* Async / spawn — stub runtime (single-threaded; spawn evaluates eagerly) */
-/* Full threading support requires linking with -lpthread on POSIX or using Win32 threads. */
-static inline int64_t __certo_await(int64_t task_handle) { return task_handle; }
+/* Threading runtime — link with -lpthread on POSIX (pass -lpthread to your C compiler). */
+#ifndef _WIN32
+#  include <pthread.h>
+#else
+#  include <windows.h>
+   typedef HANDLE pthread_t;
+   static inline int pthread_create(HANDLE* t, void* a, void*(*fn)(void*), void* arg) {
+       (void)a;
+       DWORD id; *t = CreateThread(NULL, 0, (LPTHREAD_START_ROUTINE)fn, arg, 0, &id);
+       return *t ? 0 : -1;
+   }
+   static inline int pthread_join(HANDLE t, void** r) { (void)r; WaitForSingleObject(t, INFINITE); CloseHandle(t); return 0; }
+#endif
+/* Header of every spawn context struct — must be the first two fields. */
+typedef struct { pthread_t __thr; int64_t __result; } __certo_task_hdr_t;
 /* ---- end Certo runtime ---- */
 "#;

@@ -64,6 +64,11 @@ pub enum Rvalue {
     Field { base: Operand, field: String },
     /// Aggregate construction: tuple, record.
     Aggregate(AggregateKind, Vec<Operand>),
+    /// Spawn a function call on a new OS thread. Returns an opaque task handle (int64_t).
+    /// `spawn_id` is unique within the enclosing MirFn and used to generate C names.
+    SpawnCall { spawn_id: u32, func: Operand, args: Vec<Operand> },
+    /// Join a spawned task (await its result). The operand is the task handle (int64_t).
+    JoinTask(Operand),
 }
 
 #[derive(Debug, Clone)]

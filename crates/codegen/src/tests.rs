@@ -221,3 +221,43 @@ fn validator_topo_order_respects_after() {
     let pos_b = out.find("b_passed").unwrap_or(0);
     assert!(pos_a < pos_b, "rule `a` should appear before `b`:\n{}", out);
 }
+
+// ------------------------------------------------------------------ //
+// Concurrency — parallel {} / spawn / await
+// ------------------------------------------------------------------ //
+
+#[test]
+fn parallel_block_emits_pthread_create_and_join() {
+    let src = "module A\n\
+        pub fn work(n: Int): Int = n * 2\n\
+        pub fn run(a: Int, b: Int): Int = {\n\
+            val results = parallel { work(a), work(b) }\n\
+            0\n\
+        }\n";
+    let c = codegen(src);
+    assert_contains(&c, "pthread_create");
+    assert_contains(&c, "pthread_join");
+    assert_contains(&c, "__certo_spawn_ctx_");
+    assert_contains(&c, "__certo_spawn_worker_");
+    assert_contains(&c, "__certo_task_hdr_t");
+}
+
+#[test]
+fn parallel_runtime_header_has_pthread_type() {
+    let module = certo_parser::parse("module A").expect("parse");
+    let c = emit_module(&module, &CodegenOptions { inline_runtime: true, export_public: false });
+    assert_contains(&c, "__certo_task_hdr_t");
+    assert_contains(&c, "pthread_t");
+}
+
+#[test]
+fn spawn_worker_calls_correct_function() {
+    let src = "module A\n\
+        pub fn fetch(id: Int): Int = id\n\
+        pub fn run(x: Int): Int = {\n\
+            val results = parallel { fetch(x) }\n\
+            0\n\
+        }\n";
+    let c = codegen(src);
+    assert_contains(&c, "certo_fetch(");
+}

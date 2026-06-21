@@ -104,6 +104,8 @@ fn infer_rvalue(map: &HashMap<MirLocal, String>, rv: &Rvalue) -> Option<String> 
         Rvalue::Call { .. }      => Some("ptr".into()),
         Rvalue::Field { .. }     => Some("ptr".into()),
         Rvalue::Aggregate(_, _)  => Some("ptr".into()),
+        Rvalue::SpawnCall { .. } => Some("i64".into()),
+        Rvalue::JoinTask(_)      => Some("i64".into()),
     }
 }
 
@@ -270,6 +272,14 @@ impl<'ctx> FnEmitter<'ctx> {
                 let v = self.fresh();
                 self.w(&format!("  %v{v} = inttoptr i64 0 to ptr"));
                 self.w(&format!("  store ptr %v{v}, ptr {dest_ptr}"));
+            }
+
+            // SpawnCall and JoinTask are handled by the C codegen backend.
+            // The LLVM backend emits a null placeholder — these will be compiled via C.
+            Rvalue::SpawnCall { .. } | Rvalue::JoinTask(_) => {
+                let v = self.fresh();
+                self.w(&format!("  %v{v} = add i64 0, 0"));
+                self.w(&format!("  store i64 %v{v}, ptr {dest_ptr}"));
             }
         }
     }
