@@ -290,10 +290,11 @@ fn emit_statemachine(sm: &StateMachineDecl, out: &mut String) {
     writeln!(out).unwrap();
 
     // 4. Transition functions.
+    // The type checker guarantees the caller holds the right phantom state;
+    // no runtime from-state guard is needed or emitted here.
     for t in &sm.transitions {
-        let from   = c_ident(&t.from.node);
-        let to     = c_ident(&t.to.node);
-        let fn_c   = c_fn_name(&format!("{}_{}", sm.name.node, t.event.node));
+        let to   = c_ident(&t.to.node);
+        let fn_c = c_fn_name(&format!("{}_{}", sm.name.node, t.event.node));
 
         // Build param list: machine first, then event params.
         let mut param_parts = vec![format!("{} _self", mname)];
@@ -304,23 +305,20 @@ fn emit_statemachine(sm: &StateMachineDecl, out: &mut String) {
         let param_str = param_parts.join(", ");
 
         writeln!(out, "{} {}({}) {{", mname, fn_c, param_str).unwrap();
-        // Guard: must be in `from` state.
-        writeln!(out, "    if (_self.state != {}_{}) {{", mname, from).unwrap();
-        writeln!(out, "        certo_panic(CERTO_STR(\"invalid transition {}: expected state {}\"));",
-            t.event.node, t.from.node).unwrap();
-        writeln!(out, "    }}").unwrap();
         // Assign transition params into the struct.
         for p in &t.params {
             writeln!(out, "    _self.{} = _{};", p.name.node, p.name.node).unwrap();
         }
-        // Check invariants on the `from` state before leaving (future: emit body).
-        for inv in sm.invariants.iter().filter(|i| i.state.node == t.from.node) {
-            let _ = inv;
-            writeln!(out, "    /* invariant check for {} */", t.from.node).unwrap();
+        // Invariant checks for each from-state (future: emit body).
+        for from in &t.from {
+            for inv in sm.invariants.iter().filter(|i| i.state.node == from.node) {
+                let _ = inv;
+                writeln!(out, "    /* invariant check for {} */", from.node).unwrap();
+            }
         }
         // Set new state.
         writeln!(out, "    _self.state = {}_{};", mname, to).unwrap();
-        // Inline on_enter hook if one exists for the target state.
+        // Inline on_enter hook for the target state.
         for hook in sm.on_enter.iter().filter(|h| h.state.node == t.to.node) {
             if let Some(c) = simple_expr_to_c(&hook.body.node) {
                 writeln!(out, "    {};", c).unwrap();
@@ -328,6 +326,22 @@ fn emit_statemachine(sm: &StateMachineDecl, out: &mut String) {
                 writeln!(out, "    /* on_enter {}: complex expression */", t.to.node).unwrap();
             }
         }
+        writeln!(out, "    return _self;").unwrap();
+        writeln!(out, "}}").unwrap();
+        writeln!(out).unwrap();
+    }
+
+    // 4b. assertX downcast functions for externally-loaded machine values.
+    // Order_assertDraft(m) returns m if m.state == Draft, else zero (None).
+    // Callers use these to recover a state-typed value from a DB-loaded Order.
+    for state in &sm.states {
+        let sname  = c_ident(&state.node);
+        let fn_c   = c_fn_name(&format!("{}_assert{}", sm.name.node, state.node));
+        writeln!(out, "{} {}({} _self) {{", mname, fn_c, mname).unwrap();
+        writeln!(out, "    if (_self.state != {}_{}) {{", mname, sname).unwrap();
+        // Return a zeroed struct as the None sentinel (caller checks state field).
+        writeln!(out, "        {} _none = {{0}}; return _none;", mname).unwrap();
+        writeln!(out, "    }}").unwrap();
         writeln!(out, "    return _self;").unwrap();
         writeln!(out, "}}").unwrap();
         writeln!(out).unwrap();

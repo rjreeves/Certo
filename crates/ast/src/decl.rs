@@ -215,7 +215,9 @@ pub struct StateMachineDecl {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Transition {
-    pub from:   Ident,
+    /// One or more source states. Most transitions have one; multi-from
+    /// (`[Draft, Submitted] → Cancelled`) is expressed as multiple entries.
+    pub from:   Vec<Ident>,
     pub to:     Ident,
     pub event:  Ident,
     pub params: Vec<FnParam>,

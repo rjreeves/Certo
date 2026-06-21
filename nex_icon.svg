@@ -1,0 +1,42 @@
+<svg width="680" height="680" viewBox="0 0 680 680" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <marker id="arr" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M2 1L8 5L2 9" fill="none" stroke="#6c9fff" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+    <marker id="arr2" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M2 1L8 5L2 9" fill="none" stroke="#4cefb0" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+  </defs>
+
+  <rect width="680" height="680" rx="120" fill="#0f1623"/>
+
+  <circle cx="120" cy="200" r="54" fill="#1c2a42" stroke="#6c9fff" stroke-width="10"/>
+  <circle cx="340" cy="130" r="54" fill="#271c3a" stroke="#a78bfa" stroke-width="10"/>
+  <circle cx="560" cy="200" r="54" fill="#1c2a42" stroke="#6c9fff" stroke-width="10"/>
+
+  <circle cx="120" cy="480" r="54" fill="#142a22" stroke="#4cefb0" stroke-width="10"/>
+  <circle cx="340" cy="550" r="54" fill="#1c2a42" stroke="#6c9fff" stroke-width="10"/>
+  <circle cx="560" cy="480" r="54" fill="#142a22" stroke="#4cefb0" stroke-width="10"/>
+
+  <line x1="174" y1="200" x2="280" y2="150" stroke="#6c9fff" stroke-width="14" stroke-linecap="round" fill="none" marker-end="url(#arr)"/>
+  <line x1="400" y1="150" x2="506" y2="200" stroke="#6c9fff" stroke-width="14" stroke-linecap="round" fill="none" marker-end="url(#arr)"/>
+
+  <line x1="120" y1="254" x2="120" y2="426" stroke="#4cefb0" stroke-width="14" stroke-linecap="round" fill="none" marker-end="url(#arr2)"/>
+  <line x1="560" y1="254" x2="560" y2="426" stroke="#4cefb0" stroke-width="14" stroke-linecap="round" fill="none" marker-end="url(#arr2)"/>
+
+  <line x1="174" y1="480" x2="280" y2="530" stroke="#4cefb0" stroke-width="14" stroke-linecap="round" fill="none" marker-end="url(#arr2)"/>
+  <line x1="400" y1="530" x2="506" y2="480" stroke="#4cefb0" stroke-width="14" stroke-linecap="round" fill="none" marker-end="url(#arr2)"/>
+
+  <circle cx="340" cy="340" r="72" fill="#1a1a36" stroke="#6c9fff" stroke-width="12"/>
+  <circle cx="340" cy="340" r="28" fill="#6c9fff"/>
+
+  <line x1="340" y1="184" x2="340" y2="268" stroke="#6c9fff" stroke-width="14" stroke-linecap="round" stroke-dasharray="20 14" fill="none" marker-end="url(#arr)"/>
+  <line x1="340" y1="412" x2="340" y2="496" stroke="#4cefb0" stroke-width="14" stroke-linecap="round" stroke-dasharray="20 14" fill="none" marker-end="url(#arr2)"/>
+
+  <circle cx="120" cy="200" r="22" fill="#6c9fff"/>
+  <circle cx="560" cy="200" r="22" fill="#6c9fff"/>
+  <circle cx="340" cy="130" r="22" fill="#a78bfa"/>
+  <circle cx="120" cy="480" r="22" fill="#4cefb0"/>
+  <circle cx="560" cy="480" r="22" fill="#4cefb0"/>
+  <circle cx="340" cy="550" r="22" fill="#6c9fff"/>
+</svg>

@@ -31,6 +31,21 @@ impl TypeEnv {
         self.frames.last_mut().unwrap().insert(name.into(), ty);
     }
 
+    /// Like `define`, but accumulates multiple registrations of the same name into
+    /// `Ty::Overload` instead of silently overwriting. Used for multi-from transitions.
+    pub fn define_overload(&mut self, name: impl Into<String>, ty: Ty) {
+        let name = name.into();
+        let frame = self.frames.last_mut().unwrap();
+        match frame.get_mut(&name) {
+            None => { frame.insert(name, ty); }
+            Some(Ty::Overload(candidates)) => candidates.push(ty),
+            Some(existing) => {
+                let prev = existing.clone();
+                *existing = Ty::Overload(vec![prev, ty]);
+            }
+        }
+    }
+
     /// Look up a name, searching from innermost to outermost frame.
     pub fn lookup(&self, name: &str) -> Option<&Ty> {
         for frame in self.frames.iter().rev() {

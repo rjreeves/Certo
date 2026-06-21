@@ -258,3 +258,79 @@ validator V for Order errors OE {
 }
 fn callIt(o: Order): Result<Unit, OE> = V.validate(o)").unwrap();
 }
+
+// ------------------------------------------------------------------ //
+// State machine typestate tests
+// ------------------------------------------------------------------ //
+
+// State machine generated names (Order_new, Order_submit, …) are not visible
+// to the resolve pass, so we skip resolve and go straight to typeck — the same
+// pattern used by age_in_standalone_expr_ok above.
+fn check_sm(src: &str) -> Result<(), Vec<crate::error::TypeError>> {
+    let module = parse(src).expect("parse error");
+    let _ = certo_resolve::resolve(&module);
+    check_module(&module)
+}
+
+const ORDER_SM: &str = "
+module A
+statemachine Order {
+    states: Draft, Submitted, Fulfilled, Cancelled
+    transitions:
+        Draft -> Submitted : submit
+        Submitted -> Fulfilled : fulfil
+        [Draft, Submitted] -> Cancelled : cancel
+}
+";
+
+#[test]
+fn statemachine_new_and_valid_transition_ok() {
+    check_sm(&format!("{ORDER_SM}
+val o: Order<OrderDraft> = Order_new()
+val s: Order<OrderSubmitted> = Order_submit(o)
+")).unwrap();
+}
+
+#[test]
+fn statemachine_cancel_from_draft_ok() {
+    check_sm(&format!("{ORDER_SM}
+val o: Order<OrderDraft> = Order_new()
+val c: Order<OrderCancelled> = Order_cancel(o)
+")).unwrap();
+}
+
+#[test]
+fn statemachine_cancel_from_submitted_ok() {
+    check_sm(&format!("{ORDER_SM}
+val o: Order<OrderSubmitted> = Order_submit(Order_new())
+val c: Order<OrderCancelled> = Order_cancel(o)
+")).unwrap();
+}
+
+#[test]
+fn statemachine_wrong_state_is_type_error() {
+    // fulfil requires Order<OrderSubmitted>; passing Order<OrderDraft> must fail.
+    let result = check_sm(&format!("{ORDER_SM}
+val o: Order<OrderDraft> = Order_new()
+val bad = Order_fulfil(o)
+"));
+    assert!(result.is_err(), "expected type error for wrong-state transition");
+}
+
+#[test]
+fn statemachine_predicate_accepts_any_state() {
+    // Order_isDraft should accept any Order<S>, not just Order<OrderDraft>.
+    check_sm(&format!("{ORDER_SM}
+val o: Order<OrderSubmitted> = Order_submit(Order_new())
+val b: Bool = Order_isDraft(o)
+")).unwrap();
+}
+
+#[test]
+fn statemachine_assert_downcast_returns_optional() {
+    // Order_assertSubmitted returns Option — callers must handle None.
+    check_sm(&format!("{ORDER_SM}
+fn load(): Order<OrderDraft> = Order_new()
+val opt: Order<OrderSubmitted>? = Order_assertSubmitted(load())
+")).unwrap();
+}

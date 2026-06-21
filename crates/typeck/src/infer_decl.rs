@@ -149,44 +149,94 @@ fn hoist_decl(
         // State machine declarations: register generated types and functions.
         Decl::StateMachine(sm) => {
             let mname = &sm.name.node;
-            let machine_ty = Ty::Named { name: mname.clone(), args: vec![] };
-            let state_ty   = Ty::Named { name: format!("{}State", mname), args: vec![] };
+            let state_ty = Ty::Named { name: format!("{}State", mname), args: vec![] };
 
-            // The machine type and its state type.
-            env.define(mname.clone(), machine_ty.clone());
+            // Register state marker types: OrderDraft, OrderSubmitted, …
+            // These are phantom unit types — no runtime representation.
+            for state in &sm.states {
+                let marker = format!("{}{}", mname, state.node);
+                env.define(marker.clone(), Ty::Named { name: marker, args: vec![] });
+            }
             env.define(format!("{}State", mname), state_ty.clone());
 
-            // Constructor: MachineName_new() -> MachineName
+            // machine_ty(s): Order<OrderDraft> etc. — the phantom-parametrised type.
+            let machine_ty = |state: &str| -> Ty {
+                let marker = Ty::Named { name: format!("{}{}", mname, state), args: vec![] };
+                Ty::Named { name: mname.clone(), args: vec![marker] }
+            };
+
+            // Constructor: Order_new() → Order<OrderDraft>  (first state)
+            let initial = sm.states.first().map(|s| s.node.as_str()).unwrap_or("_Unknown");
             env.define(
                 format!("{}_new", mname),
-                Ty::Fn { params: vec![], ret: Box::new(machine_ty.clone()) },
+                Ty::Fn { params: vec![], ret: Box::new(machine_ty(initial)) },
             );
 
-            // Transition functions: MachineName_event(MachineName, params...) -> MachineName
+            // Transition functions — one overload per from-state.
+            // Order_submit : (Order<OrderDraft>, …) → Order<OrderSubmitted>
             for t in &sm.transitions {
-                let mut ctx = Ctx { env, uf, errors, counter };
-                let mut param_tys = vec![machine_ty.clone()];
-                for p in &t.params {
-                    param_tys.push(type_expr_to_ty(&p.ty.node, &mut ctx));
+                let ret_ty = machine_ty(&t.to.node);
+                let extra: Vec<Ty> = {
+                    let mut ctx = Ctx { env, uf, errors, counter };
+                    t.params.iter().map(|p| type_expr_to_ty(&p.ty.node, &mut ctx)).collect()
+                };
+                for from in &t.from {
+                    let mut param_tys = vec![machine_ty(&from.node)];
+                    param_tys.extend(extra.iter().cloned());
+                    env.define_overload(
+                        format!("{}_{}", mname, t.event.node),
+                        Ty::Fn { params: param_tys, ret: Box::new(ret_ty.clone()) },
+                    );
                 }
+            }
+
+            // assertX downcast functions for externally-loaded values.
+            // Order_assertDraft(Order) → Order<OrderDraft>?
+            // Returns the erased `Order` (any phantom) and produces the specific variant.
+            // The erased type is represented as Order<_> via a fresh type variable.
+            for state in &sm.states {
+                *counter += 1;
+                let s_var = Ty::Var(*counter);
+                let erased = Ty::Named { name: mname.clone(), args: vec![s_var.clone()] };
+                let specific = machine_ty(&state.node);
                 env.define(
-                    format!("{}_{}", mname, t.event.node),
-                    Ty::Fn { params: param_tys, ret: Box::new(machine_ty.clone()) },
+                    format!("{}_assert{}", mname, state.node),
+                    Ty::Forall {
+                        vars: vec![*counter],
+                        body: Box::new(Ty::Fn {
+                            params: vec![erased],
+                            ret:    Box::new(Ty::Option(Box::new(specific))),
+                        }),
+                    },
                 );
             }
 
-            // State predicate functions: MachineName_isState(MachineName) -> Bool
+            // State predicates and accessor accept any Order<S> — quantify over S.
+            *counter += 1;
+            let s_var = Ty::Var(*counter);
+            let any_machine = Ty::Named { name: mname.clone(), args: vec![s_var] };
+
             for state in &sm.states {
                 env.define(
                     format!("{}_is{}", mname, state.node),
-                    Ty::Fn { params: vec![machine_ty.clone()], ret: Box::new(Ty::Bool) },
+                    Ty::Forall {
+                        vars: vec![*counter],
+                        body: Box::new(Ty::Fn {
+                            params: vec![any_machine.clone()],
+                            ret:    Box::new(Ty::Bool),
+                        }),
+                    },
                 );
             }
-
-            // Current state accessor: MachineName_state(MachineName) -> MachineName_state
             env.define(
                 format!("{}_state", mname),
-                Ty::Fn { params: vec![machine_ty.clone()], ret: Box::new(state_ty) },
+                Ty::Forall {
+                    vars: vec![*counter],
+                    body: Box::new(Ty::Fn {
+                        params: vec![any_machine],
+                        ret:    Box::new(state_ty),
+                    }),
+                },
             );
         }
         // Constraint names resolve to Bool at use sites.

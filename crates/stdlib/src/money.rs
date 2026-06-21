@@ -77,18 +77,6 @@ certo_decimal_t certo_decimal_mul(certo_decimal_t a, certo_decimal_t b) {
     return r;
 }
 
-certo_decimal_t certo_decimal_div(certo_decimal_t a, certo_decimal_t b) {
-    if (b.value == 0) certo_panic("decimal division by zero");
-    /* Multiply numerator by 10^scale to keep precision */
-    int8_t extra = 6;  /* 6 extra digits of precision */
-    int64_t scale_factor = 1;
-    for (int i = 0; i < extra; i++) scale_factor *= 10;
-    certo_decimal_t r = {
-        .value = (a.value * scale_factor) / b.value,
-        .scale = (int8_t)(a.scale - b.scale + extra),
-    };
-    return r;
-}
 
 bool certo_decimal_eq (certo_decimal_t a, certo_decimal_t b) {
     decimal_align(&a, &b); return a.value == b.value;
@@ -116,13 +104,160 @@ certo_decimal_t certo_decimal_negate(certo_decimal_t d) {
     return r;
 }
 
-/* Round to `places` decimal places (half-up) */
-certo_decimal_t certo_decimal_round(certo_decimal_t d, int8_t places) {
+/* ================================================================
+   RoundingMode — tagged union (mirrors certo_option_t / certo_result_t
+   pattern used for Option<T>/Result<T,E>)
+   ================================================================ */
+
+typedef enum {
+    CERTO_ROUND_HALF_UP,
+    CERTO_ROUND_HALF_DOWN,
+    CERTO_ROUND_HALF_EVEN,
+    CERTO_ROUND_UP,
+    CERTO_ROUND_DOWN,
+    CERTO_ROUND_CEILING,
+    CERTO_ROUND_FLOOR,
+    CERTO_ROUND_TO_INCREMENT,
+} certo_rounding_tag_t;
+
+typedef struct {
+    certo_rounding_tag_t tag;
+    certo_decimal_t step;   /* only meaningful when tag == CERTO_ROUND_TO_INCREMENT */
+} certo_rounding_mode_t;
+
+/* Core rounding primitive: all seven non-increment modes reduce to this
+   one function so the tie-break logic is defined in exactly one place.
+   Uses 2*abs_remainder vs divisor (correct for any divisor, not just
+   powers of 10 — the power-of-10 shortcut is wrong for roundToIncrement
+   with non-power-of-10 steps like 0.05). */
+static int64_t certo_round_apply(
+    int64_t truncated,
+    int64_t remainder,
+    int64_t divisor,
+    certo_rounding_tag_t mode
+) {
+    bool negative = remainder < 0;
+    int64_t abs_remainder = negative ? -remainder : remainder;
+    bool exactly_half = (2 * abs_remainder == divisor);
+    bool over_half    = (2 * abs_remainder >  divisor);
+
+    switch (mode) {
+        case CERTO_ROUND_UP:
+            return abs_remainder == 0 ? truncated
+                 : (negative ? truncated - 1 : truncated + 1);
+
+        case CERTO_ROUND_DOWN:
+            return truncated;
+
+        case CERTO_ROUND_CEILING:
+            return (abs_remainder == 0 || negative) ? truncated
+                 : truncated + 1;
+
+        case CERTO_ROUND_FLOOR:
+            return (abs_remainder == 0 || !negative) ? truncated
+                 : truncated - 1;
+
+        case CERTO_ROUND_HALF_UP:
+            if (abs_remainder == 0) return truncated;
+            if (exactly_half || over_half)
+                return negative ? truncated - 1 : truncated + 1;
+            return truncated;
+
+        case CERTO_ROUND_HALF_DOWN:
+            if (abs_remainder == 0) return truncated;
+            if (over_half)
+                return negative ? truncated - 1 : truncated + 1;
+            return truncated;
+
+        case CERTO_ROUND_HALF_EVEN: {
+            if (abs_remainder == 0) return truncated;
+            if (over_half)
+                return negative ? truncated - 1 : truncated + 1;
+            if (exactly_half) {
+                bool truncated_is_odd = (truncated % 2 != 0);
+                if (truncated_is_odd)
+                    return negative ? truncated - 1 : truncated + 1;
+                return truncated;
+            }
+            return truncated;
+        }
+
+        default:
+            certo_panic("certo_round_apply: ToIncrement must be handled by caller");
+    }
+}
+
+/* Decimal.round(d, places, mode) */
+certo_decimal_t certo_decimal_round_mode(
+    certo_decimal_t d, int8_t places, certo_rounding_mode_t mode
+) {
+    if (mode.tag == CERTO_ROUND_TO_INCREMENT)
+        certo_panic("Decimal.round: use Decimal.roundToIncrement for ToIncrement mode");
     if (d.scale <= places) return d;
+
     int8_t excess = d.scale - places;
     int64_t divisor = 1;
     for (int i = 0; i < excess; i++) divisor *= 10;
-    int64_t rounded = (d.value + divisor / 2) / divisor;
+
+    int64_t truncated = d.value / divisor;
+    int64_t remainder = d.value % divisor;
+    int64_t rounded   = certo_round_apply(truncated, remainder, divisor, mode.tag);
+
+    certo_decimal_t r = { .value = rounded, .scale = places };
+    return r;
+}
+
+/* Decimal.roundToIncrement(d, step, mode)
+   NOTE: returned scale matches the aligned scale, not the minimal scale
+   (e.g. 19.995 rounded to 0.05 returns scale=3 "20.000" not scale=2
+   "20.00"). Numerically identical; cosmetically non-minimal. */
+certo_decimal_t certo_decimal_round_to_increment(
+    certo_decimal_t d, certo_decimal_t step, certo_rounding_mode_t mode
+) {
+    certo_decimal_t a = d, b = step;
+    decimal_align(&a, &b);
+    if (b.value == 0) certo_panic("Decimal.roundToIncrement: step must be nonzero");
+
+    int64_t steps_truncated = a.value / b.value;
+    int64_t remainder       = a.value % b.value;
+    certo_rounding_tag_t inner_mode =
+        (mode.tag == CERTO_ROUND_TO_INCREMENT) ? CERTO_ROUND_HALF_UP : mode.tag;
+
+    int64_t steps = certo_round_apply(steps_truncated, remainder, b.value, inner_mode);
+
+    certo_decimal_t r = { .value = steps * b.value, .scale = a.scale };
+    return r;
+}
+
+/* Decimal.divRound(a, b, places, mode)
+   Exponent computed as (places + b.scale - a.scale + guard) — a single
+   signed value that correctly accounts for a's existing scale, avoiding
+   the double-counting bug present in the original certo_decimal_div. */
+certo_decimal_t certo_decimal_div_round(
+    certo_decimal_t a, certo_decimal_t b, int8_t places, certo_rounding_mode_t mode
+) {
+    if (b.value == 0) certo_panic("decimal division by zero");
+
+    int8_t guard = 6;
+    int64_t guard_factor = 1;
+    for (int i = 0; i < guard; i++) guard_factor *= 10;
+
+    int exponent = (int)places + (int)b.scale - (int)a.scale + guard;
+    bool exponent_negative = exponent < 0;
+    int abs_exponent = exponent_negative ? -exponent : exponent;
+    __int128 scale_pow = 1;
+    for (int i = 0; i < abs_exponent; i++) scale_pow *= 10;
+
+    __int128 numerator = exponent_negative
+        ? (__int128)a.value / scale_pow
+        : (__int128)a.value * scale_pow;
+
+    __int128 guarded_quotient    = numerator / b.value;
+    int64_t truncated_with_guard = (int64_t)(guarded_quotient / guard_factor);
+    int64_t remainder_for_round  = (int64_t)(guarded_quotient % guard_factor);
+
+    int64_t rounded = certo_round_apply(truncated_with_guard, remainder_for_round, guard_factor, mode.tag);
+
     certo_decimal_t r = { .value = rounded, .scale = places };
     return r;
 }
@@ -148,11 +283,13 @@ certo_decimal_t certo_money_from_cents(int64_t cents) {
 }
 
 int64_t certo_money_to_cents(certo_decimal_t m) {
-    return certo_decimal_round(m, 2).value;
+    certo_rounding_mode_t half_up = { .tag = CERTO_ROUND_HALF_UP };
+    return certo_decimal_round_mode(m, 2, half_up).value;
 }
 
-certo_decimal_t certo_money_from_decimal(certo_decimal_t d) {
-    return certo_decimal_round(d, 2);
+/* Money.fromDecimal(d, mode) — was unconditional round-to-2dp with HalfUp */
+certo_decimal_t certo_money_from_decimal_mode(certo_decimal_t d, certo_rounding_mode_t mode) {
+    return certo_decimal_round_mode(d, 2, mode);
 }
 "#;
 
@@ -160,12 +297,23 @@ certo_decimal_t certo_money_from_decimal(certo_decimal_t d) {
 pub const MONEY_CERTO: &str = r#"
 module Stdlib.Money
 
+/* Rounding policy — plain sum type, resolves via normal user-type path */
+
+type RoundingMode =
+    | HalfUp              // round half away from zero (1.5 → 2, -1.5 → -2)
+    | HalfDown            // round half toward zero    (1.5 → 1, -1.5 → -1)
+    | HalfEven            // banker's rounding         (1.5 → 2, 2.5 → 2)
+    | Up                  // always away from zero     (1.1 → 2, -1.1 → -2)
+    | Down                // always toward zero (truncate) (1.9 → 1, -1.9 → -1)
+    | Ceiling             // toward positive infinity  (1.1 → 2, -1.9 → -1)
+    | Floor               // toward negative infinity  (1.9 → 1, -1.1 → -2)
+    | ToIncrement(step: Decimal)   // nearest multiple of step, e.g. 0.05
+
 /* Decimal arithmetic */
 
 fn Decimal.add(a: Decimal, b: Decimal): Decimal
 fn Decimal.sub(a: Decimal, b: Decimal): Decimal
 fn Decimal.mul(a: Decimal, b: Decimal): Decimal
-fn Decimal.div(a: Decimal, b: Decimal): Decimal [fallible]
 fn Decimal.eq(a: Decimal, b: Decimal): Bool
 fn Decimal.lt(a: Decimal, b: Decimal): Bool
 fn Decimal.gt(a: Decimal, b: Decimal): Bool
@@ -173,14 +321,19 @@ fn Decimal.lte(a: Decimal, b: Decimal): Bool
 fn Decimal.gte(a: Decimal, b: Decimal): Bool
 fn Decimal.abs(d: Decimal): Decimal
 fn Decimal.negate(d: Decimal): Decimal
-fn Decimal.round(d: Decimal, places: Int): Decimal
 fn Decimal.toInt(d: Decimal): Int
 fn Decimal.fromInt(n: Int): Decimal
 fn Decimal.toText(d: Decimal): Text
+
+/* Rounding — mode is mandatory (no silent default) */
+
+fn Decimal.round(d: Decimal, places: Int, mode: RoundingMode): Decimal
+fn Decimal.roundToIncrement(d: Decimal, step: Decimal, mode: RoundingMode): Decimal
+fn Decimal.divRound(a: Decimal, b: Decimal, places: Int, mode: RoundingMode): Decimal [fallible]
 
 /* Money helpers (Decimal fixed at 2 decimal places) */
 
 fn Money.fromCents(cents: Int): Decimal
 fn Money.toCents(m: Decimal): Int
-fn Money.fromDecimal(d: Decimal): Decimal
+fn Money.fromDecimal(d: Decimal, mode: RoundingMode): Decimal
 "#;

@@ -91,10 +91,11 @@ mod tests {
 
     #[test]
     fn emit_module_single_view() {
+        // emit_module now produces server.cto (not per-view HTML files).
         let src = "module M\nview Home { layout = Text(\"Hi\") }\n";
         let files = emit_module(&parse(src).unwrap()).unwrap();
         assert_eq!(files.len(), 1);
-        assert!(files.iter().any(|(f, _)| f == "home.html"));
+        assert!(files.iter().any(|(f, _)| f == "server.cto"));
     }
 
     #[test]

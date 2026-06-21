@@ -31,6 +31,7 @@ pub fn llvm_ty(ty: &Ty) -> String {
         Ty::Fn { .. }  => "ptr".into(),
         Ty::Var(_)     => "ptr".into(),
         Ty::Forall { body, .. } => llvm_ty(body),
+        Ty::Overload(cs) => cs.first().map(llvm_ty).unwrap_or_else(|| "ptr".into()),
         Ty::Error      => "ptr".into(),
     }
 }
