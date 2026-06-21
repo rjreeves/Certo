@@ -1,2 +1,36 @@
 /target
 examples/out/
+**/*.rs.bk
+.pdb
+bin/
+obj/
+.pfx
+.pem
+.crt
+.key
+appsettings.Production.json
+.env
+out/
+dist/
+node_modules/
+.vs/
+.vscode/
+.idea/
+*.log
+*.user
+*.suo
+*.cache
+*.db
+# Certificates / secrets
+*.pfx
+*.key
+*.pem
+*.snk
+*.csr
+*.jks
+*.keystore
+*.env
+
+# OS junk
+.DS_Store
+Thumbs.db, .DS_Store
