@@ -1,0 +1,15 @@
+[package]
+name        = "certo-wasm"
+version     = "0.1.0"
+edition     = "2021"
+description = "WebAssembly target for the Certo compiler"
+
+[[bin]]
+name = "certo-wasm"
+path = "src/main.rs"
+
+[dependencies]
+certo-ast     = { path = "../ast" }
+certo-parser  = { path = "../parser" }
+certo-llvm    = { path = "../llvm" }
+tempfile      = "3"

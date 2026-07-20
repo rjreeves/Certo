@@ -1,0 +1,7 @@
+module SmokeTest
+
+import DataProvider
+
+fn main(): Unit = {
+    println(queryJson())
+}

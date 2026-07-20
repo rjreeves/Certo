@@ -1,0 +1,112 @@
+module MathTest
+
+fn factorial(n: Int): Int = if n <= 1 then 1 else n * factorial(n - 1)
+
+fn fibonacci(n: Int): Int =
+    if n <= 1 then n else fibonacci(n - 1) + fibonacci(n - 2)
+
+fn isPrime(n: Int): Bool = if n < 2 then false else checkPrime(n, 2)
+
+fn checkPrime(n: Int, i: Int): Bool =
+    if i * i > n then true else if n % i == 0 then false else checkPrime(n, i + 1)
+
+fn gcd(a: Int, b: Int): Int = if b == 0 then a else gcd(b, a % b)
+
+fn clamp(value: Int, lo: Int, hi: Int): Int =
+    if value < lo then lo else if value > hi then hi else value
+
+test "factorial(0) = 1" {
+    {
+        assert(factorial(0) == 1, "factorial(0)")
+    }
+}
+
+test "factorial(1) = 1" {
+    {
+        assert(factorial(1) == 1, "factorial(1)")
+    }
+}
+
+test "factorial(5) = 120" {
+    {
+        assert(factorial(5) == 120, "factorial(5)")
+    }
+}
+
+test "factorial(10) = 3628800" {
+    {
+        assert(factorial(10) == 3628800, "factorial(10)")
+    }
+}
+
+test "fibonacci(0) = 0" {
+    {
+        assert(fibonacci(0) == 0, "fib(0)")
+    }
+}
+
+test "fibonacci(1) = 1" {
+    {
+        assert(fibonacci(1) == 1, "fib(1)")
+    }
+}
+
+test "fibonacci(10) = 55" {
+    {
+        assert(fibonacci(10) == 55, "fib(10)")
+    }
+}
+
+test "1 is not prime" {
+    {
+        assert(not isPrime(1), "isPrime(1)")
+    }
+}
+
+test "2 is prime" {
+    {
+        assert(isPrime(2), "isPrime(2)")
+    }
+}
+
+test "17 is prime" {
+    {
+        assert(isPrime(17), "isPrime(17)")
+    }
+}
+
+test "18 is not prime" {
+    {
+        assert(not isPrime(18), "isPrime(18)")
+    }
+}
+
+test "gcd(12, 8) = 4" {
+    {
+        assert(gcd(12, 8) == 4, "gcd(12,8)")
+    }
+}
+
+test "gcd(100, 75) = 25" {
+    {
+        assert(gcd(100, 75) == 25, "gcd(100,75)")
+    }
+}
+
+test "clamp below range" {
+    {
+        assert(clamp(-5, 0, 10) == 0, "clamp below")
+    }
+}
+
+test "clamp above range" {
+    {
+        assert(clamp(20, 0, 10) == 10, "clamp above")
+    }
+}
+
+test "clamp within range" {
+    {
+        assert(clamp(7, 0, 10) == 7, "clamp within")
+    }
+}

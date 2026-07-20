@@ -1,0 +1,670 @@
+module FireworksUIServer
+
+import Stdlib.Core
+import Stdlib.Http
+import Stdlib.Db
+
+fn dbUrl(): Text = getEnv("DATABASE_URL") ?? "host=localhost dbname=postgres user=postgres"
+
+// ── CSS + page shell ─────────────────────────────────────────────────────────
+fn htmlCss(): Text =
+    "<style>" ++
+    "body{font-family:sans-serif;margin:2rem;color:#222;}" ++
+    "h1{font-size:1.5rem;margin-bottom:1rem;}" ++
+    "nav{margin-bottom:1.5rem;}" ++
+    "nav a{margin-right:1rem;color:#0066cc;text-decoration:none;}" ++
+    "table{border-collapse:collapse;width:100%;margin-top:0.5rem;}" ++
+    "th,td{border:1px solid #ccc;padding:6px 12px;text-align:left;font-size:0.9rem;}" ++
+    "th{background:#f0f0f0;font-weight:600;}" ++
+    "tr:nth-child(even) td{background:#fafafa;}" ++
+    ".field{margin-bottom:1rem;}" ++
+    "label{display:block;font-weight:bold;margin-bottom:0.25rem;}" ++
+    "input,select,textarea{padding:0.4rem;border:1px solid #ccc;border-radius:4px;width:100%;max-width:420px;box-sizing:border-box;}" ++
+    "button{padding:0.5rem 1.25rem;background:#0066cc;color:#fff;border:none;border-radius:4px;cursor:pointer;margin-top:0.5rem;}" ++
+    "a.btn{display:inline-block;padding:0.4rem 1rem;background:#0066cc;color:#fff;border-radius:4px;text-decoration:none;font-size:0.9rem;}" ++
+    ".row-actions{margin:2px 0;font-size:0.85rem;}" ++
+    ".row-actions a{margin-right:0.75rem;color:#0066cc;}" ++
+    "</style>"
+
+fn htmlPage(title: Text, body: Text): Text =
+    "<!DOCTYPE html><html lang=\"en\"><head>" ++
+    "<meta charset=\"UTF-8\">" ++
+    "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">" ++
+    "<title>" ++ title ++ "</title>" ++
+    htmlCss() ++
+    "</head><body>" ++ body ++ "</body></html>"
+
+// ── HTML table helpers ───────────────────────────────────────────────────────
+fn htmlTh(cols: List<Text>, i: Int, n: Int, acc: Text): Text =
+    if i >= n then acc
+    else htmlTh(cols, i + 1, n, acc ++ "<th>" ++ List.getOrPanic(cols, i) ++ "</th>")
+
+fn htmlTd(row: List<Text?>, i: Int, n: Int, acc: Text): Text =
+    if i >= n then acc
+    else htmlTd(row, i + 1, n, acc ++ "<td>" ++ (List.getOrPanic(row, i) ?? "") ++ "</td>")
+
+fn htmlTr(rows: List<List<Text?>>, i: Int, n: Int, acc: Text): Text =
+    if i >= n then acc
+    else {
+        val row = List.getOrPanic(rows, i)
+        htmlTr(rows, i + 1, n, acc ++ "<tr>" ++ htmlTd(row, 0, List.len(row), "") ++ "</tr>")
+    }
+
+fn htmlTable(cols: List<Text>, rows: List<List<Text?>>): Text =
+    "<table><thead><tr>" ++ htmlTh(cols, 0, List.len(cols), "") ++
+    "</tr></thead><tbody>" ++ htmlTr(rows, 0, List.len(rows), "") ++ "</tbody></table>"
+
+// ── URL-encoded form body parsing ────────────────────────────────────────────
+fn formField(body: Text, name: Text): Text =
+    formFieldAt(Text.split(body, "&"), name, 0)
+
+fn formFieldAt(parts: List<Text>, name: Text, i: Int): Text =
+    if i >= List.len(parts) then ""
+    else {
+        val kv = Text.split(List.getOrPanic(parts, i), "=")
+        if List.len(kv) >= 2 and Text.eq(List.getOrPanic(kv, 0), name)
+        then List.getOrPanic(kv, 1)
+        else formFieldAt(parts, name, i + 1)
+    }
+
+// ── Column index lookup ──────────────────────────────────────────────────────
+fn pkColIndex(cols: List<Text>, pk: Text, i: Int): Int =
+    if i >= List.len(cols) then -1
+    else if Text.eq(List.getOrPanic(cols, i), pk) then i
+    else pkColIndex(cols, pk, i + 1)
+
+// ── Pre-fill helper: get a column value from the first row ──────────────────
+fn colValue(rows: List<List<Text?>>, cols: List<Text>, col: Text): Text =
+    if List.len(rows) == 0 then ""
+    else {
+        val row = List.getOrPanic(rows, 0)
+        val idx = pkColIndex(cols, col, 0)
+        if idx < 0 then "" else (List.getOrPanic(row, idx) ?? "")
+    }
+
+fn rowActionsCustomerList(cols: List<Text>, rows: List<List<Text?>>, i: Int, acc: Text): Text =
+    if i >= List.len(rows) then acc
+    else {
+        val row   = List.getOrPanic(rows, i)
+        val pkIdx = pkColIndex(cols, "cust_no", 0)
+        val pkVal = if pkIdx >= 0 then (List.getOrPanic(row, pkIdx) ?? "") else ""
+        val editUrl = "/edit-customer?id=" ++ pkVal
+        val childUrl0 = "/subscriber-list?cust_no=" ++ pkVal
+        val links = "<a href=\"" ++ editUrl ++ "\">Edit</a>" ++ " &nbsp; " ++ "<a href=\"" ++ childUrl0 ++ "\">Subscriber List</a>"
+        rowActionsCustomerList(cols, rows, i + 1, acc ++ "<div class=\"row-actions\">" ++ links ++ "</div>")
+    }
+
+fn rowActionsSubscriberList(cols: List<Text>, rows: List<List<Text?>>, i: Int, acc: Text): Text =
+    if i >= List.len(rows) then acc
+    else {
+        val row   = List.getOrPanic(rows, i)
+        val pkIdx = pkColIndex(cols, "sub_no", 0)
+        val pkVal = if pkIdx >= 0 then (List.getOrPanic(row, pkIdx) ?? "") else ""
+        val editUrl = "/edit-subscriber?id=" ++ pkVal
+        val childUrl0 = "/subscription-list?sub_no=" ++ pkVal
+        val links = "<a href=\"" ++ editUrl ++ "\">Edit</a>" ++ " &nbsp; " ++ "<a href=\"" ++ childUrl0 ++ "\">Subscription List</a>"
+        rowActionsSubscriberList(cols, rows, i + 1, acc ++ "<div class=\"row-actions\">" ++ links ++ "</div>")
+    }
+
+fn rowActionsProductList(cols: List<Text>, rows: List<List<Text?>>, i: Int, acc: Text): Text =
+    if i >= List.len(rows) then acc
+    else {
+        val row   = List.getOrPanic(rows, i)
+        val pkIdx = pkColIndex(cols, "product_cde", 0)
+        val pkVal = if pkIdx >= 0 then (List.getOrPanic(row, pkIdx) ?? "") else ""
+        val editUrl = "/edit-product?id=" ++ pkVal
+        val links = "<a href=\"" ++ editUrl ++ "\">Edit</a>"
+        rowActionsProductList(cols, rows, i + 1, acc ++ "<div class=\"row-actions\">" ++ links ++ "</div>")
+    }
+
+// ── Router ───────────────────────────────────────────────────────────────────
+fn handler(req: HttpRequest): HttpResponse = {
+    val path   = HttpRequest.path(req)
+    val method = HttpRequest.method(req)
+    if path == "/customer-list" then handleCustomerList(req)
+    else if path == "/subscriber-list" then handleSubscriberList(req)
+    else if path == "/subscription-list" then handleSubscriptionList(req)
+    else if path == "/product-list" then handleProductList(req)
+    else if path == "/create-customer" then
+        if Text.eq(method, "POST") then handleCreateCustomerPost(req)
+        else handleCreateCustomerGet(req)
+    else if path == "/edit-customer" then
+        if Text.eq(method, "POST") then handleEditCustomerPost(req)
+        else handleEditCustomerGet(req)
+    else if path == "/create-subscriber" then
+        if Text.eq(method, "POST") then handleCreateSubscriberPost(req)
+        else handleCreateSubscriberGet(req)
+    else if path == "/edit-subscriber" then
+        if Text.eq(method, "POST") then handleEditSubscriberPost(req)
+        else handleEditSubscriberGet(req)
+    else if path == "/create-subscription" then
+        if Text.eq(method, "POST") then handleCreateSubscriptionPost(req)
+        else handleCreateSubscriptionGet(req)
+    else if path == "/create-product" then
+        if Text.eq(method, "POST") then handleCreateProductPost(req)
+        else handleCreateProductGet(req)
+    else if path == "/edit-product" then
+        if Text.eq(method, "POST") then handleEditProductPost(req)
+        else handleEditProductGet(req)
+    else Http.notFound(f"No route for {method} {path}")
+}
+
+// ── CustomerList ─────────────────────────────────────────────────────────────────────
+fn handleCustomerList(req: HttpRequest): HttpResponse = {
+    val conn = dbConnect(dbUrl())
+    val sql  = "SELECT * FROM customer ORDER BY 1"
+    val cols   = dbColumns(conn, sql)
+    val rows   = dbQuery(conn, sql, List.empty)
+    dbClose(conn)
+    val _tbl  = htmlTable(cols, rows)
+    val _actions = rowActionsCustomerList(cols, rows, 0, "")
+    val body = "<h1>Customer List</h1>" ++
+        "<nav>" ++ "<a href=\"/create-customer\" class=\"btn\">New customer</a>" ++ "</nav>" ++
+        "" ++
+        _tbl ++
+        "<div class=\"actions-section\">" ++ _actions ++ "</div>"
+    Http.ok(htmlPage("Customer List", body), "text/html")
+}
+
+// ── SubscriberList ─────────────────────────────────────────────────────────────────────
+fn handleSubscriberList(req: HttpRequest): HttpResponse = {
+    val conn = dbConnect(dbUrl())
+    val sql  = "SELECT * FROM subscriber WHERE cust_no = $1 ORDER BY 1"
+    val _qry   = HttpRequest.query(req)
+    val _fval  = formField(_qry, "cust_no")
+    val _p0    = List.empty
+    val _p1    = List.push(_p0, _fval)
+    val cols   = dbColumns(conn, "SELECT * FROM subscriber ORDER BY 1")
+    val rows   = dbQuery(conn, sql, _p1)
+    dbClose(conn)
+    val _tbl  = htmlTable(cols, rows)
+    val _actions = rowActionsSubscriberList(cols, rows, 0, "")
+    val body = "<h1>Subscriber List</h1>" ++
+        "<nav>" ++ "<a href=\"/create-subscriber?cust_no=\" class=\"btn\">New subscriber</a>" ++ "</nav>" ++
+        "" ++
+        _tbl ++
+        "<div class=\"actions-section\">" ++ _actions ++ "</div>"
+    Http.ok(htmlPage("Subscriber List", body), "text/html")
+}
+
+// ── SubscriptionList ─────────────────────────────────────────────────────────────────────
+fn handleSubscriptionList(req: HttpRequest): HttpResponse = {
+    val conn = dbConnect(dbUrl())
+    val sql  = "SELECT * FROM subscription WHERE sub_no = $1 ORDER BY 1"
+    val _qry   = HttpRequest.query(req)
+    val _fval  = formField(_qry, "sub_no")
+    val _p0    = List.empty
+    val _p1    = List.push(_p0, _fval)
+    val cols   = dbColumns(conn, "SELECT * FROM subscription ORDER BY 1")
+    val rows   = dbQuery(conn, sql, _p1)
+    dbClose(conn)
+    val _tbl  = htmlTable(cols, rows)
+    val body = "<h1>Subscription List</h1>" ++
+        "<nav>" ++ "<a href=\"/create-subscription?sub_no=\" class=\"btn\">New subscription</a>" ++ "</nav>" ++
+        "" ++
+        _tbl
+    Http.ok(htmlPage("Subscription List", body), "text/html")
+}
+
+// ── ProductList ─────────────────────────────────────────────────────────────────────
+fn handleProductList(req: HttpRequest): HttpResponse = {
+    val conn = dbConnect(dbUrl())
+    val sql  = "SELECT * FROM product ORDER BY 1"
+    val cols   = dbColumns(conn, sql)
+    val rows   = dbQuery(conn, sql, List.empty)
+    dbClose(conn)
+    val _tbl  = htmlTable(cols, rows)
+    val _actions = rowActionsProductList(cols, rows, 0, "")
+    val body = "<h1>Product List</h1>" ++
+        "<nav>" ++ "<a href=\"/create-product\" class=\"btn\">New product</a>" ++ "</nav>" ++
+        "" ++
+        _tbl ++
+        "<div class=\"actions-section\">" ++ _actions ++ "</div>"
+    Http.ok(htmlPage("Product List", body), "text/html")
+}
+
+fn handleCreateCustomerGet(req: HttpRequest): HttpResponse = {
+    val _ef0 = "<div class=\"field\"><label for=\"custAcctname\">custAcctname</label>" ++ "<input id=\"custAcctname\" name=\"custAcctname\" type=\"text\" required></div>"
+    val _ef1 = "<div class=\"field\"><label for=\"custNo\">custNo</label>" ++ "<input id=\"custNo\" name=\"custNo\" type=\"text\" required></div>"
+    val _ef2 = "<div class=\"field\"><label for=\"custType\">custType</label>" ++ "<input id=\"custType\" name=\"custType\" type=\"text\" required></div>"
+    val _ef3 = "<div class=\"field\"><label for=\"custStatus\">custStatus</label>" ++ "<input id=\"custStatus\" name=\"custStatus\" type=\"text\" required></div>"
+    val _ef4 = "<div class=\"field\"><label for=\"custName1\">custName1</label>" ++ "<input id=\"custName1\" name=\"custName1\" type=\"text\" required></div>"
+    val _ef5 = "<div class=\"field\"><label for=\"custName2\">custName2</label>" ++ "<input id=\"custName2\" name=\"custName2\" type=\"text\" required></div>"
+    val _ef6 = "<div class=\"field\"><label for=\"custAddress1\">custAddress1</label>" ++ "<input id=\"custAddress1\" name=\"custAddress1\" type=\"text\" required></div>"
+    val _ef7 = "<div class=\"field\"><label for=\"custAddress2\">custAddress2</label>" ++ "<input id=\"custAddress2\" name=\"custAddress2\" type=\"text\" required></div>"
+    val _ef8 = "<div class=\"field\"><label for=\"custTown\">custTown</label>" ++ "<input id=\"custTown\" name=\"custTown\" type=\"text\" required></div>"
+    val _ef9 = "<div class=\"field\"><label for=\"custPostcode\">custPostcode</label>" ++ "<input id=\"custPostcode\" name=\"custPostcode\" type=\"text\" required></div>"
+    val _ef10 = "<div class=\"field\"><label for=\"custContact\">custContact</label>" ++ "<input id=\"custContact\" name=\"custContact\" type=\"text\" required></div>"
+    val _ef11 = "<div class=\"field\"><label for=\"custPhone\">custPhone</label>" ++ "<input id=\"custPhone\" name=\"custPhone\" type=\"tel\" required></div>"
+    val _ef12 = "<div class=\"field\"><label for=\"custEmail\">custEmail</label>" ++ "<input id=\"custEmail\" name=\"custEmail\" type=\"email\" required></div>"
+    val _ef13 = "<div class=\"field\"><label for=\"custBillCycle\">custBillCycle</label>" ++ "<input id=\"custBillCycle\" name=\"custBillCycle\" type=\"text\" required></div>"
+    val _ef14 = "<div class=\"field\"><label for=\"custNextBill\">custNextBill</label>" ++ "<input id=\"custNextBill\" name=\"custNextBill\" type=\"text\" required></div>"
+    val _ef15 = "<div class=\"field\"><label for=\"custCreditCde\">custCreditCde</label>" ++ "<input id=\"custCreditCde\" name=\"custCreditCde\" type=\"text\" required></div>"
+    val _ef16 = "<div class=\"field\"><label for=\"custLimit\">custLimit</label>" ++ "<input id=\"custLimit\" name=\"custLimit\" type=\"text\" required></div>"
+    val _hdr = "<h1>Create Customer</h1>" ++ "<nav><a href=\"/customer-list\">← Back to list</a></nav>" ++ "<form method=\"POST\" action=\"/create-customer\">"
+    val _fc0_0 = _ef0 ++ _ef1 ++ _ef2 ++ _ef3
+    val _fc0_1 = _ef4 ++ _ef5 ++ _ef6 ++ _ef7
+    val _fc0_2 = _ef8 ++ _ef9 ++ _ef10 ++ _ef11
+    val _fc0_3 = _ef12 ++ _ef13 ++ _ef14 ++ _ef15
+    val _fc0_4 = _ef16
+    val _fc1_0 = _fc0_0 ++ _fc0_1 ++ _fc0_2 ++ _fc0_3
+    val _fc1_1 = _fc0_4
+    val _fc2_0 = _fc1_0 ++ _fc1_1
+    val _fields = _fc2_0
+    val _footer = "<button type=\"submit\">Submit</button>" ++ "</form>"
+    val body = _hdr ++ _fields ++ _footer
+    Http.ok(htmlPage("Create Customer", body), "text/html")
+}
+
+fn handleCreateCustomerPost(req: HttpRequest): HttpResponse = {
+    val body = HttpRequest.body(req)
+    val conn = dbConnect(dbUrl())
+    val custAcctname = formField(body, "custAcctname")
+    val custNo = formField(body, "custNo")
+    val custType = formField(body, "custType")
+    val custStatus = formField(body, "custStatus")
+    val custName1 = formField(body, "custName1")
+    val custName2 = formField(body, "custName2")
+    val custAddress1 = formField(body, "custAddress1")
+    val custAddress2 = formField(body, "custAddress2")
+    val custTown = formField(body, "custTown")
+    val custPostcode = formField(body, "custPostcode")
+    val custContact = formField(body, "custContact")
+    val custPhone = formField(body, "custPhone")
+    val custEmail = formField(body, "custEmail")
+    val custBillCycle = formField(body, "custBillCycle")
+    val custNextBill = formField(body, "custNextBill")
+    val custCreditCde = formField(body, "custCreditCde")
+    val custLimit = formField(body, "custLimit")
+    val _p0 = List.empty
+    val _p1 = List.push(_p0, custAcctname)
+    val _p2 = List.push(_p1, custNo)
+    val _p3 = List.push(_p2, custType)
+    val _p4 = List.push(_p3, custStatus)
+    val _p5 = List.push(_p4, custName1)
+    val _p6 = List.push(_p5, custName2)
+    val _p7 = List.push(_p6, custAddress1)
+    val _p8 = List.push(_p7, custAddress2)
+    val _p9 = List.push(_p8, custTown)
+    val _p10 = List.push(_p9, custPostcode)
+    val _p11 = List.push(_p10, custContact)
+    val _p12 = List.push(_p11, custPhone)
+    val _p13 = List.push(_p12, custEmail)
+    val _p14 = List.push(_p13, custBillCycle)
+    val _p15 = List.push(_p14, custNextBill)
+    val _p16 = List.push(_p15, custCreditCde)
+    val _p17 = List.push(_p16, custLimit)
+    val _rows = dbExec(conn, "INSERT INTO customer (cust_acctname, cust_no, cust_type, cust_status, cust_name1, cust_name2, cust_address1, cust_address2, cust_town, cust_postcode, cust_contact, cust_phone, cust_email, cust_bill_cycle, cust_next_bill, cust_credit_cde, cust_limit) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)", _p17)
+    dbClose(conn)
+    val msg = if _rows > 0 then "Record saved." else "Save failed — check your input."
+    val pg  = "<h2>" ++ msg ++ "</h2><p><a href=\"/customer-list\">← Back to list</a></p>"
+    Http.ok(htmlPage("Done", pg), "text/html")
+}
+
+fn handleEditCustomerGet(req: HttpRequest): HttpResponse = {
+    val _qry  = HttpRequest.query(req)
+    val _id   = formField(_qry, "id")
+    val conn  = dbConnect(dbUrl())
+    val _p0   = List.empty
+    val _p1   = List.push(_p0, _id)
+    val _rows = dbQuery(conn, "SELECT * FROM customer WHERE cust_no = $1 LIMIT 1", _p1)
+    val _cols = dbColumns(conn, "SELECT * FROM customer LIMIT 1")
+    dbClose(conn)
+    val _ef0 = "<div class=\"field\"><label for=\"custType\">custType</label>" ++ "<input id=\"custType\" name=\"custType\" type=\"text\" value=\"" ++ colValue(_rows, _cols, "cust_type") ++ "\" required></div>"
+    val _ef1 = "<div class=\"field\"><label for=\"custStatus\">custStatus</label>" ++ "<input id=\"custStatus\" name=\"custStatus\" type=\"text\" value=\"" ++ colValue(_rows, _cols, "cust_status") ++ "\" required></div>"
+    val _ef2 = "<div class=\"field\"><label for=\"custName1\">custName1</label>" ++ "<input id=\"custName1\" name=\"custName1\" type=\"text\" value=\"" ++ colValue(_rows, _cols, "cust_name1") ++ "\" required></div>"
+    val _ef3 = "<div class=\"field\"><label for=\"custName2\">custName2</label>" ++ "<input id=\"custName2\" name=\"custName2\" type=\"text\" value=\"" ++ colValue(_rows, _cols, "cust_name2") ++ "\" required></div>"
+    val _ef4 = "<div class=\"field\"><label for=\"custAddress1\">custAddress1</label>" ++ "<input id=\"custAddress1\" name=\"custAddress1\" type=\"text\" value=\"" ++ colValue(_rows, _cols, "cust_address1") ++ "\" required></div>"
+    val _ef5 = "<div class=\"field\"><label for=\"custAddress2\">custAddress2</label>" ++ "<input id=\"custAddress2\" name=\"custAddress2\" type=\"text\" value=\"" ++ colValue(_rows, _cols, "cust_address2") ++ "\" required></div>"
+    val _ef6 = "<div class=\"field\"><label for=\"custTown\">custTown</label>" ++ "<input id=\"custTown\" name=\"custTown\" type=\"text\" value=\"" ++ colValue(_rows, _cols, "cust_town") ++ "\" required></div>"
+    val _ef7 = "<div class=\"field\"><label for=\"custPostcode\">custPostcode</label>" ++ "<input id=\"custPostcode\" name=\"custPostcode\" type=\"text\" value=\"" ++ colValue(_rows, _cols, "cust_postcode") ++ "\" required></div>"
+    val _ef8 = "<div class=\"field\"><label for=\"custContact\">custContact</label>" ++ "<input id=\"custContact\" name=\"custContact\" type=\"text\" value=\"" ++ colValue(_rows, _cols, "cust_contact") ++ "\" required></div>"
+    val _ef9 = "<div class=\"field\"><label for=\"custPhone\">custPhone</label>" ++ "<input id=\"custPhone\" name=\"custPhone\" type=\"tel\" value=\"" ++ colValue(_rows, _cols, "cust_phone") ++ "\" required></div>"
+    val _ef10 = "<div class=\"field\"><label for=\"custEmail\">custEmail</label>" ++ "<input id=\"custEmail\" name=\"custEmail\" type=\"email\" value=\"" ++ colValue(_rows, _cols, "cust_email") ++ "\" required></div>"
+    val _ef11 = "<div class=\"field\"><label for=\"custBillCycle\">custBillCycle</label>" ++ "<input id=\"custBillCycle\" name=\"custBillCycle\" type=\"text\" value=\"" ++ colValue(_rows, _cols, "cust_bill_cycle") ++ "\" required></div>"
+    val _ef12 = "<div class=\"field\"><label for=\"custNextBill\">custNextBill</label>" ++ "<input id=\"custNextBill\" name=\"custNextBill\" type=\"text\" value=\"" ++ colValue(_rows, _cols, "cust_next_bill") ++ "\" required></div>"
+    val _ef13 = "<div class=\"field\"><label for=\"custCreditCde\">custCreditCde</label>" ++ "<input id=\"custCreditCde\" name=\"custCreditCde\" type=\"text\" value=\"" ++ colValue(_rows, _cols, "cust_credit_cde") ++ "\" required></div>"
+    val _ef14 = "<div class=\"field\"><label for=\"custLimit\">custLimit</label>" ++ "<input id=\"custLimit\" name=\"custLimit\" type=\"text\" value=\"" ++ colValue(_rows, _cols, "cust_limit") ++ "\" required></div>"
+    val _hdr = "<h1>Edit Customer</h1>" ++ "<nav><a href=\"/customer-list\">← Back to list</a></nav>" ++ "<form method=\"POST\" action=\"/edit-customer?id=\" " ++ _id ++ "\">"
+    val _fc0_0 = _ef0 ++ _ef1 ++ _ef2 ++ _ef3
+    val _fc0_1 = _ef4 ++ _ef5 ++ _ef6 ++ _ef7
+    val _fc0_2 = _ef8 ++ _ef9 ++ _ef10 ++ _ef11
+    val _fc0_3 = _ef12 ++ _ef13 ++ _ef14
+    val _fc1_0 = _fc0_0 ++ _fc0_1 ++ _fc0_2 ++ _fc0_3
+    val _fields = _fc1_0
+    val _footer = "<button type=\"submit\">Save changes</button>" ++ "</form>"
+    val body = _hdr ++ _fields ++ _footer
+    Http.ok(htmlPage("Edit Customer", body), "text/html")
+}
+
+fn handleEditCustomerPost(req: HttpRequest): HttpResponse = {
+    val body = HttpRequest.body(req)
+    val conn = dbConnect(dbUrl())
+    val custType = formField(body, "custType")
+    val custStatus = formField(body, "custStatus")
+    val custName1 = formField(body, "custName1")
+    val custName2 = formField(body, "custName2")
+    val custAddress1 = formField(body, "custAddress1")
+    val custAddress2 = formField(body, "custAddress2")
+    val custTown = formField(body, "custTown")
+    val custPostcode = formField(body, "custPostcode")
+    val custContact = formField(body, "custContact")
+    val custPhone = formField(body, "custPhone")
+    val custEmail = formField(body, "custEmail")
+    val custBillCycle = formField(body, "custBillCycle")
+    val custNextBill = formField(body, "custNextBill")
+    val custCreditCde = formField(body, "custCreditCde")
+    val custLimit = formField(body, "custLimit")
+    val _p0 = List.empty
+    val _p1 = List.push(_p0, custType)
+    val _p2 = List.push(_p1, custStatus)
+    val _p3 = List.push(_p2, custName1)
+    val _p4 = List.push(_p3, custName2)
+    val _p5 = List.push(_p4, custAddress1)
+    val _p6 = List.push(_p5, custAddress2)
+    val _p7 = List.push(_p6, custTown)
+    val _p8 = List.push(_p7, custPostcode)
+    val _p9 = List.push(_p8, custContact)
+    val _p10 = List.push(_p9, custPhone)
+    val _p11 = List.push(_p10, custEmail)
+    val _p12 = List.push(_p11, custBillCycle)
+    val _p13 = List.push(_p12, custNextBill)
+    val _p14 = List.push(_p13, custCreditCde)
+    val _p15 = List.push(_p14, custLimit)
+    val _qry = HttpRequest.query(req)
+    val _id  = formField(_qry, "id")
+    val _p16 = List.push(_p15, _id)
+    val _rows = dbExec(conn, "UPDATE customer SET cust_type = $1, cust_status = $2, cust_name1 = $3, cust_name2 = $4, cust_address1 = $5, cust_address2 = $6, cust_town = $7, cust_postcode = $8, cust_contact = $9, cust_phone = $10, cust_email = $11, cust_bill_cycle = $12, cust_next_bill = $13, cust_credit_cde = $14, cust_limit = $15 WHERE cust_no = $16", _p16)
+    dbClose(conn)
+    val msg = if _rows > 0 then "Record updated." else "Update failed — record not found."
+    val pg  = "<h2>" ++ msg ++ "</h2><p><a href=\"/customer-list\">← Back to list</a></p>"
+    Http.ok(htmlPage("Done", pg), "text/html")
+}
+
+fn handleCreateSubscriberGet(req: HttpRequest): HttpResponse = {
+    val _ef0 = "<div class=\"field\"><label for=\"custNo\">custNo</label>" ++ "<input id=\"custNo\" name=\"custNo\" type=\"text\" required></div>"
+    val _ef1 = "<div class=\"field\"><label for=\"subNo\">subNo</label>" ++ "<input id=\"subNo\" name=\"subNo\" type=\"text\" required></div>"
+    val _ef2 = "<div class=\"field\"><label for=\"subsName\">subsName</label>" ++ "<input id=\"subsName\" name=\"subsName\" type=\"text\" required></div>"
+    val _ef3 = "<div class=\"field\"><label for=\"subsName1\">subsName1</label>" ++ "<input id=\"subsName1\" name=\"subsName1\" type=\"text\" required></div>"
+    val _ef4 = "<div class=\"field\"><label for=\"subsName2\">subsName2</label>" ++ "<input id=\"subsName2\" name=\"subsName2\" type=\"text\" required></div>"
+    val _ef5 = "<div class=\"field\"><label for=\"subsAddress1\">subsAddress1</label>" ++ "<input id=\"subsAddress1\" name=\"subsAddress1\" type=\"text\" required></div>"
+    val _ef6 = "<div class=\"field\"><label for=\"subsAddress2\">subsAddress2</label>" ++ "<input id=\"subsAddress2\" name=\"subsAddress2\" type=\"text\" required></div>"
+    val _ef7 = "<div class=\"field\"><label for=\"subsTown\">subsTown</label>" ++ "<input id=\"subsTown\" name=\"subsTown\" type=\"text\" required></div>"
+    val _ef8 = "<div class=\"field\"><label for=\"subsPostcode\">subsPostcode</label>" ++ "<input id=\"subsPostcode\" name=\"subsPostcode\" type=\"text\" required></div>"
+    val _ef9 = "<div class=\"field\"><label for=\"subsEmail\">subsEmail</label>" ++ "<input id=\"subsEmail\" name=\"subsEmail\" type=\"email\" required></div>"
+    val _ef10 = "<div class=\"field\"><label for=\"subActive\">subActive</label>" ++ "<input id=\"subActive\" name=\"subActive\" type=\"text\" required></div>"
+    val _ef11 = "<div class=\"field\"><label for=\"subsStatus\">subsStatus</label>" ++ "<input id=\"subsStatus\" name=\"subsStatus\" type=\"text\" required></div>"
+    val _hdr = "<h1>Create Subscriber</h1>" ++ "<nav><a href=\"/subscriber-list\">← Back to list</a></nav>" ++ "<form method=\"POST\" action=\"/create-subscriber\">"
+    val _fc0_0 = _ef0 ++ _ef1 ++ _ef2 ++ _ef3
+    val _fc0_1 = _ef4 ++ _ef5 ++ _ef6 ++ _ef7
+    val _fc0_2 = _ef8 ++ _ef9 ++ _ef10 ++ _ef11
+    val _fc1_0 = _fc0_0 ++ _fc0_1 ++ _fc0_2
+    val _fields = _fc1_0
+    val _footer = "<button type=\"submit\">Submit</button>" ++ "</form>"
+    val body = _hdr ++ _fields ++ _footer
+    Http.ok(htmlPage("Create Subscriber", body), "text/html")
+}
+
+fn handleCreateSubscriberPost(req: HttpRequest): HttpResponse = {
+    val body = HttpRequest.body(req)
+    val conn = dbConnect(dbUrl())
+    val custNo = formField(body, "custNo")
+    val subNo = formField(body, "subNo")
+    val subsName = formField(body, "subsName")
+    val subsName1 = formField(body, "subsName1")
+    val subsName2 = formField(body, "subsName2")
+    val subsAddress1 = formField(body, "subsAddress1")
+    val subsAddress2 = formField(body, "subsAddress2")
+    val subsTown = formField(body, "subsTown")
+    val subsPostcode = formField(body, "subsPostcode")
+    val subsEmail = formField(body, "subsEmail")
+    val subActive = formField(body, "subActive")
+    val subsStatus = formField(body, "subsStatus")
+    val _p0 = List.empty
+    val _p1 = List.push(_p0, custNo)
+    val _p2 = List.push(_p1, subNo)
+    val _p3 = List.push(_p2, subsName)
+    val _p4 = List.push(_p3, subsName1)
+    val _p5 = List.push(_p4, subsName2)
+    val _p6 = List.push(_p5, subsAddress1)
+    val _p7 = List.push(_p6, subsAddress2)
+    val _p8 = List.push(_p7, subsTown)
+    val _p9 = List.push(_p8, subsPostcode)
+    val _p10 = List.push(_p9, subsEmail)
+    val _p11 = List.push(_p10, subActive)
+    val _p12 = List.push(_p11, subsStatus)
+    val _rows = dbExec(conn, "INSERT INTO subscriber (cust_no, sub_no, subs_name, subs_name1, subs_name2, subs_address1, subs_address2, subs_town, subs_postcode, subs_email, sub_active, subs_status) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)", _p12)
+    dbClose(conn)
+    val msg = if _rows > 0 then "Record saved." else "Save failed — check your input."
+    val pg  = "<h2>" ++ msg ++ "</h2><p><a href=\"/subscriber-list\">← Back to list</a></p>"
+    Http.ok(htmlPage("Done", pg), "text/html")
+}
+
+fn handleEditSubscriberGet(req: HttpRequest): HttpResponse = {
+    val _qry  = HttpRequest.query(req)
+    val _id   = formField(_qry, "id")
+    val conn  = dbConnect(dbUrl())
+    val _p0   = List.empty
+    val _p1   = List.push(_p0, _id)
+    val _rows = dbQuery(conn, "SELECT * FROM subscriber WHERE sub_no = $1 LIMIT 1", _p1)
+    val _cols = dbColumns(conn, "SELECT * FROM subscriber LIMIT 1")
+    dbClose(conn)
+    val _ef0 = "<div class=\"field\"><label for=\"subsName\">subsName</label>" ++ "<input id=\"subsName\" name=\"subsName\" type=\"text\" value=\"" ++ colValue(_rows, _cols, "subs_name") ++ "\" required></div>"
+    val _ef1 = "<div class=\"field\"><label for=\"subsName1\">subsName1</label>" ++ "<input id=\"subsName1\" name=\"subsName1\" type=\"text\" value=\"" ++ colValue(_rows, _cols, "subs_name1") ++ "\" required></div>"
+    val _ef2 = "<div class=\"field\"><label for=\"subsName2\">subsName2</label>" ++ "<input id=\"subsName2\" name=\"subsName2\" type=\"text\" value=\"" ++ colValue(_rows, _cols, "subs_name2") ++ "\" required></div>"
+    val _ef3 = "<div class=\"field\"><label for=\"subsAddress1\">subsAddress1</label>" ++ "<input id=\"subsAddress1\" name=\"subsAddress1\" type=\"text\" value=\"" ++ colValue(_rows, _cols, "subs_address1") ++ "\" required></div>"
+    val _ef4 = "<div class=\"field\"><label for=\"subsAddress2\">subsAddress2</label>" ++ "<input id=\"subsAddress2\" name=\"subsAddress2\" type=\"text\" value=\"" ++ colValue(_rows, _cols, "subs_address2") ++ "\" required></div>"
+    val _ef5 = "<div class=\"field\"><label for=\"subsTown\">subsTown</label>" ++ "<input id=\"subsTown\" name=\"subsTown\" type=\"text\" value=\"" ++ colValue(_rows, _cols, "subs_town") ++ "\" required></div>"
+    val _ef6 = "<div class=\"field\"><label for=\"subsPostcode\">subsPostcode</label>" ++ "<input id=\"subsPostcode\" name=\"subsPostcode\" type=\"text\" value=\"" ++ colValue(_rows, _cols, "subs_postcode") ++ "\" required></div>"
+    val _ef7 = "<div class=\"field\"><label for=\"subsEmail\">subsEmail</label>" ++ "<input id=\"subsEmail\" name=\"subsEmail\" type=\"email\" value=\"" ++ colValue(_rows, _cols, "subs_email") ++ "\" required></div>"
+    val _ef8 = "<div class=\"field\"><label for=\"subActive\">subActive</label>" ++ "<input id=\"subActive\" name=\"subActive\" type=\"text\" value=\"" ++ colValue(_rows, _cols, "sub_active") ++ "\" required></div>"
+    val _ef9 = "<div class=\"field\"><label for=\"subsStatus\">subsStatus</label>" ++ "<input id=\"subsStatus\" name=\"subsStatus\" type=\"text\" value=\"" ++ colValue(_rows, _cols, "subs_status") ++ "\" required></div>"
+    val _hdr = "<h1>Edit Subscriber</h1>" ++ "<nav><a href=\"/subscriber-list\">← Back to list</a></nav>" ++ "<form method=\"POST\" action=\"/edit-subscriber?id=\" " ++ _id ++ "\">"
+    val _fc0_0 = _ef0 ++ _ef1 ++ _ef2 ++ _ef3
+    val _fc0_1 = _ef4 ++ _ef5 ++ _ef6 ++ _ef7
+    val _fc0_2 = _ef8 ++ _ef9
+    val _fc1_0 = _fc0_0 ++ _fc0_1 ++ _fc0_2
+    val _fields = _fc1_0
+    val _footer = "<button type=\"submit\">Save changes</button>" ++ "</form>"
+    val body = _hdr ++ _fields ++ _footer
+    Http.ok(htmlPage("Edit Subscriber", body), "text/html")
+}
+
+fn handleEditSubscriberPost(req: HttpRequest): HttpResponse = {
+    val body = HttpRequest.body(req)
+    val conn = dbConnect(dbUrl())
+    val subsName = formField(body, "subsName")
+    val subsName1 = formField(body, "subsName1")
+    val subsName2 = formField(body, "subsName2")
+    val subsAddress1 = formField(body, "subsAddress1")
+    val subsAddress2 = formField(body, "subsAddress2")
+    val subsTown = formField(body, "subsTown")
+    val subsPostcode = formField(body, "subsPostcode")
+    val subsEmail = formField(body, "subsEmail")
+    val subActive = formField(body, "subActive")
+    val subsStatus = formField(body, "subsStatus")
+    val _p0 = List.empty
+    val _p1 = List.push(_p0, subsName)
+    val _p2 = List.push(_p1, subsName1)
+    val _p3 = List.push(_p2, subsName2)
+    val _p4 = List.push(_p3, subsAddress1)
+    val _p5 = List.push(_p4, subsAddress2)
+    val _p6 = List.push(_p5, subsTown)
+    val _p7 = List.push(_p6, subsPostcode)
+    val _p8 = List.push(_p7, subsEmail)
+    val _p9 = List.push(_p8, subActive)
+    val _p10 = List.push(_p9, subsStatus)
+    val _qry = HttpRequest.query(req)
+    val _id  = formField(_qry, "id")
+    val _p11 = List.push(_p10, _id)
+    val _rows = dbExec(conn, "UPDATE subscriber SET subs_name = $1, subs_name1 = $2, subs_name2 = $3, subs_address1 = $4, subs_address2 = $5, subs_town = $6, subs_postcode = $7, subs_email = $8, sub_active = $9, subs_status = $10 WHERE sub_no = $11", _p11)
+    dbClose(conn)
+    val msg = if _rows > 0 then "Record updated." else "Update failed — record not found."
+    val pg  = "<h2>" ++ msg ++ "</h2><p><a href=\"/subscriber-list\">← Back to list</a></p>"
+    Http.ok(htmlPage("Done", pg), "text/html")
+}
+
+fn handleCreateSubscriptionGet(req: HttpRequest): HttpResponse = {
+    val _ef0 = "<div class=\"field\"><label for=\"custNo\">custNo</label>" ++ "<input id=\"custNo\" name=\"custNo\" type=\"text\" required></div>"
+    val _ef1 = "<div class=\"field\"><label for=\"subNo\">subNo</label>" ++ "<input id=\"subNo\" name=\"subNo\" type=\"text\" required></div>"
+    val _ef2 = "<div class=\"field\"><label for=\"subTyper\">subTyper</label>" ++ "<input id=\"subTyper\" name=\"subTyper\" type=\"text\" required></div>"
+    val _ef3 = "<div class=\"field\"><label for=\"productCode\">productCode</label>" ++ "<input id=\"productCode\" name=\"productCode\" type=\"text\" required></div>"
+    val _ef4 = "<div class=\"field\"><label for=\"subCopies\">subCopies</label>" ++ "<input id=\"subCopies\" name=\"subCopies\" type=\"text\" required></div>"
+    val _ef5 = "<div class=\"field\"><label for=\"invoiceFreq\">invoiceFreq</label>" ++ "<input id=\"invoiceFreq\" name=\"invoiceFreq\" type=\"text\" required></div>"
+    val _ef6 = "<div class=\"field\"><label for=\"invoiceMnth\">invoiceMnth</label>" ++ "<input id=\"invoiceMnth\" name=\"invoiceMnth\" type=\"text\" required></div>"
+    val _ef7 = "<div class=\"field\"><label for=\"labelsCount\">labelsCount</label>" ++ "<input id=\"labelsCount\" name=\"labelsCount\" type=\"text\" required></div>"
+    val _ef8 = "<div class=\"field\"><label for=\"localCode\">localCode</label>" ++ "<input id=\"localCode\" name=\"localCode\" type=\"text\" required></div>"
+    val _ef9 = "<div class=\"field\"><label for=\"sourceMnth\">sourceMnth</label>" ++ "<input id=\"sourceMnth\" name=\"sourceMnth\" type=\"text\" required></div>"
+    val _hdr = "<h1>Create Subscription</h1>" ++ "<nav><a href=\"/subscription-list\">← Back to list</a></nav>" ++ "<form method=\"POST\" action=\"/create-subscription\">"
+    val _fc0_0 = _ef0 ++ _ef1 ++ _ef2 ++ _ef3
+    val _fc0_1 = _ef4 ++ _ef5 ++ _ef6 ++ _ef7
+    val _fc0_2 = _ef8 ++ _ef9
+    val _fc1_0 = _fc0_0 ++ _fc0_1 ++ _fc0_2
+    val _fields = _fc1_0
+    val _footer = "<button type=\"submit\">Submit</button>" ++ "</form>"
+    val body = _hdr ++ _fields ++ _footer
+    Http.ok(htmlPage("Create Subscription", body), "text/html")
+}
+
+fn handleCreateSubscriptionPost(req: HttpRequest): HttpResponse = {
+    val body = HttpRequest.body(req)
+    val conn = dbConnect(dbUrl())
+    val custNo = formField(body, "custNo")
+    val subNo = formField(body, "subNo")
+    val subTyper = formField(body, "subTyper")
+    val productCode = formField(body, "productCode")
+    val subCopies = formField(body, "subCopies")
+    val invoiceFreq = formField(body, "invoiceFreq")
+    val invoiceMnth = formField(body, "invoiceMnth")
+    val labelsCount = formField(body, "labelsCount")
+    val localCode = formField(body, "localCode")
+    val sourceMnth = formField(body, "sourceMnth")
+    val _p0 = List.empty
+    val _p1 = List.push(_p0, custNo)
+    val _p2 = List.push(_p1, subNo)
+    val _p3 = List.push(_p2, subTyper)
+    val _p4 = List.push(_p3, productCode)
+    val _p5 = List.push(_p4, subCopies)
+    val _p6 = List.push(_p5, invoiceFreq)
+    val _p7 = List.push(_p6, invoiceMnth)
+    val _p8 = List.push(_p7, labelsCount)
+    val _p9 = List.push(_p8, localCode)
+    val _p10 = List.push(_p9, sourceMnth)
+    val _rows = dbExec(conn, "INSERT INTO subscription (cust_no, sub_no, sub_typer, product_code, sub_copies, invoice_freq, invoice_mnth, labels_count, local_code, source_mnth) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)", _p10)
+    dbClose(conn)
+    val msg = if _rows > 0 then "Record saved." else "Save failed — check your input."
+    val pg  = "<h2>" ++ msg ++ "</h2><p><a href=\"/subscription-list\">← Back to list</a></p>"
+    Http.ok(htmlPage("Done", pg), "text/html")
+}
+
+fn handleCreateProductGet(req: HttpRequest): HttpResponse = {
+    val _ef0 = "<div class=\"field\"><label for=\"productCde\">productCde</label>" ++ "<input id=\"productCde\" name=\"productCde\" type=\"text\" required></div>"
+    val _ef1 = "<div class=\"field\"><label for=\"productDesc1\">productDesc1</label>" ++ "<input id=\"productDesc1\" name=\"productDesc1\" type=\"text\" required></div>"
+    val _ef2 = "<div class=\"field\"><label for=\"productDesc2\">productDesc2</label>" ++ "<input id=\"productDesc2\" name=\"productDesc2\" type=\"text\" required></div>"
+    val _ef3 = "<div class=\"field\"><label for=\"productPrice\">productPrice</label>" ++ "<input id=\"productPrice\" name=\"productPrice\" type=\"text\" required></div>"
+    val _ef4 = "<div class=\"field\"><label for=\"productGst\">productGst</label>" ++ "<input id=\"productGst\" name=\"productGst\" type=\"text\" required></div>"
+    val _ef5 = "<div class=\"field\"><label for=\"productMonthlyWrapper\">productMonthlyWrapper</label>" ++ "<input id=\"productMonthlyWrapper\" name=\"productMonthlyWrapper\" type=\"text\" required></div>"
+    val _ef6 = "<div class=\"field\"><label for=\"productLabelCountDefault\">productLabelCountDefault</label>" ++ "<input id=\"productLabelCountDefault\" name=\"productLabelCountDefault\" type=\"text\" required></div>"
+    val _ef7 = "<div class=\"field\"><label for=\"invoiceCycle\">invoiceCycle</label>" ++ "<input id=\"invoiceCycle\" name=\"invoiceCycle\" type=\"text\" required></div>"
+    val _ef8 = "<div class=\"field\"><label for=\"pdfOnly\">pdfOnly</label>" ++ "<input id=\"pdfOnly\" name=\"pdfOnly\" type=\"text\" required></div>"
+    val _hdr = "<h1>Create Product</h1>" ++ "<nav><a href=\"/product-list\">← Back to list</a></nav>" ++ "<form method=\"POST\" action=\"/create-product\">"
+    val _fc0_0 = _ef0 ++ _ef1 ++ _ef2 ++ _ef3
+    val _fc0_1 = _ef4 ++ _ef5 ++ _ef6 ++ _ef7
+    val _fc0_2 = _ef8
+    val _fc1_0 = _fc0_0 ++ _fc0_1 ++ _fc0_2
+    val _fields = _fc1_0
+    val _footer = "<button type=\"submit\">Submit</button>" ++ "</form>"
+    val body = _hdr ++ _fields ++ _footer
+    Http.ok(htmlPage("Create Product", body), "text/html")
+}
+
+fn handleCreateProductPost(req: HttpRequest): HttpResponse = {
+    val body = HttpRequest.body(req)
+    val conn = dbConnect(dbUrl())
+    val productCde = formField(body, "productCde")
+    val productDesc1 = formField(body, "productDesc1")
+    val productDesc2 = formField(body, "productDesc2")
+    val productPrice = formField(body, "productPrice")
+    val productGst = formField(body, "productGst")
+    val productMonthlyWrapper = formField(body, "productMonthlyWrapper")
+    val productLabelCountDefault = formField(body, "productLabelCountDefault")
+    val invoiceCycle = formField(body, "invoiceCycle")
+    val pdfOnly = formField(body, "pdfOnly")
+    val _p0 = List.empty
+    val _p1 = List.push(_p0, productCde)
+    val _p2 = List.push(_p1, productDesc1)
+    val _p3 = List.push(_p2, productDesc2)
+    val _p4 = List.push(_p3, productPrice)
+    val _p5 = List.push(_p4, productGst)
+    val _p6 = List.push(_p5, productMonthlyWrapper)
+    val _p7 = List.push(_p6, productLabelCountDefault)
+    val _p8 = List.push(_p7, invoiceCycle)
+    val _p9 = List.push(_p8, pdfOnly)
+    val _rows = dbExec(conn, "INSERT INTO product (product_cde, product_desc1, product_desc2, product_price, product_gst, product_monthly_wrapper, product_label_count_default, invoice_cycle, pdf_only) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)", _p9)
+    dbClose(conn)
+    val msg = if _rows > 0 then "Record saved." else "Save failed — check your input."
+    val pg  = "<h2>" ++ msg ++ "</h2><p><a href=\"/product-list\">← Back to list</a></p>"
+    Http.ok(htmlPage("Done", pg), "text/html")
+}
+
+fn handleEditProductGet(req: HttpRequest): HttpResponse = {
+    val _qry  = HttpRequest.query(req)
+    val _id   = formField(_qry, "id")
+    val conn  = dbConnect(dbUrl())
+    val _p0   = List.empty
+    val _p1   = List.push(_p0, _id)
+    val _rows = dbQuery(conn, "SELECT * FROM product WHERE product_cde = $1 LIMIT 1", _p1)
+    val _cols = dbColumns(conn, "SELECT * FROM product LIMIT 1")
+    dbClose(conn)
+    val _ef0 = "<div class=\"field\"><label for=\"productDesc1\">productDesc1</label>" ++ "<input id=\"productDesc1\" name=\"productDesc1\" type=\"text\" value=\"" ++ colValue(_rows, _cols, "product_desc1") ++ "\" required></div>"
+    val _ef1 = "<div class=\"field\"><label for=\"productDesc2\">productDesc2</label>" ++ "<input id=\"productDesc2\" name=\"productDesc2\" type=\"text\" value=\"" ++ colValue(_rows, _cols, "product_desc2") ++ "\" required></div>"
+    val _ef2 = "<div class=\"field\"><label for=\"productPrice\">productPrice</label>" ++ "<input id=\"productPrice\" name=\"productPrice\" type=\"text\" value=\"" ++ colValue(_rows, _cols, "product_price") ++ "\" required></div>"
+    val _ef3 = "<div class=\"field\"><label for=\"productGst\">productGst</label>" ++ "<input id=\"productGst\" name=\"productGst\" type=\"text\" value=\"" ++ colValue(_rows, _cols, "product_gst") ++ "\" required></div>"
+    val _ef4 = "<div class=\"field\"><label for=\"productMonthlyWrapper\">productMonthlyWrapper</label>" ++ "<input id=\"productMonthlyWrapper\" name=\"productMonthlyWrapper\" type=\"text\" value=\"" ++ colValue(_rows, _cols, "product_monthly_wrapper") ++ "\" required></div>"
+    val _ef5 = "<div class=\"field\"><label for=\"productLabelCountDefault\">productLabelCountDefault</label>" ++ "<input id=\"productLabelCountDefault\" name=\"productLabelCountDefault\" type=\"text\" value=\"" ++ colValue(_rows, _cols, "product_label_count_default") ++ "\" required></div>"
+    val _ef6 = "<div class=\"field\"><label for=\"invoiceCycle\">invoiceCycle</label>" ++ "<input id=\"invoiceCycle\" name=\"invoiceCycle\" type=\"text\" value=\"" ++ colValue(_rows, _cols, "invoice_cycle") ++ "\" required></div>"
+    val _ef7 = "<div class=\"field\"><label for=\"pdfOnly\">pdfOnly</label>" ++ "<input id=\"pdfOnly\" name=\"pdfOnly\" type=\"text\" value=\"" ++ colValue(_rows, _cols, "pdf_only") ++ "\" required></div>"
+    val _hdr = "<h1>Edit Product</h1>" ++ "<nav><a href=\"/product-list\">← Back to list</a></nav>" ++ "<form method=\"POST\" action=\"/edit-product?id=\" " ++ _id ++ "\">"
+    val _fc0_0 = _ef0 ++ _ef1 ++ _ef2 ++ _ef3
+    val _fc0_1 = _ef4 ++ _ef5 ++ _ef6 ++ _ef7
+    val _fc1_0 = _fc0_0 ++ _fc0_1
+    val _fields = _fc1_0
+    val _footer = "<button type=\"submit\">Save changes</button>" ++ "</form>"
+    val body = _hdr ++ _fields ++ _footer
+    Http.ok(htmlPage("Edit Product", body), "text/html")
+}
+
+fn handleEditProductPost(req: HttpRequest): HttpResponse = {
+    val body = HttpRequest.body(req)
+    val conn = dbConnect(dbUrl())
+    val productDesc1 = formField(body, "productDesc1")
+    val productDesc2 = formField(body, "productDesc2")
+    val productPrice = formField(body, "productPrice")
+    val productGst = formField(body, "productGst")
+    val productMonthlyWrapper = formField(body, "productMonthlyWrapper")
+    val productLabelCountDefault = formField(body, "productLabelCountDefault")
+    val invoiceCycle = formField(body, "invoiceCycle")
+    val pdfOnly = formField(body, "pdfOnly")
+    val _p0 = List.empty
+    val _p1 = List.push(_p0, productDesc1)
+    val _p2 = List.push(_p1, productDesc2)
+    val _p3 = List.push(_p2, productPrice)
+    val _p4 = List.push(_p3, productGst)
+    val _p5 = List.push(_p4, productMonthlyWrapper)
+    val _p6 = List.push(_p5, productLabelCountDefault)
+    val _p7 = List.push(_p6, invoiceCycle)
+    val _p8 = List.push(_p7, pdfOnly)
+    val _qry = HttpRequest.query(req)
+    val _id  = formField(_qry, "id")
+    val _p9 = List.push(_p8, _id)
+    val _rows = dbExec(conn, "UPDATE product SET product_desc1 = $1, product_desc2 = $2, product_price = $3, product_gst = $4, product_monthly_wrapper = $5, product_label_count_default = $6, invoice_cycle = $7, pdf_only = $8 WHERE product_cde = $9", _p9)
+    dbClose(conn)
+    val msg = if _rows > 0 then "Record updated." else "Update failed — record not found."
+    val pg  = "<h2>" ++ msg ++ "</h2><p><a href=\"/product-list\">← Back to list</a></p>"
+    Http.ok(htmlPage("Done", pg), "text/html")
+}
+
+fn main(): Unit [io] = {
+    println("Serving on http://localhost:3000/")
+    Http.serve(3000, handler)
+}

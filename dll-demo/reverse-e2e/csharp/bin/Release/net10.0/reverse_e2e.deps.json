@@ -1,0 +1,23 @@
+{
+  "runtimeTarget": {
+    "name": ".NETCoreApp,Version=v10.0",
+    "signature": ""
+  },
+  "compilationOptions": {},
+  "targets": {
+    ".NETCoreApp,Version=v10.0": {
+      "reverse_e2e/1.0.0": {
+        "runtime": {
+          "reverse_e2e.dll": {}
+        }
+      }
+    }
+  },
+  "libraries": {
+    "reverse_e2e/1.0.0": {
+      "type": "project",
+      "serviceable": false,
+      "sha512": ""
+    }
+  }
+}

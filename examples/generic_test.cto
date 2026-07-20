@@ -1,0 +1,17 @@
+module GenericTest
+
+import Stdlib.Core
+
+fn identity<T>(x: T): T = x
+
+fn first<T>(xs: List<T>): T? = List.first(xs)
+
+fn main(): Unit [io] = {
+    val n = identity(42)
+    val s = identity("hello")
+    println(intToText(n))
+    println(s)
+    val nums = [1, 2, 3]
+    val f = first(nums)
+    println(intToText(f ?? 0))
+}

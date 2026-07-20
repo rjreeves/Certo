@@ -1,0 +1,8 @@
+[package]
+name    = "certo-parser"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+certo-lexer = { path = "../lexer" }
+certo-ast   = { path = "../ast" }

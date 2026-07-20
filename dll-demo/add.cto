@@ -1,0 +1,4 @@
+module Add
+
+/// Adds two integers. Compiled into a shared library; exported to C as `certo_add`.
+pub fn add(a: Int, b: Int): Int = a + b

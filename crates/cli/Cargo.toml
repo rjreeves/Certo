@@ -1,0 +1,25 @@
+[package]
+name    = "certo"
+version = "1.0.49"
+edition = "2024"
+
+[[bin]]
+name = "certo"
+path = "src/main.rs"
+
+[dependencies]
+certo-ast         = { path = "../ast" }
+certo-hir         = { path = "../hir" }
+certo-fmt         = { path = "../fmt" }
+certo-testrunner  = { path = "../testrunner" }
+certo-parser      = { path = "../parser" }
+certo-migrate     = { path = "../migrate" }
+certo-codegen     = { path = "../codegen" }
+certo-stdlib      = { path = "../stdlib" }
+certo-diagnostics = { path = "../diagnostics" }
+certo-typeck      = { path = "../typeck" }
+certo-traits      = { path = "../traits" }
+certo-dbschema    = { path = "../dbschema" }
+tempfile          = "3"
+serde             = { version = "1", features = ["derive"] }
+serde_yaml        = "0.9"

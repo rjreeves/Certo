@@ -1,0 +1,19 @@
+[package]
+name        = "certo-testrunner"
+version     = "0.1.0"
+edition     = "2021"
+description = "Test runner for the Certo programming language"
+
+[[bin]]
+name = "certo-test"
+path = "src/main.rs"
+
+[dependencies]
+certo-ast         = { path = "../ast" }
+certo-parser      = { path = "../parser" }
+certo-hir         = { path = "../hir" }
+certo-mir         = { path = "../mir" }
+certo-codegen     = { path = "../codegen" }
+certo-stdlib      = { path = "../stdlib" }
+certo-diagnostics = { path = "../diagnostics" }
+tempfile          = "3"

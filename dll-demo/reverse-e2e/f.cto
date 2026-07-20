@@ -1,0 +1,6 @@
+module F
+type R = { t: Text, n: Int }
+fn main(): Unit = {
+    val out = R { t: "hi", n: 2 }
+    println(f"t: {out.t} n: {out.n}")
+}

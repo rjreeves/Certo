@@ -1,0 +1,8 @@
+module Min
+extern "C" {
+    fn rustReverse(s: Text): Text
+}
+fn main(): Unit = {
+    val r = unsafe { rustReverse("abcdef") }
+    println(r)
+}

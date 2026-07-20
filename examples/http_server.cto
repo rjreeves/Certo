@@ -1,0 +1,57 @@
+module http_server
+
+import Stdlib.Core
+import Stdlib.Http
+import Stdlib.Json
+
+// ---------------------------------------------------------------------------
+// http_server — minimal JSON API demonstrating Http.serve
+//
+// Usage:
+//   http_server [port]          (default: 8080)
+//
+// Routes:
+//   GET  /            → 200 "Hello from Certo!"
+//   GET  /health      → 200 {"status":"ok"}
+//   POST /echo        → 200 echoes request body as JSON
+//   *    anything else → 404
+// ---------------------------------------------------------------------------
+
+fn handler(req: HttpRequest): HttpResponse = {
+    val method = HttpRequest.method(req)
+    val path   = HttpRequest.path(req)
+
+    if path == "/" then
+        Http.ok("Hello from Certo!", "text/plain")
+
+    else if path == "/health" then
+        Http.ok("{\"status\":\"ok\"}", "application/json")
+
+    else if path == "/echo" then {
+        if method == "POST" then {
+            val body = HttpRequest.body(req)
+            val ct   = HttpRequest.header(req, "content-type")
+            val obj  = Json.object()
+            JsonValue.set(obj, "method", Json.string(method))
+            JsonValue.set(obj, "path",   Json.string(path))
+            JsonValue.set(obj, "body",   Json.string(body))
+            JsonValue.set(obj, "contentType", Json.string(ct))
+            Http.ok(Json.stringify(obj), "application/json")
+        } else
+            Http.badRequest("POST required for /echo")
+    }
+
+    else
+        Http.notFound(f"No route for {method} {path}")
+}
+
+fn main(): Unit [io] = {
+    val port = parseInt(arg(1) ?? "8080") ?? 8080
+    println(f"Listening on http://localhost:{intToText(port)}")
+    println("Routes:")
+    println("  GET  /        → plain text greeting")
+    println("  GET  /health  → JSON health check")
+    println("  POST /echo    → echoes body as JSON")
+    println("")
+    Http.serve(port, handler)
+}

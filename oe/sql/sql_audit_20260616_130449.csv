@@ -1,0 +1,3 @@
+﻿Order,RelativePath,FullPath,StartedAt,FinishedAt,DurationSeconds,ExitCode,Success,StandardOutput,StandardError
+"5","005_validators\order_submit.sql","C:\Users\rreev\OneDrive\Documents\GitHub\Certo\oe\sql\005_validators\order_submit.sql","2026-06-16T13:04:49.4499546+10:00","2026-06-16T13:04:49.5328451+10:00","0.083","2","False","","psql: error: connection to server at ""192.168.0.2"", port 5433 failed: FATAL:  database ""Oe"" does not exist
+"

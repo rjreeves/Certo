@@ -1,0 +1,13 @@
+module DbRun
+
+import Stdlib.Db
+import DataProvider
+import DataProviderDb
+
+fn main(): Unit = {
+    val json = queryDb(
+        "postgresql://postgres@localhost:5432/postgres",
+        "SELECT id, name, email FROM certo_demo_users ORDER BY id"
+    )
+    println(json)
+}

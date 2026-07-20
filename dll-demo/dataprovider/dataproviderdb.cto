@@ -1,0 +1,21 @@
+module DataProviderDb
+
+import Stdlib.Db
+import DataProvider
+
+// Real database-backed version. dbQuery returns List<List<Text?>> — exactly
+// the shape rowsToJson consumes — so the rows pass straight through, with
+// SQL NULLs becoming JSON null.
+//
+//   dbConnect(connStr): Int                       -- connection handle
+//   dbColumns(conn, sql): List<Text>              -- column names
+//   dbQuery(conn, sql, params): List<List<Text?>> -- rows of nullable cells
+
+/// Connect, run `sql`, and return the whole result set as a JSON array of objects.
+pub fn queryDb(connStr: Text, sql: Text): Text = {
+    val conn = dbConnect(connStr)
+    val cols = dbColumns(conn, sql)
+    val rows = dbQuery(conn, sql, [])
+    dbClose(conn)
+    rowsToJson(cols, rows)
+}

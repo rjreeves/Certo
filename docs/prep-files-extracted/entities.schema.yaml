@@ -1,0 +1,230 @@
+# =============================================================================
+# ENTITY DEFINITIONS SCHEMA
+# =============================================================================
+# Defines the domain entities that form the core of the system.
+# Entity definitions reference types and enums from prepared-items.yaml.
+#
+# From entity definitions, the generator produces:
+#   - Prisma schema (models, enums, relations)
+#   - Postgres tables, domains, foreign keys, indexes
+#   - TypeScript interfaces
+#   - GraphQL types (via PostGraphile or direct generation)
+#
+# FIELD TYPE RESOLUTION ORDER:
+#   1. Prepared item type id        e.g. type: email
+#   2. Prepared item enum id        e.g. type: order_status
+#   3. Primitive                    e.g. type: text | integer | boolean | uuid
+#                                            | decimal | timestamp | date | jsonb
+#   4. Reference to another entity  type: reference + entity: EntityName
+# =============================================================================
+
+version: "1.0"
+
+# -----------------------------------------------------------------------------
+# ENTITIES
+#
+# Schema:
+#   id:           string    REQUIRED unique identifier (PascalCase)
+#   description:  string    human readable description
+#   table:        string    optional postgres table name override (snake_case)
+#                           defaults to snake_case of id e.g. Order → order
+#   fields:       list      REQUIRED list of field definitions
+#   indexes:      list      optional additional indexes
+#   audit:        bool      if true, adds created_at, updated_at, created_by
+#   soft_delete:  bool      if true, adds deleted_at instead of hard deletes
+#
+# FIELD SCHEMA:
+#   name:         string    REQUIRED field name (camelCase)
+#   type:         string    REQUIRED type id, enum id, primitive, or "reference"
+#   entity:       string    target entity id (reference types only)
+#   required:     bool      not null constraint (default: true)
+#   unique:       bool      unique constraint (default: false)
+#   default:      any       default value
+#   primary_key:  bool      marks as primary key (default: false)
+#                           one auto-generated uuid pk added if none declared
+#   description:  string    human readable field description
+#
+# INDEX SCHEMA:
+#   fields:       list      field names included in index
+#   unique:       bool      whether index enforces uniqueness
+#   name:         string    optional index name override
+# -----------------------------------------------------------------------------
+entities:
+
+  # ---------------------------------------------------------------------------
+  - id: User
+    description: A registered user of the system
+    audit: true
+    soft_delete: true
+    fields:
+      - name: email
+        type: email                 # prepared type — generates domain + check
+        required: true
+        unique: true
+        description: User's login email address
+
+      - name: role
+        type: user_role             # prepared enum — generates postgres enum
+        required: true
+        default: MEMBER
+        description: Access role controlling permissions
+
+      - name: verified
+        type: boolean
+        required: true
+        default: false
+        description: Whether the user has verified their email address
+
+      - name: creditLimit
+        type: money                 # prepared type — decimal(10,2) gte 0
+        required: false
+        description: Maximum outstanding order total permitted
+
+      - name: paymentMethod
+        type: payment_method        # prepared enum
+        required: false
+        description: Default payment method for orders
+
+    indexes:
+      - fields: [email]
+        unique: true
+
+  # ---------------------------------------------------------------------------
+  - id: Product
+    description: A product available for purchase
+    audit: true
+    soft_delete: true
+    fields:
+      - name: name
+        type: short_text
+        required: true
+        description: Display name of the product
+
+      - name: description
+        type: long_text
+        required: false
+        description: Full product description
+
+      - name: price
+        type: money
+        required: true
+        description: Base unit price
+
+      - name: margin
+        type: money
+        required: true
+        description: Profit margin per unit — used in discount validation
+
+      - name: inventoryCount
+        type: non_negative_integer
+        required: true
+        default: 0
+        description: Current units available
+
+    indexes:
+      - fields: [name]
+        unique: false
+
+  # ---------------------------------------------------------------------------
+  - id: Order
+    description: A purchase order placed by a user
+    audit: true
+    soft_delete: false
+    fields:
+      - name: status
+        type: order_status          # prepared enum with transitions
+        required: true
+        default: DRAFT
+        description: Current lifecycle state of the order
+
+      - name: total
+        type: money
+        required: true
+        description: Total monetary value of the order
+
+      - name: user
+        type: reference
+        entity: User                # generates foreign key + relation
+        required: true
+        description: The user who placed the order
+
+    indexes:
+      - fields: [userId, status]
+        unique: false
+
+  # ---------------------------------------------------------------------------
+  - id: OrderLine
+    description: A single product line within an order
+    audit: false
+    soft_delete: false
+    fields:
+      - name: order
+        type: reference
+        entity: Order
+        required: true
+        description: The parent order
+
+      - name: product
+        type: reference
+        entity: Product
+        required: true
+        description: The product being ordered
+
+      - name: quantity
+        type: positive_integer
+        required: true
+        description: Number of units ordered
+
+      - name: unitPrice
+        type: money
+        required: true
+        description: Price per unit at time of order
+
+      - name: discount
+        type: money
+        required: false
+        default: 0
+        description: Discount applied to this line
+
+    indexes:
+      - fields: [orderId, productId]
+        unique: true                # one line per product per order
+
+  # ---------------------------------------------------------------------------
+  - id: Invoice
+    description: A financial invoice issued against an order
+    audit: true
+    soft_delete: false
+    fields:
+      - name: status
+        type: invoice_status        # prepared enum with transitions
+        required: true
+        default: DRAFT
+        description: Current lifecycle state of the invoice
+
+      - name: order
+        type: reference
+        entity: Order
+        required: true
+        description: The order this invoice covers
+
+      - name: total
+        type: money
+        required: true
+        description: Total amount invoiced
+
+      - name: dueDate
+        type: date
+        required: true
+        description: Payment due date
+
+      - name: paidAt
+        type: timestamp
+        required: false
+        description: When payment was received — null if unpaid
+
+    indexes:
+      - fields: [orderId]
+        unique: false
+      - fields: [status, dueDate]
+        unique: false

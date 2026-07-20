@@ -1,0 +1,186 @@
+rules:
+  # -------------------------------------------------------------------------
+  # Order.submit
+  # -------------------------------------------------------------------------
+
+  - id: customer_must_be_active_to_order
+    description: Orders can only be placed for customers with ACTIVE status
+    entity: Order
+    trigger: submit
+    condition:
+      field: status
+      operator: eq
+      value: ACTIVE
+    error:
+      code: CUSTOMER_NOT_ACTIVE
+      message: Orders cannot be placed for customers who are not active
+
+  - id: order_must_have_lines_to_submit
+    description: An order must have at least one line before it can be submitted
+    entity: Order
+    trigger: submit
+    condition:
+      field: lineCount
+      operator: gt
+      value: 0
+    error:
+      code: ORDER_HAS_NO_LINES
+      message: An order must have at least one product line before submission
+
+  - id: order_must_have_shipping_address
+    description: A physical order must have a shipping address before submission
+    entity: Order
+    trigger: submit
+    condition:
+      any:
+        - field: shippingAddressId
+          operator: exists
+        - field: linesAllDigital
+          operator: eq
+          value: true
+    error:
+      code: NO_SHIPPING_ADDRESS
+      message: A shipping address is required before submitting this order
+
+  - id: order_must_have_billing_address
+    description: An order must have a billing address before submission
+    entity: Order
+    trigger: submit
+    condition:
+      field: billingAddressId
+      operator: exists
+    error:
+      code: NO_BILLING_ADDRESS
+      message: A billing address is required before submitting this order
+
+  - id: credit_limit_override_requires_admin
+    description: Submitting an order that exceeds the credit limit requires admin approval
+    entity: Order
+    trigger: submit
+    overrides: customer_credit_limit_not_exceeded
+    condition:
+      constraint: user_is_admin
+    error:
+      code: CREDIT_LIMIT_OVERRIDE_NOT_ADMIN
+      message: Only admins can override the credit limit
+
+  - id: customer_credit_limit_not_exceeded
+    description: A submitted order must not cause the customer's outstanding balance to exceed their credit limit
+    entity: Order
+    trigger: submit
+    depends_on:
+      - customer_must_be_active_to_order
+    condition:
+      field: total
+      operator: lte
+      value: availableCredit
+    error:
+      code: CREDIT_LIMIT_EXCEEDED
+      message: This order would exceed the customer's available credit limit
+
+  # -------------------------------------------------------------------------
+  # Invoice.void
+  # -------------------------------------------------------------------------
+
+  - id: invoice_void_admin_override
+    description: Admin users can void invoices outside the standard void window
+    entity: Invoice
+    trigger: void
+    overrides: invoice_void_within_window
+    condition:
+      constraint: user_is_admin
+    error:
+      code: INVOICE_VOID_OVERRIDE_NOT_ADMIN
+      message: Only admins can void invoices outside the void window
+
+  - id: invoice_void_within_window
+    description: An invoice can only be voided within the standard void window
+    entity: Invoice
+    trigger: void
+    condition:
+      all:
+        - temporal: invoice_void_window
+          field: createdAt
+          operator: age_lt
+        - constraint: invoice_is_voidable
+    error:
+      code: INVOICE_VOID_WINDOW_EXPIRED
+      message: Invoices cannot be voided after 30 days or once paid
+
+  # -------------------------------------------------------------------------
+  # Payment.create
+  # -------------------------------------------------------------------------
+
+  - id: payment_requires_accounts_role
+    description: Only accounts users can record payments
+    entity: Payment
+    trigger: create
+    condition:
+      constraint: user_is_accounts
+    error:
+      code: NOT_AUTHORISED_PAYMENT
+      message: Only accounts users can record payments
+
+  - id: payment_requires_issued_invoice
+    description: Payments can only be recorded against issued or overdue invoices
+    entity: Payment
+    trigger: create
+    condition:
+      constraint: invoice_is_payable
+    error:
+      code: INVOICE_NOT_PAYABLE
+      message: Payments can only be recorded against issued or overdue invoices
+
+  - id: payment_cannot_exceed_outstanding_balance
+    description: A payment cannot exceed the outstanding invoice balance
+    entity: Payment
+    trigger: create
+    condition:
+      field: amount
+      operator: lte
+      value: amountOutstanding
+    error:
+      code: PAYMENT_EXCEEDS_BALANCE
+      message: Payment amount cannot exceed the outstanding invoice balance
+
+  - id: payment_currency_must_match_invoice
+    description: Payment currency must match the invoice currency
+    entity: Payment
+    trigger: create
+    condition:
+      field: currency
+      operator: eq
+      value: currency
+    error:
+      code: PAYMENT_CURRENCY_MISMATCH
+      message: Payment currency must match the customer's trading currency
+
+  # -------------------------------------------------------------------------
+  # OrderLine.apply_discount
+  # -------------------------------------------------------------------------
+
+  - id: discount_cannot_make_line_negative
+    description: A discount cannot make an order line total negative
+    entity: OrderLine
+    trigger: apply_discount
+    condition:
+      field: discountAmount
+      operator: lte
+      value: unitPrice
+    error:
+      code: DISCOUNT_EXCEEDS_LINE_VALUE
+      message: Discount cannot exceed the line value
+
+  - id: discount_percent_within_sales_limit
+    description: Sales users cannot apply a line discount exceeding 15%
+    entity: OrderLine
+    trigger: apply_discount
+    condition:
+      any:
+        - constraint: user_is_admin
+        - field: discountPercent
+          operator: lte
+          value: 15
+    error:
+      code: DISCOUNT_EXCEEDS_SALES_LIMIT
+      message: Sales users cannot apply discounts above 15%. Admin approval required.

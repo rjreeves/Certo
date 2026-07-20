@@ -1,0 +1,15 @@
+module StrUtil
+
+// The Rust DLL's reverse function, declared for FFI.
+extern "C" {
+    fn rustReverse(s: Text): Text
+}
+
+// Returned to callers: the reversed string plus its length.
+type Reversed = { reversed: Text, length: Int }
+
+/// Reverse `s` by calling into the Rust DLL, and report the length.
+pub fn reverseString(s: Text): Reversed = {
+    val r = unsafe { rustReverse(s) }
+    Reversed { reversed: r, length: Text.len(r) }
+}

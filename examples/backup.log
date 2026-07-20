@@ -1,0 +1,24 @@
+Starting backup for 'fireworks' on 'NUC2' at 26-07-09-03-17
+FAILED [postgres up-check]: not connectable: authentication method 10 not supported
+
+Dropbox token unavailable; last-error.json not uploaded.
+Starting backup for 'fireworks' on 'NUC2' at 26-07-09-03-17
+FAILED [postgres up-check]: not connectable: authentication method 10 not supported
+
+Dropbox token unavailable; last-error.json not uploaded.
+Starting backup for 'fireworks' on 'NUC2' at 26-07-09-03-24
+FAILED [postgres up-check]: not connectable: authentication method 10 not supported
+
+Dropbox token unavailable; last-error.json not uploaded.
+Starting backup for 'fireworks' on 'NUC2' at 26-07-09-03-35
+Creating PostgreSQL custom-format backup...
+Verifying dump structure with pg_restore --list...
+Uploading 47108995 bytes to Dropbox /Shared/backups/latest/fireworks.backup.DEV.dump
+Verified content hash for /Shared/backups/latest/fireworks.backup.DEV.dump
+Uploading 47108995 bytes to Dropbox /Shared/backups/NUC2/fireworks.backup.26-07-09-03-35.dump
+Verified content hash for /Shared/backups/NUC2/fireworks.backup.26-07-09-03-35.dump
+Uploaded /Shared/backups/latest/last-run.json -> 200
+Keeping newest 2 of 3 backups in /Shared/backups/NUC2
+Deleted old Dropbox backup /shared/backups/nuc2/fireworks.backup.26-07-08-17-06.dump
+Backup complete.
+Starting backup for 'fireworks' on 'NUC2' at 26-07-09-03-37

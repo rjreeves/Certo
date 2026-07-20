@@ -1,0 +1,173 @@
+module FireworksUI
+
+// ---------------------------------------------------------------------------
+// Fireworks CRUD UI — view and form declarations for certo-ui
+// Compile with: certo-ui fireworks_ui.cto -o out/fireworks
+//
+// Relationships:
+//   Customer (cust_no) --< Subscriber (sub_no, FK: cust_no)
+//                             --< Subscription (FK: cust_no + sub_no)
+//   Product (product_cde)  <-- Subscription (product_code FK)
+// ---------------------------------------------------------------------------
+
+// ── Customer ──────────────────────────────────────────────────────────────────
+
+view CustomerList {
+    pk = custNo
+    layout = VStack(children: [
+        Heading("Customers"),
+        HStack(children: [
+            Button("New Customer", "/create-customer"),
+            Input("search", "Search"),
+        ]),
+        For(customers, customer),
+    ])
+}
+
+form CreateCustomer -> Customer {
+    custAcctname: Text,
+    custNo: Text,
+    custType: Text,
+    custStatus: Text,
+    custName1: Text,
+    custName2: Text,
+    custAddress1: Text,
+    custAddress2: Text,
+    custTown: Text,
+    custPostcode: Text,
+    custContact: Text,
+    custPhone: Text,
+    custEmail: Text,
+    custBillCycle: Text,
+    custNextBill: Text,
+    custCreditCde: Text,
+    custLimit: Text,
+}
+
+form EditCustomer -> Customer {
+    pk: custNo,
+    custType: Text,
+    custStatus: Text,
+    custName1: Text,
+    custName2: Text,
+    custAddress1: Text,
+    custAddress2: Text,
+    custTown: Text,
+    custPostcode: Text,
+    custContact: Text,
+    custPhone: Text,
+    custEmail: Text,
+    custBillCycle: Text,
+    custNextBill: Text,
+    custCreditCde: Text,
+    custLimit: Text,
+}
+
+// ── Subscriber ────────────────────────────────────────────────────────────────
+
+view SubscriberList {
+    pk     = subNo
+    filter = custNo
+    layout = VStack(children: [
+        Heading("Subscribers"),
+        HStack(children: [
+            Button("New Subscriber", "/create-subscriber"),
+            Input("search", "Search"),
+        ]),
+        For(subscribers, subscriber),
+    ])
+}
+
+form CreateSubscriber -> Subscriber {
+    custNo: Text,
+    subNo: Text,
+    subsName: Text,
+    subsName1: Text,
+    subsName2: Text,
+    subsAddress1: Text,
+    subsAddress2: Text,
+    subsTown: Text,
+    subsPostcode: Text,
+    subsEmail: Text,
+    subActive: Text,
+    subsStatus: Text,
+}
+
+form EditSubscriber -> Subscriber {
+    pk: subNo,
+    subsName: Text,
+    subsName1: Text,
+    subsName2: Text,
+    subsAddress1: Text,
+    subsAddress2: Text,
+    subsTown: Text,
+    subsPostcode: Text,
+    subsEmail: Text,
+    subActive: Text,
+    subsStatus: Text,
+}
+
+// ── Subscription ──────────────────────────────────────────────────────────────
+
+view SubscriptionList {
+    filter = subNo
+    layout = VStack(children: [
+        Heading("Subscriptions"),
+        HStack(children: [
+            Button("New Subscription", "/create-subscription"),
+            Input("search", "Search"),
+        ]),
+        For(subscriptions, subscription),
+    ])
+}
+
+form CreateSubscription -> Subscription {
+    custNo: Text,
+    subNo: Text,
+    subTyper: Text,
+    productCode: Text,
+    subCopies: Text,
+    invoiceFreq: Text,
+    invoiceMnth: Text,
+    labelsCount: Text,
+    localCode: Text,
+    sourceMnth: Text,
+}
+
+// ── Product ───────────────────────────────────────────────────────────────────
+
+view ProductList {
+    pk = productCde
+    layout = VStack(children: [
+        Heading("Products"),
+        HStack(children: [
+            Button("New Product", "/create-product"),
+            Input("search", "Search"),
+        ]),
+        For(products, product),
+    ])
+}
+
+form CreateProduct -> Product {
+    productCde: Text,
+    productDesc1: Text,
+    productDesc2: Text,
+    productPrice: Text,
+    productGst: Text,
+    productMonthlyWrapper: Text,
+    productLabelCountDefault: Text,
+    invoiceCycle: Text,
+    pdfOnly: Text,
+}
+
+form EditProduct -> Product {
+    pk: productCde,
+    productDesc1: Text,
+    productDesc2: Text,
+    productPrice: Text,
+    productGst: Text,
+    productMonthlyWrapper: Text,
+    productLabelCountDefault: Text,
+    invoiceCycle: Text,
+    pdfOnly: Text,
+}
