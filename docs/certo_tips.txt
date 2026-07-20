@@ -1,0 +1,32 @@
+
+
+
+
+Process.lines is the key addition — it calls your handler for each line 
+as the process produces it, so long-running commands (tailing logs, 
+running psql queries via CLI, etc.) don't buffer everything in memory first.
+
+
+import Stdlib.Process
+
+// Original — run and collect all output
+val r = Process.exec("git", ["log", "--oneline", "-5"])
+println(ProcessResult.stdout(r))
+
+// New — stream line by line (constant memory, output appears as it arrives)
+Process.lines("git", ["log", "--oneline"], fn(line) => {
+    println(line)
+})
+
+// New — pipe text into stdin, get stdout back
+val r2 = Process.execWithInput("sort", [], "banana\napple\ncherry")
+println(ProcessResult.stdout(r2))
+
+===============================================================================
+
+Major.Minor — you control in Cargo.toml
+Patch — auto-increments on every release build
+Date — today's date (yymmdd)
+Build — increments on every build, release or debug
+
+=============================================================================

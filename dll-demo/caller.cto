@@ -1,0 +1,8 @@
+module Caller
+
+import Add
+
+fn main(): Unit = {
+    val result = add(2, 3)
+    println(f"add(2, 3) = {result}")
+}

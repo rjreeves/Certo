@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>EditSubscriber</title>
+  <script src="https://unpkg.com/htmx.org@2" defer></script>
+  <style>
+    .field { display: flex; flex-direction: column; gap: 0.25rem; margin-bottom: 1rem; }
+    label { font-weight: bold; }
+    input, textarea, select { padding: 0.4rem; border: 1px solid #ccc; border-radius: 4px; }
+    .cto-form { max-width: 480px; padding: 1rem; }
+  </style>
+</head>
+<body>
+<!-- TODO: on_submit handler — set hx-post to your endpoint or use a server route -->
+<form id="edit-subscriber-form" class="certo-form"
+      hx-post="/subscriber"
+      hx-swap="outerHTML">
+  <div class="field">
+    <label for="subsName">subsName</label>
+    <input id="subsName" name="subsName" type="text" required>
+  </div>
+  <div class="field">
+    <label for="subsName1">subsName1</label>
+    <input id="subsName1" name="subsName1" type="text" required>
+  </div>
+  <div class="field">
+    <label for="subsName2">subsName2</label>
+    <input id="subsName2" name="subsName2" type="text" required>
+  </div>
+  <div class="field">
+    <label for="subsAddress1">subsAddress1</label>
+    <input id="subsAddress1" name="subsAddress1" type="text" required>
+  </div>
+  <div class="field">
+    <label for="subsAddress2">subsAddress2</label>
+    <input id="subsAddress2" name="subsAddress2" type="text" required>
+  </div>
+  <div class="field">
+    <label for="subsTown">subsTown</label>
+    <input id="subsTown" name="subsTown" type="text" required>
+  </div>
+  <div class="field">
+    <label for="subsPostcode">subsPostcode</label>
+    <input id="subsPostcode" name="subsPostcode" type="text" required>
+  </div>
+  <div class="field">
+    <label for="subsEmail">subsEmail</label>
+    <input id="subsEmail" name="subsEmail" type="text" required>
+  </div>
+  <div class="field">
+    <label for="subActive">subActive</label>
+    <input id="subActive" name="subActive" type="text" required>
+  </div>
+  <div class="field">
+    <label for="subsStatus">subsStatus</label>
+    <input id="subsStatus" name="subsStatus" type="text" required>
+  </div>
+  <button type="submit">Submit</button>
+</form>
+</body>
+</html>

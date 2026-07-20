@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>CreateSubscription</title>
+  <script src="https://unpkg.com/htmx.org@2" defer></script>
+  <style>
+    .field { display: flex; flex-direction: column; gap: 0.25rem; margin-bottom: 1rem; }
+    label { font-weight: bold; }
+    input, textarea, select { padding: 0.4rem; border: 1px solid #ccc; border-radius: 4px; }
+    .cto-form { max-width: 480px; padding: 1rem; }
+  </style>
+</head>
+<body>
+<!-- TODO: on_submit handler — set hx-post to your endpoint or use a server route -->
+<form id="create-subscription-form" class="certo-form"
+      hx-post="/subscription"
+      hx-swap="outerHTML">
+  <div class="field">
+    <label for="custNo">custNo</label>
+    <input id="custNo" name="custNo" type="text" required>
+  </div>
+  <div class="field">
+    <label for="subNo">subNo</label>
+    <input id="subNo" name="subNo" type="text" required>
+  </div>
+  <div class="field">
+    <label for="subTyper">subTyper</label>
+    <input id="subTyper" name="subTyper" type="text" required>
+  </div>
+  <div class="field">
+    <label for="productCode">productCode</label>
+    <input id="productCode" name="productCode" type="text" required>
+  </div>
+  <div class="field">
+    <label for="subCopies">subCopies</label>
+    <input id="subCopies" name="subCopies" type="text" required>
+  </div>
+  <div class="field">
+    <label for="invoiceFreq">invoiceFreq</label>
+    <input id="invoiceFreq" name="invoiceFreq" type="text" required>
+  </div>
+  <div class="field">
+    <label for="invoiceMnth">invoiceMnth</label>
+    <input id="invoiceMnth" name="invoiceMnth" type="text" required>
+  </div>
+  <div class="field">
+    <label for="labelsCount">labelsCount</label>
+    <input id="labelsCount" name="labelsCount" type="text" required>
+  </div>
+  <div class="field">
+    <label for="localCode">localCode</label>
+    <input id="localCode" name="localCode" type="text" required>
+  </div>
+  <div class="field">
+    <label for="sourceMnth">sourceMnth</label>
+    <input id="sourceMnth" name="sourceMnth" type="text" required>
+  </div>
+  <button type="submit">Submit</button>
+</form>
+</body>
+</html>

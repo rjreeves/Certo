@@ -1,0 +1,7 @@
+[package]
+name    = "certo-stdlib"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+certo-typeck = { path = "../typeck" }

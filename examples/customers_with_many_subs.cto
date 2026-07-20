@@ -1,0 +1,89 @@
+module CustomersWithManySubs
+
+// HTTP API — customers with more than N subscribers.
+//
+// Usage:
+//   certo run examples\customers_with_many_subs.cto [port]   (default: 8080)
+//
+// Routes:
+//   GET /customers/high-subscriber-count           → threshold defaults to 10
+//   GET /customers/high-subscriber-count?min=<N>   → override threshold
+//
+// Edit CONNSTR below to match your database.
+
+import Stdlib.Core
+import Stdlib.Db
+import Stdlib.Http
+
+fn queryCustomers(minSubs: Text): List<List<Text?>> [io] = {
+    val conn = dbConnect("host=192.168.0.2 port=5433 dbname=fireworks user=fireworks password=***REMOVED***")
+    if conn == 0 then {
+        eprintln(f"db connect failed: {dbError(0)}")
+        []
+    } else {
+        val sql =
+            "SELECT c.cust_no, c.cust_acctname, c.cust_name1, COUNT(s.sub_no) AS sub_count " ++
+            "FROM fireworks.customer c " ++
+            "JOIN fireworks.subscriber s ON s.cust_no = c.cust_no " ++
+            "GROUP BY c.cust_no, c.cust_acctname, c.cust_name1 " ++
+            "HAVING COUNT(s.sub_no) > $1 " ++
+            "ORDER BY sub_count DESC, c.cust_acctname"
+        val rows = dbQuery(conn, sql, [minSubs])
+        dbClose(conn)
+        rows
+    }
+}
+
+fn parseMinParam(query: Text): Text =
+    if Text.startsWith(query, "min=") then
+        Text.slice(query, 4, Text.len(query))
+    else
+        "10"
+
+fn handler(req: HttpRequest): HttpResponse [io] = {
+    val method = HttpRequest.method(req)
+    val path   = HttpRequest.path(req)
+
+    if path == "/customers/high-subscriber-count" and method == "GET" then {
+        val minSubs = parseMinParam(HttpRequest.query(req))
+        val rows    = queryCustomers(minSubs)
+        val count   = intToText(List.len(rows))
+        var items   = ""
+        for row in rows {
+            val custNo   = List.getOrPanic(row, 0) ?? ""
+            val acctname = List.getOrPanic(row, 1) ?? ""
+            val name1    = List.getOrPanic(row, 2) ?? ""
+            val subCount = List.getOrPanic(row, 3) ?? ""
+            val entry =
+                "{\"cust_no\":" ++ custNo ++
+                ",\"cust_acctname\":\"" ++ acctname ++
+                "\",\"cust_name1\":\"" ++ name1 ++
+                "\",\"sub_count\":" ++ subCount ++ "}"
+            if items == "" then {
+                items = entry
+            } else {
+                items = items ++ "," ++ entry
+            }
+        }
+        val body =
+            "{\"min_subscribers\":" ++ minSubs ++
+            ",\"count\":" ++ count ++
+            ",\"customers\":[" ++ items ++ "]}"
+        Http.ok(body, "application/json")
+    }
+
+    else if path == "/health" and method == "GET" then
+        Http.ok("{\"status\":\"ok\"}", "application/json")
+
+    else
+        Http.notFound(f"No route for {method} {path}")
+}
+
+fn main(): Unit [io] = {
+    println("Listening on http://localhost:9191")
+    println("Routes:")
+    println("  GET /customers/high-subscriber-count          (min defaults to 10)")
+    println("  GET /customers/high-subscriber-count?min=<N>")
+    println("  GET /health")
+    Http.serve(9191, handler)
+}

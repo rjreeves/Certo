@@ -1,0 +1,124 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Certo",
+  "scopeName": "source.cto",
+  "patterns": [
+    { "include": "#comments" },
+    { "include": "#strings" },
+    { "include": "#keywords" },
+    { "include": "#types" },
+    { "include": "#numbers" },
+    { "include": "#operators" },
+    { "include": "#functions" },
+    { "include": "#identifiers" }
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [
+        {
+          "name": "comment.line.documentation.cto",
+          "match": "///.*$"
+        },
+        {
+          "name": "comment.line.double-slash.cto",
+          "match": "//.*$"
+        },
+        {
+          "name": "comment.block.cto",
+          "begin": "/\\*",
+          "end": "\\*/"
+        }
+      ]
+    },
+    "strings": {
+      "patterns": [
+        {
+          "name": "string.quoted.double.interpolated.cto",
+          "begin": "f\"",
+          "end": "\"",
+          "patterns": [
+            {
+              "name": "punctuation.section.embedded.cto",
+              "begin": "\\{",
+              "end": "\\}",
+              "patterns": [{ "include": "$self" }]
+            },
+            { "name": "constant.character.escape.cto", "match": "\\\\." }
+          ]
+        },
+        {
+          "name": "string.quoted.double.cto",
+          "begin": "\"",
+          "end": "\"",
+          "patterns": [
+            { "name": "constant.character.escape.cto", "match": "\\\\." }
+          ]
+        }
+      ]
+    },
+    "keywords": {
+      "patterns": [
+        {
+          "name": "keyword.control.cto",
+          "match": "\\b(if|then|else|match|for|in|while|return|guard|defer|require|parallel|transaction|unsafe|async|await)\\b"
+        },
+        {
+          "name": "keyword.declaration.cto",
+          "match": "\\b(fn|val|var|type|module|import|pub|extern|migration|up|down|test|bench)\\b"
+        },
+        {
+          "name": "keyword.operator.cto",
+          "match": "\\b(and|or|not|true|false|None|Some|Ok|Err)\\b"
+        },
+        {
+          "name": "constant.language.cto",
+          "match": "\\b(true|false|None|Unit)\\b"
+        }
+      ]
+    },
+    "types": {
+      "patterns": [
+        {
+          "name": "entity.name.type.cto",
+          "match": "\\b(Int|Float|Decimal|Bool|Text|Unit|UUID|List|Map|Option|Result|DateTime|Date|Money|Decimal)\\b"
+        }
+      ]
+    },
+    "numbers": {
+      "patterns": [
+        {
+          "name": "constant.numeric.decimal.cto",
+          "match": "\\b[0-9]+\\.[0-9]+([eE][+-]?[0-9]+)?[mM]?\\b"
+        },
+        {
+          "name": "constant.numeric.integer.cto",
+          "match": "\\b[0-9]+\\b"
+        }
+      ]
+    },
+    "operators": {
+      "patterns": [
+        {
+          "name": "keyword.operator.cto",
+          "match": "(\\+\\+|\\?\\?|=>|->|\\|>|::|==|!=|<=|>=|<|>|&&|\\|\\||\\+|-|\\*|/|%|=|:)"
+        }
+      ]
+    },
+    "functions": {
+      "patterns": [
+        {
+          "name": "entity.name.function.cto",
+          "match": "\\b([a-z_][a-zA-Z0-9_]*)(?=\\s*\\()"
+        }
+      ]
+    },
+    "identifiers": {
+      "patterns": [
+        {
+          "name": "variable.other.cto",
+          "match": "\\b[a-z_][a-zA-Z0-9_]*\\b"
+        }
+      ]
+    }
+  }
+}

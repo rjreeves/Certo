@@ -1,0 +1,56 @@
+module DataProvider
+
+// ── Rowset → JSON serialization ────────────────────────────────────────
+// Cells are Text? (nullable): SQL NULL -> None -> JSON null, otherwise a
+// quoted string. Only `Text` crosses the FFI boundary — the robust,
+// language-agnostic data-provider interface. We serialize by hand because
+// the Json stdlib has no object/array builders.
+
+/// JSON-escape backslash and double-quote (enough for SQL text/identifiers).
+fn jsonEscape(s: Text): Text = Text.replace(Text.replace(s, "\\", "\\\\"), "\"", "\\\"")
+
+/// A quoted, escaped JSON string literal.
+fn jsonStr(s: Text): Text = "\"" ++ jsonEscape(s) ++ "\""
+
+/// A cell: `null` for SQL NULL (None), otherwise a quoted string.
+fn cellToJson(cell: Text?): Text = match cell {
+    Some(v) => jsonStr(v)
+    None    => "null"
+}
+
+/// `"col":<value>` pairs for one row, comma-separated.
+fn rowFields(cols: List<Text>, cells: List<Text?>, i: Int): Text =
+    if i >= List.len(cols) then ""
+    else {
+        val sep  = if i == 0 then "" else ","
+        val pair = jsonStr(List.getOrPanic(cols, i)) ++ ":" ++ cellToJson(List.getOrPanic(cells, i))
+        sep ++ pair ++ rowFields(cols, cells, i + 1)
+    }
+
+/// One row as a JSON object.
+fn rowObject(cols: List<Text>, cells: List<Text?>): Text = "{" ++ rowFields(cols, cells, 0) ++ "}"
+
+/// All rows, comma-separated.
+fn allRows(cols: List<Text>, rows: List<List<Text?>>, i: Int): Text =
+    if i >= List.len(rows) then ""
+    else {
+        val sep = if i == 0 then "" else ","
+        sep ++ rowObject(cols, List.getOrPanic(rows, i)) ++ allRows(cols, rows, i + 1)
+    }
+
+/// Serialize a result set (column names + rows of nullable cells) to a JSON array.
+pub fn rowsToJson(cols: List<Text>, rows: List<List<Text?>>): Text =
+    "[" ++ allRows(cols, rows, 0) ++ "]"
+
+// ── Demo entry point: a mocked result set ──────────────────────────────
+// Stands in for a DB query so the JSON path is testable without a database.
+// Bob's email is None to exercise JSON null.
+pub fn queryJson(): Text = {
+    val cols = ["id", "name", "email"]
+    val rows = [
+        [Some("1"), Some("alice"), Some("alice@example.com")],
+        [Some("2"), Some("bob"),   None],
+        [Some("3"), Some("dave \"the rock\""), Some("dave@example.com")]
+    ]
+    rowsToJson(cols, rows)
+}

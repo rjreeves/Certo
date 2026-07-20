@@ -1,0 +1,30 @@
+module runps1
+
+import Stdlib.Core
+
+// Usage: runps1 <path> <script-name>
+//   path        directory containing the .ps1 file
+//   script-name file name without the .ps1 extension
+//
+// Example:
+//   runps1 C:\scripts deploy
+//   → runs: powershell.exe -ExecutionPolicy Bypass -File "C:\scripts\deploy.ps1"
+
+fn main(): Unit [io] = {
+    val path = arg(1) ?? ""
+    val name = arg(2) ?? ""
+
+    if Text.eq(path, "") or Text.eq(name, "") then {
+        eprintln("Usage: runps1 <path> <script-name>")
+        eprintln("  path        directory containing the .ps1 file")
+        eprintln("  script-name file name without the .ps1 extension")
+    } else {
+        println(f"Running: {path}\{name}.ps1")
+        val code = runPs1(path, name)
+        if code == 0 then {
+            println("Script completed successfully.")
+        } else {
+            eprintln(f"Script exited with code {intToText(code)}.")
+        }
+    }
+}

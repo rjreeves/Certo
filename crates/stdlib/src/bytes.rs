@@ -1,0 +1,122 @@
+pub const BYTES_C: &str = r#"
+/* ================================================================
+   Stdlib.Bytes — length-carrying, immutable binary buffers.
+   Represented as an opaque handle (pointer-sized, like HttpResponse),
+   so it rides through Option/List/tuple slots without corruption.
+   ================================================================ */
+
+#include <stdlib.h>
+#include <string.h>
+#include <stdint.h>
+#include <stdio.h>
+
+typedef struct { int64_t len; uint8_t* data; } CertoBytes;
+
+/* Allocate an (uninitialised) buffer of `len` bytes. */
+static CertoBytes* certo_bytes_alloc(int64_t len) {
+    CertoBytes* b = (CertoBytes*)malloc(sizeof(CertoBytes));
+    if (!b) certo_panic("out of memory");
+    b->len  = len < 0 ? 0 : len;
+    b->data = (uint8_t*)malloc((size_t)b->len + 1); /* +1 keeps data non-NULL for len 0 */
+    if (!b->data) certo_panic("out of memory");
+    b->data[b->len] = 0;
+    return b;
+}
+
+int64_t certo_bytes_length(CertoBytes* b) { return b ? b->len : 0; }
+
+CertoBytes* certo_bytes_empty(void) { return certo_bytes_alloc(0); }
+
+/* Copy of bytes [start, end); indices are clamped to [0, len]. */
+CertoBytes* certo_bytes_slice(CertoBytes* b, int64_t start, int64_t end) {
+    int64_t len = b ? b->len : 0;
+    if (start < 0)   start = 0;
+    if (end > len)   end   = len;
+    if (end < start) end   = start;
+    int64_t n = end - start;
+    CertoBytes* out = certo_bytes_alloc(n);
+    if (n > 0 && b) memcpy(out->data, b->data + start, (size_t)n);
+    return out;
+}
+
+CertoBytes* certo_bytes_concat(CertoBytes* a, CertoBytes* b) {
+    int64_t la = a ? a->len : 0;
+    int64_t lb = b ? b->len : 0;
+    CertoBytes* out = certo_bytes_alloc(la + lb);
+    if (la > 0 && a) memcpy(out->data,      a->data, (size_t)la);
+    if (lb > 0 && b) memcpy(out->data + la, b->data, (size_t)lb);
+    return out;
+}
+
+/* Bytes -> lowercase hex text (2 chars per byte). */
+certo_text_t certo_bytes_to_hex(CertoBytes* b) {
+    int64_t len = b ? b->len : 0;
+    char* out = (char*)malloc((size_t)len * 2 + 1);
+    if (!out) certo_panic("out of memory");
+    static const char* hex = "0123456789abcdef";
+    for (int64_t i = 0; i < len; i++) {
+        out[i*2]   = hex[(b->data[i] >> 4) & 0xF];
+        out[i*2+1] = hex[b->data[i] & 0xF];
+    }
+    out[len*2] = 0;
+    return out;
+}
+
+/* Text -> Bytes (copies up to the NUL terminator). */
+CertoBytes* certo_bytes_from_text(certo_text_t s) {
+    size_t n = s ? strlen(s) : 0;
+    CertoBytes* out = certo_bytes_alloc((int64_t)n);
+    if (n > 0) memcpy(out->data, s, n);
+    return out;
+}
+
+/* Read an entire file as raw bytes. Returns Option<Bytes>. */
+void* certo_read_file_bytes(certo_text_t path) {
+    if (!path) return NULL;
+    FILE* f = fopen(path, "rb");
+    if (!f) return NULL;
+    fseek(f, 0, SEEK_END);
+    long size = ftell(f);
+    if (size < 0) { fclose(f); return NULL; }
+    fseek(f, 0, SEEK_SET);
+    CertoBytes* b = certo_bytes_alloc((int64_t)size);
+    size_t got = fread(b->data, 1, (size_t)size, f);
+    fclose(f);
+    b->len = (int64_t)got; /* trust bytes actually read */
+    return __certo_opt_box((int64_t)b); /* Some(bytes) */
+}
+
+/* Write raw bytes to a file (truncating). Returns true on success. */
+bool certo_write_file_bytes(certo_text_t path, CertoBytes* b) {
+    if (!path || !b) return false;
+    FILE* f = fopen(path, "wb");
+    if (!f) return false;
+    size_t ok = fwrite(b->data, 1, (size_t)b->len, f);
+    fclose(f);
+    return ok == (size_t)b->len;
+}
+"#;
+
+pub const BYTES_CERTO: &str = r#"
+module Stdlib.Bytes
+
+// An immutable, length-carrying binary buffer.
+
+/// Number of bytes.
+fn Bytes.length(b: Bytes): Int
+
+/// Empty buffer (length 0).
+fn Bytes.empty(): Bytes
+
+/// Copy of the half-open range [start, end); indices are clamped to [0, length].
+fn Bytes.slice(b: Bytes, start: Int, end: Int): Bytes
+
+/// Concatenate two buffers into a new one.
+fn Bytes.concat(a: Bytes, b: Bytes): Bytes
+
+/// Lowercase hex encoding (two chars per byte).
+fn Bytes.toHex(b: Bytes): Text
+
+/// Copy a Text's bytes (up to its NUL terminator) into a buffer.
+fn Bytes.fromText(s: Text): Bytes
+"#;

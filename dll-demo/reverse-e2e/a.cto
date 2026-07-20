@@ -1,0 +1,10 @@
+module A
+extern "C" {
+    fn rustReverse(s: Text): Text
+}
+fn main(): Unit = {
+    val r = unsafe { rustReverse("abcdef") }
+    val n = Text.len(r)
+    println(r)
+    println(intToText(n))
+}

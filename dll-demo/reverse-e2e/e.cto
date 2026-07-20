@@ -1,0 +1,13 @@
+module E
+extern "C" {
+    fn rustReverse(s: Text): Text
+}
+type Reversed = { reversed: Text, length: Int }
+fn reverseString(s: Text): Reversed = {
+    val r = unsafe { rustReverse(s) }
+    Reversed { reversed: r, length: Text.len(r) }
+}
+fn main(): Unit = {
+    val out = reverseString("abcdef")
+    println(f"n: {out.length}")
+}

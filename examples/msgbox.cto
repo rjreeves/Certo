@@ -1,0 +1,7 @@
+module MsgBox
+
+fn main(): Unit [io] = {
+    val title = if let Some(t) = arg(1) { t } else { "Message" }
+    val message = if let Some(m) = arg(2) { m } else { "Hello from Certo!" }
+    messageBox(title, message)
+}

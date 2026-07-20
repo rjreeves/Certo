@@ -1,0 +1,25 @@
+// While loop examples
+
+fn countdown(n: Int): Unit {
+  var i = n
+  while i > 0 {
+    print(i)
+    i = i - 1
+  }
+}
+
+fn sumUpTo(limit: Int): Int {
+  var total = 0
+  var i = 1
+  while i <= limit {
+    total = total + i
+    i = i + 1
+  }
+  total
+}
+
+fn main(): Unit {
+  countdown(5)
+  val s = sumUpTo(10)
+  print(s)
+}

@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <AssemblyName>reverse_e2e</AssemblyName>
+  </PropertyGroup>
+
+  <!-- Copy both native DLLs next to the exe: the Certo DLL and the Rust DLL it
+       depends on at runtime. -->
+  <ItemGroup>
+    <None Include="..\strutil.dll" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\rust-dll\strrev.dll" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+</Project>

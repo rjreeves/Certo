@@ -1,0 +1,661 @@
+//! Generate a complete runnable Certo HTTP server from `view` and `form` declarations.
+//!
+//! # Output shape
+//!
+//! ```text
+//! certo-ui fireworks_ui.cto          →  server.cto
+//! certo build server.cto -o app.exe
+//! DATABASE_URL=postgres://... app.exe 8080
+//! ```
+//!
+//! Each `view` becomes a GET route that queries the DB and renders an HTML table.
+//! Each `form` becomes a GET route (empty form) and a POST route (INSERT to DB).
+
+use std::fmt::Write as FmtWrite;
+use certo_ast::decl::{Decl, ViewDecl, FormDecl};
+use certo_ast::expr::{Expr, Stmt};
+use certo_ast::module::Module;
+use certo_ast::span::S;
+use crate::error::UiError;
+
+/// Entry point — compile all `view`/`form` decls to a single `server.cto` string.
+pub fn emit_server(module: &Module) -> Result<String, UiError> {
+    let mod_name = module.path.segments.last()
+        .map(|s| s.node.as_str())
+        .unwrap_or("App");
+
+    let mut views: Vec<&ViewDecl> = vec![];
+    let mut forms: Vec<&FormDecl> = vec![];
+
+    for sd in &module.decls {
+        match &sd.node {
+            Decl::View(v) => views.push(v),
+            Decl::Form(f) => forms.push(f),
+            _ => {}
+        }
+    }
+
+    if views.is_empty() && forms.is_empty() {
+        return Err(UiError::NoDeclarations);
+    }
+
+    let mut out = String::new();
+
+    emit_header(&mod_name, &mut out);
+    emit_shared_helpers(&mut out);
+    emit_pk_col_index_helper(&mut out);
+    emit_col_value_helper(&mut out);
+    for v in &views {
+        emit_row_actions_for_view(v, &forms, &views, &mut out);
+    }
+    emit_router(&views, &forms, &mut out);
+
+    for v in &views {
+        emit_view_handler(v, &forms, &views, &mut out);
+    }
+    for f in &forms {
+        emit_form_get_handler(f, &mut out);
+        emit_form_post_handler(f, &mut out);
+    }
+
+    emit_main(&mut out);
+
+    Ok(out)
+}
+
+// ── Module header ─────────────────────────────────────────────────────────────
+
+fn emit_header(mod_name: &str, out: &mut String) {
+    writeln!(out, "module {}Server", mod_name).unwrap();
+    writeln!(out).unwrap();
+    writeln!(out, "import Stdlib.Core").unwrap();
+    writeln!(out, "import Stdlib.Http").unwrap();
+    writeln!(out, "import Stdlib.Db").unwrap();
+    writeln!(out).unwrap();
+    writeln!(out, "fn dbUrl(): Text = getEnv(\"DATABASE_URL\") ?? \"host=localhost dbname=postgres user=postgres\"").unwrap();
+    writeln!(out).unwrap();
+}
+
+// ── Shared helpers emitted once into every generated server ───────────────────
+
+fn emit_shared_helpers(out: &mut String) {
+    writeln!(out, "// ── CSS + page shell ─────────────────────────────────────────────────────────").unwrap();
+    writeln!(out, "fn htmlCss(): Text =").unwrap();
+    writeln!(out, "    \"<style>\" ++").unwrap();
+    writeln!(out, "    \"body{{font-family:sans-serif;margin:2rem;color:#222;}}\" ++").unwrap();
+    writeln!(out, "    \"h1{{font-size:1.5rem;margin-bottom:1rem;}}\" ++").unwrap();
+    writeln!(out, "    \"nav{{margin-bottom:1.5rem;}}\" ++").unwrap();
+    writeln!(out, "    \"nav a{{margin-right:1rem;color:#0066cc;text-decoration:none;}}\" ++").unwrap();
+    writeln!(out, "    \"table{{border-collapse:collapse;width:100%;margin-top:0.5rem;}}\" ++").unwrap();
+    writeln!(out, "    \"th,td{{border:1px solid #ccc;padding:6px 12px;text-align:left;font-size:0.9rem;}}\" ++").unwrap();
+    writeln!(out, "    \"th{{background:#f0f0f0;font-weight:600;}}\" ++").unwrap();
+    writeln!(out, "    \"tr:nth-child(even) td{{background:#fafafa;}}\" ++").unwrap();
+    writeln!(out, "    \".field{{margin-bottom:1rem;}}\" ++").unwrap();
+    writeln!(out, "    \"label{{display:block;font-weight:bold;margin-bottom:0.25rem;}}\" ++").unwrap();
+    writeln!(out, "    \"input,select,textarea{{padding:0.4rem;border:1px solid #ccc;border-radius:4px;width:100%;max-width:420px;box-sizing:border-box;}}\" ++").unwrap();
+    writeln!(out, "    \"button{{padding:0.5rem 1.25rem;background:#0066cc;color:#fff;border:none;border-radius:4px;cursor:pointer;margin-top:0.5rem;}}\" ++").unwrap();
+    writeln!(out, "    \"a.btn{{display:inline-block;padding:0.4rem 1rem;background:#0066cc;color:#fff;border-radius:4px;text-decoration:none;font-size:0.9rem;}}\" ++").unwrap();
+    writeln!(out, "    \".row-actions{{margin:2px 0;font-size:0.85rem;}}\" ++").unwrap();
+    writeln!(out, "    \".row-actions a{{margin-right:0.75rem;color:#0066cc;}}\" ++").unwrap();
+    writeln!(out, "    \"</style>\"").unwrap();
+    writeln!(out).unwrap();
+
+    writeln!(out, "fn htmlPage(title: Text, body: Text): Text =").unwrap();
+    writeln!(out, "    \"<!DOCTYPE html><html lang=\\\"en\\\"><head>\" ++").unwrap();
+    writeln!(out, "    \"<meta charset=\\\"UTF-8\\\">\" ++").unwrap();
+    writeln!(out, "    \"<meta name=\\\"viewport\\\" content=\\\"width=device-width,initial-scale=1\\\">\" ++").unwrap();
+    writeln!(out, "    \"<title>\" ++ title ++ \"</title>\" ++").unwrap();
+    writeln!(out, "    htmlCss() ++").unwrap();
+    writeln!(out, "    \"</head><body>\" ++ body ++ \"</body></html>\"").unwrap();
+    writeln!(out).unwrap();
+
+    writeln!(out, "// ── HTML table helpers ───────────────────────────────────────────────────────").unwrap();
+    writeln!(out, "fn htmlTh(cols: List<Text>, i: Int, n: Int, acc: Text): Text =").unwrap();
+    writeln!(out, "    if i >= n then acc").unwrap();
+    writeln!(out, "    else htmlTh(cols, i + 1, n, acc ++ \"<th>\" ++ List.getOrPanic(cols, i) ++ \"</th>\")").unwrap();
+    writeln!(out).unwrap();
+    writeln!(out, "fn htmlTd(row: List<Text?>, i: Int, n: Int, acc: Text): Text =").unwrap();
+    writeln!(out, "    if i >= n then acc").unwrap();
+    writeln!(out, "    else htmlTd(row, i + 1, n, acc ++ \"<td>\" ++ (List.getOrPanic(row, i) ?? \"\") ++ \"</td>\")").unwrap();
+    writeln!(out).unwrap();
+    writeln!(out, "fn htmlTr(rows: List<List<Text?>>, i: Int, n: Int, acc: Text): Text =").unwrap();
+    writeln!(out, "    if i >= n then acc").unwrap();
+    writeln!(out, "    else {{").unwrap();
+    writeln!(out, "        val row = List.getOrPanic(rows, i)").unwrap();
+    writeln!(out, "        htmlTr(rows, i + 1, n, acc ++ \"<tr>\" ++ htmlTd(row, 0, List.len(row), \"\") ++ \"</tr>\")").unwrap();
+    writeln!(out, "    }}").unwrap();
+    writeln!(out).unwrap();
+    writeln!(out, "fn htmlTable(cols: List<Text>, rows: List<List<Text?>>): Text =").unwrap();
+    writeln!(out, "    \"<table><thead><tr>\" ++ htmlTh(cols, 0, List.len(cols), \"\") ++").unwrap();
+    writeln!(out, "    \"</tr></thead><tbody>\" ++ htmlTr(rows, 0, List.len(rows), \"\") ++ \"</tbody></table>\"").unwrap();
+    writeln!(out).unwrap();
+
+    writeln!(out, "// ── URL-encoded form body parsing ────────────────────────────────────────────").unwrap();
+    writeln!(out, "fn formField(body: Text, name: Text): Text =").unwrap();
+    writeln!(out, "    formFieldAt(Text.split(body, \"&\"), name, 0)").unwrap();
+    writeln!(out).unwrap();
+    writeln!(out, "fn formFieldAt(parts: List<Text>, name: Text, i: Int): Text =").unwrap();
+    writeln!(out, "    if i >= List.len(parts) then \"\"").unwrap();
+    writeln!(out, "    else {{").unwrap();
+    writeln!(out, "        val kv = Text.split(List.getOrPanic(parts, i), \"=\")").unwrap();
+    writeln!(out, "        if List.len(kv) >= 2 and Text.eq(List.getOrPanic(kv, 0), name)").unwrap();
+    writeln!(out, "        then List.getOrPanic(kv, 1)").unwrap();
+    writeln!(out, "        else formFieldAt(parts, name, i + 1)").unwrap();
+    writeln!(out, "    }}").unwrap();
+    writeln!(out).unwrap();
+}
+
+// ── Router ────────────────────────────────────────────────────────────────────
+
+fn emit_router(views: &[&ViewDecl], forms: &[&FormDecl], out: &mut String) {
+    writeln!(out, "// ── Router ───────────────────────────────────────────────────────────────────").unwrap();
+    writeln!(out, "fn handler(req: HttpRequest): HttpResponse = {{").unwrap();
+    writeln!(out, "    val path   = HttpRequest.path(req)").unwrap();
+    writeln!(out, "    val method = HttpRequest.method(req)").unwrap();
+
+    let mut first = true;
+
+    for v in views {
+        let slug    = slugify(&v.name.node);
+        let fn_name = format!("handle{}", v.name.node);
+        let kw = if first { "    if" } else { "    else if" };
+        writeln!(out, "{} path == \"/{slug}\" then {fn_name}(req)", kw).unwrap();
+        first = false;
+    }
+
+    for f in forms {
+        let slug    = slugify(&f.name.node);
+        let fn_get  = format!("handle{}Get", f.name.node);
+        let fn_post = format!("handle{}Post", f.name.node);
+        let kw = if first { "    if" } else { "    else if" };
+        writeln!(out, "{} path == \"/{slug}\" then", kw).unwrap();
+        writeln!(out, "        if Text.eq(method, \"POST\") then {fn_post}(req)").unwrap();
+        writeln!(out, "        else {fn_get}(req)").unwrap();
+        first = false;
+    }
+
+    if first {
+        writeln!(out, "    Http.notFound(\"No routes defined\")").unwrap();
+    } else {
+        writeln!(out, "    else Http.notFound(f\"No route for {{method}} {{path}}\")").unwrap();
+    }
+
+    writeln!(out, "}}").unwrap();
+    writeln!(out).unwrap();
+}
+
+// ── View handler ──────────────────────────────────────────────────────────────
+
+fn emit_view_handler(v: &ViewDecl, forms: &[&FormDecl], _all_views: &[&ViewDecl], out: &mut String) {
+    let name    = &v.name.node;
+    let fn_name = format!("handle{}", name);
+    let title   = to_title(name);
+
+    writeln!(out, "// ── {} ─────────────────────────────────────────────────────────────────────", name).unwrap();
+
+    let for_entity = find_for_entity(&v.layout.node);
+
+    if let Some(ref entity) = for_entity {
+        let table      = entity.to_lowercase();
+        let _pk_col     = v.pk.as_deref().map(camel_to_snake);
+        let filter_col = v.filter_by.as_deref().map(camel_to_snake);
+
+        // SQL — with optional WHERE for filter
+        let sql = if let Some(ref fc) = filter_col {
+            format!("SELECT * FROM {} WHERE {} = $1 ORDER BY 1", table, fc)
+        } else {
+            format!("SELECT * FROM {} ORDER BY 1", table)
+        };
+
+        // Create-form nav link
+        let create_form = forms.iter().find(|f| {
+            let fl = f.name.node.to_lowercase();
+            fl.starts_with("create") && fl.contains(&entity.to_lowercase())
+        });
+
+        writeln!(out, "fn {fn_name}(req: HttpRequest): HttpResponse = {{").unwrap();
+        writeln!(out, "    val conn = dbConnect(dbUrl())").unwrap();
+        writeln!(out, "    val sql  = \"{sql}\"").unwrap();
+
+        // If filtered, extract the param from query string
+        if let Some(ref fc) = filter_col {
+            writeln!(out, "    val _qry   = HttpRequest.query(req)").unwrap();
+            writeln!(out, "    val _fval  = formField(_qry, \"{fc}\")").unwrap();
+            writeln!(out, "    val _p0    = List.empty").unwrap();
+            writeln!(out, "    val _p1    = List.push(_p0, _fval)").unwrap();
+            writeln!(out, "    val cols   = dbColumns(conn, \"SELECT * FROM {table} ORDER BY 1\")").unwrap();
+            writeln!(out, "    val rows   = dbQuery(conn, sql, _p1)").unwrap();
+        } else {
+            writeln!(out, "    val cols   = dbColumns(conn, sql)").unwrap();
+            writeln!(out, "    val rows   = dbQuery(conn, sql, List.empty)").unwrap();
+        }
+        writeln!(out, "    dbClose(conn)").unwrap();
+
+        // Build nav bar
+        let mut nav_parts: Vec<String> = vec![];
+        if let Some(cf) = create_form {
+            let cs = slugify(&cf.name.node);
+            let et = to_title(entity);
+            if let Some(ref fc) = filter_col {
+                nav_parts.push(format!("\"<a href=\\\"/{cs}?{fc}=\\\" class=\\\"btn\\\">New {et}</a>\""));
+            } else {
+                nav_parts.push(format!("\"<a href=\\\"/{cs}\\\" class=\\\"btn\\\">New {et}</a>\""));
+            }
+        }
+        let nav_html = if nav_parts.is_empty() {
+            String::new()
+        } else {
+            format!("\"<nav>\" ++ {} ++ \"</nav>\" ++\n        ", nav_parts.join(" ++ "))
+        };
+
+        writeln!(out, "    val _tbl  = htmlTable(cols, rows)").unwrap();
+
+        if v.pk.is_some() {
+            let ra_fn = format!("rowActions{name}");
+            writeln!(out, "    val _actions = {ra_fn}(cols, rows, 0, \"\")").unwrap();
+            writeln!(out, "    val body = \"<h1>{title}</h1>\" ++").unwrap();
+            writeln!(out, "        {nav_html}\"\" ++").unwrap();
+            writeln!(out, "        _tbl ++").unwrap();
+            writeln!(out, "        \"<div class=\\\"actions-section\\\">\" ++ _actions ++ \"</div>\"").unwrap();
+        } else {
+            writeln!(out, "    val body = \"<h1>{title}</h1>\" ++").unwrap();
+            writeln!(out, "        {nav_html}\"\" ++").unwrap();
+            writeln!(out, "        _tbl").unwrap();
+        }
+
+        writeln!(out, "    Http.ok(htmlPage(\"{title}\", body), \"text/html\")").unwrap();
+        writeln!(out, "}}").unwrap();
+    } else {
+        // Static view
+        let body_html = {
+            use crate::layout::layout_to_html;
+            let layout_expr = extract_layout_expr(&v.layout.node).unwrap_or(&v.layout.node);
+            let raw = layout_to_html(layout_expr, 0);
+            raw.lines()
+               .filter(|l| !l.trim_start().starts_with("<!--"))
+               .collect::<Vec<_>>()
+               .join("")
+        };
+        let escaped = escape_certo_str(&format!("<h1>{title}</h1>{body_html}"));
+        writeln!(out, "fn {fn_name}(req: HttpRequest): HttpResponse =").unwrap();
+        writeln!(out, "    Http.ok(htmlPage(\"{title}\", \"{escaped}\"), \"text/html\")").unwrap();
+    }
+
+    writeln!(out).unwrap();
+}
+
+// ── pkColIndex helper (emitted once, shared by all views) ─────────────────────
+
+fn emit_pk_col_index_helper(out: &mut String) {
+    writeln!(out, "// ── Column index lookup ──────────────────────────────────────────────────────").unwrap();
+    writeln!(out, "fn pkColIndex(cols: List<Text>, pk: Text, i: Int): Int =").unwrap();
+    writeln!(out, "    if i >= List.len(cols) then -1").unwrap();
+    writeln!(out, "    else if Text.eq(List.getOrPanic(cols, i), pk) then i").unwrap();
+    writeln!(out, "    else pkColIndex(cols, pk, i + 1)").unwrap();
+    writeln!(out).unwrap();
+}
+
+// ── Per-view row-action function ──────────────────────────────────────────────
+
+/// Emit `fn rowActionsXxx(cols, rows, i, acc): Text` with hardcoded edit + child links.
+fn emit_row_actions_for_view(v: &ViewDecl, forms: &[&FormDecl], all_views: &[&ViewDecl], out: &mut String) {
+    let pk = match &v.pk { Some(p) => p, None => return };
+    let name    = &v.name.node;
+    let fn_name = format!("rowActions{}", name);
+    let pk_col  = camel_to_snake(pk);
+
+    // Edit form for this entity
+    let entity = match find_for_entity(&v.layout.node) { Some(e) => e, None => return };
+    let edit_form = forms.iter().find(|f| {
+        let fl = f.name.node.to_lowercase();
+        fl.starts_with("edit") && fl.contains(&entity.to_lowercase())
+    });
+
+    // Child views whose filter_by matches our pk
+    let child_views: Vec<&&ViewDecl> = all_views.iter().filter(|cv| {
+        cv.filter_by.as_deref().map(camel_to_snake).as_deref() == Some(pk_col.as_str())
+    }).collect();
+
+    writeln!(out, "fn {fn_name}(cols: List<Text>, rows: List<List<Text?>>, i: Int, acc: Text): Text =").unwrap();
+    writeln!(out, "    if i >= List.len(rows) then acc").unwrap();
+    writeln!(out, "    else {{").unwrap();
+    writeln!(out, "        val row   = List.getOrPanic(rows, i)").unwrap();
+    writeln!(out, "        val pkIdx = pkColIndex(cols, \"{pk_col}\", 0)").unwrap();
+    writeln!(out, "        val pkVal = if pkIdx >= 0 then (List.getOrPanic(row, pkIdx) ?? \"\") else \"\"").unwrap();
+
+    // Build URL vals and links expression.
+    // Each URL is a separate val so pkVal is concatenated as an operator, not
+    // embedded as literal text inside a string.
+    let mut url_vals: Vec<String>  = vec![];
+    let mut link_parts: Vec<String> = vec![];
+
+    if let Some(ef) = edit_form {
+        let es = slugify(&ef.name.node);
+        url_vals.push(format!("        val editUrl = \"/{es}?id=\" ++ pkVal"));
+        link_parts.push("\"<a href=\\\"\" ++ editUrl ++ \"\\\">Edit</a>\"".to_string());
+    }
+
+    for (idx, cv) in child_views.iter().enumerate() {
+        let cv_slug      = slugify(&cv.name.node);
+        let cv_label     = to_title(&cv.name.node);
+        let filter_param = cv.filter_by.as_deref().map(camel_to_snake).unwrap_or_default();
+        let url_var      = format!("childUrl{idx}");
+        url_vals.push(format!("        val {url_var} = \"/{cv_slug}?{filter_param}=\" ++ pkVal"));
+        link_parts.push(format!("\"<a href=\\\"\" ++ {url_var} ++ \"\\\">{cv_label}</a>\""));
+    }
+
+    for uv in &url_vals {
+        writeln!(out, "{uv}").unwrap();
+    }
+
+    let links_expr = if link_parts.is_empty() {
+        "\"\"".to_string()
+    } else {
+        link_parts.join(" ++ \" &nbsp; \" ++ ")
+    };
+
+    writeln!(out, "        val links = {links_expr}").unwrap();
+    writeln!(out, "        {fn_name}(cols, rows, i + 1, acc ++ \"<div class=\\\"row-actions\\\">\" ++ links ++ \"</div>\")").unwrap();
+    writeln!(out, "    }}").unwrap();
+    writeln!(out).unwrap();
+}
+
+// ── Form GET handler ──────────────────────────────────────────────────────────
+
+fn emit_form_get_handler(f: &FormDecl, out: &mut String) {
+    let name    = &f.name.node;
+    let fn_name = format!("handle{}Get", name);
+    let slug    = slugify(name);
+    let title   = to_title(name);
+    let is_edit = name.to_lowercase().starts_with("edit");
+
+    let target = f.target.segments.last()
+        .map(|s| s.node.as_str())
+        .unwrap_or(name.as_str());
+    let list_slug  = slugify(&format!("{}List", target));
+    let table      = camel_to_snake(target);
+
+    writeln!(out, "fn {fn_name}(req: HttpRequest): HttpResponse = {{").unwrap();
+
+    if is_edit {
+        if let Some(ref pk_field) = f.pk {
+            let pk_col = camel_to_snake(pk_field);
+            writeln!(out, "    val _qry  = HttpRequest.query(req)").unwrap();
+            writeln!(out, "    val _id   = formField(_qry, \"id\")").unwrap();
+            writeln!(out, "    val conn  = dbConnect(dbUrl())").unwrap();
+            writeln!(out, "    val _p0   = List.empty").unwrap();
+            writeln!(out, "    val _p1   = List.push(_p0, _id)").unwrap();
+            writeln!(out, "    val _rows = dbQuery(conn, \"SELECT * FROM {table} WHERE {pk_col} = $1 LIMIT 1\", _p1)").unwrap();
+            writeln!(out, "    val _cols = dbColumns(conn, \"SELECT * FROM {table} LIMIT 1\")").unwrap();
+            writeln!(out, "    dbClose(conn)").unwrap();
+
+            // Emit each field as its own val to avoid deep ++ chains
+            for (i, field) in f.fields.iter().enumerate() {
+                let fname  = &field.name.node;
+                let fcol   = camel_to_snake(fname);
+                let label  = field.label.as_deref().unwrap_or(fname.as_str());
+                let itype  = infer_input_type(fname, &field.field_type);
+                writeln!(out,
+                    "    val _ef{i} = \"<div class=\\\"field\\\"><label for=\\\"{fname}\\\">{label}</label>\" ++ \"<input id=\\\"{fname}\\\" name=\\\"{fname}\\\" type=\\\"{itype}\\\" value=\\\"\" ++ colValue(_rows, _cols, \"{fcol}\") ++ \"\\\" required></div>\"").unwrap();
+            }
+
+            // Build body by joining field vars in small chains
+            let n = f.fields.len();
+            writeln!(out, "    val _hdr = \"<h1>{title}</h1>\" ++ \"<nav><a href=\\\"/{list_slug}\\\">← Back to list</a></nav>\" ++ \"<form method=\\\"POST\\\" action=\\\"/{slug}?id=\\\" \" ++ _id ++ \"\\\">\"").unwrap();
+            emit_field_concat_tree(out, n, "    ");
+            writeln!(out, "    val _footer = \"<button type=\\\"submit\\\">Save changes</button>\" ++ \"</form>\"").unwrap();
+            writeln!(out, "    val body = _hdr ++ _fields ++ _footer").unwrap();
+            writeln!(out, "    Http.ok(htmlPage(\"{title}\", body), \"text/html\")").unwrap();
+            writeln!(out, "}}").unwrap();
+            writeln!(out).unwrap();
+            return;
+        }
+    }
+
+    // Create form (no pre-fill) — emit each field as its own val
+    for (i, field) in f.fields.iter().enumerate() {
+        let fname = &field.name.node;
+        let label = field.label.as_deref().unwrap_or(fname.as_str());
+        let itype = infer_input_type(fname, &field.field_type);
+        writeln!(out,
+            "    val _ef{i} = \"<div class=\\\"field\\\"><label for=\\\"{fname}\\\">{label}</label>\" ++ \"<input id=\\\"{fname}\\\" name=\\\"{fname}\\\" type=\\\"{itype}\\\" required></div>\"").unwrap();
+    }
+
+    let n = f.fields.len();
+    writeln!(out, "    val _hdr = \"<h1>{title}</h1>\" ++ \"<nav><a href=\\\"/{list_slug}\\\">← Back to list</a></nav>\" ++ \"<form method=\\\"POST\\\" action=\\\"/{slug}\\\">\"").unwrap();
+    emit_field_concat_tree(out, n, "    ");
+    writeln!(out, "    val _footer = \"<button type=\\\"submit\\\">Submit</button>\" ++ \"</form>\"").unwrap();
+    writeln!(out, "    val body = _hdr ++ _fields ++ _footer").unwrap();
+    writeln!(out, "    Http.ok(htmlPage(\"{title}\", body), \"text/html\")").unwrap();
+    writeln!(out, "}}").unwrap();
+    writeln!(out).unwrap();
+}
+
+// ── colValue helper (emitted once) ────────────────────────────────────────────
+
+fn emit_col_value_helper(out: &mut String) {
+    writeln!(out, "// ── Pre-fill helper: get a column value from the first row ──────────────────").unwrap();
+    writeln!(out, "fn colValue(rows: List<List<Text?>>, cols: List<Text>, col: Text): Text =").unwrap();
+    writeln!(out, "    if List.len(rows) == 0 then \"\"").unwrap();
+    writeln!(out, "    else {{").unwrap();
+    writeln!(out, "        val row = List.getOrPanic(rows, 0)").unwrap();
+    writeln!(out, "        val idx = pkColIndex(cols, col, 0)").unwrap();
+    writeln!(out, "        if idx < 0 then \"\" else (List.getOrPanic(row, idx) ?? \"\")").unwrap();
+    writeln!(out, "    }}").unwrap();
+    writeln!(out).unwrap();
+}
+
+/// Emit `val _fields = _ef0 ++ _ef1 ++ ...` using a flat chain of at most
+/// 4 terms per `val` so the parser never recurses more than a few levels deep.
+fn emit_field_concat_tree(out: &mut String, n: usize, indent: &str) {
+    if n == 0 {
+        writeln!(out, "{indent}val _fields = \"\"").unwrap();
+        return;
+    }
+    // Group _ef vars into chunks of 4, each assigned to an intermediate val
+    let vars: Vec<String> = (0..n).map(|i| format!("_ef{i}")).collect();
+    let mut level_vars = vars;
+    let mut pass = 0usize;
+    while level_vars.len() > 1 {
+        let mut next: Vec<String> = vec![];
+        for chunk in level_vars.chunks(4) {
+            let joined = chunk.join(" ++ ");
+            let var = format!("_fc{pass}_{}", next.len());
+            writeln!(out, "{indent}val {var} = {joined}").unwrap();
+            next.push(var);
+        }
+        level_vars = next;
+        pass += 1;
+    }
+    // Rename the single survivor to _fields
+    let survivor = &level_vars[0];
+    writeln!(out, "{indent}val _fields = {survivor}").unwrap();
+}
+
+// ── Form POST handler ─────────────────────────────────────────────────────────
+
+fn emit_form_post_handler(f: &FormDecl, out: &mut String) {
+    let name    = &f.name.node;
+    let fn_name = format!("handle{}Post", name);
+    let target  = f.target.segments.last()
+        .map(|s| s.node.as_str())
+        .unwrap_or(name.as_str());
+    let table     = camel_to_snake(target);
+    let list_slug = slugify(&format!("{}List", target));
+    let is_edit   = name.to_lowercase().starts_with("edit");
+
+    let cols: Vec<String> = f.fields.iter()
+        .map(|field| camel_to_snake(&field.name.node))
+        .collect();
+
+    writeln!(out, "fn {fn_name}(req: HttpRequest): HttpResponse = {{").unwrap();
+    writeln!(out, "    val body = HttpRequest.body(req)").unwrap();
+    writeln!(out, "    val conn = dbConnect(dbUrl())").unwrap();
+
+    for field in &f.fields {
+        let fname = &field.name.node;
+        writeln!(out, "    val {fname} = formField(body, \"{fname}\")").unwrap();
+    }
+
+    writeln!(out, "    val _p0 = List.empty").unwrap();
+    for (i, field) in f.fields.iter().enumerate() {
+        let fname = &field.name.node;
+        writeln!(out, "    val _p{} = List.push(_p{}, {})", i + 1, i, fname).unwrap();
+    }
+
+    if is_edit {
+        if let Some(ref pk_field) = f.pk {
+            let pk_col = camel_to_snake(pk_field);
+            let n      = f.fields.len();
+            // Extract id from query string
+            writeln!(out, "    val _qry = HttpRequest.query(req)").unwrap();
+            writeln!(out, "    val _id  = formField(_qry, \"id\")").unwrap();
+            writeln!(out, "    val _p{} = List.push(_p{}, _id)", n + 1, n).unwrap();
+            let last_p    = format!("_p{}", n + 1);
+            let set_clause = cols.iter().enumerate()
+                .map(|(i, c)| format!("{} = ${}", c, i + 1))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let sql = format!("UPDATE {table} SET {set_clause} WHERE {pk_col} = ${}", n + 1);
+            writeln!(out, "    val _rows = dbExec(conn, \"{sql}\", {last_p})").unwrap();
+            writeln!(out, "    dbClose(conn)").unwrap();
+            writeln!(out, "    val msg = if _rows > 0 then \"Record updated.\" else \"Update failed — record not found.\"").unwrap();
+            writeln!(out, "    val pg  = \"<h2>\" ++ msg ++ \"</h2><p><a href=\\\"/{list_slug}\\\">← Back to list</a></p>\"").unwrap();
+            writeln!(out, "    Http.ok(htmlPage(\"Done\", pg), \"text/html\")").unwrap();
+            writeln!(out, "}}").unwrap();
+            writeln!(out).unwrap();
+            return;
+        }
+    }
+
+    // INSERT path
+    let col_list  = cols.join(", ");
+    let ph_list   = (1..=cols.len()).map(|i| format!("${i}")).collect::<Vec<_>>().join(", ");
+    let sql       = format!("INSERT INTO {table} ({col_list}) VALUES ({ph_list})");
+    let last_p    = format!("_p{}", f.fields.len());
+
+    writeln!(out, "    val _rows = dbExec(conn, \"{sql}\", {last_p})").unwrap();
+    writeln!(out, "    dbClose(conn)").unwrap();
+    writeln!(out, "    val msg = if _rows > 0 then \"Record saved.\" else \"Save failed — check your input.\"").unwrap();
+    writeln!(out, "    val pg  = \"<h2>\" ++ msg ++ \"</h2><p><a href=\\\"/{list_slug}\\\">← Back to list</a></p>\"").unwrap();
+    writeln!(out, "    Http.ok(htmlPage(\"Done\", pg), \"text/html\")").unwrap();
+    writeln!(out, "}}").unwrap();
+    writeln!(out).unwrap();
+}
+
+// ── Main ──────────────────────────────────────────────────────────────────────
+
+fn emit_main(out: &mut String) {
+    writeln!(out, "fn main(): Unit [io] = {{").unwrap();
+    writeln!(out, "    println(\"Serving on http://localhost:3000/\")").unwrap();
+    writeln!(out, "    Http.serve(3000, handler)").unwrap();
+    writeln!(out, "}}").unwrap();
+}
+
+// ── Layout expression extraction ──────────────────────────────────────────────
+
+/// Pull the RHS of `layout = <expr>` from a view body block.
+pub fn extract_layout_expr(block: &Expr) -> Option<&Expr> {
+    if let Expr::Block { stmts, .. } = block {
+        for stmt in stmts {
+            if let Stmt::Assign { target, value, .. } = stmt {
+                if target.node == "layout" {
+                    return Some(&value.node);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Recursively find the second positional arg of the first `For(items, item)` call.
+fn find_for_entity(expr: &Expr) -> Option<String> {
+    match expr {
+        Expr::App { func, args, .. } => {
+            if call_name(func).as_deref() == Some("For") {
+                let positional: Vec<_> = args.iter().filter(|a| a.label.is_none()).collect();
+                if let Some(arg) = positional.get(1) {
+                    if let Expr::Path { path, .. } = &arg.value.node {
+                        if let Some(seg) = path.segments.last() {
+                            return Some(seg.node.clone());
+                        }
+                    }
+                }
+            }
+            for arg in args {
+                if let Some(e) = find_for_entity(&arg.value.node) {
+                    return Some(e);
+                }
+            }
+            None
+        }
+        Expr::List { elements, .. } => {
+            elements.iter().find_map(|e| find_for_entity(&e.node))
+        }
+        Expr::Block { stmts, .. } => {
+            stmts.iter().find_map(|stmt| {
+                if let Stmt::Assign { value, .. } = stmt {
+                    find_for_entity(&value.node)
+                } else {
+                    None
+                }
+            })
+        }
+        _ => None,
+    }
+}
+
+fn call_name(func: &S<Expr>) -> Option<String> {
+    if let Expr::Path { path, .. } = &func.node {
+        path.segments.last().map(|s| s.node.clone())
+    } else {
+        None
+    }
+}
+
+// ── String utilities ──────────────────────────────────────────────────────────
+
+pub fn slugify(name: &str) -> String {
+    let mut s = String::new();
+    for (i, c) in name.chars().enumerate() {
+        if c.is_uppercase() && i > 0 { s.push('-'); }
+        s.push(c.to_lowercase().next().unwrap());
+    }
+    s
+}
+
+pub fn camel_to_snake(name: &str) -> String {
+    let mut s = String::new();
+    for (i, c) in name.chars().enumerate() {
+        if c.is_uppercase() && i > 0 { s.push('_'); }
+        s.push(c.to_lowercase().next().unwrap());
+    }
+    s
+}
+
+fn to_title(name: &str) -> String {
+    let mut s = String::new();
+    for (i, c) in name.chars().enumerate() {
+        if c.is_uppercase() && i > 0 { s.push(' '); }
+        s.push(c);
+    }
+    s
+}
+
+/// Escape a string for embedding inside a Certo double-quoted string literal.
+fn escape_certo_str(s: &str) -> String {
+    s.replace('\\', "\\\\")
+     .replace('"', "\\\"")
+     .replace('\n', "")
+     .replace('\r', "")
+}
+
+fn infer_input_type(name: &str, _ft: &Option<certo_ast::span::S<certo_ast::expr::Expr>>) -> &'static str {
+    let lower = name.to_lowercase();
+    if lower.contains("email")                          { return "email"; }
+    if lower.contains("password")                       { return "password"; }
+    if lower.contains("phone") || lower.contains("tel") { return "tel"; }
+    if lower.contains("date")                           { return "date"; }
+    if lower.contains("url") || lower.contains("website") { return "url"; }
+    "text"
+}

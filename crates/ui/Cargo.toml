@@ -1,0 +1,12 @@
+[package]
+name    = "certo-ui"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "certo-ui"
+path = "src/main.rs"
+
+[dependencies]
+certo-ast    = { path = "../ast" }
+certo-parser = { path = "../parser" }

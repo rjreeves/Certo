@@ -1,0 +1,84 @@
+module runsql
+
+// ---------------------------------------------------------------------------
+// runsql — execute a SQL file against PostgreSQL, like `psql -f file.sql`,
+// but as a single self-contained binary (no psql / PostgreSQL client install
+// required — libpq is linked/shipped with the executable).
+//
+// Usage:
+//   runsql <file.sql> [connstr]
+//
+//   connstr defaults to $PG_CONNSTR, then to libpq's own environment
+//   variables (PGHOST, PGPORT, PGDATABASE, PGUSER, PGPASSWORD) and defaults.
+//
+// Output: the file being processed and the elapsed execution time.
+//
+// Errors abort with a report, in two levels:
+//   [file]   — level 1: SQL file cannot be found, opened, or read.
+//   [server] — level 2: connection or runtime execution error from PostgreSQL.
+//
+// Works against PostgreSQL 9.1 and above (uses the simple query protocol, and
+// a modern libpq so SCRAM-authenticated 10+ servers connect too).
+// ---------------------------------------------------------------------------
+
+import Stdlib.Core
+import Stdlib.Text
+import Stdlib.File
+import Stdlib.Db
+import Stdlib.Env
+import Stdlib.Process
+
+fn fail1(msg: Text): Unit [io] = {
+    eprintln("ERROR [file]: " ++ msg)
+    Process.quit(1)
+}
+
+fn fail2(msg: Text): Unit [io] = {
+    eprintln("ERROR [server]: " ++ msg)
+    Process.quit(2)
+}
+
+fn runSql(file: Text, connstr: Text, sql: Text): Unit [io] = {
+    val conn = dbConnect(connstr)
+    if conn == 0 then {
+        fail2("cannot connect: " ++ dbError(0))
+    }
+
+    val start = monotonicMillis()
+    val ok = dbRunScript(conn, sql)
+    val elapsed = monotonicMillis() - start
+
+    if ok == 0 then {
+        val err = dbError(conn)          // capture before closing
+        dbClose(conn)
+        fail2(err)
+    }
+
+    dbClose(conn)
+    println(f"Done: {file}  ({intToText(elapsed)} ms)")
+}
+
+fn main(): Unit [io] = {
+    val file = arg(1) ?? ""
+    if Text.eq(file, "") then {
+        eprintln("usage: runsql <file.sql> [connstr]")
+        eprintln("  connstr defaults to $PG_CONNSTR, then libpq env vars (PGHOST, PGPORT, ...).")
+        Process.quit(64)
+    }
+    val connstr = arg(2) ?? (getEnv("PG_CONNSTR") ?? "")
+
+    println("Processing: " ++ file)
+    flush()
+
+    // ── Level 1: file access ────────────────────────────────────────────
+    if not fileExists(file) then {
+        fail1("SQL file not found: " ++ file)
+    }
+
+    if let Some(sql) = readFile(file) {
+        // ── Level 2: connect + execute ──────────────────────────────────
+        runSql(file, connstr, sql)
+    } else {
+        fail1("cannot open or read SQL file: " ++ file)
+    }
+}

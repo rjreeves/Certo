@@ -1,0 +1,33 @@
+module Tasks
+
+fn main(): Unit [io] = dispatch(argCount())
+
+fn dispatch(n: Int): Unit [io] = if n < 2 then printHelp() else runCommand()
+
+fn runCommand(): Unit [io] =
+    {
+    print("Command received. Total args (including program name): ")
+    println(intToText(argCount()))
+    print("Running tasks list:")
+    println("")
+    listTasks()
+}
+
+fn listTasks(): Unit [io] =
+    {
+    println("  1. Write Certo compiler  [done]")
+    println("  2. Add stdlib I/O        [done]")
+    println("  3. Ship it               [pending]")
+}
+
+fn printHelp(): Unit [io] =
+    {
+    println("Tasks CLI — Certo demo")
+    println("")
+    println("Usage:  tasks <command>")
+    println("")
+    println("Commands:")
+    println("  list   Show the task list")
+    println("  add    Add a task (stub)")
+    println("  help   Show this message")
+}

@@ -1,0 +1,81 @@
+module pg_sentinel
+
+import Stdlib.Core
+import Stdlib.Db
+
+// ---------------------------------------------------------------------------
+// pg_sentinel - ensure PostgreSQL 18 is running and connectable
+//
+// Usage:
+//   pg_sentinel [connstr] [service-name]
+//
+// Example:
+//   pg_sentinel "host=localhost port=5433 dbname=postgres user=postgres"
+// ---------------------------------------------------------------------------
+
+fn main(): Unit [io] = {
+    val connstr = arg(1) ?? "host=localhost port=5433 dbname=postgres user=postgres"
+    val serviceName = arg(2) ?? "postgresql-x64-18"
+
+    println("pg_sentinel")
+    println("Checking PostgreSQL 18...")
+    println(f"  connection string : {connstr}")
+    println(f"  service name      : {serviceName}")
+    println("")
+
+    val conn = dbConnect(connstr)
+
+    if conn == 0 then {
+        eprintln("WARN  PostgreSQL 18 is not connectable.")
+        eprintln(f"      {dbError(0)}")
+        println(f"Attempting to start Windows service: {serviceName}")
+
+        val startResult = Process.exec("sc", ["start", serviceName])
+        val startCode = ProcessResult.exitCode(startResult)
+
+        if startCode == 0 then {
+            println("Service start command accepted. Checking again...")
+        } else {
+            eprintln(f"FAIL  service start command exited with code {intToText(startCode)}.")
+            eprintln(ProcessResult.stdout(startResult))
+            eprintln(ProcessResult.stderr(startResult))
+            eprintln("      Starting a Windows service may require running pg_sentinel as Administrator.")
+            Process.quit(1)
+        }
+
+        val retryConn = dbConnect(connstr)
+
+        if retryConn == 0 then {
+            eprintln("FAIL  PostgreSQL 18 is still not connectable after service start.")
+            eprintln(f"      {dbError(0)}")
+            Process.quit(1)
+        } else {
+            verifyPostgres18(retryConn)
+        }
+    } else {
+        verifyPostgres18(conn)
+    }
+}
+
+fn verifyPostgres18(conn: Int): Unit [io] = {
+    val versionNum = dbServerVersion(conn)
+    val major = versionNum / 10000
+    val minor = (versionNum % 10000) / 100
+    val patch = versionNum % 100
+    val banner = dbVersionString(conn)
+
+    println(f"  server version    : {banner}")
+    println(f"  version number    : {intToText(versionNum)}")
+    println(f"  parsed version    : {intToText(major)}.{intToText(minor)}.{intToText(patch)}")
+    println("")
+
+    if major == 18 then {
+        println("OK    PostgreSQL 18 is running and connectable.")
+        dbClose(conn)
+        Process.quit(0)
+    } else {
+        eprintln(f"FAIL  expected PostgreSQL 18, got {intToText(major)}.{intToText(minor)}.")
+        dbClose(conn)
+        Process.quit(2)
+    }
+}

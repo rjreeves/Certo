@@ -1,0 +1,433 @@
+module backup_fireworks
+
+// ---------------------------------------------------------------------------
+// A Certo port of BACKUP-fireworks.ps1 — the parts expressible today.
+//
+// Covered here (compiles now):
+//   * config from env with defaults
+//   * PostgreSQL up-check + pg_dump + pg_restore --list verify (Process.exec)
+//   * Dropbox OAuth refresh -> access token       (Http.request + Json)
+//   * Dropbox JSON API calls: create_folder / delete / list_folder
+//       with the "ignore expected error" pattern  (Http.request + status check)
+//   * last-run.json metadata upload (text body)   (Http.request content API)
+//   * retention: keep newest N timestamped dumps
+//   * transcript-style logging to a Dropbox-synced file (appendFile)
+//   * native binary .dump upload + Dropbox content-hash verification
+//       (Bytes + Crypto.sha256Bytes + Http.requestBytes) — no shell-out
+//   * secrets from env var OR Windows Credential Manager (Stdlib.Credential)
+//
+// Full parity with BACKUP-fireworks.ps1, entirely native — no shell-out.
+// ---------------------------------------------------------------------------
+
+import Stdlib.Core
+import Stdlib.Http
+import Stdlib.Json
+import Stdlib.Db
+import Stdlib.Process
+import Stdlib.File
+import Stdlib.Env
+import Stdlib.DateTime
+import Stdlib.Bytes
+import Stdlib.Crypto
+import Stdlib.Credential
+
+// ── Small helpers ───────────────────────────────────────────────────────────
+
+fn env(key: Text, fallback: Text): Text =
+    getEnv(key) ?? fallback
+
+fn log(logPath: Text, line: Text): Unit [io] = {
+    println(line)
+    val _ = appendFile(logPath, line ++ "\n")
+}
+
+// Resolve a secret: env var wins; else try Credential Manager under a list of
+// candidate target names (mirrors the PowerShell Resolve-Secret). Never logs
+// the value itself. Returns "" if nothing is found.
+fn resolveSecret(envVal: Text, prefix: Text, name: Text): Text [io] = {
+    if not Text.eq(envVal, "") then {
+        envVal
+    } else {
+        val candidates = [
+            prefix ++ "/dropbox/" ++ name,
+            prefix ++ "/" ++ name,
+            name
+        ]
+        var found = ""
+        for t in candidates {
+            if Text.eq(found, "") then {
+                if let Some(s) = Credential.get(t) {
+                    found = s
+                }
+            }
+        }
+        found
+    }
+}
+
+// ── Dropbox: OAuth refresh-token -> short-lived access token ────────────────
+
+fn dropboxAccessToken(refresh: Text, appKey: Text, appSecret: Text): Text [io] = {
+    val body =
+        "grant_type=refresh_token" ++
+        "&refresh_token=" ++ refresh ++
+        "&client_id=" ++ appKey ++
+        "&client_secret=" ++ appSecret
+
+    val headers = [["Content-Type", "application/x-www-form-urlencoded"]]
+    val resp = Http.request("POST", "https://api.dropboxapi.com/oauth2/token", headers, body)
+
+    if HttpResponse.status(resp) != 200 then {
+        ""
+    } else {
+        val j = Json.parse(HttpResponse.body(resp))
+        JsonValue.asText(JsonValue.get(j, "access_token"))
+    }
+}
+
+// ── Dropbox: authenticated JSON API call (analogue of Invoke-DropboxApi) ────
+// Returns the HTTP status; caller decides which errors are "expected".
+
+fn dropboxApi(token: Text, endpoint: Text, jsonBody: Text): HttpResponse [io] = {
+    val headers = [
+        ["Authorization", "Bearer " ++ token],
+        ["Content-Type", "application/json"]
+    ]
+    Http.request("POST", "https://api.dropboxapi.com/2/" ++ endpoint, headers, jsonBody)
+}
+
+// Create a folder; a 409 path/conflict/folder (already exists) is expected.
+fn ensureFolder(token: Text, logPath: Text, path: Text): Unit [io] = {
+    val jb = "{\"path\":\"" ++ path ++ "\",\"autorename\":false}"
+    val resp = dropboxApi(token, "files/create_folder_v2", jb)
+    val st = HttpResponse.status(resp)
+    if st == 200 then {
+        log(logPath, "Created Dropbox folder " ++ path)
+    } else if st == 409 then {
+        // already exists — expected, ignore quietly
+    } else {
+        log(logPath, f"WARN create_folder {path} -> {intToText(st)}: {HttpResponse.body(resp)}")
+    }
+}
+
+// Delete a file; a 409 path_lookup/not_found (nothing there) is expected.
+fn deleteIfExists(token: Text, logPath: Text, path: Text): Unit [io] = {
+    val jb = "{\"path\":\"" ++ path ++ "\"}"
+    val resp = dropboxApi(token, "files/delete_v2", jb)
+    val st = HttpResponse.status(resp)
+    if st == 200 then {
+        log(logPath, "Deleted old Dropbox backup " ++ path)
+    } else if st == 409 then {
+        // not found — expected, ignore
+    } else {
+        log(logPath, f"WARN delete {path} -> {intToText(st)}: {HttpResponse.body(resp)}")
+    }
+}
+
+// ── PostgreSQL: dump + verify via subprocess ────────────────────────────────
+
+fn pgDump(logPath: Text, bin: Text, connArgs: List<Text>, outFile: Text): Bool [io] = {
+    log(logPath, "Creating PostgreSQL custom-format backup...")
+    val r = Process.exec(bin, connArgs)
+    val code = ProcessResult.exitCode(r)
+    if code != 0 then {
+        log(logPath, f"pg_dump failed ({intToText(code)}): {ProcessResult.stderr(r)}")
+        false
+    } else {
+        true
+    }
+}
+
+fn pgVerify(logPath: Text, bin: Text, dumpFile: Text): Bool [io] = {
+    log(logPath, "Verifying dump structure with pg_restore --list...")
+    val r = Process.exec(bin, ["--list", dumpFile])
+    val code = ProcessResult.exitCode(r)
+    if code != 0 then {
+        log(logPath, f"pg_restore verify failed ({intToText(code)}): {ProcessResult.stderr(r)}")
+        false
+    } else {
+        true
+    }
+}
+
+// Dropbox content-hash: 4MB blocks -> sha256 each -> concat digests -> sha256 -> hex.
+fn dropboxContentHash(data: Bytes): Text = {
+    val block = 4 * 1024 * 1024
+    val total = Bytes.length(data)
+    val nblocks = if total == 0 then 1 else (total + block - 1) / block
+    var acc = Bytes.empty()
+    var i = 0
+    while i < nblocks {
+        val start = i * block
+        val rawEnd = start + block
+        val end = if rawEnd < total then rawEnd else total
+        acc = Bytes.concat(acc, Crypto.sha256Bytes(Bytes.slice(data, start, end)))
+        i = i + 1
+    }
+    Bytes.toHex(Crypto.sha256Bytes(acc))
+}
+
+// Native binary upload with integrity check — no shell-out.
+// Uploads the file, then verifies Dropbox's returned content_hash against ours.
+fn uploadDump(token: Text, logPath: Text, localFile: Text, dropboxPath: Text): Bool [io] = {
+    val maybe = readFileBytes(localFile)
+    if let Some(data) = maybe {
+        val localHash = dropboxContentHash(data)
+        log(logPath, f"Uploading {intToText(Bytes.length(data))} bytes to Dropbox {dropboxPath}")
+        val apiArg = "{\"path\":\"" ++ dropboxPath ++ "\",\"mode\":\"overwrite\"}"
+        val headers = [
+            ["Authorization", "Bearer " ++ token],
+            ["Dropbox-API-Arg", apiArg],
+            ["Content-Type", "application/octet-stream"]
+        ]
+        val resp = Http.requestBytes("POST", "https://content.dropboxapi.com/2/files/upload", headers, data)
+        val st = HttpResponse.status(resp)
+        if st != 200 then {
+            log(logPath, f"upload {dropboxPath} -> {intToText(st)}: {HttpResponse.body(resp)}")
+            false
+        } else {
+            val j = Json.parse(HttpResponse.body(resp))
+            val remoteHash = JsonValue.asText(JsonValue.get(j, "content_hash"))
+            if Text.eq(remoteHash, localHash) then {
+                log(logPath, "Verified content hash for " ++ dropboxPath)
+                true
+            } else {
+                log(logPath, f"HASH MISMATCH {dropboxPath}: local={localHash} remote={remoteHash}")
+                false
+            }
+        }
+    } else {
+        log(logPath, "Could not read " ++ localFile)
+        false
+    }
+}
+
+// Upload a small TEXT file (metadata) — body is Text, so Http.request works today.
+fn uploadText(token: Text, logPath: Text, dropboxPath: Text, content: Text): Unit [io] = {
+    val headers = [
+        ["Authorization", "Bearer " ++ token],
+        ["Dropbox-API-Arg", "{\"path\":\"" ++ dropboxPath ++ "\",\"mode\":\"overwrite\"}"],
+        ["Content-Type", "application/octet-stream"]
+    ]
+    val resp = Http.request("POST", "https://content.dropboxapi.com/2/files/upload", headers, content)
+    log(logPath, f"Uploaded {dropboxPath} -> {intToText(HttpResponse.status(resp))}")
+}
+
+// ── Failure handling: upload last-error.json, then quit ─────────────────────
+// Mirrors New-LastErrorJson / Try-UploadLastError. Upload is best-effort and
+// skipped if we don't yet have a Dropbox token (e.g. Postgres failed first).
+fn failBackup(token: Text, logPath: Text, latestDir: Text, database: Text,
+              computer: Text, stamp: Text, stage: Text, detail: Text, code: Int): Unit [io] = {
+    log(logPath, f"FAILED [{stage}]: {detail}")
+    if Text.eq(token, "") then {
+        log(logPath, "Dropbox token unavailable; last-error.json not uploaded.")
+    } else {
+        val e = Json.object()
+        JsonValue.set(e, "status", Json.string("error"))
+        JsonValue.set(e, "reason", Json.string(detail))
+        JsonValue.set(e, "failed_stage", Json.string(stage))
+        JsonValue.set(e, "database", Json.string(database))
+        JsonValue.set(e, "computer_name", Json.string(computer))
+        JsonValue.set(e, "timestamp", Json.string(stamp))
+        uploadText(token, logPath, latestDir ++ "/last-error.json", Json.stringify(e))
+    }
+    Process.quit(code)
+}
+
+// ── Portable copy: optional third destination on a local/removable disk ─────
+// Mirrors Copy-LatestBackupToPortable. Writes the dump under
+// <root>/fireworks/backup/<name>, then re-reads it and verifies the content
+// hash matches the source (catches copy corruption).
+fn copyToPortable(logPath: Text, portableRoot: Text, backupName: Text, sourceFile: Text): Unit [io] = {
+    val targetDir = portableRoot ++ "/fireworks/backup"
+    val targetPath = targetDir ++ "/" ++ backupName
+    log(logPath, "Copying latest backup to portable path " ++ targetPath)
+    val _ = makeDir(targetDir)
+    if let Some(data) = readFileBytes(sourceFile) {
+        val expectedHash = dropboxContentHash(data)
+        if writeFileBytes(targetPath, data) then {
+            if let Some(check) = readFileBytes(targetPath) {
+                val got = dropboxContentHash(check)
+                if Text.eq(got, expectedHash) then {
+                    log(logPath, "Portable backup verified at " ++ targetPath)
+                } else {
+                    log(logPath, f"WARN portable hash mismatch at {targetPath}: expected {expectedHash} got {got}")
+                }
+            } else {
+                log(logPath, "WARN could not re-read portable copy to verify: " ++ targetPath)
+            }
+        } else {
+            log(logPath, "WARN portable copy write failed: " ++ targetPath)
+        }
+    } else {
+        log(logPath, "WARN could not read source for portable copy: " ++ sourceFile)
+    }
+}
+
+// ── Retention: keep the newest N timestamped dumps in a folder ──────────────
+// Filenames look like  fireworks.backup.26-07-09-11-02.dump  — the timestamp
+// segment (index 2) with dashes stripped is a monotonic numeric key.
+
+fn timestampKey(name: Text): Int = {
+    val parts = Text.split(name, ".")
+    val seg = List.get(parts, 2) ?? "0"
+    textToIntUnsafe(Text.replace(seg, "-", ""))
+}
+
+// List all timestamped dump paths (path_lower) in `folder` matching `stem.*.dump`,
+// following list_folder pagination. Mirrors Remove-OldDropboxBackups' enumeration.
+fn listDumpPaths(token: Text, logPath: Text, folder: Text, stem: Text): List<Text> [io] = {
+    var paths: List<Text> = []
+    var cursor = ""
+    var more = true
+    var first = true
+    while more {
+        val resp = if first then {
+            dropboxApi(token, "files/list_folder", "{\"path\":\"" ++ folder ++ "\",\"recursive\":false}")
+        } else {
+            dropboxApi(token, "files/list_folder/continue", "{\"cursor\":\"" ++ cursor ++ "\"}")
+        }
+        first = false
+        if HttpResponse.status(resp) != 200 then {
+            log(logPath, f"list_folder {folder} -> {intToText(HttpResponse.status(resp))}: {HttpResponse.body(resp)}")
+            more = false
+        } else {
+            val j = Json.parse(HttpResponse.body(resp))
+            val entries = JsonValue.get(j, "entries")
+            val n = JsonValue.length(entries)
+            var i = 0
+            while i < n {
+                val e = JsonValue.at(entries, i)
+                val tag = JsonValue.asText(JsonValue.get(e, ".tag"))
+                val name = JsonValue.asText(JsonValue.get(e, "name"))
+                if Text.eq(tag, "file") and Text.startsWith(name, stem ++ ".") and Text.endsWith(name, ".dump") then {
+                    paths = List.push(paths, JsonValue.asText(JsonValue.get(e, "path_lower")))
+                }
+                i = i + 1
+            }
+            more = JsonValue.asBool(JsonValue.get(j, "has_more"))
+            cursor = JsonValue.asText(JsonValue.get(j, "cursor"))
+        }
+    }
+    paths
+}
+
+// Keep the newest `keep` timestamped dumps in `folder`; delete the rest.
+fn pruneOldDumps(token: Text, logPath: Text, folder: Text, stem: Text, keep: Int): Unit [io] = {
+    val paths = listDumpPaths(token, logPath, folder, stem)
+    val sorted = List.sort(paths) { a, b => timestampKey(b) - timestampKey(a) }  // newest first
+    val total = List.len(sorted)
+    log(logPath, f"Keeping newest {intToText(keep)} of {intToText(total)} backups in {folder}")
+    if total > keep then {
+        for p in List.slice(sorted, keep, total) {
+            deleteIfExists(token, logPath, p)
+        }
+    }
+}
+
+// ── Orchestration ───────────────────────────────────────────────────────────
+
+fn main(): Unit [io] = {
+    val database = env("Database", "fireworks")
+    val computer = env("COMPUTERNAME", "unknown")
+    val connstr  = env("PG_CONNSTR", "host=127.0.0.1 port=5432 dbname=fireworks user=postgres")
+    val backupRoot = env("DROPBOX_BACKUP_ROOT", "/Shared/backups")
+    val keepLogs = 3
+
+    val now = DateTime.now()
+    val stamp = DateTime.format(now, "%y-%m-%d-%H-%M")
+    val logPath = env("BACKUP_LOG_PATH", "backup.log")
+
+    log(logPath, f"Starting backup for '{database}' on '{computer}' at {stamp}")
+
+    // 1. Postgres reachable?
+    val conn = dbConnect(connstr)
+    if conn == 0 then {
+        failBackup("", logPath, backupRoot ++ "/latest", database, computer, stamp,
+                   "postgres up-check", f"not connectable: {dbError(0)}", 1)
+    }
+    dbClose(conn)
+
+    // Dropbox path layout (computed early so failBackup can reference latestDir).
+    val latestDir = backupRoot ++ "/latest"
+    val computerDir = backupRoot ++ "/" ++ computer
+
+    // 2. Credentials: env var first, then Windows Credential Manager.
+    val credPrefix = env("DROPBOX_CREDENTIAL_PREFIX", "zen/default")
+    val refresh = resolveSecret(env("DROPBOX_REFRESH_TOKEN", ""), credPrefix, "refresh_token")
+    val appKey  = resolveSecret(env("DROPBOX_APP_KEY", ""),       credPrefix, "app_key")
+    val secret  = resolveSecret(env("DROPBOX_APP_SECRET", ""),    credPrefix, "app_secret")
+
+    val token = dropboxAccessToken(refresh, appKey, secret)
+    if Text.eq(token, "") then {
+        // No token → can't upload last-error.json; failBackup logs and quits.
+        failBackup("", logPath, latestDir, database, computer, stamp,
+                   "dropbox auth", "could not obtain access token", 1)
+    }
+
+    // 3. Ensure Dropbox folders.
+    ensureFolder(token, logPath, backupRoot)
+    ensureFolder(token, logPath, latestDir)
+    ensureFolder(token, logPath, computerDir)
+
+    // 4. pg_dump + verify.
+    val pgHost = env("PGHOST", "127.0.0.1")
+    val pgPort = env("PGPORT", "5432")
+    val pgUser = env("PGUSER", "postgres")
+    val pgDumpBin    = env("PG_DUMP",    "C:/Program Files/PostgreSQL/9.1/bin/pg_dump.exe")
+    val pgRestoreBin = env("PG_RESTORE", "C:/Program Files/PostgreSQL/9.1/bin/pg_restore.exe")
+    val dumpFile = env("TEMP", ".") ++ "/fireworks.backup." ++ stamp ++ ".dump"
+    val connArgs = ["-U", pgUser, "-h", pgHost, "-p", pgPort, "-F", "c", "-f", dumpFile, database]
+    val dumped = pgDump(logPath, pgDumpBin, connArgs, dumpFile)
+    if dumped == false then {
+        failBackup(token, logPath, latestDir, database, computer, stamp, "pg_dump", "pg_dump failed", 2)
+    }
+    val ok = pgVerify(logPath, pgRestoreBin, dumpFile)
+    if ok == false then {
+        failBackup(token, logPath, latestDir, database, computer, stamp, "pg_restore verify", "dump verification failed", 3)
+    }
+
+    // 5. Upload dump (native, content-hash verified) + timestamped copy.
+    // Mode (if set) is inserted as a clean segment before the extension, so
+    // fireworks.backup.DEV.dump — not fireworks.backup.dumpDEV. The timestamped
+    // copy is never mode-suffixed (it's already unique per run).
+    val stem = "fireworks.backup"
+    val mode = env("Mode", "")
+    val modeSeg = if Text.eq(Text.trim(mode), "") then "" else "." ++ Text.trim(mode)
+    val latestName = stem ++ modeSeg ++ ".dump"
+    val latestPath = latestDir ++ "/" ++ latestName
+    val stampedPath = computerDir ++ "/" ++ stem ++ "." ++ stamp ++ ".dump"
+    val u1 = uploadDump(token, logPath, dumpFile, latestPath)
+    if u1 == false then {
+        failBackup(token, logPath, latestDir, database, computer, stamp, "uploading latest backup", "upload/verify failed for " ++ latestPath, 4)
+    }
+    val u2 = uploadDump(token, logPath, dumpFile, stampedPath)
+    if u2 == false then {
+        failBackup(token, logPath, latestDir, database, computer, stamp, "uploading timestamped backup", "upload/verify failed for " ++ stampedPath, 4)
+    }
+
+    // 6. Portable copy (optional) — a local/removable third destination.
+    val portableRoot = env("PORTABLE_BACKUP_ROOT", "")
+    if not Text.eq(portableRoot, "") then {
+        copyToPortable(logPath, portableRoot, latestName, dumpFile)
+    }
+
+    // 7. last-run.json metadata (text upload — works today).
+    val meta = Json.object()
+    JsonValue.set(meta, "database", Json.string(database))
+    JsonValue.set(meta, "computer", Json.string(computer))
+    JsonValue.set(meta, "timestamp", Json.string(stamp))
+    JsonValue.set(meta, "latest_file", Json.string(latestName))
+    uploadText(token, logPath, latestDir ++ "/last-run.json", Json.stringify(meta))
+
+    // 8. Clear any stale last-error.json (success path).
+    deleteIfExists(token, logPath, latestDir ++ "/last-error.json")
+
+    // 8. Retention: keep newest N timestamped dumps (real list_folder + prune).
+    val keepStr = env("KEEP_BACKUPS", "")
+    val keepBackups = if Text.eq(keepStr, "") then 2 else textToIntUnsafe(keepStr)
+    pruneOldDumps(token, logPath, computerDir, stem, keepBackups)
+
+    val _ = keepLogs
+    log(logPath, "Backup complete.")
+}

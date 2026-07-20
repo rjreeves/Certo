@@ -1,0 +1,121 @@
+module db_users
+
+import Stdlib.Core
+import Stdlib.Db
+
+// ---------------------------------------------------------------------------
+// db_users — demonstrates parameterized queries and transactions
+//
+// Usage:
+//   db_users <connstr>
+//
+// Expects a table:
+//   CREATE TABLE users (
+//     id    SERIAL PRIMARY KEY,
+//     name  TEXT NOT NULL,
+//     email TEXT NOT NULL UNIQUE,
+//     age   INT  NOT NULL
+//   );
+// ---------------------------------------------------------------------------
+
+fn main(): Unit [io] = {
+    val connstr = arg(1) ?? "host=localhost dbname=postgres user=postgres"
+
+    val conn = dbConnect(connstr)
+    if conn == 0 then {
+        eprintln(f"could not connect: {dbError(0)}")
+    } else {
+        // ── Schema ────────────────────────────────────────────────────
+        dbExec(conn,
+            "CREATE TABLE IF NOT EXISTS users (" ++
+            "  id    SERIAL PRIMARY KEY," ++
+            "  name  TEXT NOT NULL," ++
+            "  email TEXT NOT NULL UNIQUE," ++
+            "  age   INT  NOT NULL" ++
+            ")", [])
+        println("table ready")
+
+        // ── Insert with parameterized query ───────────────────────────
+        dbBegin(conn)
+
+        dbExec(conn,
+            "INSERT INTO users(name, email, age) VALUES ($1, $2, $3)" ++
+            " ON CONFLICT (email) DO NOTHING",
+            ["Alice", "alice@example.com", "30"])
+
+        dbExec(conn,
+            "INSERT INTO users(name, email, age) VALUES ($1, $2, $3)" ++
+            " ON CONFLICT (email) DO NOTHING",
+            ["Bob", "bob@example.com", "25"])
+
+        dbExec(conn,
+            "INSERT INTO users(name, email, age) VALUES ($1, $2, $3)" ++
+            " ON CONFLICT (email) DO NOTHING",
+            ["Carol", "carol@example.com", "35"])
+
+        dbCommit(conn)
+        println("inserted sample rows")
+
+        // ── Query all users ───────────────────────────────────────────
+        val cols = dbColumns(conn, "SELECT id, name, email, age FROM users")
+        val rows = dbQuery(conn, "SELECT id, name, email, age FROM users ORDER BY id", [])
+
+        println(f"\nAll users ({intToText(List.len(rows))} rows):")
+
+        // Print header using trailing lambda
+        val header = List.fold(cols, "") { acc, col =>
+            if acc == "" then col else acc ++ " | " ++ col
+        }
+        println(header)
+        println("-----------------------------")
+
+        for row in rows {
+            val line = List.fold(row, "") { acc, cell =>
+                if acc == "" then cell ?? "" else acc ++ " | " ++ (cell ?? "")
+            }
+            println(line)
+        }
+
+        // ── Parameterized lookup ──────────────────────────────────────
+        val minAge = "28"
+        val older = dbQuery(conn,
+            "SELECT name, age FROM users WHERE age >= $1 ORDER BY age",
+            [minAge])
+        println(f"\nUsers aged {minAge} or older:")
+        for row in older {
+            val name = List.getOrPanic(row, 0) ?? ""
+            val age  = List.getOrPanic(row, 1) ?? ""
+            println(f"  {name} (age {age})")
+        }
+
+        // ── Single-row lookup via query + first ───────────────────────
+        val found = List.first(dbQuery(conn,
+            "SELECT name, email FROM users WHERE email = $1",
+            ["alice@example.com"]))
+        if let Some(row) = found {
+            val name  = List.getOrPanic(row, 0) ?? ""
+            val email = List.getOrPanic(row, 1) ?? ""
+            println(f"\nFound: {name} <{email}>")
+        } else {
+            println("\nalice not found")
+        }
+
+        // ── Count via query ───────────────────────────────────────────
+        val countRows = dbQuery(conn, "SELECT COUNT(*) FROM users", [])
+        val total = if let Some(r) = List.first(countRows) { List.getOrPanic(r, 0) ?? "?" } else { "?" }
+        println(f"\nTotal users: {total}")
+
+        // ── Transaction rollback demo ─────────────────────────────────
+        dbBegin(conn)
+        dbExec(conn, "DELETE FROM users WHERE name = $1", ["Bob"])
+        val afterDeleteRows = dbQuery(conn, "SELECT COUNT(*) FROM users", [])
+        val afterDelete = if let Some(r) = List.first(afterDeleteRows) { List.getOrPanic(r, 0) ?? "?" } else { "?" }
+        println(f"After DELETE inside txn: {afterDelete} users")
+        dbRollback(conn)
+        val afterRollbackRows = dbQuery(conn, "SELECT COUNT(*) FROM users", [])
+        val afterRollback = if let Some(r) = List.first(afterRollbackRows) { List.getOrPanic(r, 0) ?? "?" } else { "?" }
+        println(f"After ROLLBACK: {afterRollback} users (Bob is back)")
+
+        dbClose(conn)
+    }
+}
