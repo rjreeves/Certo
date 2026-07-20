@@ -2,6 +2,14 @@
 /target/
 **/target/
 
+# Release/scratch build output
+/dist/
+/out/
+
+# .NET build output (dll-demo/, oe/)
+bin/
+obj/
+
 # Editor/OS cruft
 .DS_Store
 Thumbs.db
