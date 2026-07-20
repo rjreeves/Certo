@@ -104,6 +104,8 @@ self-joins) are done — see the Completed table above. What's left:
 | 75 | Parameterized `Decimal(p,s)`, `Float32`, `Char` | `Decimal` has no precision/scale; no `Float32`/`Char` type exists. |
 | 76 | Row polymorphism (`<R: { name: Text }>`), higher-kinded types (`Functor<F<_>>`) | Not started — large type-system features. |
 | 77 | Result combinators — `flatMap`/`mapErr`/`getOrElse`/`recover`/`Result.all`/`Result.allSettled` | Only `?` propagation and `match` exist today. |
+| 97 | Parser bug — multi-param arrow lambdas `(a, b) => expr` don't parse (`expected RParen, found FatArrow`) | Found while writing a real program (`List.fold`/`List.sort` callbacks). Only single-param `(x) => expr` and the trailing-block form `{ a, b => expr }` work; `parse_postfix`'s `(`-after-expr branch doesn't special-case a parenthesized param list followed by `=>`. `crates/parser` |
+| 98 | Typeck bug — `List.empty()` fails to unify even with an explicit `List<T>` annotation, reporting it as an unapplied `() => U` function instead of the call result | Found in the same program; worked around with a `[]` literal. Looks specific to zero-arg generic calls in typeck's `App` inference. `crates/typeck` |
 
 ### Security
 
