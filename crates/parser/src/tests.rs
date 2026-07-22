@@ -521,6 +521,79 @@ fn trailing_lambda_still_works_outside_match_scrutinee() {
 }
 
 // ------------------------------------------------------------------ //
+// Arrow lambdas: `(x) => body`, `(x, y) => body`, `() => body`
+// ------------------------------------------------------------------ //
+
+fn fn_body(m: &certo_ast::module::Module, decl_idx: usize) -> Expr {
+    let Decl::Fn(f) = &m.decls[decl_idx].node else { panic!("expected fn") };
+    f.body.as_ref().unwrap().node.clone()
+}
+
+#[test]
+fn single_param_arrow_lambda_parses() {
+    // The exact form from the language spec's own examples — was entirely unparseable.
+    let m = ok("module A\nfn f(xs: List<Int>): List<Int> = List.map(xs, (x) => x)");
+    let Expr::App { args, .. } = fn_body(&m, 0) else { panic!("expected call") };
+    let Expr::Lambda { params, .. } = &args[1].value.node else { panic!("expected lambda arg, got {:?}", args[1].value.node) };
+    assert_eq!(params.len(), 1);
+    assert_eq!(params[0].name.node, "x");
+    assert!(params[0].ty.is_none());
+}
+
+#[test]
+fn multi_param_arrow_lambda_parses() {
+    let m = ok("module A\nfn f(xs: List<Int>): Int = List.fold(xs, 0, (acc, x) => acc + x)");
+    let Expr::App { args, .. } = fn_body(&m, 0) else { panic!("expected call") };
+    let Expr::Lambda { params, .. } = &args[2].value.node else { panic!("expected lambda arg") };
+    assert_eq!(params.len(), 2);
+    assert_eq!(params[0].name.node, "acc");
+    assert_eq!(params[1].name.node, "x");
+}
+
+#[test]
+fn typed_arrow_lambda_params_parse() {
+    let m = ok("module A\nfn f(): Int = { val add = (a: Int, b: Int) => a + b\n add(1, 2) }");
+    let Expr::Block { stmts, .. } = fn_body(&m, 0) else { panic!("expected block") };
+    let certo_ast::expr::Stmt::Val { value, .. } = &stmts[0] else { panic!("expected val") };
+    let Expr::Lambda { params, .. } = &value.node else { panic!("expected lambda") };
+    assert_eq!(params.len(), 2);
+    assert!(params[0].ty.is_some());
+    assert!(params[1].ty.is_some());
+}
+
+#[test]
+fn zero_param_arrow_lambda_parses_as_lambda_not_unit() {
+    // `()` alone is the Unit literal; `() => body` must still be recognized as a lambda.
+    let m = ok("module A\nfn f(): Int = { val thunk = () => 42\n thunk() }");
+    let Expr::Block { stmts, .. } = fn_body(&m, 0) else { panic!("expected block") };
+    let certo_ast::expr::Stmt::Val { value, .. } = &stmts[0] else { panic!("expected val") };
+    let Expr::Lambda { params, .. } = &value.node else { panic!("expected lambda, got {:?}", value.node) };
+    assert_eq!(params.len(), 0);
+}
+
+#[test]
+fn curried_arrow_lambda_parses() {
+    let m = ok("module A\nfn f(): Int = { val add = (a) => (b) => a + b\n add(1)(2) }");
+    let Expr::Block { stmts, .. } = fn_body(&m, 0) else { panic!("expected block") };
+    let certo_ast::expr::Stmt::Val { value, .. } = &stmts[0] else { panic!("expected val") };
+    let Expr::Lambda { params, body, .. } = &value.node else { panic!("expected outer lambda") };
+    assert_eq!(params.len(), 1);
+    assert!(matches!(&body.node, Expr::Lambda { .. }), "expected nested lambda body, got {:?}", body.node);
+}
+
+#[test]
+fn parenthesized_expr_and_tuple_still_parse_when_not_followed_by_arrow() {
+    // Regression guard: ordinary `(expr)` and tuples must not be misread as lambda params.
+    let m = ok("module A\nfn f(): Int = (1 + 2)");
+    assert!(matches!(fn_body(&m, 0), Expr::BinOp { .. }));
+
+    let m2 = ok("module A\nfn f(): Int = { val (a, b) = (1, 2)\n a + b }");
+    let Expr::Block { stmts, .. } = fn_body(&m2, 0) else { panic!("expected block") };
+    let certo_ast::expr::Stmt::Val { value, .. } = &stmts[0] else { panic!("expected val") };
+    assert!(matches!(&value.node, Expr::Tuple { .. }), "expected tuple, got {:?}", value.node);
+}
+
+// ------------------------------------------------------------------ //
 // Migration operations (structured parsing)
 // ------------------------------------------------------------------ //
 

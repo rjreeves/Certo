@@ -363,7 +363,9 @@ fn parse_atom(cur: &mut Cursor<'_>) -> Result<S<Expr>, ParseError> {
         // Identifier / path / constructor
         Some(Token::Ident(_)) => parse_ident_or_record(cur),
 
-        // `(expr)` or tuple
+        // `(x) => body`, `(x, y) => body`, `(x: Int) => body`, `() => body` — a lambda.
+        // Otherwise `(expr)` or a tuple.
+        Some(Token::LParen) if peek_is_arrow_lambda(cur) => parse_arrow_lambda(cur),
         Some(Token::LParen)   => parse_paren_or_tuple(cur),
 
         // `[e1, e2]` — list
@@ -471,6 +473,58 @@ fn parse_ident_or_record(cur: &mut Cursor<'_>) -> Result<S<Expr>, ParseError> {
     }
 
     Ok(S::new(Expr::Path { path, span }, span))
+}
+
+/// True if the tokens starting at the cursor's current `(` form a lambda parameter
+/// list immediately followed by `=>` — e.g. `(x) =>`, `(x, y) =>`, `(x: Int) =>`,
+/// `() =>`. A parenthesized *value* expression or tuple is never legally followed by
+/// `=>` anywhere else in the grammar (match-arm patterns and `A => B` function types
+/// are parsed by entirely separate code paths), so finding `=>` right after the
+/// balanced close paren is an unambiguous signal — regardless of what's actually
+/// inside the parens, since we're only tracking paren depth here, not validating
+/// the contents look like params (that's `parse_arrow_lambda`'s job, and it'll
+/// surface a proper error if they don't).
+fn peek_is_arrow_lambda(cur: &Cursor<'_>) -> bool {
+    if cur.peek() != Some(&Token::LParen) { return false; }
+    let mut depth = 0i32;
+    let mut i = 0usize;
+    loop {
+        match cur.peek_at(i) {
+            Some(Token::LParen) => depth += 1,
+            Some(Token::RParen) => {
+                depth -= 1;
+                if depth == 0 {
+                    return cur.peek_at(i + 1) == Some(&Token::FatArrow);
+                }
+            }
+            None => return false,
+            _ => {}
+        }
+        i += 1;
+    }
+}
+
+/// `(x) => body`, `(x, y) => body`, `(x: Int, y: Text) => body`, `() => body`.
+/// Param types are optional, unlike `fn(...)`-lambdas where they're required.
+fn parse_arrow_lambda(cur: &mut Cursor<'_>) -> Result<S<Expr>, ParseError> {
+    let start = cur.expect(&Token::LParen)?;
+    let mut params = Vec::new();
+    while cur.peek() != Some(&Token::RParen) && !cur.at_end() {
+        let (name, name_span) = cur.expect_ident()?;
+        let ty = if cur.eat(|t| matches!(t, Token::Colon)).is_some() {
+            Some(parse_type(cur)?)
+        } else {
+            None
+        };
+        let param_span = ty.as_ref().map(|t| name_span.to(t.span)).unwrap_or(name_span);
+        params.push(LambdaParam { name: S::new(name, name_span), ty, span: param_span });
+        if cur.eat(|t| matches!(t, Token::Comma)).is_none() { break; }
+    }
+    cur.expect(&Token::RParen)?;
+    cur.expect(&Token::FatArrow)?;
+    let body = parse_expr(cur)?;
+    let span = start.to(body.span);
+    Ok(S::new(Expr::Lambda { params, body: Box::new(body), span }, span))
 }
 
 fn parse_paren_or_tuple(cur: &mut Cursor<'_>) -> Result<S<Expr>, ParseError> {
