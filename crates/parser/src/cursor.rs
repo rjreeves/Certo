@@ -50,6 +50,13 @@ impl<'src> Cursor<'src> {
         self.tokens.get(self.pos + 3).map(|s| &s.token)
     }
 
+    /// Peek `offset` tokens ahead of the current position (0 = current token).
+    /// For unbounded lookahead scans where a fixed peek2/peek3/peek4 isn't enough —
+    /// e.g. finding the token right after a balanced `(...)` group of arbitrary length.
+    pub fn peek_at(&self, offset: usize) -> Option<&Token<'src>> {
+        self.tokens.get(self.pos + offset).map(|s| &s.token)
+    }
+
     /// True if the next tokens look like a trailing lambda: `{ ident => …` or `{ ident, ident => …`
     pub fn is_trailing_lambda(&self) -> bool {
         if self.suppress_trailing_lambda { return false; }

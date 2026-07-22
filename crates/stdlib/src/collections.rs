@@ -37,6 +37,13 @@ CertoList* certo_list_new_empty(void) {
 CertoList* certo_list_new(void) {
     return list_alloc(8);
 }
+/* `List.empty()` — the real function call site; see RUNTIME_HEADER's comment
+ * (this used to be a `#define certo_list_empty certo_list_new_empty()` macro
+ * relying on `List.empty` being referenced without call parens, which broke once
+ * typeck correctly registered it as a zero-arg function instead of a bare value). */
+CertoList* certo_list_empty(void) {
+    return certo_list_new_empty();
+}
 
 CertoList* certo_list_of(int64_t n, ...) {
     va_list ap;
@@ -241,6 +248,11 @@ static CertoMap* map_alloc(int64_t cap) {
 
 CertoMap* certo_map_new(void) {
     return map_alloc(16);
+}
+
+/* `Map.empty()` — see certo_list_empty's comment above; same fix. */
+CertoMap* certo_map_empty(void) {
+    return certo_map_new();
 }
 
 static int64_t map_probe(CertoMap* m, void* key) {

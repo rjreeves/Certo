@@ -79,7 +79,11 @@ pub fn seed_stdlib(env: &mut TypeEnv, counter: &mut u32) {
 
     {
         let a = fresh();
-        env.define("List.empty", poly1(a, Ty::List(Box::new(Ty::Var(a)))));
+        // Declared as a zero-arg fn (`fn List.empty<T>(): List<T>`), so it must be
+        // registered as `() => List<T>`, not a bare `List<T>` value — every call site
+        // is `List.empty()`, an App with zero args, which always unifies the callee's
+        // type against `Fn{params: [], ret}`.
+        env.define("List.empty", poly1(a, Ty::Fn { params: vec![], ret: Box::new(Ty::List(Box::new(Ty::Var(a)))) }));
     }
     {
         let a = fresh();
@@ -220,9 +224,13 @@ pub fn seed_stdlib(env: &mut TypeEnv, counter: &mut u32) {
 
     {
         let k = fresh(); let v = fresh();
+        // Same fix as List.empty above — must be `() => Map<K,V>`, not a bare value.
         env.define("Map.empty", Ty::Forall {
             vars: vec![k, v],
-            body: Box::new(Ty::Map(Box::new(Ty::Var(k)), Box::new(Ty::Var(v)))),
+            body: Box::new(Ty::Fn {
+                params: vec![],
+                ret: Box::new(Ty::Map(Box::new(Ty::Var(k)), Box::new(Ty::Var(v)))),
+            }),
         });
     }
     {

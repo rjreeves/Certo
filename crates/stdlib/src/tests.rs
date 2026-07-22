@@ -76,6 +76,36 @@ fn map_empty_is_polymorphic() {
 }
 
 #[test]
+fn list_empty_is_a_zero_arg_function_not_a_bare_value() {
+    // Regression test: `List.empty` was registered as a bare `Forall<T>. List<T>`
+    // value instead of `Forall<T>. () => List<T>`. Every call site is `List.empty()`
+    // — an App with zero args — which always unifies the callee's type against
+    // `Fn{params: [], ret}`, so a bare (non-Fn) body made every use of `List.empty()`
+    // fail to type-check, misreported as "found `() => U`".
+    let env = seeded_env();
+    match env.lookup("List.empty").unwrap() {
+        Ty::Forall { body, .. } => assert!(
+            matches!(body.as_ref(), Ty::Fn { params, .. } if params.is_empty()),
+            "List.empty's body should be a zero-arg Fn, got {:?}", body
+        ),
+        other => panic!("List.empty should be polymorphic, got {:?}", other),
+    }
+}
+
+#[test]
+fn map_empty_is_a_zero_arg_function_not_a_bare_value() {
+    // Same bug, same fix, for Map.empty — see list_empty's test above.
+    let env = seeded_env();
+    match env.lookup("Map.empty").unwrap() {
+        Ty::Forall { body, .. } => assert!(
+            matches!(body.as_ref(), Ty::Fn { params, .. } if params.is_empty()),
+            "Map.empty's body should be a zero-arg Fn, got {:?}", body
+        ),
+        other => panic!("Map.empty should be polymorphic, got {:?}", other),
+    }
+}
+
+#[test]
 fn map_insert_registered() {
     let env = seeded_env();
     assert!(matches!(env.lookup("Map.insert").unwrap(), Ty::Forall { .. }));

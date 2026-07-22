@@ -603,9 +603,9 @@ typedef void* certo_error_t;
 
 /* List (dynamic array) — full signatures are in the stdlib C block. */
 typedef struct { int64_t len; int64_t cap; void** data; } certo_list_base_t;
-/* List.empty constant — alias for the runtime constructor so codegen can emit
-   it as a plain global reference without a separate MIR aggregate node. */
-#define certo_list_empty certo_list_new_empty()
+/* certo_list_empty/certo_map_empty (List.empty()/Map.empty()) are real functions
+   defined alongside CertoList/CertoMap in the stdlib C block, not macros here —
+   see crates/stdlib/src/collections.rs. */
 
 /* Result<T,E> — heap-allocated tagged value.
    payload stores any scalar (int/float/bool) or pointer cast to intptr_t.
