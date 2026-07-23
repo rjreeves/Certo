@@ -101,10 +101,28 @@ pub struct TraitBound {
     pub span: Span,
 }
 
-/// A single generic parameter with optional bounds: `T: DbModel + Serializable`
+/// A row-polymorphism bound: `R: { name: Text }` — satisfied by any type that has
+/// *at least* these fields (with compatible types); extra fields are fine, unlike
+/// `TypeExpr::Record`'s use as a concrete anonymous record type.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RowBound {
+    pub fields: Vec<RecordTypeField>,
+    pub span:   Span,
+}
+
+/// One bound in a type parameter's `+`-separated bound list: either a trait name
+/// (`DbModel`) or an inline record shape (`{ name: Text }`).
+#[derive(Debug, Clone, PartialEq)]
+pub enum Bound {
+    Trait(TraitBound),
+    Row(RowBound),
+}
+
+/// A single generic parameter with optional bounds: `T: DbModel + Serializable`,
+/// or `R: { name: Text }` (row polymorphism).
 #[derive(Debug, Clone, PartialEq)]
 pub struct TypeParam {
     pub name:   Ident,
-    pub bounds: Vec<TraitBound>,
+    pub bounds: Vec<Bound>,
     pub span:   Span,
 }

@@ -418,3 +418,81 @@ fn fstring_non_displayable_errors() {
     assert!(kinds.iter().any(|k| matches!(k, TypeErrorKind::NonDisplayableInterpolation { .. })),
         "expected NonDisplayableInterpolation, got {:?}", kinds);
 }
+
+// ------------------------------------------------------------------ //
+// Row polymorphism — `<R: { field: Ty }>` bounds (E0212)
+// ------------------------------------------------------------------ //
+
+#[test]
+fn row_bound_exact_match_ok() {
+    check(
+        "module A
+type Widget = { name: Text }
+fn getName<R: { name: Text }>(record: R): Text = record.name
+fn f(): Text = getName(Widget { name: \"Bolt\" })"
+    ).unwrap();
+}
+
+#[test]
+fn row_bound_superset_fields_ok() {
+    check(
+        "module A
+type Order = { id: Int, name: Text, total: Int }
+fn getName<R: { name: Text }>(record: R): Text = record.name
+fn f(): Text = getName(Order { id: 1, name: \"Alice\", total: 100 })"
+    ).unwrap();
+}
+
+#[test]
+fn row_bound_via_pipe_ok() {
+    check(
+        "module A
+type Order = { id: Int, name: Text, total: Int }
+fn getName<R: { name: Text }>(record: R): Text = record.name
+fn f(): Text = Order { id: 1, name: \"Alice\", total: 100 } |> getName"
+    ).unwrap();
+}
+
+#[test]
+fn row_bound_missing_field_e0212() {
+    let kind = first_error_kind(
+        "module A
+type NoName = { id: Int }
+fn getName<R: { name: Text }>(record: R): Text = record.name
+fn f(): Text = getName(NoName { id: 1 })"
+    );
+    assert!(matches!(kind, TypeErrorKind::MissingRowField { .. }), "expected E0212, got {kind:?}");
+}
+
+#[test]
+fn row_bound_wrong_field_type_mismatch() {
+    let kinds: Vec<_> = check_err(
+        "module A
+type WrongType = { name: Int }
+fn getName<R: { name: Text }>(record: R): Text = record.name
+fn f(): Text = getName(WrongType { name: 42 })"
+    ).into_iter().map(|e| e.kind).collect();
+    assert!(kinds.iter().any(|k| matches!(k, TypeErrorKind::Mismatch { .. })),
+        "expected a Mismatch for wrong field type, got {:?}", kinds);
+}
+
+#[test]
+fn row_bound_non_record_argument_errors() {
+    let errs = check_err(
+        "module A
+fn getName<R: { name: Text }>(record: R): Text = record.name
+fn f(): Text = getName(42)"
+    );
+    assert!(!errs.is_empty(), "expected a type error passing a non-record to a row-bounded param");
+}
+
+#[test]
+fn row_bound_missing_field_via_pipe_e0212() {
+    let kind = first_error_kind(
+        "module A
+type NoName = { id: Int }
+fn getName<R: { name: Text }>(record: R): Text = record.name
+fn f(): Text = NoName { id: 1 } |> getName"
+    );
+    assert!(matches!(kind, TypeErrorKind::MissingRowField { .. }), "expected E0212, got {kind:?}");
+}

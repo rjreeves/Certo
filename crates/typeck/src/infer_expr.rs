@@ -1,7 +1,8 @@
+use std::collections::HashMap;
 use certo_ast::expr::{Expr, Stmt, Lit, BinOp, UnOp};
 use certo_ast::span::{S, Span};
 use certo_ast::types::TypeExpr;
-use crate::ty::Ty;
+use crate::ty::{Ty, TyVar};
 use crate::env::TypeEnv;
 use crate::unify::UnionFind;
 use crate::error::{TypeError, TypeErrorKind};
@@ -150,8 +151,6 @@ pub fn infer(expr: &S<Expr>, ctx: &mut Ctx<'_>) -> Ty {
         }
 
         Expr::App { func, args, span } => {
-            let func_ty = infer(func, ctx);
-
             let has_labels = args.iter().any(|a| a.label.is_some());
             // Build both a full-qualified path (for stdlib) and a short name (for user-defined).
             let (fn_full_path, fn_short_name) = if let Expr::Path { path, .. } = &func.node {
@@ -166,7 +165,9 @@ pub fn infer(expr: &S<Expr>, ctx: &mut Ctx<'_>) -> Ty {
                 .as_ref()
                 .filter(|fp| ctx.env.get_param_meta(fp).is_some())
                 .cloned()
-                .or(fn_short_name);
+                .or(fn_short_name.clone());
+
+            let (func_ty, row_check) = resolve_callee(func, ctx);
 
             // Collect (inferred_ty, span) per argument slot, respecting labels/defaults.
             let arg_info: Vec<(Ty, Span)> = if has_labels {
@@ -225,6 +226,11 @@ pub fn infer(expr: &S<Expr>, ctx: &mut Ctx<'_>) -> Ty {
             for ((arg_ty, arg_span), param_ty) in arg_info.iter().zip(param_vars.iter()) {
                 ctx.unify(arg_ty.clone(), param_ty.clone(), *arg_span);
             }
+
+            // Now that unification has resolved as much as it's going to, check any
+            // row-polymorphism bounds against whatever the bound type param resolved to.
+            apply_row_check(&row_check, ctx, *span);
+
             ret_ty
         }
 
@@ -233,20 +239,22 @@ pub fn infer(expr: &S<Expr>, ctx: &mut Ctx<'_>) -> Ty {
             match &right.node {
                 // `a |> f(b, c)` — type-check as `f(a, b, c)`
                 Expr::App { func, args, .. } => {
-                    let func_ty = infer(func, ctx);
+                    let (func_ty, row_check) = resolve_callee(func, ctx);
                     let mut param_tys = vec![left_ty];
                     param_tys.extend(args.iter().map(|a| infer(&a.value, ctx)));
                     let ret_ty = ctx.fresh();
                     let expected = Ty::Fn { params: param_tys, ret: Box::new(ret_ty.clone()) };
                     ctx.unify(func_ty, expected, *span);
+                    apply_row_check(&row_check, ctx, *span);
                     ret_ty
                 }
                 // `a |> f` — type-check as `f(a)`
                 _ => {
-                    let right_ty = infer(right, ctx);
+                    let (right_ty, row_check) = resolve_callee(right, ctx);
                     let ret_ty = ctx.fresh();
                     let expected_fn = Ty::Fn { params: vec![left_ty], ret: Box::new(ret_ty.clone()) };
                     ctx.unify(right_ty, expected_fn, *span);
+                    apply_row_check(&row_check, ctx, *span);
                     ret_ty
                 }
             }
@@ -541,6 +549,111 @@ pub fn infer(expr: &S<Expr>, ctx: &mut Ctx<'_>) -> Ty {
 /// conversions codegen emits in `coerce_to_text` (Int/Float/Bool/Decimal/Text).
 fn is_displayable(ty: &Ty) -> bool {
     matches!(ty, Ty::Int | Ty::Float | Ty::Bool | Ty::Decimal | Ty::Text)
+}
+
+// ------------------------------------------------------------------ //
+// Row-polymorphism bounds (`R: { name: Text }`)
+// ------------------------------------------------------------------ //
+
+/// A row check to run once a call's arguments have been unified: the bounds
+/// themselves (each as the bound type param's *original* `TyVar` plus its
+/// required fields), and the substitution mapping those original vars to the
+/// fresh vars this particular call instantiated them to.
+type RowCheck = (Vec<(TyVar, Vec<(String, Ty)>)>, HashMap<TyVar, Ty>);
+
+/// Resolve a call's callee expression, instantiating its type — and if it names a
+/// row-bounded function, returning the row check to run once the call's arguments
+/// are unified. Shared by `Expr::App` and both branches of `Expr::Pipe`, since a
+/// row-bounded function can be called either way (`f(x)` or `x |> f`).
+///
+/// Row bounds are looked up by plain function name, i.e. this only covers
+/// top-level `fn`s called by bare name — impl-block methods parse as
+/// `Expr::Field` (`Type.method`), which isn't handled yet (see BACKLOG).
+/// `infer(func, ctx)`'s generic `Expr::Path` case instantiates the callee's type
+/// too, but discards the substitution it used, which we need here to know which
+/// fresh var a bound type param became for *this* call.
+fn resolve_callee(func: &S<Expr>, ctx: &mut Ctx<'_>) -> (Ty, Option<RowCheck>) {
+    let short_name = if let Expr::Path { path, .. } = &func.node {
+        path.segments.last().map(|s| s.node.clone())
+    } else {
+        None
+    };
+
+    let resolved = short_name.as_deref().and_then(|name| {
+        let bounds = ctx.env.get_row_bounds(name)?.clone();
+        let raw = ctx.env.lookup(name)?.clone();
+        let (instantiated, subst) = raw.instantiate_with_subst(ctx.counter);
+        Some((instantiated, bounds, subst))
+    });
+
+    match resolved {
+        Some((ty, bounds, subst)) => (ty, Some((bounds, subst))),
+        None => (infer(func, ctx), None),
+    }
+}
+
+/// Run a row check produced by `resolve_callee`, after the call's arguments have
+/// been unified (so the bound type param's fresh var is as resolved as it's going
+/// to get).
+fn apply_row_check(row_check: &Option<RowCheck>, ctx: &mut Ctx<'_>, span: Span) {
+    let Some((bounds, subst)) = row_check else { return };
+    for (orig_var, required_fields) in bounds {
+        if let Some(bound_ty) = subst.get(orig_var) {
+            let resolved = ctx.uf.apply(bound_ty);
+            check_row_bound(&resolved, required_fields, ctx, span);
+        }
+    }
+}
+
+/// Check that `resolved_ty` structurally has at least `required_fields`, with
+/// compatible types — the actual row-polymorphism satisfaction check.
+fn check_row_bound(resolved_ty: &Ty, required_fields: &[(String, Ty)], ctx: &mut Ctx<'_>, span: Span) {
+    // Still an unresolved variable — the bound param was never pinned down to a
+    // concrete type by the call (e.g. an unused argument), nothing to check yet.
+    if matches!(resolved_ty, Ty::Var(_) | Ty::Error) { return; }
+
+    let actual_fields: Vec<(String, Ty)> = match resolved_ty {
+        Ty::Record(fields) => fields.clone(),
+        Ty::Named { name, args } if args.is_empty() => {
+            match ctx.env.record_fields.get(name) {
+                Some(fields) => fields.clone(),
+                None => {
+                    push_row_shape_mismatch(resolved_ty, required_fields, ctx, span);
+                    return;
+                }
+            }
+        }
+        _ => {
+            push_row_shape_mismatch(resolved_ty, required_fields, ctx, span);
+            return;
+        }
+    };
+
+    for (field_name, required_ty) in required_fields {
+        match actual_fields.iter().find(|(n, _)| n == field_name) {
+            // Field exists — check its type the same way any other value is
+            // checked, so a mismatch here gets the same well-formatted E0200.
+            Some((_, actual_ty)) => ctx.unify(actual_ty.clone(), required_ty.clone(), span),
+            None => ctx.errors.push(TypeError {
+                kind: TypeErrorKind::MissingRowField {
+                    ty:       resolved_ty.clone(),
+                    field:    field_name.clone(),
+                    required: required_ty.clone(),
+                },
+                span,
+            }),
+        }
+    }
+}
+
+fn push_row_shape_mismatch(resolved_ty: &Ty, required_fields: &[(String, Ty)], ctx: &mut Ctx<'_>, span: Span) {
+    ctx.errors.push(TypeError {
+        kind: TypeErrorKind::Mismatch {
+            expected: Ty::Record(required_fields.to_vec()),
+            found:    resolved_ty.clone(),
+        },
+        span,
+    });
 }
 
 fn infer_lit(lit: &Lit) -> Ty {

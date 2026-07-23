@@ -1243,6 +1243,15 @@ pub(crate) fn type_error_to_diagnostic(e: &TypeError) -> Diagnostic {
                 .with_label("no text representation")
                 .with_note("only Int, Float, Bool, Decimal, and Text can be interpolated; convert it first")
         }
+
+        TypeErrorKind::MissingRowField { ty, field, required } => {
+            let names = assign_var_names(&[ty, required]);
+            Diagnostic::error("E0212",
+                format!("`{}` does not satisfy the row bound", ty.display_named(&names)))
+                .with_span(e.span)
+                .with_label(format!("missing field `{}: {}`", field, required.display_named(&names)))
+                .with_note(format!("add a `{}: {}` field, or pass a type that already has one", field, required.display_named(&names)))
+        }
     }
 }
 

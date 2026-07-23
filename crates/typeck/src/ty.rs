@@ -77,6 +77,15 @@ impl Ty {
     /// Instantiate a `Forall` by replacing each quantified var with a fresh
     /// inference variable, using the provided counter.
     pub fn instantiate(&self, counter: &mut u32) -> Ty {
+        self.instantiate_with_subst(counter).0
+    }
+
+    /// Same as `instantiate`, but also returns the substitution map (original
+    /// quantified `TyVar` → fresh `Ty::Var`) — needed by callers that must track
+    /// which fresh variable a given bound type parameter became, e.g. to check a
+    /// row-polymorphism bound against whatever that variable resolves to after
+    /// the call's arguments are unified.
+    pub fn instantiate_with_subst(&self, counter: &mut u32) -> (Ty, HashMap<TyVar, Ty>) {
         match self {
             Ty::Forall { vars, body } => {
                 let mut subst: HashMap<TyVar, Ty> = HashMap::new();
@@ -84,9 +93,9 @@ impl Ty {
                     *counter += 1;
                     subst.insert(v, Ty::Var(*counter));
                 }
-                body.apply_subst(&subst)
+                (body.apply_subst(&subst), subst)
             }
-            other => other.clone(),
+            other => (other.clone(), HashMap::new()),
         }
     }
 
