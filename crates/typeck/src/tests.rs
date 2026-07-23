@@ -496,3 +496,19 @@ fn f(): Text = NoName { id: 1 } |> getName"
     );
     assert!(matches!(kind, TypeErrorKind::MissingRowField { .. }), "expected E0212, got {kind:?}");
 }
+
+// ------------------------------------------------------------------ //
+// `??` chaining with an optional fallback (right-associative parse)
+// ------------------------------------------------------------------ //
+
+#[test]
+fn null_coalesce_chain_with_optional_middle_value_ok() {
+    // `a ?? b ?? c` must parse/typecheck as `a ?? (b ?? c)` so a chain of
+    // fallbacks works even when the middle value is itself optional.
+    check(
+        "module A
+fn maybeA(): Text? = None
+fn maybeB(): Text? = None
+fn f(): Text = maybeA() ?? maybeB() ?? \"default\""
+    ).unwrap();
+}
