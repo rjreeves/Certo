@@ -722,3 +722,28 @@ fn migration_raw_sql_escape_hatch() {
 fn migration_unknown_op_errors() {
     err("module A\nmigration \"x\" { up { frobnicate users } down { } }");
 }
+
+// ------------------------------------------------------------------ //
+// `??` is right-associative: `a ?? b ?? c` == `a ?? (b ?? c)`
+// ------------------------------------------------------------------ //
+
+#[test]
+fn null_coalesce_chain_is_right_associative() {
+    let m = ok("module A\nfn f(): Text = a ?? b ?? c");
+    let Decl::Fn(f) = &m.decls[0].node else { panic!("expected fn decl") };
+    let Expr::BinOp { op: BinOp::NullCoalesce, left, right, .. } = &f.body.as_ref().unwrap().node
+        else { panic!("expected a NullCoalesce BinOp") };
+    // left must be the bare `a`, not `a ?? b` — that's what right-associativity means here.
+    assert!(matches!(&left.node, Expr::Path { .. }), "expected left operand to be bare `a`, got {:?}", left.node);
+    // right must itself be the nested `b ?? c`, not the bare `b`.
+    let Expr::BinOp { op: BinOp::NullCoalesce, .. } = &right.node
+        else { panic!("expected right operand to be the nested `b ?? c`, got {:?}", right.node) };
+}
+
+#[test]
+fn null_coalesce_single_still_parses() {
+    // Regression guard: the two-operand case must still work after the associativity change.
+    let m = ok("module A\nfn f(): Text = a ?? b");
+    let Decl::Fn(f) = &m.decls[0].node else { panic!("expected fn decl") };
+    assert!(matches!(&f.body.as_ref().unwrap().node, Expr::BinOp { op: BinOp::NullCoalesce, .. }));
+}

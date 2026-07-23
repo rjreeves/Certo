@@ -67,12 +67,12 @@ fn parse_and(cur: &mut Cursor<'_>) -> Result<S<Expr>, ParseError> {
 }
 
 fn parse_coalesce(cur: &mut Cursor<'_>) -> Result<S<Expr>, ParseError> {
-    let mut left = parse_not(cur)?;
-    while cur.peek() == Some(&Token::DoubleQuestion) {
+    let left = parse_not(cur)?;
+    if cur.peek() == Some(&Token::DoubleQuestion) {
         cur.bump();
-        let right = parse_not(cur)?;
+        let right = parse_coalesce(cur)?; // right-associative, so `a ?? b ?? c` == `a ?? (b ?? c)`
         let span = left.span.to(right.span);
-        left = S::new(Expr::BinOp { op: BinOp::NullCoalesce, left: Box::new(left), right: Box::new(right), span }, span);
+        return Ok(S::new(Expr::BinOp { op: BinOp::NullCoalesce, left: Box::new(left), right: Box::new(right), span }, span));
     }
     Ok(left)
 }
