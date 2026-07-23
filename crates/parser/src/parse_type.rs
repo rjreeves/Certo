@@ -1,5 +1,5 @@
 use certo_ast::span::S;
-use certo_ast::types::{TypeExpr, TypeParam, EffectSet, Effect, TraitBound, ModulePath, RecordTypeField};
+use certo_ast::types::{TypeExpr, TypeParam, EffectSet, Effect, TraitBound, Bound, RowBound, ModulePath, RecordTypeField};
 use certo_lexer::Token;
 use crate::cursor::Cursor;
 use crate::error::{ParseError, ParseErrorKind};
@@ -182,9 +182,9 @@ pub fn parse_type_params(cur: &mut Cursor<'_>) -> Result<Vec<TypeParam>, ParseEr
         let mut bounds = Vec::new();
 
         if cur.eat(|t| matches!(t, Token::Colon)).is_some() {
-            bounds.push(parse_trait_bound(cur)?);
+            bounds.push(parse_bound(cur)?);
             while cur.eat(|t| matches!(t, Token::Plus)).is_some() {
-                bounds.push(parse_trait_bound(cur)?);
+                bounds.push(parse_bound(cur)?);
             }
         }
 
@@ -203,6 +203,20 @@ fn parse_trait_bound(cur: &mut Cursor<'_>) -> Result<TraitBound, ParseError> {
     let path = parse_module_path(cur)?;
     let span = path.span;
     Ok(TraitBound { name: path, span })
+}
+
+/// One bound in a `+`-separated type-param bound list: a trait name (`DbModel`)
+/// or an inline record shape (`{ name: Text }`) for row polymorphism.
+fn parse_bound(cur: &mut Cursor<'_>) -> Result<Bound, ParseError> {
+    if cur.peek() == Some(&Token::LBrace) {
+        let rec = parse_record_type(cur)?;
+        let TypeExpr::Record { fields, span } = rec.node else {
+            unreachable!("parse_record_type always returns TypeExpr::Record")
+        };
+        Ok(Bound::Row(RowBound { fields, span }))
+    } else {
+        Ok(Bound::Trait(parse_trait_bound(cur)?))
+    }
 }
 
 /// `[pure]` or `[db.read, async]`

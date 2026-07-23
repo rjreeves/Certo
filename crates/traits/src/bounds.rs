@@ -35,7 +35,10 @@ fn check_type_param(tp: &TypeParam, db: &TraitDb, errors: &mut Vec<TraitError>) 
     // For each bound `T: SomeTrait`, verify there is at least one registered
     // impl of SomeTrait.  We cannot know the concrete T at this stage, so we
     // only flag bounds that refer to traits that don't exist at all.
+    // Row bounds (`R: { name: Text }`) aren't traits — certo_typeck checks
+    // those against the concrete type at each call site instead.
     for bound in &tp.bounds {
+        let certo_ast::types::Bound::Trait(bound) = bound else { continue };
         let trait_name = bound.name.segments
             .iter().map(|s| s.node.as_str()).collect::<Vec<_>>().join(".");
         if !db.traits.contains_key(&trait_name) {
@@ -207,6 +210,7 @@ pub fn check_call_bounds(
 ) {
     for tp in type_params {
         for bound in &tp.bounds {
+            let certo_ast::types::Bound::Trait(bound) = bound else { continue };
             let trait_name = bound.name.segments
                 .iter().map(|s| s.node.as_str()).collect::<Vec<_>>().join(".");
             if !db.implements(concrete_type, &trait_name) {

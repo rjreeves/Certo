@@ -11,11 +11,22 @@ pub struct TypeEnv {
     pub param_meta: HashMap<String, Vec<(String, bool)>>,
     /// Record type definitions: type_name → [(field_name, field_type)].
     pub record_fields: HashMap<String, Vec<(String, Ty)>>,
+    /// Row-polymorphism bounds on generic functions: fn_name → [(the bound type
+    /// param's original quantified TyVar, its required [(field_name, field_type)])].
+    /// Populated during hoisting (see `infer_decl::hoist_decl`); checked at each
+    /// call site once the function's type params are instantiated and the call's
+    /// arguments are unified (see `infer_expr`'s `Expr::App` handling).
+    pub row_bounds: HashMap<String, Vec<(TyVar, Vec<(String, Ty)>)>>,
 }
 
 impl TypeEnv {
     pub fn new() -> Self {
-        TypeEnv { frames: vec![HashMap::new()], param_meta: HashMap::new(), record_fields: HashMap::new() }
+        TypeEnv {
+            frames: vec![HashMap::new()],
+            param_meta: HashMap::new(),
+            record_fields: HashMap::new(),
+            row_bounds: HashMap::new(),
+        }
     }
 
     pub fn push(&mut self) {
@@ -81,6 +92,19 @@ impl TypeEnv {
     /// Retrieve parameter metadata for a function, if available.
     pub fn get_param_meta(&self, fn_name: &str) -> Option<&Vec<(String, bool)>> {
         self.param_meta.get(fn_name)
+    }
+
+    /// Register a function's row-polymorphism bounds (see `row_bounds` field doc).
+    /// A no-op when `bounds` is empty, so callers can call this unconditionally.
+    pub fn define_row_bounds(&mut self, fn_name: impl Into<String>, bounds: Vec<(TyVar, Vec<(String, Ty)>)>) {
+        if !bounds.is_empty() {
+            self.row_bounds.insert(fn_name.into(), bounds);
+        }
+    }
+
+    /// Retrieve a function's row-polymorphism bounds, if it has any.
+    pub fn get_row_bounds(&self, fn_name: &str) -> Option<&Vec<(TyVar, Vec<(String, Ty)>)>> {
+        self.row_bounds.get(fn_name)
     }
 
     /// Seed the environment with built-in types/values.

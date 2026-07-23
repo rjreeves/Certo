@@ -1,4 +1,4 @@
-use certo_ast::types::{TypeExpr, TypeParam, EffectSet, Effect};
+use certo_ast::types::{TypeExpr, TypeParam, EffectSet, Effect, Bound};
 use crate::printer::group;
 
 pub fn fmt_type(te: &TypeExpr, indent: usize) -> String {
@@ -40,13 +40,23 @@ pub fn fmt_type_params(params: &[TypeParam]) -> String {
         if p.bounds.is_empty() {
             p.name.node.clone()
         } else {
-            let bounds = p.bounds.iter().map(|b| {
-                b.name.segments.iter().map(|s| s.node.as_str()).collect::<Vec<_>>().join(".")
-            }).collect::<Vec<_>>().join(" + ");
+            let bounds = p.bounds.iter().map(fmt_bound).collect::<Vec<_>>().join(" + ");
             format!("{}: {}", p.name.node, bounds)
         }
     }).collect();
     format!("<{}>", ps.join(", "))
+}
+
+fn fmt_bound(b: &Bound) -> String {
+    match b {
+        Bound::Trait(t) => t.name.segments.iter().map(|s| s.node.as_str()).collect::<Vec<_>>().join("."),
+        Bound::Row(r) => {
+            let fs: Vec<String> = r.fields.iter()
+                .map(|f| format!("{}: {}", f.name.node, fmt_type(&f.ty.node, 0)))
+                .collect();
+            format!("{{ {} }}", fs.join(", "))
+        }
+    }
 }
 
 pub fn fmt_effects(effects: &Option<EffectSet>) -> String {

@@ -9,6 +9,33 @@ use crate::unify::UnionFind;
 use crate::error::{TypeError, TypeErrorKind};
 use crate::infer_expr::{infer, infer_block, type_expr_to_ty, Ctx};
 
+/// Extract row-polymorphism bounds (`R: { name: Text }`) from a function/method's
+/// type parameters, evaluating each required field's type. `type_param_vars` must
+/// be the fresh `TyVar`s already created for `type_params`, in the same order —
+/// see the `type_param_vars` construction just above each call site. Must be
+/// called before the type-param scope is popped, so a field type that refers to
+/// a sibling type parameter (e.g. `R: { value: T }`) resolves to that param's
+/// actual var rather than an unrelated fresh one.
+fn collect_row_bounds(
+    type_params:     &[certo_ast::types::TypeParam],
+    type_param_vars: &[u32],
+    ctx:             &mut Ctx<'_>,
+) -> Vec<(u32, Vec<(String, Ty)>)> {
+    use certo_ast::types::Bound;
+    type_params.iter().zip(type_param_vars.iter()).filter_map(|(tp, &var)| {
+        let fields: Vec<(String, Ty)> = tp.bounds.iter()
+            .filter_map(|b| match b {
+                Bound::Row(row) => Some(row.fields.iter()
+                    .map(|f| (f.name.node.clone(), type_expr_to_ty(&f.ty.node, ctx)))
+                    .collect::<Vec<_>>()),
+                Bound::Trait(_) => None,
+            })
+            .flatten()
+            .collect();
+        if fields.is_empty() { None } else { Some((var, fields)) }
+    }).collect()
+}
+
 /// Entry point: check all declarations in a module.
 pub fn check_module(module: &Module) -> Result<(), Vec<TypeError>> {
     let mut env     = TypeEnv::new();
@@ -202,6 +229,7 @@ fn hoist_decl(
                     Ty::Var(*ctx.counter)
                 }
             };
+            let row_bounds = collect_row_bounds(&f.type_params, &type_param_vars, &mut ctx);
             ctx.env.pop();
 
             let fn_ty = Ty::Fn { params: param_tys, ret: Box::new(ret_ty) };
@@ -216,6 +244,7 @@ fn hoist_decl(
                 .map(|p| (p.name.node.clone(), p.default.is_some()))
                 .collect();
             ctx.env.define_param_meta(f.name.node.clone(), meta);
+            ctx.env.define_row_bounds(f.name.node.clone(), row_bounds);
         }
         Decl::Val(v) => {
             let mut ctx = Ctx { env, uf, errors, counter };
@@ -360,6 +389,7 @@ fn hoist_decl(
                     Some(ann) => type_expr_to_ty(&ann.node, &mut ctx),
                     None      => { *ctx.counter += 1; Ty::Var(*ctx.counter) }
                 };
+                let row_bounds = collect_row_bounds(&m.type_params, &type_param_vars, &mut ctx);
                 ctx.env.pop();
                 let fn_ty = Ty::Fn { params: param_tys, ret: Box::new(ret_ty) };
                 let fn_ty = if type_param_vars.is_empty() {
@@ -372,7 +402,8 @@ fn hoist_decl(
                 let meta: Vec<(String, bool)> = m.params.iter()
                     .map(|p| (p.name.node.clone(), p.default.is_some()))
                     .collect();
-                ctx.env.define_param_meta(qname, meta);
+                ctx.env.define_param_meta(qname.clone(), meta);
+                ctx.env.define_row_bounds(qname, row_bounds);
             }
         }
         _ => {} // Other decls handled later or not yet

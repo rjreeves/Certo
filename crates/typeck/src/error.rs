@@ -36,6 +36,10 @@ pub enum TypeErrorKind {
     /// E0211 — an f-string interpolation `{ }` holds a value with no text representation.
     NonDisplayableInterpolation { ty: Ty },
 
+    /// E0212 — an argument passed for a row-polymorphism-bounded type parameter
+    /// (`R: { name: Text }`) is missing a required field.
+    MissingRowField { ty: Ty, field: String, required: Ty },
+
     /// E0708 — temporal declaration body does not resolve to Duration.
     TemporalNotDuration { found: Ty },
 
@@ -64,6 +68,9 @@ impl TypeError {
                 format!("E0210: call to extern function `{}` must be inside an `unsafe {{ }}` block", name),
             TypeErrorKind::NonDisplayableInterpolation { ty } =>
                 format!("E0211: cannot interpolate a value of type `{}` into a string — convert it first", ty.display()),
+            TypeErrorKind::MissingRowField { ty, field, required } =>
+                format!("E0212: `{}` does not satisfy the row bound — missing field `{}: {}`",
+                    ty.display(), field, required.display()),
             TypeErrorKind::TemporalNotDuration { found } =>
                 format!("E0708: temporal body must resolve to Duration, found `{}`", found.display()),
             TypeErrorKind::AgeOnNonTimestamp { found } =>

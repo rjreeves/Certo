@@ -75,6 +75,50 @@ fn fn_decl_simple() {
 }
 
 #[test]
+fn row_bound_parses() {
+    use certo_ast::types::Bound;
+    let m = ok("module A\nfn getName<R: { name: Text }>(record: R): Text = record.name");
+    let Decl::Fn(f) = &m.decls[0].node else { panic!("expected fn decl") };
+    assert_eq!(f.type_params.len(), 1);
+    assert_eq!(f.type_params[0].name.node, "R");
+    assert_eq!(f.type_params[0].bounds.len(), 1);
+    let Bound::Row(row) = &f.type_params[0].bounds[0] else { panic!("expected a row bound") };
+    assert_eq!(row.fields.len(), 1);
+    assert_eq!(row.fields[0].name.node, "name");
+}
+
+#[test]
+fn row_bound_with_multiple_fields_parses() {
+    use certo_ast::types::Bound;
+    let m = ok("module A\nfn f<R: { name: Text, age: Int }>(r: R): Text = r.name");
+    let Decl::Fn(f) = &m.decls[0].node else { panic!("expected fn decl") };
+    let Bound::Row(row) = &f.type_params[0].bounds[0] else { panic!("expected a row bound") };
+    assert_eq!(row.fields.len(), 2);
+    assert_eq!(row.fields[1].name.node, "age");
+}
+
+#[test]
+fn trait_bound_still_parses_as_before() {
+    // Regression guard: the Bound enum change must not affect ordinary trait bounds.
+    use certo_ast::types::Bound;
+    let m = ok("module A\nfn f<T: Serializable>(x: T): Text = todo()");
+    let Decl::Fn(f) = &m.decls[0].node else { panic!("expected fn decl") };
+    let Bound::Trait(tb) = &f.type_params[0].bounds[0] else { panic!("expected a trait bound") };
+    assert_eq!(tb.name.segments[0].node, "Serializable");
+}
+
+#[test]
+fn mixed_trait_and_row_bounds_parse() {
+    use certo_ast::types::Bound;
+    let m = ok("module A\nfn f<R: Serializable + { name: Text }>(r: R): Text = r.name");
+    let Decl::Fn(f) = &m.decls[0].node else { panic!("expected fn decl") };
+    let bounds = &f.type_params[0].bounds;
+    assert_eq!(bounds.len(), 2);
+    assert!(matches!(&bounds[0], Bound::Trait(_)));
+    assert!(matches!(&bounds[1], Bound::Row(_)));
+}
+
+#[test]
 fn async_fn_decl() {
     let m = ok("module A\nasync fn fetchUser(id: UUID): Result<User, DbError> = todo()");
     match &m.decls[0].node {
