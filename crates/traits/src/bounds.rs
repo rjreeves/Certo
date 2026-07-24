@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 use crate::trait_db::TraitDb;
 use crate::error::{TraitError, TraitErrorKind};
-use certo_ast::decl::{Decl, FnDecl};
-use certo_ast::expr::{Expr, Stmt};
+use certo_ast::decl::{Decl, FnDecl, FnParam};
+use certo_ast::expr::{Arg, Expr, Stmt};
 use certo_ast::module::Module;
 use certo_ast::span::S;
 use certo_ast::types::{TypeExpr, TypeParam};
@@ -72,13 +72,29 @@ pub fn check_dbquery_typed_bounds(module: &Module, db: &TraitDb) -> Vec<TraitErr
         .collect();
 
     let mut errors = Vec::new();
-    for sd in &module.decls {
-        if let Decl::Fn(f) = &sd.node {
-            if let Some(body) = &f.body {
-                walk_expr(body, &fn_ret, db, &mut errors);
+    for_each_body(module, &mut |body| {
+        for_each_call(body, &mut |func, args| {
+            let is_dbqt = matches!(&func.node,
+                Expr::Path { path, .. }
+                if path.segments.last().map(|s| s.node.as_str()) == Some("dbQueryTyped")
+            );
+            if !is_dbqt || args.len() < 4 { return; }
+
+            let mapper = &args[3].value;
+            let Expr::Path { path, .. } = &mapper.node else { return };
+            let mapper_name = path.segments.last().map(|s| s.node.as_str()).unwrap_or("");
+            let Some(ret_ty) = fn_ret.get(mapper_name) else { return };
+            if !db.implements(ret_ty, "DbRow") {
+                errors.push(TraitError {
+                    kind: TraitErrorKind::UnsatisfiedBound {
+                        ty:         ret_ty.clone(),
+                        trait_name: "DbRow".to_string(),
+                    },
+                    span: mapper.span,
+                });
             }
-        }
-    }
+        });
+    });
     errors
 }
 
@@ -90,52 +106,101 @@ fn type_expr_simple_name(te: &TypeExpr) -> Option<String> {
     }
 }
 
-fn walk_expr(
-    expr:   &S<Expr>,
-    fn_ret: &HashMap<String, String>,
-    db:     &TraitDb,
-    errors: &mut Vec<TraitError>,
-) {
+/// Best-effort static check: for a call `f(args...)` where `f` is a
+/// module-local function or impl method with a `Trait`-bounded type param `T`,
+/// and an argument at a parameter position declared as bare `T` is a record
+/// literal `TypeName { .. }`, verify `TypeName` satisfies the bound.
+///
+/// Like `check_dbquery_typed_bounds`, this only fires when the concrete type
+/// is directly visible in the call's own AST (a record-literal argument) —
+/// this crate has no type inference, so a value passed via a variable or a
+/// computed expression is not tracked. Only bare-name calls (`f(x)`) are
+/// covered, not `Type.method(...)` dot-call syntax (mirrors the same v1
+/// scope limitation as row-polymorphism bound checking in `certo-typeck`).
+pub fn check_generic_call_bounds(module: &Module, db: &TraitDb) -> Vec<TraitError> {
+    let generics = collect_generic_fns(module);
+
+    let mut errors = Vec::new();
+    for_each_body(module, &mut |body| {
+        for_each_call(body, &mut |func, args| {
+            let Expr::Path { path, .. } = &func.node else { return };
+            let name = path.segments.last().map(|s| s.node.as_str()).unwrap_or("");
+            let Some(sig) = generics.get(name) else { return };
+
+            for (param, arg) in sig.params.iter().zip(args.iter()) {
+                let Some(tp) = sig.type_params.iter().find(|tp| is_bare_type_param(&param.ty.node, &tp.name.node))
+                    else { continue };
+                if tp.bounds.iter().all(|b| matches!(b, certo_ast::types::Bound::Row(_))) { continue; }
+                let Expr::Record { ty_name: Some(concrete), .. } = &arg.value.node else { continue };
+                check_call_bounds(concrete, std::slice::from_ref(tp), db, &mut errors, arg.value.span);
+            }
+        });
+    });
+    errors
+}
+
+struct GenericFnSig {
+    type_params: Vec<TypeParam>,
+    params:      Vec<FnParam>,
+}
+
+fn collect_generic_fns(module: &Module) -> HashMap<String, GenericFnSig> {
+    let mut out = HashMap::new();
+    let mut add = |f: &FnDecl| {
+        if f.type_params.is_empty() { return; }
+        out.insert(f.name.node.clone(), GenericFnSig {
+            type_params: f.type_params.clone(),
+            params:      f.params.clone(),
+        });
+    };
+    for sd in &module.decls {
+        match &sd.node {
+            Decl::Fn(f) => add(f),
+            Decl::Impl(i) => { for m in &i.methods { add(m); } }
+            _ => {}
+        }
+    }
+    out
+}
+
+fn is_bare_type_param(ty: &TypeExpr, param_name: &str) -> bool {
+    matches!(ty, TypeExpr::Named { path, args, .. }
+        if args.is_empty() && path.segments.len() == 1 && path.segments[0].node == param_name)
+}
+
+/// Call `visit` once for every function/impl-method body in the module.
+fn for_each_body<'a>(module: &'a Module, visit: &mut dyn FnMut(&'a S<Expr>)) {
+    for sd in &module.decls {
+        match &sd.node {
+            Decl::Fn(f) => { if let Some(body) = &f.body { visit(body); } }
+            Decl::Impl(i) => {
+                for m in &i.methods { if let Some(body) = &m.body { visit(body); } }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Recursively walk `expr`, calling `visit(func, args)` for every call
+/// expression (`Expr::App`) found anywhere inside it.
+fn for_each_call<'a>(expr: &'a S<Expr>, visit: &mut dyn FnMut(&'a S<Expr>, &'a [Arg])) {
     match &expr.node {
         Expr::App { func, args, span: _ } => {
-            let is_dbqt = matches!(&func.node,
-                Expr::Path { path, .. }
-                if path.segments.last().map(|s| s.node.as_str()) == Some("dbQueryTyped")
-            );
-
-            if is_dbqt && args.len() >= 4 {
-                let mapper = &args[3].value;
-                if let Expr::Path { path, .. } = &mapper.node {
-                    let mapper_name = path.segments.last().map(|s| s.node.as_str()).unwrap_or("");
-                    if let Some(ret_ty) = fn_ret.get(mapper_name) {
-                        if !db.implements(ret_ty, "DbRow") {
-                            errors.push(TraitError {
-                                kind: TraitErrorKind::UnsatisfiedBound {
-                                    ty:         ret_ty.clone(),
-                                    trait_name: "DbRow".to_string(),
-                                },
-                                span: mapper.span,
-                            });
-                        }
-                    }
-                }
-            }
-
-            walk_expr(func, fn_ret, db, errors);
-            for arg in args { walk_expr(&arg.value, fn_ret, db, errors); }
+            visit(func, args);
+            for_each_call(func, visit);
+            for arg in args { for_each_call(&arg.value, visit); }
         }
-
         Expr::Block { stmts, .. } => {
-            for stmt in stmts { walk_stmt(stmt, fn_ret, db, errors); }
+            for stmt in stmts { for_each_call_stmt(stmt, visit); }
         }
         Expr::If { cond, then_expr, else_expr, .. } => {
-            walk_expr(cond, fn_ret, db, errors);
-            walk_expr(then_expr, fn_ret, db, errors);
-            walk_expr(else_expr, fn_ret, db, errors);
+            for_each_call(cond, visit);
+            for_each_call(then_expr, visit);
+            for_each_call(else_expr, visit);
         }
         Expr::BinOp { left, right, .. } | Expr::Pipe { left, right, .. } => {
-            walk_expr(left, fn_ret, db, errors);
-            walk_expr(right, fn_ret, db, errors);
+            for_each_call(left, visit);
+            for_each_call(right, visit);
         }
         Expr::UnOp { expr, .. }
         | Expr::Field { expr, .. }
@@ -143,56 +208,51 @@ fn walk_expr(
         | Expr::Try { expr, .. }
         | Expr::Await { expr, .. }
         | Expr::Spawn { expr, .. }
-        | Expr::Ascribe { expr, .. } => walk_expr(expr, fn_ret, db, errors),
-        Expr::Lambda { body, .. } => walk_expr(body, fn_ret, db, errors),
+        | Expr::Ascribe { expr, .. } => for_each_call(expr, visit),
+        Expr::Lambda { body, .. } => for_each_call(body, visit),
         Expr::Match { scrutinee, arms, .. } => {
-            walk_expr(scrutinee, fn_ret, db, errors);
-            for arm in arms { walk_expr(&arm.body, fn_ret, db, errors); }
+            for_each_call(scrutinee, visit);
+            for arm in arms { for_each_call(&arm.body, visit); }
         }
         Expr::List { elements, .. } | Expr::Tuple { elements, .. } => {
-            for e in elements { walk_expr(e, fn_ret, db, errors); }
+            for e in elements { for_each_call(e, visit); }
         }
         Expr::Record { base, fields, .. } => {
-            if let Some(b) = base { walk_expr(b, fn_ret, db, errors); }
-            for f in fields { walk_expr(&f.value, fn_ret, db, errors); }
+            if let Some(b) = base { for_each_call(b, visit); }
+            for f in fields { for_each_call(&f.value, visit); }
         }
         Expr::For { iter, body, .. } => {
-            walk_expr(iter, fn_ret, db, errors);
-            walk_expr(body, fn_ret, db, errors);
+            for_each_call(iter, visit);
+            for_each_call(body, visit);
         }
         Expr::Guard { cond, else_expr, .. } | Expr::While { cond, body: else_expr, .. } => {
-            walk_expr(cond, fn_ret, db, errors);
-            walk_expr(else_expr, fn_ret, db, errors);
+            for_each_call(cond, visit);
+            for_each_call(else_expr, visit);
         }
         Expr::Require { expr, error, .. } => {
-            walk_expr(expr, fn_ret, db, errors);
-            walk_expr(error, fn_ret, db, errors);
+            for_each_call(expr, visit);
+            for_each_call(error, visit);
         }
         Expr::Parallel { tasks, timeout, .. } => {
-            for t in tasks { walk_expr(t, fn_ret, db, errors); }
-            if let Some(to) = timeout { walk_expr(to, fn_ret, db, errors); }
+            for t in tasks { for_each_call(t, visit); }
+            if let Some(to) = timeout { for_each_call(to, visit); }
         }
         Expr::Transaction { body, .. } | Expr::Unsafe { body, .. } => {
-            walk_expr(body, fn_ret, db, errors);
+            for_each_call(body, visit);
         }
-        Expr::Age { expr, .. } => walk_expr(expr, fn_ret, db, errors),
+        Expr::Age { expr, .. } => for_each_call(expr, visit),
         // Terminals — nothing to recurse into
         Expr::Lit { .. } | Expr::Path { .. } => {}
     }
 }
 
-fn walk_stmt(
-    stmt:   &Stmt,
-    fn_ret: &HashMap<String, String>,
-    db:     &TraitDb,
-    errors: &mut Vec<TraitError>,
-) {
+fn for_each_call_stmt<'a>(stmt: &'a Stmt, visit: &mut dyn FnMut(&'a S<Expr>, &'a [Arg])) {
     match stmt {
-        Stmt::Expr   { expr, .. }  => walk_expr(expr, fn_ret, db, errors),
-        Stmt::Val    { value, .. } => walk_expr(value, fn_ret, db, errors),
-        Stmt::Var    { value, .. } => walk_expr(value, fn_ret, db, errors),
-        Stmt::Assign { value, .. } => walk_expr(value, fn_ret, db, errors),
-        Stmt::Defer  { body, .. }  => walk_expr(body, fn_ret, db, errors),
+        Stmt::Expr   { expr, .. }  => for_each_call(expr, visit),
+        Stmt::Val    { value, .. } => for_each_call(value, visit),
+        Stmt::Var    { value, .. } => for_each_call(value, visit),
+        Stmt::Assign { value, .. } => for_each_call(value, visit),
+        Stmt::Defer  { body, .. }  => for_each_call(body, visit),
     }
 }
 

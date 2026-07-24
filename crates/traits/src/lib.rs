@@ -5,7 +5,7 @@ mod error;
 
 pub use trait_db::{TraitDb, TraitDef, ImplRecord, MethodSig};
 pub use error::{TraitError, TraitErrorKind};
-pub use bounds::{check_bounds, check_call_bounds, check_dbquery_typed_bounds};
+pub use bounds::{check_bounds, check_call_bounds, check_dbquery_typed_bounds, check_generic_call_bounds};
 
 use certo_ast::module::Module;
 
@@ -13,6 +13,8 @@ use certo_ast::module::Module;
 /// 1. Build the trait/impl registry.
 /// 2. Verify each impl satisfies its trait.
 /// 3. Verify type-param bounds in function signatures.
+/// 4. Verify call sites that supply a record-literal argument for a
+///    trait-bounded generic parameter.
 pub fn check_module(module: &Module) -> Result<TraitDb, Vec<TraitError>> {
     let db = TraitDb::build(module);
 
@@ -20,6 +22,7 @@ pub fn check_module(module: &Module) -> Result<TraitDb, Vec<TraitError>> {
     errors.extend(check_impl::check_impls(module, &db));
     errors.extend(check_bounds(module, &db));
     errors.extend(check_dbquery_typed_bounds(module, &db));
+    errors.extend(check_generic_call_bounds(module, &db));
 
     if errors.is_empty() { Ok(db) } else { Err(errors) }
 }
