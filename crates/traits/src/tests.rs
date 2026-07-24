@@ -173,3 +173,84 @@ impl Namer for Widget {
     assert!(has_kind(&errs, |k| matches!(k, TraitErrorKind::ParamTypeMismatch { method, .. } if method == "name")),
         "expected E0304, got: {:?}", errs.iter().map(|e| e.message()).collect::<Vec<_>>());
 }
+
+// ------------------------------------------------------------------ //
+// Generic call-site bound checking (check_generic_call_bounds)
+// ------------------------------------------------------------------ //
+
+#[test]
+fn generic_call_with_satisfying_record_literal_ok() {
+    ok("module A
+trait Greet {
+    fn greet(name: Text): Text
+}
+
+type Person = { name: Text }
+
+impl Greet for Person {
+    fn greet(name: Text): Text = name
+}
+
+fn callGreet<T: Greet>(x: T): Unit = {}
+
+fn main(): Unit = callGreet(Person { name: \"Alice\" })");
+}
+
+#[test]
+fn generic_call_with_unsatisfying_record_literal_errors() {
+    let errs = err("module A
+trait Greet {
+    fn greet(name: Text): Text
+}
+
+type Robot = { id: Int }
+
+fn callGreet<T: Greet>(x: T): Unit = {}
+
+fn main(): Unit = callGreet(Robot { id: 1 })");
+    assert!(has_kind(&errs, |k|
+        matches!(k, TraitErrorKind::UnsatisfiedBound { ty, trait_name } if ty == "Robot" && trait_name == "Greet")),
+        "expected E0305 for Robot not implementing Greet, got: {:?}",
+        errs.iter().map(|e| e.message()).collect::<Vec<_>>());
+}
+
+#[test]
+fn generic_call_via_dot_syntax_not_checked() {
+    // Known v1 limitation (mirrors the same gap in row-polymorphism bound
+    // checking): `Type.method(...)` parses as Expr::Field wrapping the App,
+    // not a bare Expr::Path, so it's outside this check's scope. Must NOT
+    // false-positive by somehow still finding an error here.
+    ok("module A
+trait Greet {
+    fn greet(name: Text): Text
+}
+
+type Robot = { id: Int }
+
+type Caller = { id: Int }
+
+impl Caller {
+    fn callGreet<T: Greet>(x: T): Unit = {}
+}
+
+fn main(): Unit = Caller.callGreet(Robot { id: 1 })");
+}
+
+#[test]
+fn generic_call_with_non_literal_argument_not_checked() {
+    // Best-effort/syntactic: a variable argument's type isn't visible in the
+    // AST, so this must NOT raise a false positive.
+    ok("module A
+trait Greet {
+    fn greet(name: Text): Text
+}
+
+type Robot = { id: Int }
+
+fn callGreet<T: Greet>(x: T): Unit = {}
+
+fn main(): Unit = {
+    val r = Robot { id: 1 }
+    callGreet(r)
+}");
+}

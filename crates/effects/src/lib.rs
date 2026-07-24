@@ -4,7 +4,7 @@ pub mod check_effects;
 mod error;
 
 pub use effect_env::{EffectEnv, DeclaredEffects, build_env};
-pub use error::{EffectError, EffectErrorKind};
+pub use error::{EffectError, EffectErrorKind, effect_name};
 
 use certo_ast::module::Module;
 

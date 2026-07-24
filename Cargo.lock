@@ -28,12 +28,13 @@ checksum = "b4388bee8683e3d04af747c73422af53102d2bd24d9eadb6cbc100baef4b43f8"
 
 [[package]]
 name = "certo"
-version = "1.0.49"
+version = "1.0.52"
 dependencies = [
  "certo-ast",
  "certo-codegen",
  "certo-dbschema",
  "certo-diagnostics",
+ "certo-effects",
  "certo-fmt",
  "certo-hir",
  "certo-migrate",
