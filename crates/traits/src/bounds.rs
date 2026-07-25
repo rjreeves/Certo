@@ -114,18 +114,16 @@ fn type_expr_simple_name(te: &TypeExpr) -> Option<String> {
 /// Like `check_dbquery_typed_bounds`, this only fires when the concrete type
 /// is directly visible in the call's own AST (a record-literal argument) —
 /// this crate has no type inference, so a value passed via a variable or a
-/// computed expression is not tracked. Only bare-name calls (`f(x)`) are
-/// covered, not `Type.method(...)` dot-call syntax (mirrors the same v1
-/// scope limitation as row-polymorphism bound checking in `certo-typeck`).
+/// computed expression is not tracked. Covers both bare-name calls (`f(x)`)
+/// and `Type.method(x)` dot-call syntax (via `callee_lookup_key`).
 pub fn check_generic_call_bounds(module: &Module, db: &TraitDb) -> Vec<TraitError> {
     let generics = collect_generic_fns(module);
 
     let mut errors = Vec::new();
     for_each_body(module, &mut |body| {
         for_each_call(body, &mut |func, args| {
-            let Expr::Path { path, .. } = &func.node else { return };
-            let name = path.segments.last().map(|s| s.node.as_str()).unwrap_or("");
-            let Some(sig) = generics.get(name) else { return };
+            let Some(name) = callee_lookup_key(&func.node) else { return };
+            let Some(sig) = generics.get(&name) else { return };
 
             for (param, arg) in sig.params.iter().zip(args.iter()) {
                 let Some(tp) = sig.type_params.iter().find(|tp| is_bare_type_param(&param.ty.node, &tp.name.node))
@@ -144,19 +142,26 @@ struct GenericFnSig {
     params:      Vec<FnParam>,
 }
 
+/// Top-level functions are keyed by bare name; impl methods by `"Type.method"`
+/// — matching how `resolve_callee` in `certo_typeck` and `qualified_call_name`
+/// below resolve a `Type.method(...)` call site. Keying impl methods by bare
+/// name alone would collide whenever two impls declare a same-named method.
 fn collect_generic_fns(module: &Module) -> HashMap<String, GenericFnSig> {
     let mut out = HashMap::new();
-    let mut add = |f: &FnDecl| {
+    let mut add = |key: String, f: &FnDecl| {
         if f.type_params.is_empty() { return; }
-        out.insert(f.name.node.clone(), GenericFnSig {
+        out.insert(key, GenericFnSig {
             type_params: f.type_params.clone(),
             params:      f.params.clone(),
         });
     };
     for sd in &module.decls {
         match &sd.node {
-            Decl::Fn(f) => add(f),
-            Decl::Impl(i) => { for m in &i.methods { add(m); } }
+            Decl::Fn(f) => add(f.name.node.clone(), f),
+            Decl::Impl(i) => {
+                let type_name = i.type_path.segments.last().map(|s| s.node.as_str()).unwrap_or("");
+                for m in &i.methods { add(format!("{}.{}", type_name, m.name.node), m); }
+            }
             _ => {}
         }
     }
@@ -166,6 +171,27 @@ fn collect_generic_fns(module: &Module) -> HashMap<String, GenericFnSig> {
 fn is_bare_type_param(ty: &TypeExpr, param_name: &str) -> bool {
     matches!(ty, TypeExpr::Named { path, args, .. }
         if args.is_empty() && path.segments.len() == 1 && path.segments[0].node == param_name)
+}
+
+/// Resolve a call's callee to a lookup key: a bare `Path` by its name, or a
+/// `Type.method(...)` dot-call (`Expr::Field` on an uppercase-first-segment
+/// `Path`) by its qualified `"Type.method"` name. Returns `None` for anything
+/// else (e.g. a value field access `record.method(...)` where `record` is a
+/// lowercase local — this crate has no type inference to resolve that).
+fn callee_lookup_key(func: &Expr) -> Option<String> {
+    match func {
+        Expr::Path { path, .. } => path.segments.last().map(|s| s.node.clone()),
+        Expr::Field { expr, field, .. } => {
+            let Expr::Path { path, .. } = &expr.node else { return None };
+            let first = path.segments.first()?;
+            if first.node.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
+                Some(format!("{}.{}", first.node, field.node))
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
 }
 
 /// Call `visit` once for every function/impl-method body in the module.

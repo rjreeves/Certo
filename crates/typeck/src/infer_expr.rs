@@ -281,15 +281,10 @@ pub fn infer(expr: &S<Expr>, ctx: &mut Ctx<'_>) -> Ty {
         Expr::Field { expr, field, span } => {
             // Check if this is a module-qualified call: Text.join, List.map, etc.
             // (upper-case single-segment path not bound as a local)
-            if let Expr::Path { path, .. } = &expr.node {
-                let first = path.segments.first().map(|s| s.node.as_str()).unwrap_or("");
-                let is_upper = first.chars().next().map(|c| c.is_uppercase()).unwrap_or(false);
-                if is_upper {
-                    let qualified = format!("{}.{}", first, field.node);
-                    if let Some(ty) = ctx.env.lookup(&qualified) {
-                        let ty = ty.clone();
-                        return ctx.instantiate(ty);
-                    }
+            if let Some(qualified) = qualified_call_name(expr, field) {
+                if let Some(ty) = ctx.env.lookup(&qualified) {
+                    let ty = ty.clone();
+                    return ctx.instantiate(ty);
                 }
             }
 
@@ -561,25 +556,30 @@ fn is_displayable(ty: &Ty) -> bool {
 /// fresh vars this particular call instantiated them to.
 type RowCheck = (Vec<(TyVar, Vec<(String, Ty)>)>, HashMap<TyVar, Ty>);
 
+/// A bare-name path (`fn(x)`) resolves to `fn`'s row bounds by that name;
+/// `Type.method(x)` resolves by qualified name via `qualified_call_name`,
+/// matching how impl methods are hoisted into `row_bounds` (`"Type.method"`).
+///
 /// Resolve a call's callee expression, instantiating its type — and if it names a
 /// row-bounded function, returning the row check to run once the call's arguments
 /// are unified. Shared by `Expr::App` and both branches of `Expr::Pipe`, since a
 /// row-bounded function can be called either way (`f(x)` or `x |> f`).
 ///
-/// Row bounds are looked up by plain function name, i.e. this only covers
-/// top-level `fn`s called by bare name — impl-block methods parse as
-/// `Expr::Field` (`Type.method`), which isn't handled yet (see BACKLOG).
 /// `infer(func, ctx)`'s generic `Expr::Path` case instantiates the callee's type
 /// too, but discards the substitution it used, which we need here to know which
 /// fresh var a bound type param became for *this* call.
 fn resolve_callee(func: &S<Expr>, ctx: &mut Ctx<'_>) -> (Ty, Option<RowCheck>) {
-    let short_name = if let Expr::Path { path, .. } = &func.node {
-        path.segments.last().map(|s| s.node.clone())
-    } else {
-        None
+    let lookup_name = match &func.node {
+        Expr::Path { path, .. } => path.segments.last().map(|s| s.node.clone()),
+        // `Type.method(...)` — same uppercase-first-segment heuristic the
+        // Expr::Field arm below uses to resolve the call's type in the first
+        // place; without this, the call itself still type-checks (via that
+        // arm), but any row bound on `method` was silently never checked.
+        Expr::Field { expr, field, .. } => qualified_call_name(expr, field),
+        _ => None,
     };
 
-    let resolved = short_name.as_deref().and_then(|name| {
+    let resolved = lookup_name.as_deref().and_then(|name| {
         let bounds = ctx.env.get_row_bounds(name)?.clone();
         let raw = ctx.env.lookup(name)?.clone();
         let (instantiated, subst) = raw.instantiate_with_subst(ctx.counter);
@@ -589,6 +589,21 @@ fn resolve_callee(func: &S<Expr>, ctx: &mut Ctx<'_>) -> (Ty, Option<RowCheck>) {
     match resolved {
         Some((ty, bounds, subst)) => (ty, Some((bounds, subst))),
         None => (infer(func, ctx), None),
+    }
+}
+
+/// If `expr.field` is a module/type-qualified reference — `expr` is a bare
+/// `Path` whose first segment starts uppercase, e.g. `Text.join`, `List.map`,
+/// `Order.getName` — return its qualified lookup key (`"Text.join"`, etc).
+/// Returns `None` for an ordinary value field access (`record.name`), where
+/// the first segment is a lowercase local/param, not a type name.
+fn qualified_call_name(expr: &S<Expr>, field: &S<String>) -> Option<String> {
+    let Expr::Path { path, .. } = &expr.node else { return None };
+    let first = path.segments.first()?;
+    if first.node.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
+        Some(format!("{}.{}", first.node, field.node))
+    } else {
+        None
     }
 }
 

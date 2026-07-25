@@ -215,12 +215,12 @@ fn main(): Unit = callGreet(Robot { id: 1 })");
 }
 
 #[test]
-fn generic_call_via_dot_syntax_not_checked() {
-    // Known v1 limitation (mirrors the same gap in row-polymorphism bound
-    // checking): `Type.method(...)` parses as Expr::Field wrapping the App,
-    // not a bare Expr::Path, so it's outside this check's scope. Must NOT
-    // false-positive by somehow still finding an error here.
-    ok("module A
+fn generic_call_via_dot_syntax_is_checked() {
+    // `Type.method(...)` parses as Expr::Field wrapping the App, not a bare
+    // Expr::Path — `callee_lookup_key` recognizes this dot-call shape too
+    // (was a known limitation; fixed alongside the analogous gap in
+    // row-polymorphism bound checking).
+    let errs = err("module A
 trait Greet {
     fn greet(name: Text): Text
 }
@@ -234,6 +234,74 @@ impl Caller {
 }
 
 fn main(): Unit = Caller.callGreet(Robot { id: 1 })");
+    assert!(has_kind(&errs, |k|
+        matches!(k, TraitErrorKind::UnsatisfiedBound { ty, trait_name } if ty == "Robot" && trait_name == "Greet")),
+        "expected E0305 for Robot not implementing Greet via a dot-call, got: {:?}",
+        errs.iter().map(|e| e.message()).collect::<Vec<_>>());
+}
+
+#[test]
+fn generic_call_via_lowercase_receiver_not_mistaken_for_qualified_call() {
+    // `callee_lookup_key` must only treat `expr.field(...)` as a qualified
+    // Type.method call when `expr` is an uppercase-first-segment Path — a
+    // lowercase local (`caller`, not `Caller`) must not false-positive into
+    // a bogus "generics" lookup, even though the AST shape is identical.
+    ok("module A
+trait Greet {
+    fn greet(name: Text): Text
+}
+
+type Robot = { id: Int }
+
+fn callGreet<T: Greet>(x: T): Unit = {}
+
+fn main(): Unit = {
+    val caller = Robot { id: 1 }
+    caller.callGreet(Robot { id: 2 })
+}");
+}
+
+#[test]
+fn same_named_methods_on_different_impls_do_not_collide() {
+    // collect_generic_fns keys impl methods by "Type.method", not bare
+    // method name — two impls with a same-named generic method must be
+    // checked independently, not have one silently overwrite the other's
+    // entry in the lookup map.
+    let errs = err("module A
+trait Greet {
+    fn greet(name: Text): Text
+}
+
+type Person = { name: Text }
+
+impl Greet for Person {
+    fn greet(name: Text): Text = name
+}
+
+type Robot = { id: Int }
+type Alpha = { id: Int }
+type Beta = { id: Int }
+
+impl Alpha {
+    fn callGreet<T: Greet>(x: T): Unit = {}
+}
+
+impl Beta {
+    fn callGreet<T: Greet>(x: T): Unit = {}
+}
+
+fn main(): Unit = {
+    Alpha.callGreet(Person { name: \"Alice\" })
+    Beta.callGreet(Robot { id: 1 })
+}");
+    assert!(has_kind(&errs, |k|
+        matches!(k, TraitErrorKind::UnsatisfiedBound { ty, trait_name } if ty == "Robot" && trait_name == "Greet")),
+        "expected Beta.callGreet's Robot argument to be flagged independently of Alpha.callGreet, got: {:?}",
+        errs.iter().map(|e| e.message()).collect::<Vec<_>>());
+    assert!(!has_kind(&errs, |k|
+        matches!(k, TraitErrorKind::UnsatisfiedBound { ty, .. } if ty == "Person")),
+        "Alpha.callGreet's satisfying Person argument must not be flagged, got: {:?}",
+        errs.iter().map(|e| e.message()).collect::<Vec<_>>());
 }
 
 #[test]

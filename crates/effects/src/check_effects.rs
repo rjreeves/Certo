@@ -18,12 +18,14 @@ pub fn check_module(module: &Module, env: &EffectEnv) -> Vec<EffectError> {
                 }
             }
             Decl::Impl(i) => {
+                let type_name = i.type_path.segments.last().map(|s| s.node.as_str()).unwrap_or("");
                 for m in &i.methods {
                     if let Some(body) = &m.body {
-                        let declared = env.get(&m.name.node)
+                        let qname = format!("{}.{}", type_name, m.name.node);
+                        let declared = env.get(&qname)
                             .cloned()
                             .unwrap_or_default();
-                        check_fn_body(&m.name.node, &declared, body, env, &mut errors);
+                        check_fn_body(&qname, &declared, body, env, &mut errors);
                     }
                 }
             }

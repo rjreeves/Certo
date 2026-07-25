@@ -40,14 +40,22 @@ pub fn build_env_seeded(module: &Module, mut env: EffectEnv) -> EffectEnv {
 }
 
 fn collect_fn_effects(decl: &Decl, env: &mut EffectEnv) {
-    let fns: Vec<&certo_ast::decl::FnDecl> = match decl {
-        Decl::Fn(f)    => vec![f],
-        Decl::Trait(t) => t.methods.iter().collect(),
-        Decl::Impl(i)  => i.methods.iter().collect(),
+    // Impl methods are keyed by "Type.method" — matching how a Type.method(...)
+    // dot-call is resolved (see infer_effects.rs) — so two impls declaring a
+    // same-named method don't collide under one bare-name entry. Top-level fns
+    // and trait method *signatures* (abstract, never directly callable) keep
+    // their bare name.
+    let fns: Vec<(String, &certo_ast::decl::FnDecl)> = match decl {
+        Decl::Fn(f)    => vec![(f.name.node.clone(), f)],
+        Decl::Trait(t) => t.methods.iter().map(|f| (f.name.node.clone(), f)).collect(),
+        Decl::Impl(i)  => {
+            let type_name = i.type_path.segments.last().map(|s| s.node.as_str()).unwrap_or("");
+            i.methods.iter().map(|f| (format!("{}.{}", type_name, f.name.node), f)).collect()
+        }
         _              => vec![],
     };
 
-    for f in fns {
+    for (key, f) in fns {
         let declared = match &f.effects {
             None => DeclaredEffects { effects: HashSet::new(), is_pure: false },
             Some(es) => {
@@ -72,6 +80,6 @@ fn collect_fn_effects(decl: &Decl, env: &mut EffectEnv) {
             declared.effects.insert(Effect::Async);
         }
 
-        env.insert(f.name.node.clone(), declared);
+        env.insert(key, declared);
     }
 }

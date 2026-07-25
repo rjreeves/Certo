@@ -171,6 +171,54 @@ fn pure_fn_calling_impure_named_fn_names_the_callee() {
 }
 
 #[test]
+fn pure_fn_calling_impure_method_via_dot_call_is_checked() {
+    // `Type.method(...)` parses as Expr::Field wrapping the App, not a bare
+    // Expr::Path — callee_lookup_key must recognize this dot-call shape too.
+    let module = parse("module A
+type Widget = { id: Int }
+impl Widget {
+    fn doIo(): Unit [io] = {}
+}
+fn compute(): Int [pure] = {
+    Widget.doIo()
+    1
+}").expect("parse error");
+    let env = build_env(&module);
+    let errs = crate::check_effects::check_module(&module, &env);
+
+    assert_eq!(errs.len(), 1, "expected exactly one error, got: {:?}",
+        errs.iter().map(|e| e.message()).collect::<Vec<_>>());
+    assert!(matches!(&errs[0].kind,
+        EffectErrorKind::ImpureCallInPure { caller, callee, .. } if caller == "compute" && callee == "Widget.doIo"),
+        "expected ImpureCallInPure naming callee `Widget.doIo`, got: {}", errs[0].message());
+}
+
+#[test]
+fn same_named_methods_on_different_impls_do_not_collide() {
+    // collect_fn_effects keys impl methods by "Type.method", not bare method
+    // name — two impls with a same-named method must have independent
+    // declared effects, not have one silently overwrite the other's entry.
+    let module = parse("module A
+type Quiet = { id: Int }
+type Loud = { id: Int }
+impl Quiet {
+    fn run(): Unit [pure] = {}
+}
+impl Loud {
+    fn run(): Unit [io] = { println(\"x\") }
+}
+fn compute(): Int [pure] = {
+    Quiet.run()
+    1
+}").expect("parse error");
+    let env = build_env(&module);
+    let errs = crate::check_effects::check_module(&module, &env);
+    assert!(errs.is_empty(),
+        "Quiet.run is [pure]; calling it from a pure fn must not be flagged, got: {:?}",
+        errs.iter().map(|e| e.message()).collect::<Vec<_>>());
+}
+
+#[test]
 fn unannotated_fn_allows_all_effects_except_unsafe() {
     // Open effect set: transaction is OK, but unsafe is not
     let tx_body = S::new(Expr::Transaction { body: Box::new(lit_expr(1)), span: DUMMY }, DUMMY);
