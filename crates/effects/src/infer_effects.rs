@@ -32,13 +32,12 @@ pub fn infer_expr(expr: &S<Expr>, env: &EffectEnv, out: &mut InferredEffects) {
             infer_expr(func, env, out);
             for a in args { infer_expr(&a.value, env, out); }
 
-            // If calling a named function, inherit its declared effects.
-            if let Expr::Path { path, .. } = &func.node {
-                if let Some(name) = path.segments.last().map(|s| s.node.as_str()) {
-                    if let Some(decl) = env.get(name) {
-                        for e in &decl.effects {
-                            out.add(e.clone(), *span, Some(name.to_string()));
-                        }
+            // If calling a named function — bare `f(x)` or qualified
+            // `Type.method(x)` — inherit its declared effects.
+            if let Some(name) = callee_lookup_key(&func.node) {
+                if let Some(decl) = env.get(&name) {
+                    for e in &decl.effects {
+                        out.add(e.clone(), *span, Some(name.clone()));
                     }
                 }
             }
@@ -135,5 +134,28 @@ fn infer_stmt(stmt: &Stmt, env: &EffectEnv, out: &mut InferredEffects) {
         Stmt::Val { value, .. } | Stmt::Var { value, .. } => infer_expr(value, env, out),
         Stmt::Assign { value, .. } => infer_expr(value, env, out),
         Stmt::Defer { body, .. } | Stmt::Expr { expr: body, .. } => infer_expr(body, env, out),
+    }
+}
+
+/// Resolve a call's callee to an `EffectEnv` lookup key: a bare `Path` by its
+/// name, or a `Type.method(...)` dot-call (`Expr::Field` on an
+/// uppercase-first-segment `Path`) by its qualified `"Type.method"` name —
+/// matching how impl methods are keyed in `effect_env::collect_fn_effects`.
+/// Returns `None` for a value field access (`record.method(...)` where
+/// `record` is a lowercase local) — this crate has no type inference to
+/// resolve that.
+fn callee_lookup_key(func: &Expr) -> Option<String> {
+    match func {
+        Expr::Path { path, .. } => path.segments.last().map(|s| s.node.clone()),
+        Expr::Field { expr, field, .. } => {
+            let Expr::Path { path, .. } = &expr.node else { return None };
+            let first = path.segments.first()?;
+            if first.node.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
+                Some(format!("{}.{}", first.node, field.node))
+            } else {
+                None
+            }
+        }
+        _ => None,
     }
 }
