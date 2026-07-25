@@ -80,10 +80,12 @@ fn pure_fn_with_unsafe_body_is_error() {
     let module = simple_module(vec![Decl::Fn(decl)]);
     let env = build_env(&module);
     let errs = crate::check_effects::check_module(&module, &env);
-    assert!(!errs.is_empty(), "expected error");
-    assert!(errs.iter().any(|e| matches!(&e.kind,
-        EffectErrorKind::ImpureCallInPure { .. } | EffectErrorKind::UndeclaredEffect { .. }
-    )), "unexpected error kinds: {:?}", errs.iter().map(|e| e.message()).collect::<Vec<_>>());
+    // Exactly one, specific error — not the generic ImpureCallInPure/UndeclaredEffect
+    // duplicate that used to also fire alongside it (see BACKLOG item 106).
+    assert_eq!(errs.len(), 1, "expected exactly one error, got: {:?}",
+        errs.iter().map(|e| e.message()).collect::<Vec<_>>());
+    assert!(matches!(&errs[0].kind, EffectErrorKind::UnsafeOutsideUnsafe { .. }),
+        "expected E0404 UnsafeOutsideUnsafe, got: {}", errs[0].message());
 }
 
 #[test]
@@ -141,6 +143,31 @@ fn await_without_async_annotation_is_error() {
     assert!(!errs.is_empty(), "expected E0402");
     assert!(errs.iter().any(|e| matches!(&e.kind, EffectErrorKind::MissingAsyncAnnotation { .. })),
         "expected E0402: {:?}", errs.iter().map(|e| e.message()).collect::<Vec<_>>());
+}
+
+#[test]
+fn pure_fn_calling_impure_named_fn_names_the_callee() {
+    // BACKLOG item 106: ImpureCallInPure's `callee` field used to always be
+    // constructed as an empty string. It must now name the actual callee.
+    let call_body = S::new(Expr::App {
+        func: Box::new(S::new(Expr::Path {
+            path: certo_ast::types::ModulePath { segments: vec![ident("doIo")], span: DUMMY },
+            span: DUMMY,
+        }, DUMMY)),
+        args: vec![],
+        span: DUMMY,
+    }, DUMMY);
+    let callee = fn_decl("doIo", effect_set(&[Effect::Io]), lit_expr(1));
+    let caller = fn_decl("compute", pure_set(), call_body);
+    let module = simple_module(vec![Decl::Fn(callee), Decl::Fn(caller)]);
+    let env = build_env(&module);
+    let errs = crate::check_effects::check_module(&module, &env);
+
+    assert_eq!(errs.len(), 1, "expected exactly one error (no duplicate), got: {:?}",
+        errs.iter().map(|e| e.message()).collect::<Vec<_>>());
+    assert!(matches!(&errs[0].kind,
+        EffectErrorKind::ImpureCallInPure { caller, callee, .. } if caller == "compute" && callee == "doIo"),
+        "expected ImpureCallInPure naming callee `doIo`, got: {}", errs[0].message());
 }
 
 #[test]

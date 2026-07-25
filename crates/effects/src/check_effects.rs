@@ -43,38 +43,45 @@ fn check_fn_body(
     let mut inferred = InferredEffects::default();
     infer_expr(body, env, &mut inferred);
 
-    for (effect, span) in &inferred.origins {
+    for (effect, span, callee) in &inferred.origins {
+        // `?` is allowed in pure functions (pure = no side effects, not
+        // necessarily total); Pure itself is never a violation.
+        if matches!(effect, Effect::Pure | Effect::Fallible) { continue; }
+
+        // A pure function calling a *named* function that requires this
+        // effect gets the most specific, actionable message — who was
+        // called and what it needs. This must be checked (and the loop
+        // iteration finished) before the per-kind arms below, so a call's
+        // effect isn't also reported by the generic per-kind message.
+        if declared.is_pure {
+            if let Some(callee_name) = callee {
+                errors.push(EffectError {
+                    kind: EffectErrorKind::ImpureCallInPure {
+                        caller: fn_name.to_string(),
+                        callee: callee_name.clone(),
+                        effect: effect.clone(),
+                    },
+                    span: *span,
+                });
+                continue;
+            }
+        }
+
         match effect {
             Effect::Async => {
-                if !declared.is_pure && !declared.effects.contains(&Effect::Async) {
-                    // If the function has no effects annotation at all — open set — skip.
-                    // Only flag when there IS a non-async annotation or when it's pure.
-                    if declared.is_pure || !declared.effects.is_empty() {
-                        if declared.is_pure {
-                            errors.push(EffectError {
-                                kind: EffectErrorKind::UndeclaredEffect {
-                                    fn_name: fn_name.to_string(),
-                                    effect:  effect.clone(),
-                                },
-                                span: *span,
-                            });
-                        } else {
-                            errors.push(EffectError {
-                                kind: EffectErrorKind::MissingAsyncAnnotation {
-                                    fn_name: fn_name.to_string(),
-                                },
-                                span: *span,
-                            });
-                        }
-                    }
-                }
-            }
-
-            Effect::DbWrite => {
-                if !declared.effects.contains(&Effect::DbWrite) {
-                    if declared.is_pure || !declared.effects.is_empty() {
+                if !declared.effects.contains(&Effect::Async) {
+                    if declared.is_pure {
+                        // Direct `await`/`spawn`/`parallel` syntax — no callee to name.
                         errors.push(EffectError {
-                            kind: EffectErrorKind::TransactionOutsideDbWrite {
+                            kind: EffectErrorKind::UndeclaredEffect {
+                                fn_name: fn_name.to_string(),
+                                effect:  effect.clone(),
+                            },
+                            span: *span,
+                        });
+                    } else if !declared.effects.is_empty() {
+                        errors.push(EffectError {
+                            kind: EffectErrorKind::MissingAsyncAnnotation {
                                 fn_name: fn_name.to_string(),
                             },
                             span: *span,
@@ -83,7 +90,22 @@ fn check_fn_body(
                 }
             }
 
+            Effect::DbWrite => {
+                if !declared.effects.contains(&Effect::DbWrite)
+                    && (declared.is_pure || !declared.effects.is_empty())
+                {
+                    errors.push(EffectError {
+                        kind: EffectErrorKind::TransactionOutsideDbWrite {
+                            fn_name: fn_name.to_string(),
+                        },
+                        span: *span,
+                    });
+                }
+            }
+
             Effect::Unsafe => {
+                // Always requires an explicit [unsafe] annotation, even for an
+                // otherwise-open (unannotated) function.
                 if !declared.effects.contains(&Effect::Unsafe) {
                     errors.push(EffectError {
                         kind: EffectErrorKind::UnsafeOutsideUnsafe {
@@ -95,8 +117,9 @@ fn check_fn_body(
             }
 
             other => {
-                // For all other effects: flag only when the function is explicitly
-                // annotated as pure, or has a declared set that doesn't include them.
+                // Reaching here with declared.is_pure means a callee-less origin
+                // (in practice this doesn't happen for Io/DbRead — they're only
+                // ever introduced via a named call — but handle it defensively).
                 if declared.is_pure {
                     errors.push(EffectError {
                         kind: EffectErrorKind::UndeclaredEffect {
@@ -106,8 +129,6 @@ fn check_fn_body(
                         span: *span,
                     });
                 } else if !declared.effects.is_empty() && !declared.effects.contains(other) {
-                    // Check if this effect came from a callee — emit ImpureCallInPure only
-                    // when the caller is pure.
                     errors.push(EffectError {
                         kind: EffectErrorKind::UndeclaredEffect {
                             fn_name: fn_name.to_string(),
@@ -116,24 +137,6 @@ fn check_fn_body(
                         span: *span,
                     });
                 }
-            }
-        }
-    }
-
-    // Special case: pure function calling any effectful callee
-    if declared.is_pure {
-        for (effect, span) in &inferred.origins {
-            if *effect != Effect::Pure && *effect != Effect::Fallible {
-                // Fallible is allowed in pure functions (pure = no side effects,
-                // not necessarily total). All others are not.
-                errors.push(EffectError {
-                    kind: EffectErrorKind::ImpureCallInPure {
-                        caller: fn_name.to_string(),
-                        callee: String::new(),
-                        effect: effect.clone(),
-                    },
-                    span: *span,
-                });
             }
         }
     }

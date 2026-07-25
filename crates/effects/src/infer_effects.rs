@@ -8,14 +8,17 @@ use crate::effect_env::EffectEnv;
 #[derive(Debug, Default)]
 pub struct InferredEffects {
     pub effects: HashSet<Effect>,
-    /// Spans where each inferred effect was first observed (for error reporting).
-    pub origins: Vec<(Effect, Span)>,
+    /// (effect, span, callee) for each effect kind's first observed origin —
+    /// `callee` is the named function that introduced it (for a call whose
+    /// declared effects were inherited), or `None` for a direct syntactic
+    /// form (`await`, `unsafe { }`, `db.transaction { }`, `?`).
+    pub origins: Vec<(Effect, Span, Option<String>)>,
 }
 
 impl InferredEffects {
-    fn add(&mut self, e: Effect, span: Span) {
+    fn add(&mut self, e: Effect, span: Span, callee: Option<String>) {
         if self.effects.insert(e.clone()) {
-            self.origins.push((e, span));
+            self.origins.push((e, span, callee));
         }
     }
 }
@@ -34,7 +37,7 @@ pub fn infer_expr(expr: &S<Expr>, env: &EffectEnv, out: &mut InferredEffects) {
                 if let Some(name) = path.segments.last().map(|s| s.node.as_str()) {
                     if let Some(decl) = env.get(name) {
                         for e in &decl.effects {
-                            out.add(e.clone(), *span);
+                            out.add(e.clone(), *span, Some(name.to_string()));
                         }
                     }
                 }
@@ -43,27 +46,27 @@ pub fn infer_expr(expr: &S<Expr>, env: &EffectEnv, out: &mut InferredEffects) {
 
         Expr::Await { expr, span } => {
             infer_expr(expr, env, out);
-            out.add(Effect::Async, *span);
+            out.add(Effect::Async, *span, None);
         }
 
         Expr::Spawn { expr, span } => {
             infer_expr(expr, env, out);
-            out.add(Effect::Async, *span);
+            out.add(Effect::Async, *span, None);
         }
 
         Expr::Transaction { body, span } => {
             infer_expr(body, env, out);
-            out.add(Effect::DbWrite, *span);
+            out.add(Effect::DbWrite, *span, None);
         }
 
         Expr::Unsafe { body, span } => {
             infer_expr(body, env, out);
-            out.add(Effect::Unsafe, *span);
+            out.add(Effect::Unsafe, *span, None);
         }
 
         Expr::Try { expr, span } => {
             infer_expr(expr, env, out);
-            out.add(Effect::Fallible, *span);
+            out.add(Effect::Fallible, *span, None);
         }
 
         // Recursive walks
@@ -111,7 +114,7 @@ pub fn infer_expr(expr: &S<Expr>, env: &EffectEnv, out: &mut InferredEffects) {
             for t in tasks { infer_expr(t, env, out); }
             if let Some(t) = timeout { infer_expr(t, env, out); }
             // parallel implies async
-            out.add(Effect::Async, expr.span);
+            out.add(Effect::Async, expr.span, None);
         }
 
         Expr::For { iter, body, .. } => {
