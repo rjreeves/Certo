@@ -706,7 +706,9 @@ fn run_typeck(module: &Module, src: &str, filename: &str, colour: bool) {
         process::exit(1);
     }
 
-    if let Err(errs) = certo_effects::check_module(module) {
+    let mut effect_env = certo_effects::EffectEnv::new();
+    certo_stdlib::seed_stdlib_effects(&mut effect_env);
+    if let Err(errs) = certo_effects::check_module_seeded(module, effect_env) {
         let diags: Vec<Diagnostic> = errs.iter()
             .map(|e| effect_error_to_diagnostic(e))
             .collect();

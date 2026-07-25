@@ -1215,3 +1215,34 @@ fn certo_sources_includes_json_and_http() {
     assert!(names.contains(&"Stdlib.Json"), "missing Stdlib.Json");
     assert!(names.contains(&"Stdlib.Http"), "missing Stdlib.Http");
 }
+
+// ------------------------------------------------------------------ //
+// seed_stdlib_effects
+// ------------------------------------------------------------------ //
+
+#[test]
+fn seed_stdlib_effects_registers_known_io_functions() {
+    use certo_ast::types::Effect;
+    let mut env = certo_effects::EffectEnv::new();
+    crate::seed_stdlib_effects(&mut env);
+
+    for name in ["println", "eprintln", "readLine", "readAll", "dbConnect", "dbQuery", "setEnv",
+                 "Http.get", "Query.list", "Mutation.run"] {
+        let declared = env.get(name).unwrap_or_else(|| panic!("{} not registered", name));
+        assert!(declared.effects.contains(&Effect::Io),
+            "{} registered without Io: {:?}", name, declared);
+    }
+}
+
+#[test]
+fn seed_stdlib_effects_leaves_pure_functions_unregistered() {
+    // Absence from the env is exactly what lets a pure function call these
+    // without a [pure] violation — a *wrong* effect entry would be worse
+    // than no entry at all.
+    let mut env = certo_effects::EffectEnv::new();
+    crate::seed_stdlib_effects(&mut env);
+
+    for name in ["intToText", "absInt", "pow", "range", "List.len", "Text.len"] {
+        assert!(env.get(name).is_none(), "{} should not be registered as effectful", name);
+    }
+}

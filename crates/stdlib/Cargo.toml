@@ -4,4 +4,6 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-certo-typeck = { path = "../typeck" }
+certo-ast     = { path = "../ast" }
+certo-typeck  = { path = "../typeck" }
+certo-effects = { path = "../effects" }
