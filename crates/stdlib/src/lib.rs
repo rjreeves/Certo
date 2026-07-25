@@ -19,8 +19,10 @@ mod crypto;
 mod regex;
 mod csv;
 pub mod seed;
+mod effects_seed;
 
 pub use seed::seed_stdlib;
+pub use effects_seed::seed_stdlib_effects;
 
 pub use core::{CORE_C, CORE_CERTO};
 pub use bytes::{BYTES_C, BYTES_CERTO};

@@ -23,8 +23,16 @@ pub type EffectEnv = HashMap<String, DeclaredEffects>;
 
 /// Build an effect environment from a module's top-level fn declarations.
 pub fn build_env(module: &Module) -> EffectEnv {
-    let mut env = EffectEnv::new();
+    build_env_seeded(module, EffectEnv::new())
+}
 
+/// Like `build_env`, but merges the module's declarations into a pre-existing
+/// environment (e.g. one already populated with stdlib function effects via
+/// `certo_stdlib::seed_stdlib_effects`) instead of starting from empty. A
+/// function the module declares under a name that also exists in `env`
+/// overrides the seeded entry, matching how `certo_typeck`'s stdlib seeding
+/// lets user code shadow a builtin.
+pub fn build_env_seeded(module: &Module, mut env: EffectEnv) -> EffectEnv {
     for sdecl in &module.decls {
         collect_fn_effects(&sdecl.node, &mut env);
     }
