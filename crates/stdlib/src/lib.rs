@@ -2,6 +2,7 @@ mod core;
 mod bytes;
 mod credential;
 mod collections;
+mod result;
 mod text;
 mod datetime;
 mod money;
@@ -28,6 +29,7 @@ pub use core::{CORE_C, CORE_CERTO};
 pub use bytes::{BYTES_C, BYTES_CERTO};
 pub use credential::{CREDENTIAL_C, CREDENTIAL_CERTO};
 pub use collections::{COLLECTIONS_C, COLLECTIONS_CERTO};
+pub use result::{RESULT_C, RESULT_CERTO};
 pub use text::{TEXT_C, TEXT_CERTO};
 pub use datetime::{DATETIME_C, DATETIME_CERTO};
 pub use money::{MONEY_C, MONEY_CERTO};
@@ -47,7 +49,7 @@ pub use csv::{CSV_C, CSV_CERTO};
 
 /// The full C runtime header: base types + all stdlib implementations.
 pub fn full_c_runtime() -> String {
-    [CORE_C, BYTES_C, CREDENTIAL_C, COLLECTIONS_C, TEXT_C, DATETIME_C, MONEY_C,
+    [CORE_C, BYTES_C, CREDENTIAL_C, COLLECTIONS_C, RESULT_C, TEXT_C, DATETIME_C, MONEY_C,
      ENV_C, FILE_C, PATH_C, PROCESS_C, JSON_C, HTTP_C, MATH_C,
      CRYPTO_C, REGEX_C, CSV_C].concat()
 }
@@ -65,6 +67,7 @@ pub fn certo_sources() -> Vec<(&'static str, &'static str)> {
         ("Stdlib.Bytes",       BYTES_CERTO),
         ("Stdlib.Credential",  CREDENTIAL_CERTO),
         ("Stdlib.Collections", COLLECTIONS_CERTO),
+        ("Stdlib.Result",      RESULT_CERTO),
         ("Stdlib.Text",        TEXT_CERTO),
         ("Stdlib.DateTime",    DATETIME_CERTO),
         ("Stdlib.Money",       MONEY_CERTO),

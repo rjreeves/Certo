@@ -198,6 +198,7 @@ version = "0.1.0"
 dependencies = [
  "certo-ast",
  "certo-effects",
+ "certo-parser",
  "certo-typeck",
 ]
 

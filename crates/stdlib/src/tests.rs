@@ -64,6 +64,25 @@ fn list_map_registered() {
 }
 
 #[test]
+fn result_combinators_registered() {
+    let env = seeded_env();
+    for name in ["flatMap", "mapErr", "getOrElse", "recover", "Result.all", "Result.allSettled"] {
+        assert!(env.lookup(name).is_some(), "{} not registered", name);
+        assert!(matches!(env.lookup(name).unwrap(), Ty::Forall { .. }),
+            "{} should be polymorphic", name);
+    }
+}
+
+#[test]
+fn result_c_runtime_included() {
+    let rt = full_c_runtime();
+    for f in ["certo_flat_map", "certo_map_err", "certo_get_or_else", "certo_recover",
+              "certo_result_all", "certo_result_all_settled"] {
+        assert!(rt.contains(f), "missing {} in runtime", f);
+    }
+}
+
+#[test]
 fn list_fold_is_polymorphic() {
     let env = seeded_env();
     assert!(matches!(env.lookup("List.fold").unwrap(), Ty::Forall { .. }));
@@ -1245,4 +1264,69 @@ fn seed_stdlib_effects_leaves_pure_functions_unregistered() {
     for name in ["intToText", "absInt", "pow", "range", "List.len", "Text.len"] {
         assert!(env.get(name).is_none(), "{} should not be registered as effectful", name);
     }
+}
+
+// ------------------------------------------------------------------ //
+// Result combinators — full type-check against real source
+// ------------------------------------------------------------------ //
+
+/// Unlike `seeded_env`, this also seeds the typeck-builtin constructors
+/// (`Ok`/`Err`/`Some`/`None`/`true`/`false`) via `seed_builtins`, matching
+/// exactly what the real CLI does (`crates/cli/src/main.rs`'s `run_typeck`)
+/// — needed here since these tests exercise real source using `Ok`/`Err`.
+fn check_full(src: &str) -> Result<(), Vec<certo_typeck::TypeError>> {
+    let module = certo_parser::parse(src).expect("parse error");
+    let mut env = TypeEnv::new();
+    let mut counter = 0u32;
+    env.seed_builtins(&mut counter);
+    seed_stdlib(&mut env, &mut counter);
+    certo_typeck::check_module_seeded(&module, env, counter)
+}
+
+#[test]
+fn flat_map_chains_fallible_ops_ok() {
+    check_full(
+        "module A
+fn parsePositive(s: Text): Result<Int, Text> = Ok(1)
+fn doubleIt(n: Int): Result<Int, Text> = Ok(n * 2)
+fn f(): Result<Int, Text> = parsePositive(\"5\") |> flatMap(doubleIt)"
+    ).unwrap();
+}
+
+#[test]
+fn map_err_transforms_error_side_ok() {
+    check_full(
+        "module A
+fn f(): Result<Int, Text> = Err(\"boom\") |> mapErr((e) => \"wrapped: \" ++ e)"
+    ).unwrap();
+}
+
+#[test]
+fn get_or_else_unwraps_to_payload_type_ok() {
+    check_full("module A\nfn f(): Int = Ok(1) |> getOrElse(0)").unwrap();
+}
+
+#[test]
+fn recover_unwraps_to_payload_type_ok() {
+    check_full("module A\nfn f(): Int = Err(\"e\") |> recover((e) => 0)").unwrap();
+}
+
+#[test]
+fn result_all_wraps_list_of_payloads_ok() {
+    check_full("module A\nfn f(): Result<List<Int>, Text> = Result.all([Ok(1), Ok(2)])").unwrap();
+}
+
+#[test]
+fn result_all_settled_returns_list_of_results_ok() {
+    check_full("module A\nfn f(): List<Result<Int, Text>> = Result.allSettled([Ok(1), Err(\"e\")])").unwrap();
+}
+
+#[test]
+fn flat_map_with_non_result_returning_fn_is_type_error() {
+    // flatMap's callback must itself return a Result — a plain Int-returning
+    // lambda must be rejected, not silently accepted.
+    let errs = check_full(
+        "module A\nfn f(): Result<Int, Text> = Ok(1) |> flatMap((x) => x + 1)"
+    ).unwrap_err();
+    assert!(!errs.is_empty(), "expected a type error for flatMap's callback not returning a Result");
 }
