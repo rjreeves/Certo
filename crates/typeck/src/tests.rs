@@ -15,8 +15,24 @@ fn check_err(src: &str) -> Vec<crate::error::TypeError> {
     check_module(&module).unwrap_err()
 }
 
+/// Like `check`, but tolerates `resolve` errors instead of panicking on them.
+/// `certo_resolve` never registers user-declared sum-type variant names
+/// (`Decl::Type` bodies are skipped entirely — see BACKLOG), so any test that
+/// pattern-matches a *custom* sum type (as opposed to the built-in `Option`/
+/// `Result`) would otherwise fail here even though the real compiler never
+/// runs `certo_resolve` at all (it isn't even a dependency of `crates/cli`).
+fn check_ignoring_resolve(src: &str) -> Result<(), Vec<crate::error::TypeError>> {
+    let module = parse(src).expect("parse error");
+    let _ = resolve(&module);
+    check_module(&module)
+}
+
 fn first_error_kind(src: &str) -> TypeErrorKind {
     check_err(src).into_iter().next().expect("expected at least one error").kind
+}
+
+fn has_kind_typeck(errs: &[crate::error::TypeError], f: impl Fn(&TypeErrorKind) -> bool) -> bool {
+    errs.iter().any(|e| f(&e.kind))
 }
 
 // ------------------------------------------------------------------ //
@@ -374,6 +390,78 @@ fn match_arms_must_agree() {
 }
 
 // ------------------------------------------------------------------ //
+// Pattern-to-scrutinee type checking
+// ------------------------------------------------------------------ //
+
+#[test]
+fn match_literal_pattern_wrong_type_e0200() {
+    // A Text literal pattern matched against an Int scrutinee.
+    let errs = check_err(
+        "module A\nfn f(n: Int): Text = match n {\n  \"hello\" => \"a\"\n  _ => \"b\"\n}");
+    assert!(!errs.is_empty(), "expected a type error for a Text pattern against an Int scrutinee");
+    assert!(has_kind_typeck(&errs, |k| matches!(k, TypeErrorKind::Mismatch { .. })),
+        "expected E0200, got: {:?}", errs.iter().map(|e| e.message()).collect::<Vec<_>>());
+}
+
+#[test]
+fn match_bool_literal_patterns_ok() {
+    check("module A\nfn f(b: Bool): Text = match b {\n  true => \"yes\"\n  false => \"no\"\n}").unwrap();
+}
+
+#[test]
+fn match_constructor_from_wrong_type_e0200() {
+    // `Ok(x)` (a Result constructor) matched against a plain Int scrutinee.
+    let errs = check_err(
+        "module A\nfn f(n: Int): Int = match n {\n  Ok(x) => x\n  _ => 0\n}");
+    assert!(!errs.is_empty(), "expected a type error matching a Result constructor against an Int scrutinee");
+}
+
+#[test]
+fn match_constructor_arity_mismatch_e0204() {
+    // `Some` takes exactly one field.
+    let errs = check_err(
+        "module A\nfn f(o: Option<Int>): Int = match o {\n  Some(a, b) => a\n  _ => 0\n}");
+    assert!(has_kind_typeck(&errs, |k| matches!(k, TypeErrorKind::ArityMismatch { .. })),
+        "expected E0204, got: {:?}", errs.iter().map(|e| e.message()).collect::<Vec<_>>());
+}
+
+#[test]
+fn match_binds_precise_type_from_scrutinee() {
+    // `x` bound from `Some(x)` against Option<Int> must be usable as an Int —
+    // this only works if check_pattern gave it Int, not a totally free var.
+    check("module A\nfn f(o: Option<Int>): Int = match o {\n  Some(x) => x + 1\n  _ => 0\n}").unwrap();
+}
+
+#[test]
+fn match_tuple_pattern_binds_precise_types() {
+    // `a` bound from the tuple pattern must be usable as an Int and `b` as a
+    // Bool — this only works if check_pattern gave each element its precise
+    // positional type, not a shared/unconstrained fresh var.
+    check("module A\nfn f(p: (Int, Bool)): Int = match p {\n  (a, b) => if b then a + 1 else a\n}").unwrap();
+}
+
+#[test]
+fn match_record_pattern_binds_precise_types() {
+    // A single record-pattern arm doesn't count as an exhaustiveness catch-all
+    // (see is_catch_all's doc comment — a known v1 conservative limitation),
+    // so a trailing wildcard is required here.
+    check("module A\ntype Order = { id: Int, total: Int }\n\
+           fn f(o: Order): Int = match o {\n  Order { id, total } => id + total\n  _ => 0\n}").unwrap();
+}
+
+#[test]
+fn val_destructure_tuple_binds_precise_types() {
+    check("module A\nfn f(): Int = {\n  val (a, b) = (1, 2)\n  a + b\n}").unwrap();
+}
+
+#[test]
+fn val_destructure_wrong_type_e0200() {
+    let errs = check_err(
+        "module A\nfn f(): Int = {\n  val (a, b): (Int, Int) = (1, \"x\")\n  a + b\n}");
+    assert!(!errs.is_empty(), "expected a type error destructuring a Text into an Int-typed tuple slot");
+}
+
+// ------------------------------------------------------------------ //
 // FFI safety — extern calls must be inside `unsafe { }`
 // ------------------------------------------------------------------ //
 
@@ -511,4 +599,113 @@ fn maybeA(): Text? = None
 fn maybeB(): Text? = None
 fn f(): Text = maybeA() ?? maybeB() ?? \"default\""
     ).unwrap();
+}
+
+// ------------------------------------------------------------------ //
+// Match exhaustiveness checking (E0213)
+// ------------------------------------------------------------------ //
+
+#[test]
+fn bool_match_missing_false_e0213() {
+    let kind = first_error_kind("module A\nfn f(b: Bool): Text = match b {\n  true => \"y\"\n}");
+    assert!(matches!(kind, TypeErrorKind::NonExhaustiveMatch { .. }), "expected E0213, got {kind:?}");
+}
+
+#[test]
+fn bool_match_both_arms_ok() {
+    check("module A\nfn f(b: Bool): Text = match b {\n  true => \"y\"\n  false => \"n\"\n}").unwrap();
+}
+
+#[test]
+fn bool_match_wildcard_catch_all_ok() {
+    check("module A\nfn f(b: Bool): Text = match b {\n  true => \"y\"\n  _ => \"n\"\n}").unwrap();
+}
+
+#[test]
+fn option_match_missing_none_e0213() {
+    let kind = first_error_kind("module A\nfn f(o: Option<Int>): Int = match o {\n  Some(x) => x\n}");
+    assert!(matches!(kind, TypeErrorKind::NonExhaustiveMatch { .. }), "expected E0213, got {kind:?}");
+}
+
+#[test]
+fn option_match_both_arms_ok() {
+    check("module A\nfn f(o: Option<Int>): Int = match o {\n  Some(x) => x\n  None => 0\n}").unwrap();
+}
+
+#[test]
+fn result_match_missing_err_e0213() {
+    let kind = first_error_kind("module A\nfn f(r: Result<Int, Text>): Int = match r {\n  Ok(x) => x\n}");
+    assert!(matches!(kind, TypeErrorKind::NonExhaustiveMatch { .. }), "expected E0213, got {kind:?}");
+}
+
+#[test]
+fn result_match_both_arms_ok() {
+    check("module A\nfn f(r: Result<Int, Text>): Int = match r {\n  Ok(x) => x\n  Err(_) => 0\n}").unwrap();
+}
+
+#[test]
+fn sum_type_match_missing_variant_e0213() {
+    let kind = first_error_kind(
+        "module A
+type Shape =
+    | Circle(radius: Float)
+    | Square(side: Float)
+fn area(s: Shape): Float = match s {\n  Circle(r) => r\n}");
+    assert!(matches!(kind, TypeErrorKind::NonExhaustiveMatch { .. }), "expected E0213, got {kind:?}");
+}
+
+#[test]
+fn sum_type_match_all_variants_ok() {
+    check_ignoring_resolve(
+        "module A
+type Shape =
+    | Circle(radius: Float)
+    | Square(side: Float)
+fn area(s: Shape): Float = match s {\n  Circle(r) => r\n  Square(side) => side\n}"
+    ).unwrap();
+}
+
+#[test]
+fn sum_type_match_wildcard_catch_all_ok() {
+    check_ignoring_resolve(
+        "module A
+type Shape =
+    | Circle(radius: Float)
+    | Square(side: Float)
+fn area(s: Shape): Float = match s {\n  Circle(r) => r\n  _ => 0.0\n}"
+    ).unwrap();
+}
+
+#[test]
+fn or_pattern_covers_both_branches_ok() {
+    // `true | false` in one arm should count as covering both bool values.
+    check("module A\nfn f(b: Bool): Text = match b {\n  true | false => \"either\"\n}").unwrap();
+}
+
+#[test]
+fn guarded_arm_does_not_count_as_coverage_e0213() {
+    // A guard could fail at runtime, so `true if cond` must not satisfy
+    // exhaustiveness on its own.
+    let kind = first_error_kind(
+        "module A\nfn f(b: Bool): Text = match b {\n  true if b => \"y\"\n  false => \"n\"\n}");
+    assert!(matches!(kind, TypeErrorKind::NonExhaustiveMatch { .. }), "expected E0213, got {kind:?}");
+}
+
+#[test]
+fn tuple_pattern_of_irrefutable_elements_is_exhaustive_ok() {
+    // A tuple type has exactly one shape, so `(a, b)` alone is genuinely
+    // exhaustive — no wildcard arm required.
+    check("module A\nfn f(p: (Int, Bool)): Int = match p {\n  (a, b) => a\n}").unwrap();
+}
+
+#[test]
+fn int_match_requires_wildcard_e0213() {
+    // Literal-only patterns can never be exhaustive over an infinite domain.
+    let kind = first_error_kind("module A\nfn f(n: Int): Text = match n {\n  0 => \"zero\"\n  1 => \"one\"\n}");
+    assert!(matches!(kind, TypeErrorKind::NonExhaustiveMatch { .. }), "expected E0213, got {kind:?}");
+}
+
+#[test]
+fn int_match_with_wildcard_ok() {
+    check("module A\nfn f(n: Int): Text = match n {\n  0 => \"zero\"\n  _ => \"other\"\n}").unwrap();
 }

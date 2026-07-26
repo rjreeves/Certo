@@ -282,6 +282,10 @@ fn hoist_decl(
             // Register sum variants so constructors are bound in the environment.
             if let certo_ast::decl::TypeBody::Sum(variants) = &t.body {
                 let parent_ty = Ty::Named { name: t.name.node.clone(), args: vec![] };
+                env.sum_variants.insert(
+                    t.name.node.clone(),
+                    variants.iter().map(|v| v.name.node.clone()).collect(),
+                );
                 for v in variants {
                     if v.fields.is_empty() {
                         // Unit variant: `Red` — just a value of the parent type.

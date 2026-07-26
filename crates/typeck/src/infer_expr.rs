@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use certo_ast::expr::{Expr, Stmt, Lit, BinOp, UnOp};
 use certo_ast::span::{S, Span};
 use certo_ast::types::TypeExpr;
@@ -360,8 +360,7 @@ pub fn infer(expr: &S<Expr>, ctx: &mut Ctx<'_>) -> Ty {
             let result_ty = ctx.fresh();
             for arm in arms {
                 ctx.env.push();
-                // Bind pattern variables as fresh vars (simplified — full pattern inference is complex)
-                bind_pattern_vars(&arm.pattern.node, ctx);
+                check_pattern(&arm.pattern.node, scrut_ty.clone(), ctx);
                 if let Some(g) = &arm.guard {
                     let gty = infer(g, ctx);
                     ctx.unify(gty, Ty::Bool, *span);
@@ -370,8 +369,7 @@ pub fn infer(expr: &S<Expr>, ctx: &mut Ctx<'_>) -> Ty {
                 ctx.unify(arm_ty, result_ty.clone(), *span);
                 ctx.env.pop();
             }
-            // Unify scrutinee with pattern scrutinee type (simplified for now)
-            let _ = scrut_ty;
+            check_exhaustive(&scrut_ty, arms, ctx, *span);
             result_ty
         }
 
@@ -745,7 +743,7 @@ pub fn infer_stmt(stmt: &Stmt, ctx: &mut Ctx<'_>) -> Ty {
                 ctx.unify(val_ty.clone(), ann_ty, value.span);
             }
             let generalised = ctx.env.generalise(val_ty, ctx.uf);
-            bind_pattern_tys(&pattern.node, generalised, ctx);
+            check_pattern(&pattern.node, generalised, ctx);
             let _ = span;
             Ty::Unit
         }
@@ -780,6 +778,140 @@ pub fn infer_stmt(stmt: &Stmt, ctx: &mut Ctx<'_>) -> Ty {
             Ty::Unit
         }
         Stmt::Expr { expr, .. } => infer(expr, ctx),
+    }
+}
+
+/// Check that a `match`'s arms cover every possible value of the scrutinee's
+/// type. An unguarded wildcard/binding arm always makes a match exhaustive,
+/// regardless of the scrutinee's type — checked first, before looking at the
+/// type at all. Beyond that, this is fully correct for `Bool`, `Option`,
+/// `Result`, and user-declared sum types (their variant sets are finite and
+/// known); every other type (`Int`, `Text`, `Float`, tuples, lists, records,
+/// opaque named types, ...) has no finite, checkable set of literal/shape
+/// patterns that could ever be exhaustive on its own, so those require an
+/// unguarded catch-all arm — there's no partial "structural" exhaustiveness
+/// check for compound patterns like Rust's usefulness algorithm has.
+///
+/// A guarded arm (`pat if cond => ...`) never counts as covering `pat`'s
+/// shape: the guard could fail at runtime, so the arm might not actually
+/// handle that case.
+fn check_exhaustive(scrut_ty: &Ty, arms: &[certo_ast::expr::MatchArm], ctx: &mut Ctx<'_>, span: Span) {
+    if arms.iter().any(|arm| arm.guard.is_none() && is_catch_all(&arm.pattern.node)) {
+        return;
+    }
+
+    let resolved = ctx.uf.apply(scrut_ty);
+    let missing: Vec<String> = match &resolved {
+        Ty::Var(_) | Ty::Error => return, // unresolved/erroneous — don't cascade a second error
+
+        Ty::Bool => {
+            let mut covered = HashSet::new();
+            for arm in arms.iter().filter(|a| a.guard.is_none()) {
+                collect_bool_literals(&arm.pattern.node, &mut covered);
+            }
+            let mut missing = Vec::new();
+            if !covered.contains(&true)  { missing.push("true".to_string()); }
+            if !covered.contains(&false) { missing.push("false".to_string()); }
+            missing
+        }
+
+        Ty::Option(_) => missing_variants(arms, &["Some", "None"], |n| match n {
+            "Some" => "Some(_)".to_string(),
+            other  => other.to_string(),
+        }),
+
+        Ty::Result(_, _) => missing_variants(arms, &["Ok", "Err"], |n| format!("{n}(_)")),
+
+        Ty::Named { name, .. } => {
+            match ctx.env.sum_variants.get(name).cloned() {
+                Some(variants) => {
+                    let refs: Vec<&str> = variants.iter().map(|v| v.as_str()).collect();
+                    missing_variants(arms, &refs, |n| n.to_string())
+                }
+                // A plain record / opaque named type has no finite variant set —
+                // only a catch-all (already ruled out above) can be exhaustive.
+                None => vec!["_".to_string()],
+            }
+        }
+
+        // Int, Text, Float, Decimal, Tuple, List, Map, Uuid, Unit, Fn, ... —
+        // same reasoning as the plain-named-type case above.
+        _ => vec!["_".to_string()],
+    };
+
+    if !missing.is_empty() {
+        ctx.errors.push(TypeError {
+            kind: TypeErrorKind::NonExhaustiveMatch { ty: resolved, missing },
+            span,
+        });
+    }
+}
+
+/// Coverage check shared by `Option`/`Result`/user sum types: every named
+/// variant in `variants` must be matched by some unguarded arm's top-level
+/// constructor pattern.
+fn missing_variants(
+    arms:     &[certo_ast::expr::MatchArm],
+    variants: &[&str],
+    label:    impl Fn(&str) -> String,
+) -> Vec<String> {
+    let mut covered = HashSet::new();
+    for arm in arms.iter().filter(|a| a.guard.is_none()) {
+        collect_constructor_names(&arm.pattern.node, &mut covered);
+    }
+    variants.iter().filter(|v| !covered.contains(**v)).map(|v| label(v)).collect()
+}
+
+/// True for a pattern that matches any value unconditionally: a bare
+/// wildcard/binding, an alias/or-pattern that reduces to one, or a tuple
+/// pattern whose every element is itself unconditional — a tuple type has
+/// exactly one shape, so e.g. `(a, b)` alone is genuinely exhaustive with no
+/// need for a trailing wildcard arm. The same isn't recognized for
+/// `Record`/`Constructor` patterns even though a plain (non-sum) record type
+/// has the same one-shape property: distinguishing "the one shape of a
+/// record type" from "one variant of a sum type" needs the type environment,
+/// which this purely-structural check doesn't have — see BACKLOG (match
+/// exhaustiveness item).
+fn is_catch_all(pat: &certo_ast::pattern::Pattern) -> bool {
+    use certo_ast::pattern::Pattern;
+    match pat {
+        Pattern::Wildcard { .. } | Pattern::Ident { .. } => true,
+        Pattern::As { pattern, .. } => is_catch_all(&pattern.node),
+        Pattern::Or { left, right, .. } => is_catch_all(&left.node) || is_catch_all(&right.node),
+        Pattern::Guard { pattern, .. } => is_catch_all(&pattern.node),
+        Pattern::Tuple { elements, .. } => elements.iter().all(|e| is_catch_all(&e.node)),
+        _ => false,
+    }
+}
+
+fn collect_bool_literals(pat: &certo_ast::pattern::Pattern, out: &mut HashSet<bool>) {
+    use certo_ast::pattern::{Pattern, LitPat};
+    match pat {
+        Pattern::Literal { value: LitPat::Bool(b), .. } => { out.insert(*b); }
+        Pattern::As { pattern, .. } | Pattern::Guard { pattern, .. } => collect_bool_literals(&pattern.node, out),
+        Pattern::Or { left, right, .. } => {
+            collect_bool_literals(&left.node, out);
+            collect_bool_literals(&right.node, out);
+        }
+        _ => {}
+    }
+}
+
+fn collect_constructor_names(pat: &certo_ast::pattern::Pattern, out: &mut HashSet<String>) {
+    use certo_ast::pattern::Pattern;
+    match pat {
+        Pattern::Constructor { path, .. } => {
+            if let Some(s) = path.segments.last() { out.insert(s.node.clone()); }
+        }
+        Pattern::Record { path: Some(p), .. } => {
+            if let Some(s) = p.segments.last() { out.insert(s.node.clone()); }
+        }
+        Pattern::As { pattern, .. } | Pattern::Guard { pattern, .. } => collect_constructor_names(&pattern.node, out),
+        Pattern::Or { left, right, .. } => {
+            collect_constructor_names(&left.node, out);
+            collect_constructor_names(&right.node, out);
+        }
+        _ => {}
     }
 }
 
@@ -821,13 +953,144 @@ fn bind_pattern_vars(pat: &certo_ast::pattern::Pattern, ctx: &mut Ctx<'_>) {
     }
 }
 
-fn bind_pattern_tys(pat: &certo_ast::pattern::Pattern, ty: Ty, ctx: &mut Ctx<'_>) {
-    use certo_ast::pattern::Pattern;
+/// Type-check a pattern against its scrutinee/expected type: unify each
+/// structural piece (literal, tuple element, constructor field, record
+/// field, list element) against the corresponding part of `expected`, and
+/// bind pattern variables with their precise inferred types rather than
+/// fresh, totally unconstrained ones. Shared by `match` arms and `val`
+/// destructuring, since both are "a pattern must describe a value of a
+/// known type."
+///
+/// Falls back to `bind_pattern_vars` (fresh vars, no real check) only where
+/// there's genuinely no type information to check against — an unresolved
+/// constructor name (resolve should already flag that separately), or a
+/// named-field sum-variant pattern (`Circle { radius: r }`): variant fields
+/// are registered as a positional constructor `Fn`, not individually by
+/// name, so there's no per-field type to look up for that specific form.
+fn check_pattern(pat: &certo_ast::pattern::Pattern, expected: Ty, ctx: &mut Ctx<'_>) {
+    use certo_ast::pattern::{Pattern, LitPat};
     match pat {
-        Pattern::Ident { name, .. } => {
-            ctx.env.define(name.node.clone(), ty);
-        }
         Pattern::Wildcard { .. } => {}
-        _ => bind_pattern_vars(pat, ctx),
+
+        Pattern::Ident { name, .. } => {
+            ctx.env.define(name.node.clone(), expected);
+        }
+
+        Pattern::As { pattern, name, .. } => {
+            check_pattern(&pattern.node, expected.clone(), ctx);
+            ctx.env.define(name.node.clone(), expected);
+        }
+
+        Pattern::Guard { pattern, .. } => check_pattern(&pattern.node, expected, ctx),
+
+        Pattern::Or { left, right, .. } => {
+            check_pattern(&left.node, expected.clone(), ctx);
+            check_pattern(&right.node, expected, ctx);
+        }
+
+        Pattern::Literal { value, span } => {
+            let lit_ty = match value {
+                LitPat::Int(_)    => Ty::Int,
+                LitPat::Float(_)  => Ty::Float,
+                LitPat::Bool(_)   => Ty::Bool,
+                LitPat::String(_) => Ty::Text,
+                LitPat::Unit      => Ty::Unit,
+            };
+            let inst = ctx.instantiate(expected);
+            ctx.unify(lit_ty, inst, *span);
+        }
+
+        Pattern::Tuple { elements, span } => {
+            let elem_tys: Vec<Ty> = elements.iter().map(|_| ctx.fresh()).collect();
+            let inst = ctx.instantiate(expected);
+            ctx.unify(Ty::Tuple(elem_tys.clone()), inst, *span);
+            for (e, ety) in elements.iter().zip(elem_tys) {
+                check_pattern(&e.node, ety, ctx);
+            }
+        }
+
+        Pattern::List { head, tail, span } => {
+            let elem_ty = ctx.fresh();
+            let list_ty = Ty::List(Box::new(elem_ty.clone()));
+            let inst = ctx.instantiate(expected);
+            ctx.unify(list_ty.clone(), inst, *span);
+            for h in head { check_pattern(&h.node, elem_ty.clone(), ctx); }
+            if let Some(t) = tail { check_pattern(&t.node, list_ty, ctx); }
+        }
+
+        Pattern::Constructor { path, fields, span } => {
+            let name = path.segments.last().map(|s| s.node.as_str()).unwrap_or("");
+            match ctx.env.lookup(name).cloned() {
+                Some(ctor_ty) => {
+                    match ctx.instantiate(ctor_ty) {
+                        Ty::Fn { params, ret } => {
+                            let inst = ctx.instantiate(expected);
+                            ctx.unify(*ret, inst, *span);
+                            if params.len() != fields.len() {
+                                ctx.errors.push(TypeError {
+                                    kind: TypeErrorKind::ArityMismatch { expected: params.len(), found: fields.len() },
+                                    span: *span,
+                                });
+                                for f in fields { bind_pattern_vars(&f.node, ctx); }
+                            } else {
+                                for (f, pty) in fields.iter().zip(params) {
+                                    check_pattern(&f.node, pty, ctx);
+                                }
+                            }
+                        }
+                        other => {
+                            // Unit variant / 0-arg constructor: `other` IS the parent type.
+                            let inst = ctx.instantiate(expected);
+                            ctx.unify(other, inst, *span);
+                            if !fields.is_empty() {
+                                ctx.errors.push(TypeError {
+                                    kind: TypeErrorKind::ArityMismatch { expected: 0, found: fields.len() },
+                                    span: *span,
+                                });
+                            }
+                            for f in fields { bind_pattern_vars(&f.node, ctx); }
+                        }
+                    }
+                }
+                None => {
+                    // Unknown constructor — resolve should already flag this; don't
+                    // cascade a spurious type error, just bind fields defensively.
+                    for f in fields { bind_pattern_vars(&f.node, ctx); }
+                }
+            }
+        }
+
+        Pattern::Record { path, fields, span, .. } => {
+            let type_name = path.as_ref()
+                .and_then(|p| p.segments.last())
+                .map(|s| s.node.clone())
+                .or_else(|| match ctx.uf.apply(&expected) {
+                    Ty::Named { name, .. } => Some(name),
+                    _ => None,
+                });
+            let declared = type_name.as_ref().and_then(|n| ctx.env.record_fields.get(n).cloned());
+
+            if let (Some(name), Some(declared)) = (&type_name, &declared) {
+                let inst = ctx.instantiate(expected);
+                ctx.unify(Ty::Named { name: name.clone(), args: vec![] }, inst, *span);
+                for f in fields {
+                    let field_ty = declared.iter().find(|(n, _)| n == &f.name.node)
+                        .map(|(_, t)| t.clone())
+                        .unwrap_or_else(|| ctx.fresh());
+                    match &f.pattern {
+                        Some(p) => check_pattern(&p.node, field_ty, ctx),
+                        None    => ctx.env.define(f.name.node.clone(), field_ty), // shorthand `{ x }`
+                    }
+                }
+            } else {
+                // Best-effort fallback — see doc comment above.
+                for f in fields {
+                    match &f.pattern {
+                        Some(p) => bind_pattern_vars(&p.node, ctx),
+                        None    => { let ty = ctx.fresh(); ctx.env.define(f.name.node.clone(), ty); }
+                    }
+                }
+            }
+        }
     }
 }

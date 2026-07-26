@@ -17,6 +17,9 @@ pub struct TypeEnv {
     /// call site once the function's type params are instantiated and the call's
     /// arguments are unified (see `infer_expr`'s `Expr::App` handling).
     pub row_bounds: HashMap<String, Vec<(TyVar, Vec<(String, Ty)>)>>,
+    /// Sum type variant names: type_name → [variant_name, ...], in declaration
+    /// order. Used for match exhaustiveness checking.
+    pub sum_variants: HashMap<String, Vec<String>>,
 }
 
 impl TypeEnv {
@@ -26,6 +29,7 @@ impl TypeEnv {
             param_meta: HashMap::new(),
             record_fields: HashMap::new(),
             row_bounds: HashMap::new(),
+            sum_variants: HashMap::new(),
         }
     }
 
