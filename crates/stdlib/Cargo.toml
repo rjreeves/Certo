@@ -7,3 +7,6 @@ edition = "2024"
 certo-ast     = { path = "../ast" }
 certo-typeck  = { path = "../typeck" }
 certo-effects = { path = "../effects" }
+
+[dev-dependencies]
+certo-parser = { path = "../parser" }

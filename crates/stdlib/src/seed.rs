@@ -52,6 +52,54 @@ pub fn seed_stdlib(env: &mut TypeEnv, counter: &mut u32) {
         env.define("Err", poly2(a, b, fn1(Ty::Var(b), Ty::Result(Box::new(Ty::Var(a)), Box::new(Ty::Var(b))))));
     }
 
+    // ---------------------------------------------------------------- //
+    // Result<T, E> combinators
+    // ---------------------------------------------------------------- //
+
+    // flatMap :: ∀T U E. Result<T,E> → (T → Result<U,E>) → Result<U,E>
+    {
+        let t = fresh(); let u = fresh(); let e = fresh();
+        let result_te = Ty::Result(Box::new(Ty::Var(t)), Box::new(Ty::Var(e)));
+        let result_ue = Ty::Result(Box::new(Ty::Var(u)), Box::new(Ty::Var(e)));
+        let f_ty = fn1(Ty::Var(t), result_ue.clone());
+        env.define("flatMap", poly3(t, u, e, fn2(result_te, f_ty, result_ue)));
+    }
+    // mapErr :: ∀T E F. Result<T,E> → (E → F) → Result<T,F>
+    {
+        let t = fresh(); let e = fresh(); let f = fresh();
+        let result_te = Ty::Result(Box::new(Ty::Var(t)), Box::new(Ty::Var(e)));
+        let result_tf = Ty::Result(Box::new(Ty::Var(t)), Box::new(Ty::Var(f)));
+        let f_ty = fn1(Ty::Var(e), Ty::Var(f));
+        env.define("mapErr", poly3(t, e, f, fn2(result_te, f_ty, result_tf)));
+    }
+    // getOrElse :: ∀T E. Result<T,E> → T → T
+    {
+        let t = fresh(); let e = fresh();
+        let result_te = Ty::Result(Box::new(Ty::Var(t)), Box::new(Ty::Var(e)));
+        env.define("getOrElse", poly2(t, e, fn2(result_te, Ty::Var(t), Ty::Var(t))));
+    }
+    // recover :: ∀T E. Result<T,E> → (E → T) → T
+    {
+        let t = fresh(); let e = fresh();
+        let result_te = Ty::Result(Box::new(Ty::Var(t)), Box::new(Ty::Var(e)));
+        let f_ty = fn1(Ty::Var(e), Ty::Var(t));
+        env.define("recover", poly2(t, e, fn2(result_te, f_ty, Ty::Var(t))));
+    }
+    // Result.all :: ∀T E. List<Result<T,E>> → Result<List<T>, E>
+    {
+        let t = fresh(); let e = fresh();
+        let result_te = Ty::Result(Box::new(Ty::Var(t)), Box::new(Ty::Var(e)));
+        let ret = Ty::Result(Box::new(Ty::List(Box::new(Ty::Var(t)))), Box::new(Ty::Var(e)));
+        env.define("Result.all", poly2(t, e, fn1(Ty::List(Box::new(result_te)), ret)));
+    }
+    // Result.allSettled :: ∀T E. List<Result<T,E>> → List<Result<T,E>>
+    {
+        let t = fresh(); let e = fresh();
+        let result_te = Ty::Result(Box::new(Ty::Var(t)), Box::new(Ty::Var(e)));
+        env.define("Result.allSettled",
+            poly2(t, e, fn1(Ty::List(Box::new(result_te.clone())), Ty::List(Box::new(result_te)))));
+    }
+
     def!("messageBox",      fn2(Ty::Text, Ty::Text, Ty::Unit)); // messageBox(title, message)
     def!("assert",  fn2(Ty::Bool, Ty::Text, Ty::Unit));
     def!("pow",     fn2(Ty::Int, Ty::Int, Ty::Int));
@@ -871,6 +919,14 @@ pub fn seed_stdlib(env: &mut TypeEnv, counter: &mut u32) {
     pm!("range",           "from", "to");
     pm!("rangeInclusive",  "from", "to");
 
+    // Result
+    pm!("flatMap",             "r", "f");
+    pm!("mapErr",              "r", "f");
+    pm!("getOrElse",           "r", "default");
+    pm!("recover",             "r", "f");
+    pm!("Result.all",          "results");
+    pm!("Result.allSettled",   "results");
+
     // List
     pm!("List.get",        "list", "index");
     pm!("List.getOrPanic", "list", "index");
@@ -991,4 +1047,8 @@ fn poly1(var: u32, body: Ty) -> Ty {
 
 fn poly2(v1: u32, v2: u32, body: Ty) -> Ty {
     Ty::Forall { vars: vec![v1, v2], body: Box::new(body) }
+}
+
+fn poly3(v1: u32, v2: u32, v3: u32, body: Ty) -> Ty {
+    Ty::Forall { vars: vec![v1, v2, v3], body: Box::new(body) }
 }
