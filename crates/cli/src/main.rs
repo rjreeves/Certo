@@ -1305,6 +1305,15 @@ pub(crate) fn type_error_to_diagnostic(e: &TypeError) -> Diagnostic {
                 .with_label(format!("missing field `{}: {}`", field, required.display_named(&names)))
                 .with_note(format!("add a `{}: {}` field, or pass a type that already has one", field, required.display_named(&names)))
         }
+
+        TypeErrorKind::NonExhaustiveMatch { ty, missing } => {
+            let names = assign_var_names(&[ty]);
+            Diagnostic::error("E0213",
+                format!("match on `{}` is not exhaustive", ty.display_named(&names)))
+                .with_span(e.span)
+                .with_label(format!("missing: {}", missing.join(", ")))
+                .with_note("add the missing arm(s), or a `_ => ...` arm to cover the rest")
+        }
     }
 }
 

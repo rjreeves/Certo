@@ -40,6 +40,9 @@ pub enum TypeErrorKind {
     /// (`R: { name: Text }`) is missing a required field.
     MissingRowField { ty: Ty, field: String, required: Ty },
 
+    /// E0213 — a `match` doesn't cover every possible value of the scrutinee's type.
+    NonExhaustiveMatch { ty: Ty, missing: Vec<String> },
+
     /// E0708 — temporal declaration body does not resolve to Duration.
     TemporalNotDuration { found: Ty },
 
@@ -71,6 +74,9 @@ impl TypeError {
             TypeErrorKind::MissingRowField { ty, field, required } =>
                 format!("E0212: `{}` does not satisfy the row bound — missing field `{}: {}`",
                     ty.display(), field, required.display()),
+            TypeErrorKind::NonExhaustiveMatch { ty, missing } =>
+                format!("E0213: match on `{}` is not exhaustive — missing: {}",
+                    ty.display(), missing.join(", ")),
             TypeErrorKind::TemporalNotDuration { found } =>
                 format!("E0708: temporal body must resolve to Duration, found `{}`", found.display()),
             TypeErrorKind::AgeOnNonTimestamp { found } =>
