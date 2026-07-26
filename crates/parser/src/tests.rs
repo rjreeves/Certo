@@ -747,3 +747,73 @@ fn null_coalesce_single_still_parses() {
     let Decl::Fn(f) = &m.decls[0].node else { panic!("expected fn decl") };
     assert!(matches!(&f.body.as_ref().unwrap().node, Expr::BinOp { op: BinOp::NullCoalesce, .. }));
 }
+
+// ------------------------------------------------------------------ //
+// Multi-param function *type* annotations: `(A, B) => C`
+// ------------------------------------------------------------------ //
+
+#[test]
+fn multi_param_fn_type_annotation_has_two_params() {
+    use certo_ast::types::TypeExpr;
+    let m = ok("module A\nfn apply(f: (Int, Int) => Int, a: Int, b: Int): Int = f(a, b)");
+    let Decl::Fn(decl) = &m.decls[0].node else { panic!("expected fn decl") };
+    let TypeExpr::Fn { params, ret, .. } = &decl.params[0].ty.node else { panic!("expected a function type") };
+    assert_eq!(params.len(), 2, "expected 2 params, got {:?}", params);
+    assert!(matches!(&params[0].node, TypeExpr::Named { path, .. } if path.segments[0].node == "Int"));
+    assert!(matches!(&params[1].node, TypeExpr::Named { path, .. } if path.segments[0].node == "Int"));
+    assert!(matches!(&ret.node, TypeExpr::Named { path, .. } if path.segments[0].node == "Int"));
+}
+
+#[test]
+fn three_param_fn_type_annotation_has_three_params() {
+    use certo_ast::types::TypeExpr;
+    let m = ok("module A\nfn apply(f: (Int, Text, Bool) => Unit): Unit = todo()");
+    let Decl::Fn(decl) = &m.decls[0].node else { panic!("expected fn decl") };
+    let TypeExpr::Fn { params, .. } = &decl.params[0].ty.node else { panic!("expected a function type") };
+    assert_eq!(params.len(), 3, "expected 3 params, got {:?}", params);
+}
+
+#[test]
+fn zero_param_fn_type_annotation_has_no_params() {
+    use certo_ast::types::TypeExpr;
+    let m = ok("module A\nfn apply(f: () => Int): Int = f()");
+    let Decl::Fn(decl) = &m.decls[0].node else { panic!("expected fn decl") };
+    let TypeExpr::Fn { params, .. } = &decl.params[0].ty.node else { panic!("expected a function type") };
+    assert!(params.is_empty(), "expected 0 params, got {:?}", params);
+}
+
+#[test]
+fn single_param_fn_type_annotation_still_parses() {
+    // Regression guard: a lone parenthesized param must not become a
+    // 1-element-tuple-turned-single-param or otherwise change shape.
+    use certo_ast::types::TypeExpr;
+    let m = ok("module A\nfn apply(f: (Int) => Int, a: Int): Int = f(a)");
+    let Decl::Fn(decl) = &m.decls[0].node else { panic!("expected fn decl") };
+    let TypeExpr::Fn { params, .. } = &decl.params[0].ty.node else { panic!("expected a function type") };
+    assert_eq!(params.len(), 1, "expected 1 param, got {:?}", params);
+    assert!(matches!(&params[0].node, TypeExpr::Named { path, .. } if path.segments[0].node == "Int"));
+}
+
+#[test]
+fn optional_tuple_param_fn_type_not_split() {
+    // `(A, B)? => C` is a single Option<(A,B)> param — the `?` binds to the
+    // whole tuple, so this must NOT be split into two params.
+    use certo_ast::types::TypeExpr;
+    let m = ok("module A\nfn apply(f: (Int, Int)? => Int): Int = todo()");
+    let Decl::Fn(decl) = &m.decls[0].node else { panic!("expected fn decl") };
+    let TypeExpr::Fn { params, .. } = &decl.params[0].ty.node else { panic!("expected a function type") };
+    assert_eq!(params.len(), 1, "expected 1 (optional-tuple) param, got {:?}", params);
+    assert!(matches!(&params[0].node, TypeExpr::Option { inner, .. }
+        if matches!(&inner.node, TypeExpr::Tuple { elements, .. } if elements.len() == 2)),
+        "expected the single param to be Option<(Int, Int)>, got {:?}", params[0].node);
+}
+
+#[test]
+fn plain_tuple_type_not_followed_by_arrow_still_parses() {
+    // Regression guard: a genuine (non-function) tuple type annotation must
+    // still parse as a Tuple, not get accidentally affected by the fn-type fix.
+    use certo_ast::types::TypeExpr;
+    let m = ok("module A\nfn f(pair: (Int, Int)): Int = 1");
+    let Decl::Fn(decl) = &m.decls[0].node else { panic!("expected fn decl") };
+    assert!(matches!(&decl.params[0].ty.node, TypeExpr::Tuple { elements, .. } if elements.len() == 2));
+}
