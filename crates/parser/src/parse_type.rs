@@ -32,9 +32,19 @@ pub fn parse_type(cur: &mut Cursor<'_>) -> Result<S<TypeExpr>, ParseError> {
     if cur.eat(|t| matches!(t, Token::FatArrow)).is_some() {
         let ret = parse_type(cur)?;
         let span = start.to(ret.span);
+        // `(A, B) => C` means a 2-param function type — matching how a
+        // parenthesized list is a param list at the lambda-value level
+        // (`(x, y) => expr`) — not "one tuple-typed param". Only unwrap
+        // when the LHS parsed as a bare tuple type: `(A, B)? => C` still
+        // has `ty` as `Option<Tuple>` at this point, correctly left as a
+        // single (optional-tuple) param.
+        let params = match ty.node {
+            TypeExpr::Tuple { elements, .. } => elements,
+            _ => vec![ty],
+        };
         ty = S::new(TypeExpr::Fn {
-            params: vec![ty],
-            ret:    Box::new(ret),
+            params,
+            ret: Box::new(ret),
             span,
         }, span);
     }

@@ -159,7 +159,7 @@ fn emit_fn_inner(f: &MirFn, prefix: &str, nullary_enums: &HashSet<String>, out: 
             emit_stmt(stmt, &f.locals, &fn_cname, &mut spawn_idx, nullary_enums, out);
         }
         if let Some(term) = &bb.terminator {
-            emit_terminator(term, ret_ty, out);
+            emit_terminator(term, ret_ty, &f.locals, out);
         }
     }
 
@@ -190,7 +190,7 @@ fn emit_stmt(stmt: &MirStmt, locals: &[MirLocalDecl], fn_cname: &str, spawn_idx:
         }
         Rvalue::Call { func, args } => {
             let args_str = emit_call_args(func, args);
-            writeln!(out, "    {} = {}({});", lhs, emit_operand(func), args_str).unwrap();
+            writeln!(out, "    {} = {}({});", lhs, emit_callee(func, locals), args_str).unwrap();
         }
         Rvalue::Field { base, field } => {
             // For an all-nullary enum (represented as a plain int), the value *is*
@@ -290,7 +290,7 @@ fn emit_stmt(stmt: &MirStmt, locals: &[MirLocalDecl], fn_cname: &str, spawn_idx:
     }
 }
 
-fn emit_terminator(term: &Terminator, ret_ty: &Ty, out: &mut String) {
+fn emit_terminator(term: &Terminator, ret_ty: &Ty, locals: &[MirLocalDecl], out: &mut String) {
     match term {
         Terminator::Goto(bb) => {
             writeln!(out, "    goto bb{};", bb).unwrap();
@@ -311,7 +311,7 @@ fn emit_terminator(term: &Terminator, ret_ty: &Ty, out: &mut String) {
         }
         Terminator::Call { func, args, dest, next } => {
             let args_str = emit_call_args(func, args);
-            writeln!(out, "    {} = {}({});", local_name(*dest), emit_operand(func), args_str).unwrap();
+            writeln!(out, "    {} = {}({});", local_name(*dest), emit_callee(func, locals), args_str).unwrap();
             writeln!(out, "    goto bb{};", next).unwrap();
         }
         Terminator::Switch { discr, targets, otherwise } => {
@@ -335,6 +335,26 @@ fn emit_operand(op: &Operand) -> String {
         Operand::Global(n)  => c_fn_name(n),
         Operand::Const(c)   => emit_const(c),
     }
+}
+
+/// Emit the callee of a call expression. A named function (`Operand::Global`)
+/// already has its real, correctly-typed C declaration, so it's called
+/// directly. A function *value* held in a local, though, is statically typed
+/// as the opaque zero-arg `certo_fn_t` (see `ty_to_c`) — calling it without a
+/// cast would use that 0-arg signature regardless of how many arguments the
+/// call actually passes. Cast it to the real signature first, using the
+/// local's own `Ty::Fn { params, ret }`.
+fn emit_callee(func: &Operand, locals: &[MirLocalDecl]) -> String {
+    let Operand::Local(id) = func else { return emit_operand(func) };
+    let Some(Ty::Fn { params, ret }) = locals.iter().find(|l| l.id == *id).map(|l| &l.ty) else {
+        return emit_operand(func);
+    };
+    let param_str = if params.is_empty() {
+        "void".to_string()
+    } else {
+        params.iter().map(ty_to_c).collect::<Vec<_>>().join(", ")
+    };
+    format!("(({}(*)({}))({}))", ret_ty_to_c(ret), param_str, emit_operand(func))
 }
 
 fn emit_call_args(func: &Operand, args: &[Operand]) -> String {
