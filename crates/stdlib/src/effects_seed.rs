@@ -4,14 +4,10 @@ use certo_effects::{EffectEnv, DeclaredEffects};
 
 /// Register the declared effects of every stdlib function that is actually
 /// effectful. Hand-maintained, mirroring how `seed.rs` hand-registers stdlib
-/// *type* signatures rather than deriving them from the descriptive
-/// `*_CERTO` source constants (`certo_sources()`) — those aren't valid,
-/// parseable Certo for most modules (many use a `fn Type.method(...)`
-/// declaration header the parser doesn't support; see BACKLOG item 107) —
-/// so this can't be built by just parsing them. The names/effects here were
-/// taken directly from the `[io]`/`[fallible]` annotations already written
-/// in each module's `*_CERTO` doc text, which stays accurate as reference
-/// documentation even though the text as a whole doesn't parse.
+/// *type* signatures rather than deriving them from anything parseable —
+/// there's no machine-readable source of truth for stdlib signatures at all
+/// (see `docs/STDLIB-QUICKREF.md`, the hand-maintained manual), so the
+/// names/effects here are cross-checked against that doc by hand.
 ///
 /// Without this, `certo_effects` has no idea that `println`/`dbConnect`/etc.
 /// are effectful, so a `[pure]` function calling them directly goes

@@ -25,27 +25,27 @@ mod effects_seed;
 pub use seed::seed_stdlib;
 pub use effects_seed::seed_stdlib_effects;
 
-pub use core::{CORE_C, CORE_CERTO};
-pub use bytes::{BYTES_C, BYTES_CERTO};
-pub use credential::{CREDENTIAL_C, CREDENTIAL_CERTO};
-pub use collections::{COLLECTIONS_C, COLLECTIONS_CERTO};
-pub use result::{RESULT_C, RESULT_CERTO};
-pub use text::{TEXT_C, TEXT_CERTO};
-pub use datetime::{DATETIME_C, DATETIME_CERTO};
-pub use money::{MONEY_C, MONEY_CERTO};
-pub use db::{DB_C, DB_CERTO};
-pub use dbquery::{DBQUERY_C, DBQUERY_CERTO};
-pub use dbmutation::{DBMUTATION_C, DBMUTATION_CERTO};
-pub use env::{ENV_C, ENV_CERTO};
-pub use file::{FILE_C, FILE_CERTO};
-pub use path::{PATH_C, PATH_CERTO};
-pub use process::{PROCESS_C, PROCESS_CERTO};
-pub use json::{JSON_C, JSON_CERTO};
-pub use http::{HTTP_C, HTTP_CERTO};
-pub use math::{MATH_C, MATH_CERTO};
-pub use crypto::{CRYPTO_C, CRYPTO_CERTO};
-pub use regex::{REGEX_C, REGEX_CERTO};
-pub use csv::{CSV_C, CSV_CERTO};
+pub use core::CORE_C;
+pub use bytes::BYTES_C;
+pub use credential::CREDENTIAL_C;
+pub use collections::COLLECTIONS_C;
+pub use result::RESULT_C;
+pub use text::TEXT_C;
+pub use datetime::DATETIME_C;
+pub use money::MONEY_C;
+pub use db::DB_C;
+pub use dbquery::DBQUERY_C;
+pub use dbmutation::DBMUTATION_C;
+pub use env::ENV_C;
+pub use file::FILE_C;
+pub use path::PATH_C;
+pub use process::PROCESS_C;
+pub use json::JSON_C;
+pub use http::HTTP_C;
+pub use math::MATH_C;
+pub use crypto::CRYPTO_C;
+pub use regex::REGEX_C;
+pub use csv::CSV_C;
 
 /// The full C runtime header: base types + all stdlib implementations.
 pub fn full_c_runtime() -> String {
@@ -58,33 +58,6 @@ pub fn full_c_runtime() -> String {
 pub fn full_c_runtime_with_db(with_db: bool) -> String {
     let base = full_c_runtime();
     if with_db { base + DB_C + DBQUERY_C + DBMUTATION_C } else { base }
-}
-
-/// All stdlib Certo source files, keyed by module path.
-pub fn certo_sources() -> Vec<(&'static str, &'static str)> {
-    vec![
-        ("Stdlib.Core",        CORE_CERTO),
-        ("Stdlib.Bytes",       BYTES_CERTO),
-        ("Stdlib.Credential",  CREDENTIAL_CERTO),
-        ("Stdlib.Collections", COLLECTIONS_CERTO),
-        ("Stdlib.Result",      RESULT_CERTO),
-        ("Stdlib.Text",        TEXT_CERTO),
-        ("Stdlib.DateTime",    DATETIME_CERTO),
-        ("Stdlib.Money",       MONEY_CERTO),
-        ("Stdlib.Db",          DB_CERTO),
-        ("Stdlib.DbQuery",     DBQUERY_CERTO),
-        ("Stdlib.DbMutation",  DBMUTATION_CERTO),
-        ("Stdlib.Env",         ENV_CERTO),
-        ("Stdlib.File",        FILE_CERTO),
-        ("Stdlib.Path",        PATH_CERTO),
-        ("Stdlib.Process",     PROCESS_CERTO),
-        ("Stdlib.Json",        JSON_CERTO),
-        ("Stdlib.Http",        HTTP_CERTO),
-        ("Stdlib.Math",        MATH_CERTO),
-        ("Stdlib.Crypto",      CRYPTO_CERTO),
-        ("Stdlib.Regex",       REGEX_CERTO),
-        ("Stdlib.Csv",         CSV_CERTO),
-    ]
 }
 
 #[cfg(test)]

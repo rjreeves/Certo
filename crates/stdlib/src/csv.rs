@@ -111,21 +111,3 @@ static CertoList *certo_csv_rows(CertoList *rows) {
     return out;
 }
 "#;
-
-pub const CSV_CERTO: &str = r#"
-// Stdlib.Csv — CSV parsing and serialization (RFC 4180)
-
-/// Parse CSV text into a list of rows, each row a list of fields.
-/// Handles quoted fields, embedded commas, and escaped quotes.
-extern fn Csv.parse(text: Text): List<List<Text>>
-
-/// Serialize a list of rows back to CSV text.
-/// Fields containing commas, quotes, or newlines are automatically quoted.
-extern fn Csv.serialize(rows: List<List<Text>>): Text
-
-/// Return the first row (header row) of a parsed CSV.
-extern fn Csv.header(rows: List<List<Text>>): List<Text>
-
-/// Return all rows except the first (data rows, skipping header).
-extern fn Csv.rows(rows: List<List<Text>>): List<List<Text>>
-"#;

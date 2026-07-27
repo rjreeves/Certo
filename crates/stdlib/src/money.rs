@@ -155,32 +155,3 @@ certo_decimal_t certo_money_from_decimal(certo_decimal_t d) {
     return certo_decimal_round(d, 2);
 }
 "#;
-
-/// Certo source declaration of `Stdlib.Money`.
-pub const MONEY_CERTO: &str = r#"
-module Stdlib.Money
-
-/* Decimal arithmetic */
-
-fn Decimal.add(a: Decimal, b: Decimal): Decimal
-fn Decimal.sub(a: Decimal, b: Decimal): Decimal
-fn Decimal.mul(a: Decimal, b: Decimal): Decimal
-fn Decimal.div(a: Decimal, b: Decimal): Decimal [fallible]
-fn Decimal.eq(a: Decimal, b: Decimal): Bool
-fn Decimal.lt(a: Decimal, b: Decimal): Bool
-fn Decimal.gt(a: Decimal, b: Decimal): Bool
-fn Decimal.lte(a: Decimal, b: Decimal): Bool
-fn Decimal.gte(a: Decimal, b: Decimal): Bool
-fn Decimal.abs(d: Decimal): Decimal
-fn Decimal.negate(d: Decimal): Decimal
-fn Decimal.round(d: Decimal, places: Int): Decimal
-fn Decimal.toInt(d: Decimal): Int
-fn Decimal.fromInt(n: Int): Decimal
-fn Decimal.toText(d: Decimal): Text
-
-/* Money helpers (Decimal fixed at 2 decimal places) */
-
-fn Money.fromCents(cents: Int): Decimal
-fn Money.toCents(m: Decimal): Int
-fn Money.fromDecimal(d: Decimal): Decimal
-"#;

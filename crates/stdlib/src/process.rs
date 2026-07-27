@@ -400,38 +400,3 @@ int64_t certo_process_lines_certo(certo_text_t cmd, CertoList* args, CertoFnText
 #endif
 }
 "#;
-
-pub const PROCESS_CERTO: &str = r#"
-module Stdlib.Process
-
-/// Run an external command with the given arguments.
-/// Returns a ProcessResult with exitCode, stdout, and stderr captured.
-fn Process.exec(cmd: Text, args: List<Text>): ProcessResult [io]
-
-/// Run an external command, writing `input` to its stdin.
-/// Returns a ProcessResult with exitCode, stdout, and stderr captured.
-fn Process.execWithInput(cmd: Text, args: List<Text>, input: Text): ProcessResult [io]
-
-/// Stream stdout of an external command line by line.
-/// `handler` is called once per line (newline stripped).
-/// Returns the exit code.
-fn Process.lines(cmd: Text, args: List<Text>, handler: fn(Text): Unit): Int [io]
-
-/// Launch a process without waiting for it to exit.
-fn Process.spawnDetached(cmd: Text, args: List<Text>, workingDir: Text): Int [io]
-
-/// Launch a process without waiting for it to exit, hiding any child console window on Windows.
-fn Process.spawnDetachedHidden(cmd: Text, args: List<Text>, workingDir: Text): Int [io]
-
-/// Exit the current process with the given code.
-fn Process.quit(code: Int): Unit [io]
-
-/// Exit code from a ProcessResult.
-fn ProcessResult.exitCode(r: ProcessResult): Int
-
-/// Captured standard output from a ProcessResult.
-fn ProcessResult.stdout(r: ProcessResult): Text
-
-/// Captured standard error from a ProcessResult.
-fn ProcessResult.stderr(r: ProcessResult): Text
-"#;

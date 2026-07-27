@@ -145,24 +145,3 @@ static certo_text_t certo_crypto_base64_decode(certo_text_t s) {
     out[j]=0; return out;
 }
 "#;
-
-pub const CRYPTO_CERTO: &str = r#"
-// Stdlib.Crypto — hashing and encoding
-
-/// SHA-256 hash of a string — returns lowercase hex (64 chars).
-extern fn Crypto.sha256(s: Text): Text
-
-/// SHA-256 over raw Bytes — returns the raw 32-byte digest (not hex).
-/// Use Bytes.toHex on the result for a hex string.
-fn Crypto.sha256Bytes(b: Bytes): Bytes
-
-/// MD5 hash of a string — returns lowercase hex (32 chars).
-/// Not suitable for security-sensitive use; prefer sha256 for new code.
-extern fn Crypto.md5(s: Text): Text
-
-/// Base64-encode a string.
-extern fn Crypto.base64Encode(s: Text): Text
-
-/// Base64-decode a string. Returns empty string on invalid input.
-extern fn Crypto.base64Decode(s: Text): Text
-"#;

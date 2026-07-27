@@ -96,27 +96,3 @@ bool certo_write_file_bytes(certo_text_t path, CertoBytes* b) {
     return ok == (size_t)b->len;
 }
 "#;
-
-pub const BYTES_CERTO: &str = r#"
-module Stdlib.Bytes
-
-// An immutable, length-carrying binary buffer.
-
-/// Number of bytes.
-fn Bytes.length(b: Bytes): Int
-
-/// Empty buffer (length 0).
-fn Bytes.empty(): Bytes
-
-/// Copy of the half-open range [start, end); indices are clamped to [0, length].
-fn Bytes.slice(b: Bytes, start: Int, end: Int): Bytes
-
-/// Concatenate two buffers into a new one.
-fn Bytes.concat(a: Bytes, b: Bytes): Bytes
-
-/// Lowercase hex encoding (two chars per byte).
-fn Bytes.toHex(b: Bytes): Text
-
-/// Copy a Text's bytes (up to its NUL terminator) into a buffer.
-fn Bytes.fromText(s: Text): Bytes
-"#;

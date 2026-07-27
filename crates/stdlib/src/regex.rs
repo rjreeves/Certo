@@ -185,23 +185,3 @@ static CertoList* certo_regex_split(certo_text_t pat, certo_text_t str) {
     return list;
 }
 "##;
-
-pub const REGEX_CERTO: &str = r#"
-// Stdlib.Regex — regular expression matching
-
-/// Returns true if `pattern` matches anywhere in `input`.
-extern fn Regex.match(pattern: Text, input: Text): Bool
-
-/// Returns the first match of `pattern` in `input`, or "" if not found.
-extern fn Regex.find(pattern: Text, input: Text): Text
-
-/// Returns a list of capture groups from the first match.
-/// Empty list if no match.
-extern fn Regex.captures(pattern: Text, input: Text): List<Text>
-
-/// Replace the first occurrence of `pattern` in `input` with `replacement`.
-extern fn Regex.replace(pattern: Text, input: Text, replacement: Text): Text
-
-/// Split `input` on `pattern`. Returns list of segments.
-extern fn Regex.split(pattern: Text, input: Text): List<Text>
-"#;
