@@ -127,39 +127,3 @@ void* certo_list_dir(certo_text_t path) {   /* Option<List<Text>> */
     return __certo_opt_box((int64_t)out);   /* Some(entries) */
 }
 "#;
-
-pub const FILE_CERTO: &str = r#"
-module Stdlib.File
-
-/// Read entire file contents as Text. Returns None on error.
-fn readFile(path: Text): Text? [io]
-
-/// Write text to a file, replacing any existing contents.
-/// Returns true on success.
-fn writeFile(path: Text, content: Text): Bool [io]
-
-/// Read an entire file as raw bytes (binary-safe). Returns None on error.
-fn readFileBytes(path: Text): Bytes? [io]
-
-/// Write raw bytes to a file, replacing any existing contents (binary-safe).
-/// Returns true on success.
-fn writeFileBytes(path: Text, data: Bytes): Bool [io]
-
-/// Append text to a file.
-/// Returns true on success.
-fn appendFile(path: Text, content: Text): Bool [io]
-
-/// Return true if the file exists and is readable.
-fn fileExists(path: Text): Bool [io]
-
-/// Delete a file. Returns true on success.
-fn deleteFile(path: Text): Bool [io]
-
-/// Create a directory and any missing parents (mkdir -p).
-/// Returns true if the directory exists afterwards.
-fn makeDir(path: Text): Bool [io]
-
-/// List the names of entries in a directory (excluding . and ..).
-/// Returns None if the path does not exist or is not a directory.
-fn listDir(path: Text): List<Text>? [io]
-"#;

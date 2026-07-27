@@ -37,16 +37,3 @@ int64_t certo_unset_env(certo_text_t key) {
     return 0;
 }
 "#;
-
-pub const ENV_CERTO: &str = r#"
-module Stdlib.Env
-
-/// Return the value of environment variable `key`, or None if not set.
-fn getEnv(key: Text): Text?
-
-/// Set environment variable `key` to `val`.
-fn setEnv(key: Text, val: Text): Unit [io]
-
-/// Remove environment variable `key`.
-fn unsetEnv(key: Text): Unit [io]
-"#;

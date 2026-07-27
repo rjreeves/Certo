@@ -2,7 +2,7 @@ use certo_typeck::{Ty, TypeEnv};
 use crate::seed::seed_stdlib;
 use crate::{CORE_C, BYTES_C, CREDENTIAL_C, COLLECTIONS_C, TEXT_C, DATETIME_C, MONEY_C,
             ENV_C, FILE_C, PATH_C, PROCESS_C, JSON_C, HTTP_C, DB_C,
-            full_c_runtime, certo_sources};
+            full_c_runtime};
 
 fn seeded_env() -> TypeEnv {
     let mut env = TypeEnv::new();
@@ -241,21 +241,6 @@ fn full_c_runtime_combines_all_modules() {
     assert!(rt.contains("certo_text_concat"),   "missing text");
     assert!(rt.contains("certo_datetime_now"),  "missing datetime");
     assert!(rt.contains("certo_decimal_add"),   "missing money");
-}
-
-#[test]
-fn certo_sources_covers_all_modules() {
-    let srcs = certo_sources();
-    let names: Vec<&str> = srcs.iter().map(|(n, _)| *n).collect();
-    assert!(names.contains(&"Stdlib.Core"));
-    assert!(names.contains(&"Stdlib.Collections"));
-    assert!(names.contains(&"Stdlib.Text"));
-    assert!(names.contains(&"Stdlib.DateTime"));
-    assert!(names.contains(&"Stdlib.Money"));
-    // every module has non-empty source
-    for (name, src) in &srcs {
-        assert!(!src.is_empty(), "{} source is empty", name);
-    }
 }
 
 // ------------------------------------------------------------------ //
@@ -825,16 +810,6 @@ fn full_c_runtime_includes_new_modules() {
 }
 
 #[test]
-fn certo_sources_includes_new_modules() {
-    let srcs = certo_sources();
-    let names: Vec<&str> = srcs.iter().map(|(n, _)| *n).collect();
-    assert!(names.contains(&"Stdlib.Env"),     "missing Stdlib.Env");
-    assert!(names.contains(&"Stdlib.File"),    "missing Stdlib.File");
-    assert!(names.contains(&"Stdlib.Path"),    "missing Stdlib.Path");
-    assert!(names.contains(&"Stdlib.Process"), "missing Stdlib.Process");
-}
-
-#[test]
 fn money_to_cents_type() {
     let env = seeded_env();
     match env.lookup("Money.toCents").unwrap() {
@@ -1225,14 +1200,6 @@ fn full_c_runtime_includes_json_and_http() {
     let rt = full_c_runtime();
     assert!(rt.contains("certo_json_parse"), "missing json in runtime");
     assert!(rt.contains("certo_http_get"),   "missing http in runtime");
-}
-
-#[test]
-fn certo_sources_includes_json_and_http() {
-    let srcs = certo_sources();
-    let names: Vec<&str> = srcs.iter().map(|(n, _)| *n).collect();
-    assert!(names.contains(&"Stdlib.Json"), "missing Stdlib.Json");
-    assert!(names.contains(&"Stdlib.Http"), "missing Stdlib.Http");
 }
 
 // ------------------------------------------------------------------ //

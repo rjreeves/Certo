@@ -11,6 +11,7 @@ Signatures only — one line per function. For narrative usage see
 | Module | import |
 |---|---|
 | [Core](#core) | *(auto-imported)* |
+| [Result](#result) | `import Stdlib.Result` |
 | [Text](#text) | `import Stdlib.Text` |
 | [Collections](#collections) | `import Stdlib.Collections` |
 | [Money / Decimal](#money--decimal) | `import Stdlib.Money` |
@@ -91,6 +92,38 @@ arg(i: Int): Text?                  // argv[i], or None if out of range
 ```
 assert(cond: Bool, msg: Text): Unit  // panics if cond is false
 panic(msg: Text): Nothing            // unconditional abort
+```
+
+---
+
+## Result
+
+`import Stdlib.Result`
+
+`flatMap`/`mapErr`/`getOrElse`/`recover` are bare functions, used via the
+pipe operator (`r |> flatMap(f)` desugars to `flatMap(r, f)`) — Certo has
+no `value.method()` dispatch, only `Type.method(...)` static calls, so
+these aren't called as `r.flatMap(f)`. `Result.all`/`Result.allSettled`
+are qualified, like `List.map`.
+
+```
+flatMap<T, U, E>(r: Result<T, E>, f: fn(T): Result<U, E>): Result<U, E>
+    // Ok(v) -> f(v); Err(e) -> Err(e) unchanged (short-circuits)
+
+mapErr<T, E, F>(r: Result<T, E>, f: fn(E): F): Result<T, F>
+    // transforms the error side only; Ok is untouched
+
+getOrElse<T, E>(r: Result<T, E>, default: T): T
+    // unwraps Ok, else returns default
+
+recover<T, E>(r: Result<T, E>, f: fn(E): T): T
+    // unwraps Ok, else computes a fallback value from the error
+
+Result.all<T, E>(results: List<Result<T, E>>): Result<List<T>, E>
+    // Ok(every payload) if all succeeded, else the first Err (short-circuits)
+
+Result.allSettled<T, E>(results: List<Result<T, E>>): List<Result<T, E>>
+    // every outcome unchanged; never short-circuits
 ```
 
 ---

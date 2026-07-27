@@ -204,26 +204,3 @@ certo_text_t certo_text_repeat(certo_text_t s, int64_t n) {
     return out;
 }
 "#;
-
-/// Certo source declaration of `Stdlib.Text`.
-pub const TEXT_CERTO: &str = r#"
-module Stdlib.Text
-
-fn Text.len(s: Text): Int
-fn Text.concat(a: Text, b: Text): Text
-fn Text.eq(a: Text, b: Text): Bool
-fn Text.contains(s: Text, sub: Text): Bool
-fn Text.startsWith(s: Text, prefix: Text): Bool
-fn Text.endsWith(s: Text, suffix: Text): Bool
-fn Text.toUpper(s: Text): Text
-fn Text.toLower(s: Text): Text
-fn Text.trim(s: Text): Text
-fn Text.trimStart(s: Text): Text
-fn Text.trimEnd(s: Text): Text
-fn Text.slice(s: Text, start: Int, end: Int): Text
-fn Text.indexOf(s: Text, sub: Text): Int?
-fn Text.replace(s: Text, from: Text, to: Text): Text
-fn Text.split(s: Text, sep: Text): List<Text>
-fn Text.join(parts: List<Text>, sep: Text): Text
-fn Text.repeat(s: Text, n: Int): Text
-"#;

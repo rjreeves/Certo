@@ -104,24 +104,3 @@ certo_text_t certo_path_stem(certo_text_t path) {
     return out;
 }
 "#;
-
-pub const PATH_CERTO: &str = r#"
-module Stdlib.Path
-
-/// Join two path segments, inserting a separator if needed.
-fn Path.join(a: Text, b: Text): Text
-
-/// The last component of a path (filename with extension).
-fn Path.basename(path: Text): Text
-
-/// Everything before the last component (the directory part).
-/// Returns "." if there is no directory component.
-fn Path.dirname(path: Text): Text
-
-/// The file extension of the last component, without the leading dot.
-/// Returns None if there is no extension.
-fn Path.extension(path: Text): Text?
-
-/// The filename without its extension.
-fn Path.stem(path: Text): Text
-"#;

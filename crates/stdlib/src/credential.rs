@@ -118,23 +118,3 @@ bool  certo_credential_set(certo_text_t target, certo_text_t secret) { (void)tar
 bool  certo_credential_delete(certo_text_t target) { (void)target; return false; }
 #endif
 "#;
-
-pub const CREDENTIAL_CERTO: &str = r#"
-module Stdlib.Credential
-
-// Windows Credential Manager (Generic credentials). On non-Windows platforms
-// every function returns None/false so callers can fall back to env vars.
-
-/// Raw credential blob for a Generic credential `target`, or None if absent.
-fn Credential.getBytes(target: Text): Bytes? [io]
-
-/// Best-effort text secret for `target` (tries UTF-8, then UTF-16LE).
-/// None if the credential is absent.
-fn Credential.get(target: Text): Text? [io]
-
-/// Store a Generic credential. Returns true on success.
-fn Credential.set(target: Text, secret: Text): Bool [io]
-
-/// Delete a Generic credential. Returns true on success.
-fn Credential.delete(target: Text): Bool [io]
-"#;
