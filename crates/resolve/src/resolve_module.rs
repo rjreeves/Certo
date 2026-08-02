@@ -1,5 +1,5 @@
 use certo_ast::module::{Module, Import, ImportKind};
-use certo_ast::decl::Decl;
+use certo_ast::decl::{Decl, TypeBody};
 use crate::scope::{ScopeChain, Res};
 use crate::error::ResolveError;
 use crate::resolve_decl::resolve_decl;
@@ -9,7 +9,25 @@ use crate::resolve_decl::resolve_decl;
 /// Returns `Ok(())` when no errors were found, or `Err(Vec<ResolveError>)`
 /// listing every E0100/E0101/E0102 that was detected.
 pub fn resolve(module: &Module) -> Result<(), Vec<ResolveError>> {
+    resolve_with(module, None)
+}
+
+/// Like `resolve`, but seeds the module-level scope with extra builtin
+/// names first (e.g. stdlib bare names such as `print`/`parseInt`).
+/// `certo_resolve` only knows a small, hardcoded builtin list of its own
+/// (see `scope::seed_builtins`) with no idea of the wider stdlib, so a
+/// caller that runs against real programs — currently only `certo-lsp` —
+/// needs to hand in the same names `certo_typeck::seed_stdlib` registers
+/// or every stdlib call looks undefined.
+pub fn resolve_seeded(module: &Module, extra_builtins: impl IntoIterator<Item = String>) -> Result<(), Vec<ResolveError>> {
+    resolve_with(module, Some(extra_builtins.into_iter().collect()))
+}
+
+fn resolve_with(module: &Module, extra_builtins: Option<Vec<String>>) -> Result<(), Vec<ResolveError>> {
     let mut scope = ScopeChain::new();
+    if let Some(names) = extra_builtins {
+        scope.seed_extra(names);
+    }
 
     // Pass 1: hoist all top-level declaration names so that mutually
     // recursive functions can refer to each other.
@@ -35,6 +53,21 @@ pub fn resolve(module: &Module) -> Result<(), Vec<ResolveError>> {
 /// recursion work without ordering constraints.
 fn hoist_decls(module: &Module, scope: &mut ScopeChain) {
     for decl in &module.decls {
+        // Sum-type variants (`Circle`, `Square`, ...) are their own top-level
+        // names — constructors/values referenced directly in expressions and
+        // patterns — so hoist them alongside the type name itself.
+        if let Decl::Type(t) = &decl.node {
+            if let TypeBody::Sum(variants) = &t.body {
+                for v in variants {
+                    scope.define_top_level(
+                        &v.name.node,
+                        Res::Decl { name: v.name.node.clone(), span: v.name.span },
+                        v.name.span,
+                    );
+                }
+            }
+        }
+
         let (name, span) = match &decl.node {
             Decl::Fn(f)           => (f.name.node.clone(), f.name.span),
             Decl::Type(t)         => (t.name.node.clone(), t.name.span),

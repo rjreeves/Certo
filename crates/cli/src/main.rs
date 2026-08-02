@@ -1318,8 +1318,12 @@ pub(crate) fn type_error_to_diagnostic(e: &TypeError) -> Diagnostic {
 }
 
 pub(crate) fn find_cc() -> Option<String> {
-    // First try names on PATH.
-    for candidate in &["clang", "gcc", "cc", "cl"] {
+    // First try names on PATH. MSVC's cl.exe is deliberately not a candidate:
+    // the compiler invocation below is 100% GCC/Clang-flag syntax (-o, -I,
+    // -Xlinker, -luser32, ...), which cl.exe doesn't understand at all, so
+    // "detecting" it would just fail differently (and more confusingly) one
+    // step later. See BACKLOG item 104.
+    for candidate in &["clang", "gcc", "cc"] {
         if probe_cc(candidate) { return Some(candidate.to_string()); }
     }
     // Fall back to common Windows install locations.

@@ -41,15 +41,19 @@ impl Analysis {
 
         let module = match certo_parser::parse(src) {
             Ok(m) => {
-                // Name resolution
-                if let Err(errs) = certo_resolve::resolve(&m) {
-                    resolve_errors = errs;
-                }
                 // Type checking — seed stdlib so built-ins don't appear unbound
                 let mut env     = certo_typeck::TypeEnv::new();
                 let mut counter = 0u32;
                 env.seed_builtins(&mut counter);
                 certo_stdlib::seed_stdlib(&mut env, &mut counter);
+
+                // Name resolution — seeded with the same stdlib names as
+                // typeck so e.g. `print`/`parseInt` don't show up as
+                // undefined (BACKLOG item 110).
+                if let Err(errs) = certo_resolve::resolve_seeded(&m, env.names()) {
+                    resolve_errors = errs;
+                }
+
                 if let Err(errs) = certo_typeck::check_module_seeded(&m, env, counter) {
                     type_errors = errs;
                 }
