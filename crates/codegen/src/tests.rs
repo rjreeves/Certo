@@ -152,6 +152,68 @@ fn sum_type_with_payload_constructor_and_match() {
     assert_not_contains(&c, "shape__circle"); // the old broken union member name
 }
 
+#[test]
+fn named_field_variant_match_reads_real_field_name() {
+    // A variant declared with named fields (`Circle(radius: Float)`) must be
+    // read back via that same name — the struct constructor already used it
+    // (`.circle = { .radius = radius }`), so a positional `.circle.f0` read
+    // doesn't exist and fails to compile (BACKLOG item 111).
+    let c = codegen(
+        "module A\ntype Shape = | Circle(radius: Float) | Square(side: Float)\n\
+         fn area(s: Shape): Float = match s {\n  Circle(r) => r\n  Square(side) => side\n}");
+    assert_contains(&c, ".circle.radius");
+    assert_contains(&c, ".square.side");
+    assert_not_contains(&c, ".circle.f0");
+    assert_not_contains(&c, ".square.f0");
+}
+
+#[test]
+fn named_field_variant_mixed_positions_read_correct_names() {
+    // A multi-field named variant must map each pattern position to its own
+    // declared name, not fall back to a single shared name or swap fields.
+    let c = codegen(
+        "module A\ntype Rect = | Rect(width: Float, height: Float)\n\
+         fn area(r: Rect): Float = match r {\n  Rect(w, h) => w * h\n}");
+    assert_contains(&c, ".rect.width");
+    assert_contains(&c, ".rect.height");
+}
+
+#[test]
+fn sum_type_match_float_field_bound_as_double_not_truncated() {
+    // A pattern-bound Float field (`Circle(r) => r`) must give `r`'s MIR
+    // local the real `double` type, not the `Ty::Error` placeholder codegen
+    // maps to `int64_t` — otherwise reading a Float payload out of the
+    // union truncates it (BACKLOG item 111).
+    let c = codegen(
+        "module A\ntype Shape = | Circle(radius: Float) | Square(side: Float)\n\
+         fn radiusOrZero(s: Shape): Float = match s {\n  Circle(r) => r\n  Square(side) => 0.0\n}");
+    assert_contains(&c, "double certo_radius_or_zero");
+}
+
+#[test]
+fn sum_type_match_with_computed_arm_bodies_returns_double() {
+    // Arm bodies that are computed expressions (`r * r * 3.14159`) are
+    // always `Ty::Error` at the HIR level (BinOp doesn't self-type there);
+    // the match's own join-local type must still be recovered as `double`
+    // from the arm operand, not default to `int64_t` and truncate the
+    // result on return (BACKLOG item 111).
+    let c = codegen(
+        "module A\ntype Shape = | Circle(radius: Float) | Square(side: Float)\n\
+         fn area(s: Shape): Float = match s {\n  Circle(r) => r * r * 3.14159\n  Square(side) => side * side\n}");
+    assert_contains(&c, "double certo_area");
+    assert_not_contains(&c, "int64_t certo_area");
+}
+
+#[test]
+fn if_expr_with_computed_branch_bodies_returns_double() {
+    // Same join-type-recovery fix, applied to `if`/`else` (the other branch
+    // construct with the identical Ty::Error-propagation gap).
+    let c = codegen(
+        "module A\nfn pick(cond: Bool, a: Float, b: Float): Float = if cond then a * 2.0 else b * 3.0");
+    assert_contains(&c, "double certo_pick");
+    assert_not_contains(&c, "int64_t certo_pick");
+}
+
 // ------------------------------------------------------------------ //
 // Function emission
 // ------------------------------------------------------------------ //

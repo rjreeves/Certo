@@ -301,11 +301,26 @@ fn lower_expr(expr: &HirExpr, b: &mut Builder) -> Operand {
 
             b.switch_to(then_bb);
             let then_op = lower_expr(then_expr, b);
+            // See the analogous patch in the Match case below: HIR often
+            // can't infer expr.ty for a computed branch body, so recover it
+            // from the branch's own operand once it's known.
+            if matches!(b.locals[result as usize].ty, Ty::Error) {
+                let inferred = infer_operand_ty(&then_op, b);
+                if !matches!(inferred, Ty::Error) {
+                    b.locals[result as usize].ty = inferred;
+                }
+            }
             b.assign(result, Rvalue::Use(then_op));
             b.terminate(Terminator::Goto(join_bb));
 
             b.switch_to(else_bb);
             let else_op = lower_expr(else_expr, b);
+            if matches!(b.locals[result as usize].ty, Ty::Error) {
+                let inferred = infer_operand_ty(&else_op, b);
+                if !matches!(inferred, Ty::Error) {
+                    b.locals[result as usize].ty = inferred;
+                }
+            }
             b.assign(result, Rvalue::Use(else_op));
             b.terminate(Terminator::Goto(join_bb));
 
@@ -375,7 +390,7 @@ fn lower_expr(expr: &HirExpr, b: &mut Builder) -> Operand {
                         b.terminate(Terminator::Goto(after_pat));
                         if arm.guard.is_some() { b.switch_to(after_pat); }
                     }
-                    HirPat::Constructor { name, fields } => {
+                    HirPat::Constructor { name, fields, field_names, field_types } => {
                         // Special-case built-in Option/Result constructors which use
                         // pointer/struct representations rather than tagged-union enums.
                         match name.as_str() {
@@ -460,20 +475,23 @@ fn lower_expr(expr: &HirExpr, b: &mut Builder) -> Operand {
                                 // User-defined sum type: compare .tag field to variant constant.
                                 let tag_local = b.declare_local("_tag", Ty::Int);
                                 b.assign(tag_local, Rvalue::Field { base: scrut_op.clone(), field: "tag".into() });
-                                // The union member is named after the variant (lowercased),
-                                // and payload fields are positional (`f0`, `f1`, …) to match
-                                // the tagged-union struct emitted by codegen. `name` here is
-                                // the fully-qualified `Type__Variant`, so take the last segment.
+                                // The union member is named after the variant (lowercased).
+                                // Payload fields use whatever name the codegen-emitted struct
+                                // gave them — the variant's declared field name, or the
+                                // positional fallback `f<i>` — per `field_names[i]` (computed
+                                // in HIR lowering from the same rule `emit_module.rs` uses).
+                                // `name` here is the fully-qualified `Type__Variant`, so take
+                                // the last segment.
                                 let variant = name.rsplit("__").next().unwrap_or(name).to_lowercase();
                                 for (i, field_pat) in fields.iter().enumerate() {
                                     if let HirPat::Bind { local, name: fname } = field_pat {
-                                        let ml = b.map_hir_local(*local, fname, Ty::Error);
+                                        let ml = b.map_hir_local(*local, fname, field_types[i].clone());
                                         // Read the payload directly via a nested path
-                                        // `scrut.<variant>.f<i>` — avoids an intermediate
+                                        // `scrut.<variant>.<field>` — avoids an intermediate
                                         // local whose (anonymous struct) type we can't name.
                                         b.assign(ml, Rvalue::Field {
                                             base: scrut_op.clone(),
-                                            field: format!("{}.f{}", variant, i),
+                                            field: format!("{}.{}", variant, field_names[i]),
                                         });
                                     }
                                 }
@@ -530,6 +548,18 @@ fn lower_expr(expr: &HirExpr, b: &mut Builder) -> Operand {
                 // ── Arm body ─────────────────────────────────────────
                 b.switch_to(arm_bb);
                 let arm_op = lower_expr(&arm.body, b);
+                // HIR often can't infer expr.ty for a computed arm body
+                // (`Circle(r) => r * r * 3.14159` is a BinOp, always
+                // Ty::Error at the HIR level — see the BinOp case above).
+                // Recover the join local's real type from the first arm
+                // whose operand reveals one, same idiom as `lower_fn`'s
+                // return-type patch-after-the-fact via `infer_operand_ty`.
+                if matches!(b.locals[result as usize].ty, Ty::Error) {
+                    let inferred = infer_operand_ty(&arm_op, b);
+                    if !matches!(inferred, Ty::Error) {
+                        b.locals[result as usize].ty = inferred;
+                    }
+                }
                 b.assign(result, Rvalue::Use(arm_op));
                 b.terminate(Terminator::Goto(join_bb));
 

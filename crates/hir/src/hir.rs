@@ -208,7 +208,15 @@ pub enum HirPat {
     Bind { local: LocalId, name: String },
     Lit(HirLitPat),
     Tuple(Vec<HirPat>),
-    Constructor { name: String, fields: Vec<HirPat> },
+    /// `field_names[i]` is the C struct member the codegen-emitted tagged
+    /// union actually uses for `fields[i]`'s payload slot — the field's real
+    /// name if the variant declared one (`Circle(radius: Float)`), else the
+    /// positional fallback `f{i}` (see `emit_module.rs`'s struct emission,
+    /// which the two must agree with byte-for-byte). `field_types[i]` is the
+    /// field's declared type, so a bound local gets that type instead of
+    /// `Ty::Error` (which codegen maps to `int64_t`, silently truncating
+    /// e.g. `Float` payloads on read).
+    Constructor { name: String, fields: Vec<HirPat>, field_names: Vec<String>, field_types: Vec<Ty> },
     Or(Box<HirPat>, Box<HirPat>),
 }
 
