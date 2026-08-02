@@ -207,6 +207,10 @@ fn collections_c_contains_list_and_map() {
     assert!(COLLECTIONS_C.contains("certo_list_any"),      "missing list_any");
     assert!(COLLECTIONS_C.contains("certo_list_all"),      "missing list_all");
     assert!(COLLECTIONS_C.contains("certo_list_zip"),      "missing list_zip");
+    assert!(COLLECTIONS_C.contains("certo_list_distinct"),  "missing list_distinct");
+    assert!(COLLECTIONS_C.contains("certo_list_partition"), "missing list_partition");
+    assert!(COLLECTIONS_C.contains("certo_list_chunked"),   "missing list_chunked");
+    assert!(COLLECTIONS_C.contains("certo_list_group_by"),  "missing list_group_by");
     assert!(COLLECTIONS_C.contains("certo_map_from_list"), "missing map_from_list");
 }
 
@@ -450,6 +454,23 @@ fn list_zip_is_polymorphic() {
 fn map_from_list_registered() {
     let env = seeded_env();
     assert!(matches!(env.lookup("Map.fromList").unwrap(), Ty::Forall { .. }));
+}
+
+#[test]
+fn list_new_collection_functions_registered() {
+    let env = seeded_env();
+    for name in &["List.distinct", "List.partition", "List.chunked", "List.groupBy"] {
+        assert!(env.lookup(name).is_some(), "missing: {}", name);
+    }
+}
+
+#[test]
+fn list_distinct_partition_chunked_group_by_are_polymorphic() {
+    let env = seeded_env();
+    assert!(matches!(env.lookup("List.distinct").unwrap(),  Ty::Forall { .. }));
+    assert!(matches!(env.lookup("List.partition").unwrap(), Ty::Forall { .. }));
+    assert!(matches!(env.lookup("List.chunked").unwrap(),   Ty::Forall { .. }));
+    assert!(matches!(env.lookup("List.groupBy").unwrap(),   Ty::Forall { .. }));
 }
 
 // ------------------------------------------------------------------ //
@@ -1296,4 +1317,40 @@ fn flat_map_with_non_result_returning_fn_is_type_error() {
         "module A\nfn f(): Result<Int, Text> = Ok(1) |> flatMap((x) => x + 1)"
     ).unwrap_err();
     assert!(!errs.is_empty(), "expected a type error for flatMap's callback not returning a Result");
+}
+
+// ------------------------------------------------------------------ //
+// Collections — distinct/partition/chunked/groupBy — full type-check
+// ------------------------------------------------------------------ //
+
+#[test]
+fn distinct_preserves_list_type_ok() {
+    check_full("module A\nfn f(xs: List<Int>): List<Int> = List.distinct(xs)").unwrap();
+}
+
+#[test]
+fn partition_returns_tuple_of_lists_ok() {
+    check_full(
+        "module A\nfn f(xs: List<Int>): (List<Int>, List<Int>) = List.partition(xs, (x) => x > 0)"
+    ).unwrap();
+}
+
+#[test]
+fn chunked_returns_list_of_lists_ok() {
+    check_full("module A\nfn f(xs: List<Int>): List<List<Int>> = List.chunked(xs, 2)").unwrap();
+}
+
+#[test]
+fn group_by_returns_map_of_key_to_list_ok() {
+    check_full(
+        "module A\nfn f(xs: List<Int>): Map<Int, List<Int>> = List.groupBy(xs, (x) => x % 2)"
+    ).unwrap();
+}
+
+#[test]
+fn partition_pred_must_return_bool_is_type_error() {
+    let errs = check_full(
+        "module A\nfn f(xs: List<Int>): (List<Int>, List<Int>) = List.partition(xs, (x) => x)"
+    ).unwrap_err();
+    assert!(!errs.is_empty(), "expected a type error for a non-Bool partition predicate");
 }

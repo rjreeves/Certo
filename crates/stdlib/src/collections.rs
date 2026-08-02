@@ -203,6 +203,53 @@ CertoList* certo_list_sort(CertoList* l, CertoCmp cmp) {
                       certo_list_sort(right, cmp), cmp);
 }
 
+/* ---- distinct / partition / chunked ---- */
+
+/* Pointer-equality dedup, first-occurrence order — same equality convention
+ * as certo_list_contains_ptr/Map's key equality (see STDLIB-QUICKREF's note
+ * on Map: use Text keys carefully, since two equal strings are different
+ * pointers unless interned). O(n^2), matching this runtime's existing
+ * unoptimized style (certo_list_sort etc.). */
+CertoList* certo_list_distinct(CertoList* l) {
+    if (!l) return list_alloc(0);
+    CertoList* n = list_alloc(l->len);
+    for (int64_t i = 0; i < l->len; i++) {
+        bool seen = false;
+        for (int64_t j = 0; j < n->len; j++) {
+            if (n->data[j] == l->data[i]) { seen = true; break; }
+        }
+        if (!seen) n->data[n->len++] = l->data[i];
+    }
+    return n;
+}
+
+/* Returns a 2-tuple (matches, non-matches) — tuples are CertoList* with
+ * boxed elements (see Rvalue::Aggregate(Tuple) in emit_mir.rs); List<T>
+ * values are already pointer-sized so no f2i boxing is needed here. */
+CertoList* certo_list_partition(CertoList* l, CertoPred pred) {
+    CertoList* yes = list_alloc(l ? l->len : 0);
+    CertoList* no  = list_alloc(l ? l->len : 0);
+    if (l) {
+        for (int64_t i = 0; i < l->len; i++) {
+            if (pred(l->data[i])) yes->data[yes->len++] = l->data[i];
+            else                  no->data[no->len++]   = l->data[i];
+        }
+    }
+    return certo_list_of(2, (void*)yes, (void*)no);
+}
+
+CertoList* certo_list_chunked(CertoList* l, int64_t size) {
+    if (!l || size <= 0) return list_alloc(0);
+    int64_t n_chunks = (l->len + size - 1) / size;
+    CertoList* out = list_alloc(n_chunks > 0 ? n_chunks : 0);
+    for (int64_t i = 0; i < l->len; i += size) {
+        int64_t end = i + size;
+        if (end > l->len) end = l->len;
+        out->data[out->len++] = (void*)certo_list_slice(l, i, end);
+    }
+    return out;
+}
+
 /* ---- zip (pairs stored as heap-allocated {fst, snd}) ---- */
 
 typedef struct { void* fst; void* snd; } CertoPair;
@@ -320,6 +367,26 @@ CertoMap* certo_map_from_list(CertoList* l) {
         int64_t h = map_probe(m, p->fst);
         if (!m->entries[h].occupied) m->len++;
         m->entries[h] = (MapEntry){ .key = p->fst, .value = p->snd, .occupied = true };
+    }
+    return m;
+}
+
+/* Groups list elements by a key function into Map<K, List<T>>. Pre-sized to
+ * `len*2` slots (worst case: every element has a distinct key) since, unlike
+ * certo_map_insert, this builds the map in place rather than growing it via
+ * copy-on-write per insert. */
+CertoMap* certo_list_group_by(CertoList* l, CertoFn1 key) {
+    CertoMap* m = map_alloc(l && l->len > 0 ? l->len * 2 : 16);
+    if (!l) return m;
+    for (int64_t i = 0; i < l->len; i++) {
+        void* k = key(l->data[i]);
+        int64_t h = map_probe(m, k);
+        CertoList* bucket = m->entries[h].occupied
+            ? (CertoList*)m->entries[h].value
+            : list_alloc(4);
+        bucket = certo_list_push(bucket, l->data[i]);
+        if (!m->entries[h].occupied) m->len++;
+        m->entries[h] = (MapEntry){ .key = k, .value = (void*)bucket, .occupied = true };
     }
     return m;
 }

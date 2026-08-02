@@ -180,7 +180,16 @@ List.any<T>(list: List<T>, pred: T => Bool): Bool
 List.all<T>(list: List<T>, pred: T => Bool): Bool
 List.sort<T>(list: List<T>, cmp: (T, T) => Int): List<T>  // negative/0/positive
 List.zip<A, B>(a: List<A>, b: List<B>): List<(A, B)>      // length = min(len a, len b)
+List.distinct<T>(list: List<T>): List<T>                 // dedup, pointer equality (see Map note below)
+List.partition<T>(list: List<T>, pred: T => Bool): (List<T>, List<T>)  // (matches, non-matches)
+List.chunked<T>(list: List<T>, size: Int): List<List<T>>
+List.groupBy<T, K>(list: List<T>, key: T => K): Map<K, List<T>>  // K uses Map's pointer-equality keys — see below
 ```
+
+`sumBy`/`minBy`/`maxBy` (numeric/ordered projections) are not implemented yet —
+see BACKLOG item 112: passing a Float-returning lambda into any of these
+higher-order stdlib functions is unsound today (a deeper, pre-existing
+codegen bug, not specific to these three).
 
 ### Map\<K, V\>
 
