@@ -33,6 +33,14 @@ struct Cx {
     global_types:  HashMap<String, Ty>,
     /// Sum variant name → parent type name (e.g. "Red" → "Color").
     variant_to_type: HashMap<String, String>,
+    /// Sum variant name → ordered C field names for its payload (the real
+    /// field name where the variant declared one, else the positional
+    /// fallback `f{i}` — must match `emit_module.rs`'s struct emission).
+    variant_field_names: HashMap<String, Vec<String>>,
+    /// Sum variant name → ordered payload field types (needed so a
+    /// match-bound field local gets its real type instead of `Ty::Error`,
+    /// which codegen maps to `int64_t` and silently truncates e.g. `Float`).
+    variant_field_types: HashMap<String, Vec<Ty>>,
     /// Record type name → ordered field names (for spread desugar).
     record_field_names: HashMap<String, Vec<String>>,
     /// LocalId → type, for local variables whose type is known (val bindings,
@@ -55,6 +63,8 @@ impl Cx {
             fn_ret_types:  HashMap::new(),
             global_types:        HashMap::new(),
             variant_to_type:     HashMap::new(),
+            variant_field_names: HashMap::new(),
+            variant_field_types: HashMap::new(),
             record_field_names:  HashMap::new(),
             local_types:         HashMap::new(),
             errors:              Vec::new(),
@@ -255,6 +265,15 @@ pub fn lower_module(module: &Module) -> Result<HirModule, Vec<LowerError>> {
                         cx.global_types.insert(v.name.node.clone(), parent_ty.clone());
                     } else {
                         cx.fn_ret_types.insert(v.name.node.clone(), parent_ty.clone());
+                        let field_names: Vec<String> = v.fields.iter().enumerate()
+                            .map(|(i, f)| f.name.as_ref().map(|n| n.node.clone()).unwrap_or_else(|| format!("f{i}")))
+                            .collect();
+                        cx.variant_field_names.insert(v.name.node.clone(), field_names);
+                        let tp_names: Vec<&str> = t.type_params.iter().map(|tp| tp.name.node.as_str()).collect();
+                        let field_types: Vec<Ty> = v.fields.iter()
+                            .map(|f| ast_ty_to_ty_with_params(&f.ty.node, &tp_names))
+                            .collect();
+                        cx.variant_field_types.insert(v.name.node.clone(), field_types);
                     }
                 }
             }
@@ -617,7 +636,7 @@ fn lower_expr(expr: &S<Expr>, cx: &mut Cx) -> HirExpr {
                 },
             };
             let none_arm = HirArm {
-                pat:   HirPat::Constructor { name: "None".into(), fields: vec![] },
+                pat:   HirPat::Constructor { name: "None".into(), fields: vec![], field_names: vec![], field_types: vec![] },
                 guard: None,
                 body:  HirExpr { kind: HirExprKind::Global("None".into()), ty: Ty::Error, span },
             };
@@ -639,7 +658,7 @@ fn lower_expr(expr: &S<Expr>, cx: &mut Cx) -> HirExpr {
             let scrut = lower_expr(scrutinee, cx);
             let hir_arms: Vec<HirArm> = arms.iter().map(|arm| {
                 cx.push_scope();
-                let pat   = lower_pat(&arm.pattern, cx);
+                let pat   = lower_pat(&arm.pattern, &scrut.ty, cx);
                 let guard = arm.guard.as_ref().map(|g| lower_expr(g, cx));
                 let body  = lower_expr(&arm.body, cx);
                 cx.pop_scope();
@@ -1004,12 +1023,22 @@ fn lower_block(stmts: &[Stmt], span: Span, cx: &mut Cx) -> HirExpr {
     }
 }
 
-fn lower_pat(pat: &S<certo_ast::pattern::Pattern>, cx: &mut Cx) -> HirPat {
+/// `scrut_ty` is the type of the value this pattern matches against — needed
+/// so a bound variable (`Circle(r) => r`, `Some(x) => x`, ...) gets its real
+/// type registered in `cx.local_types` instead of `Ty::Error`. Without it,
+/// `Expr::Match`'s own inferred type falls back to whatever arm happens to
+/// have a literal body (or `Ty::Error` if none does), which silently
+/// truncates e.g. a `Float` payload once codegen maps `Ty::Error` to
+/// `int64_t` (see BACKLOG item 111).
+fn lower_pat(pat: &S<certo_ast::pattern::Pattern>, scrut_ty: &Ty, cx: &mut Cx) -> HirPat {
     use certo_ast::pattern::{Pattern, LitPat};
     match &pat.node {
         Pattern::Wildcard { .. } => HirPat::Wildcard,
         Pattern::Ident { name, .. } => {
             let local = cx.define_local(&name.node);
+            if !matches!(scrut_ty, Ty::Error) {
+                cx.local_types.insert(local, scrut_ty.clone());
+            }
             HirPat::Bind { local, name: name.node.clone() }
         }
         Pattern::Literal { value, .. } => match value {
@@ -1032,20 +1061,42 @@ fn lower_pat(pat: &S<certo_ast::pattern::Pattern>, cx: &mut Cx) -> HirPat {
                 HirPat::Wildcard
             }
         },
-        Pattern::Tuple { elements, .. } => HirPat::Tuple(elements.iter().map(|e| lower_pat(e, cx)).collect()),
+        Pattern::Tuple { elements, .. } => {
+            let elem_tys: Vec<Ty> = match scrut_ty {
+                Ty::Tuple(ts) => ts.clone(),
+                _ => vec![Ty::Error; elements.len()],
+            };
+            HirPat::Tuple(elements.iter().zip(elem_tys.iter()).map(|(e, ety)| lower_pat(e, ety, cx)).collect())
+        }
         Pattern::Constructor { path, fields, .. } => {
             let variant = path.segments.last().map(|s| s.node.clone()).unwrap_or_default();
             // Build a fully qualified tag name so MIR can emit `TypeName_VariantName`.
             let name = if let Some(parent) = cx.variant_to_type.get(&variant) {
                 format!("{}__{}", parent, variant)
             } else {
-                variant
+                variant.clone()
             };
-            HirPat::Constructor { name, fields: fields.iter().map(|f| lower_pat(f, cx)).collect() }
+            let field_names = cx.variant_field_names.get(&variant).cloned()
+                .unwrap_or_else(|| (0..fields.len()).map(|i| format!("f{i}")).collect());
+            // Built-in Option/Result constructors' payload type comes from
+            // the scrutinee's own type argument, not `variant_field_types`
+            // (which only knows about user-declared `Decl::Type` sum types).
+            let field_types: Vec<Ty> = match variant.as_str() {
+                "Some" => match scrut_ty { Ty::Option(inner) => vec![(**inner).clone()], _ => vec![Ty::Error; fields.len()] },
+                "None" => vec![],
+                "Ok"   => match scrut_ty { Ty::Result(t, _) => vec![(**t).clone()], _ => vec![Ty::Error; fields.len()] },
+                "Err"  => match scrut_ty { Ty::Result(_, e) => vec![(**e).clone()], _ => vec![Ty::Error; fields.len()] },
+                _ => cx.variant_field_types.get(&variant).cloned()
+                    .unwrap_or_else(|| vec![Ty::Error; fields.len()]),
+            };
+            let lowered_fields: Vec<HirPat> = fields.iter().enumerate()
+                .map(|(i, f)| lower_pat(f, field_types.get(i).unwrap_or(&Ty::Error), cx))
+                .collect();
+            HirPat::Constructor { name, fields: lowered_fields, field_names, field_types }
         }
         Pattern::Or { left, right, .. } => HirPat::Or(
-            Box::new(lower_pat(left, cx)),
-            Box::new(lower_pat(right, cx)),
+            Box::new(lower_pat(left, scrut_ty, cx)),
+            Box::new(lower_pat(right, scrut_ty, cx)),
         ),
         // Record / Guard / As — flatten to wildcard for now (full pattern compilation later)
         _ => HirPat::Wildcard,
