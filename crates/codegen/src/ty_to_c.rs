@@ -18,7 +18,11 @@ pub fn ty_to_c(ty: &Ty) -> String {
         Ty::Option(_)   => "void*".into(),
         Ty::Result(_, _) => "void*".into(), // heap-allocated certo_result_t
         Ty::List(_)     => "void*".into(),
-        Ty::Map(k, v)   => format!("certo_map_{}_{}_t", mangle(k), mangle(v)),
+        // `CertoMap*` is opaque and untyped regardless of K/V (same as
+        // `CertoList*` for List<T> above) — no per-instantiation typedef is
+        // ever emitted, so naming one here produced an undeclared C
+        // identifier the moment a Map value crossed a function boundary.
+        Ty::Map(_, _)   => "void*".into(),
         Ty::Tuple(ts)   => {
             if ts.is_empty() { "int64_t".into() } else { "void*".into() }
         }

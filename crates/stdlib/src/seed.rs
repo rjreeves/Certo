@@ -265,6 +265,36 @@ pub fn seed_stdlib(env: &mut TypeEnv, counter: &mut u32) {
             )),
         });
     }
+    {
+        let a = fresh();
+        let list_a = Ty::List(Box::new(Ty::Var(a)));
+        env.define("List.distinct", poly1(a, fn1(list_a.clone(), list_a)));
+    }
+    {
+        let a = fresh();
+        let pred = fn1(Ty::Var(a), Ty::Bool);
+        let list_a = Ty::List(Box::new(Ty::Var(a)));
+        env.define("List.partition", poly1(a,
+            fn2(list_a.clone(), pred, Ty::Tuple(vec![list_a.clone(), list_a]))));
+    }
+    {
+        let a = fresh();
+        let list_a = Ty::List(Box::new(Ty::Var(a)));
+        env.define("List.chunked", poly1(a,
+            fn2(list_a.clone(), Ty::Int, Ty::List(Box::new(list_a)))));
+    }
+    {
+        let a = fresh(); let k = fresh();
+        let key = fn1(Ty::Var(a), Ty::Var(k));
+        env.define("List.groupBy", Ty::Forall {
+            vars: vec![a, k],
+            body: Box::new(fn2(
+                Ty::List(Box::new(Ty::Var(a))),
+                key,
+                Ty::Map(Box::new(Ty::Var(k)), Box::new(Ty::List(Box::new(Ty::Var(a))))),
+            )),
+        });
+    }
 
     // ---------------------------------------------------------------- //
     // Collections — Map<K, V>
@@ -942,6 +972,10 @@ pub fn seed_stdlib(env: &mut TypeEnv, counter: &mut u32) {
     pm!("List.all",        "list", "pred");
     pm!("List.sort",       "list", "cmp");
     pm!("List.zip",        "a", "b");
+    pm!("List.distinct",   "list");
+    pm!("List.partition",  "list", "pred");
+    pm!("List.chunked",    "list", "size");
+    pm!("List.groupBy",    "list", "key");
 
     // Map
     pm!("Map.insert",      "map", "key", "value");

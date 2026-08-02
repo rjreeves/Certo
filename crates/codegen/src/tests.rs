@@ -100,6 +100,37 @@ fn option_match_derefs_through_val_binding() {
 }
 
 #[test]
+fn new_collection_functions_emit_expected_call_names() {
+    let c = codegen(
+        "module A\nimport Stdlib.Collections.{ List }\n\
+         fn f(xs: List<Int>): Int = {\n\
+         \x20 val d = List.distinct(xs)\n\
+         \x20 val (a, b) = List.partition(d, (x) => x > 0)\n\
+         \x20 val cs = List.chunked(a, 2)\n\
+         \x20 val g = List.groupBy(b, (x) => x % 2)\n\
+         \x20 List.len(b)\n\
+         }");
+    assert_contains(&c, "certo_list_distinct(");
+    assert_contains(&c, "certo_list_partition(");
+    assert_contains(&c, "certo_list_chunked(");
+    assert_contains(&c, "certo_list_group_by(");
+}
+
+#[test]
+fn map_typed_local_uses_void_star_not_undeclared_typedef() {
+    // Ty::Map(k, v) used to mangle into `certo_map_{k}_{v}_t` — a typedef
+    // that's never actually emitted anywhere, so any Map-typed local/param/
+    // return produced an "undeclared identifier" C compile error. CertoMap*
+    // is opaque regardless of K/V (same as CertoList* for List<T>), so it
+    // must compile to plain `void*` like every other opaque heap type.
+    // (An annotated param, not a stdlib call return, so the type is known
+    // to this crate's standalone HIR pass without a full typeck seed.)
+    let c = codegen("module A\nfn f(m: Map<Text, Int>): Map<Text, Int> = m");
+    assert_not_contains(&c, "certo_map_text_int_t");
+    assert_contains(&c, "void* certo_f(void* _l1)");
+}
+
+#[test]
 fn tuple_float_element_is_bit_preserved() {
     // A Float tuple element must be bit-cast into/out of the pointer-sized slot.
     let c = codegen(
