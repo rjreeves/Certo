@@ -15,18 +15,6 @@ fn check_err(src: &str) -> Vec<crate::error::TypeError> {
     check_module(&module).unwrap_err()
 }
 
-/// Like `check`, but tolerates `resolve` errors instead of panicking on them.
-/// `certo_resolve` never registers user-declared sum-type variant names
-/// (`Decl::Type` bodies are skipped entirely — see BACKLOG), so any test that
-/// pattern-matches a *custom* sum type (as opposed to the built-in `Option`/
-/// `Result`) would otherwise fail here even though the real compiler never
-/// runs `certo_resolve` at all (it isn't even a dependency of `crates/cli`).
-fn check_ignoring_resolve(src: &str) -> Result<(), Vec<crate::error::TypeError>> {
-    let module = parse(src).expect("parse error");
-    let _ = resolve(&module);
-    check_module(&module)
-}
-
 fn first_error_kind(src: &str) -> TypeErrorKind {
     check_err(src).into_iter().next().expect("expected at least one error").kind
 }
@@ -656,7 +644,7 @@ fn area(s: Shape): Float = match s {\n  Circle(r) => r\n}");
 
 #[test]
 fn sum_type_match_all_variants_ok() {
-    check_ignoring_resolve(
+    check(
         "module A
 type Shape =
     | Circle(radius: Float)
@@ -667,7 +655,7 @@ fn area(s: Shape): Float = match s {\n  Circle(r) => r\n  Square(side) => side\n
 
 #[test]
 fn sum_type_match_wildcard_catch_all_ok() {
-    check_ignoring_resolve(
+    check(
         "module A
 type Shape =
     | Circle(radius: Float)

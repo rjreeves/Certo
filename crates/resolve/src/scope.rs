@@ -149,6 +149,17 @@ impl ScopeChain {
     // Builtins
     // ---------------------------------------------------------------- //
 
+    /// Seed extra builtin names into the module-level frame (e.g. stdlib
+    /// bare names like `print`/`parseInt` handed in by a caller — see
+    /// `resolve_module::resolve_seeded`). Does not override an existing
+    /// binding, so a local decl of the same name still wins.
+    pub fn seed_extra(&mut self, names: impl IntoIterator<Item = String>) {
+        let frame = self.frames.first_mut().unwrap();
+        for name in names {
+            frame.bindings.entry(name).or_insert(Res::Builtin);
+        }
+    }
+
     fn seed_builtins(&mut self) {
         let builtins = [
             // Primitive types

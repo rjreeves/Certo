@@ -56,6 +56,13 @@ impl TypeEnv {
         None
     }
 
+    /// Every name currently defined in any frame. Used to hand the same set
+    /// of stdlib/builtin names typeck knows about to other passes (e.g.
+    /// `certo_resolve`) without hand-maintaining a second list.
+    pub fn names(&self) -> Vec<String> {
+        self.frames.iter().flat_map(|f| f.keys().cloned()).collect()
+    }
+
     /// Generalise a monotype with respect to this environment.
     /// Quantifies over all free vars in `ty` that are not free in the environment.
     pub fn generalise(&self, ty: Ty, uf: &UnionFind) -> Ty {
