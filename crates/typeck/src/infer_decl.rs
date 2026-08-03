@@ -410,38 +410,70 @@ fn hoist_decl(
             let ty = Ty::Named { name: t.name.node.clone(), args: vec![] };
             env.define(t.name.node.clone(), ty);
 
+            // Bring the type's own type params into scope (as fresh vars) so
+            // record/variant field types that reference them (e.g.
+            // `type Secret<T> = priv Secret(T)`) resolve correctly instead of
+            // becoming a bogus rigid `Ty::Named("T")` — see BACKLOG item 78.
+            let mut ctx = Ctx { env, uf, errors, counter };
+            ctx.env.push();
+            let type_param_vars: Vec<u32> = t.type_params.iter().map(|tp| {
+                *ctx.counter += 1;
+                let v = *ctx.counter;
+                ctx.env.define(tp.name.node.clone(), Ty::Var(v));
+                v
+            }).collect();
+            let parent_ty = Ty::Named {
+                name: t.name.node.clone(),
+                args: type_param_vars.iter().map(|&v| Ty::Var(v)).collect(),
+            };
+
             // Register record fields so field-access typeck can resolve `a.field` on named types.
             if let certo_ast::decl::TypeBody::Record(rec) = &t.body {
-                let mut ctx = Ctx { env, uf, errors, counter };
                 let fields: Vec<(String, Ty)> = rec.fields.iter()
                     .map(|f| (f.name.node.clone(), type_expr_to_ty(&f.ty.node, &mut ctx)))
                     .collect();
-                env.record_fields.insert(t.name.node.clone(), fields);
+                ctx.env.record_fields.insert(t.name.node.clone(), fields);
             }
 
             // Register sum variants so constructors are bound in the environment.
+            // Computed *while* the type-param scope above is active (so field
+            // types referencing them resolve correctly), but the resulting
+            // constructor bindings are `define`d only after popping that scope
+            // — `define` always targets the innermost frame, so defining them
+            // before the `pop()` would silently discard them with it.
+            let mut variant_defs: Vec<(String, Ty)> = Vec::new();
             if let certo_ast::decl::TypeBody::Sum(variants) = &t.body {
-                let parent_ty = Ty::Named { name: t.name.node.clone(), args: vec![] };
-                env.sum_variants.insert(
+                ctx.env.sum_variants.insert(
                     t.name.node.clone(),
                     variants.iter().map(|v| v.name.node.clone()).collect(),
                 );
                 for v in variants {
                     if v.fields.is_empty() {
                         // Unit variant: `Red` — just a value of the parent type.
-                        env.define(v.name.node.clone(), parent_ty.clone());
+                        let ty = if type_param_vars.is_empty() {
+                            parent_ty.clone()
+                        } else {
+                            Ty::Forall { vars: type_param_vars.clone(), body: Box::new(parent_ty.clone()) }
+                        };
+                        variant_defs.push((v.name.node.clone(), ty));
                     } else {
                         // Variant with fields: constructor function.
-                        let mut ctx = Ctx { env, uf, errors, counter };
                         let param_tys: Vec<Ty> = v.fields.iter()
                             .map(|f| type_expr_to_ty(&f.ty.node, &mut ctx))
                             .collect();
-                        env.define(
-                            v.name.node.clone(),
-                            Ty::Fn { params: param_tys, ret: Box::new(parent_ty.clone()) },
-                        );
+                        let fn_ty = Ty::Fn { params: param_tys, ret: Box::new(parent_ty.clone()) };
+                        let fn_ty = if type_param_vars.is_empty() {
+                            fn_ty
+                        } else {
+                            Ty::Forall { vars: type_param_vars.clone(), body: Box::new(fn_ty) }
+                        };
+                        variant_defs.push((v.name.node.clone(), fn_ty));
                     }
                 }
+            }
+            ctx.env.pop();
+            for (name, ty) in variant_defs {
+                ctx.env.define(name, ty);
             }
         }
         // State machine declarations: register generated types and functions.
@@ -520,7 +552,10 @@ fn hoist_decl(
             for m in &i.methods {
                 let mut ctx = Ctx { env, uf, errors, counter };
                 ctx.env.push();
-                let type_param_vars: Vec<u32> = m.type_params.iter().map(|tp| {
+                // Both the impl block's own type params (`impl<T> Secret { ... }`)
+                // and the method's own (`fn m<U>(...)`) are in scope for the
+                // method's signature — see BACKLOG item 78.
+                let type_param_vars: Vec<u32> = i.type_params.iter().chain(m.type_params.iter()).map(|tp| {
                     *ctx.counter += 1;
                     let v = *ctx.counter;
                     ctx.env.define(tp.name.node.clone(), Ty::Var(v));
@@ -656,7 +691,33 @@ fn check_decl(decl: &Decl, ctx: &mut Ctx<'_>) {
             ctx.env.pop();
         }
 
-        // Other decls: skip for now (traits, impls, state machines, etc.)
+        // Impl method bodies — previously never checked at all (only their
+        // hoisted signatures existed, for callers to unify against); mirrors
+        // Decl::Fn's own body-checking, with both the impl block's own type
+        // params and the method's own in scope. See BACKLOG item 78.
+        Decl::Impl(i) => {
+            for m in &i.methods {
+                if let Some(body) = &m.body {
+                    ctx.env.push();
+                    for tp in i.type_params.iter().chain(m.type_params.iter()) {
+                        let fresh = ctx.fresh();
+                        ctx.env.define(tp.name.node.clone(), fresh);
+                    }
+                    for p in &m.params {
+                        let ty = type_expr_to_ty(&p.ty.node, ctx);
+                        ctx.env.define(p.name.node.clone(), ty);
+                    }
+                    let body_ty = infer_fn_body(body, ctx);
+                    if let Some(ann) = &m.ret_ty {
+                        let declared = type_expr_to_ty(&ann.node, ctx);
+                        ctx.unify(body_ty, declared, m.span);
+                    }
+                    ctx.env.pop();
+                }
+            }
+        }
+
+        // Other decls: skip for now (traits, state machines, etc.)
         _ => {}
     }
 }

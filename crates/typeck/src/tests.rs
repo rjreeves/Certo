@@ -761,3 +761,78 @@ type Shape = | Circle(radius: Float) | Square(side: Float)
 fn f(): Shape = Circle(1.0)"
     ).unwrap();
 }
+
+// ------------------------------------------------------------------ //
+// Impl method body checking + generic impls (found while implementing
+// item 78's Secret<T> prerequisite — see BACKLOG)
+// ------------------------------------------------------------------ //
+
+#[test]
+fn impl_method_body_type_mismatch_is_caught() {
+    // Previously impl method bodies were never checked at all — only the
+    // hoisted signature existed, for callers to unify against. A body
+    // returning the wrong type must now be rejected.
+    let errs = check_err(
+        "module A
+type Point = { x: Int, y: Int }
+impl Point {
+    fn wrongBody(p: Point): Int = \"not an int\"
+}"
+    );
+    assert!(!errs.is_empty(), "expected a type error from the impl method's own body");
+    assert!(errs[0].message().contains("E0200"), "got: {}", errs[0].message());
+}
+
+#[test]
+fn impl_method_body_correct_type_ok() {
+    check(
+        "module A
+type Point = { x: Int, y: Int }
+impl Point {
+    fn sum(p: Point): Int = p.x + p.y
+}"
+    ).unwrap();
+}
+
+#[test]
+fn generic_impl_type_param_threads_through_method_body() {
+    // `impl<T> Box { ... }` — the impl's own type param `T` must be in scope
+    // for every method's params, return type, and body, resolving to the
+    // *same* type variable as the type's own declared `T`, not a bogus
+    // rigid `Ty::Named("T")`.
+    check(
+        "module A
+type Box<T> = priv Box(T)
+impl<T> Box {
+    fn wrap(v: T): Box<T> = Box(v)
+    fn unwrap(b: Box<T>): T = match b { Box(v) => v }
+}
+fn f(): Text = Box.unwrap(Box.wrap(\"hi\"))"
+    ).unwrap();
+}
+
+#[test]
+fn generic_impl_wrong_body_type_is_caught() {
+    // The generic-impl fix must not accidentally bypass body-checking —
+    // a genuinely wrong body inside a generic impl is still an error.
+    let errs = check_err(
+        "module A
+type Box<T> = priv Box(T)
+impl<T> Box {
+    fn wrap(v: T): Box<T> = 42
+}"
+    );
+    assert!(!errs.is_empty(), "expected a type error");
+}
+
+#[test]
+fn generic_sum_type_unit_variant_ok() {
+    // A generic sum type can still have non-generic unit variants alongside
+    // a payload-carrying one referencing the type param.
+    check(
+        "module A
+type Maybe<T> = | Just(T) | Nothing
+fn f(): Maybe<Int> = Just(1)
+fn g(): Maybe<Int> = Nothing"
+    ).unwrap();
+}
