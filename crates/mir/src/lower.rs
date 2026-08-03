@@ -129,6 +129,76 @@ pub fn lower_fn(f: &HirFn) -> (MirFn, Vec<MirFn>) {
     (MirFn { name: f.name.clone(), param_count: f.params.len(), locals: b.locals, blocks: b.blocks }, lifted)
 }
 
+/// Stdlib higher-order functions whose C runtime parameter is a single
+/// generic `void* (*)(void*)`-style function pointer (`CertoFn1`/`CertoPred`
+/// in `collections.rs`) rather than the callee's real native signature.
+/// A lambda literal passed directly as the callback argument to one of
+/// these needs the boxed-ABI treatment (see `lower_lambda_boxed`) — BACKLOG
+/// item 112. Deliberately narrow: `List.sort`'s two-argument, Int-returning
+/// comparator and user-defined higher-order functions (which already use a
+/// consistent native ABI on both sides, see item 108) are out of scope.
+const BOXED_ABI_CALLEES: &[&str] = &[
+    "List.map", "List.filter", "List.find", "List.any", "List.all", "List.groupBy",
+];
+
+/// Lift a lambda literal that's being passed directly as the callback
+/// argument to one of `BOXED_ABI_CALLEES`. Every param is unboxed on entry
+/// and the return value boxed on exit, so the lambda's C signature is
+/// uniformly `void* (*)(void*, ...)` — matching the generic function
+/// pointer type those C runtime functions declare, instead of the lambda's
+/// real native signature (e.g. `double(double)`), which is what caused a
+/// `Float`-returning callback to silently misread the wrong return
+/// register (BACKLOG item 112).
+fn lower_lambda_boxed(params: &[certo_hir::HirParam], body: &HirExpr, param_ty_hint: Option<&Ty>, b: &mut Builder) -> Operand {
+    let idx = b.lambda_count;
+    b.lambda_count += 1;
+    let lam_name = format!("__lam_{}_{}_boxed", b.fn_name, idx);
+
+    let mut lb = Builder::new(&lam_name);
+    let ret_slot = lb.declare_local("_ret", Ty::Var(0));
+
+    // The C signature's params (locals 1..=param_count) are always void* —
+    // declare all of them first, then the "real" typed locals the body
+    // actually uses, unboxed from the raw params. Lambda params are almost
+    // always unannotated (`(x) => ...`), so `p.ty` is `Ty::Error`; fall back
+    // to `param_ty_hint` (the callee's scrutinee element type, known at the
+    // call site) rather than mis-unboxing as a raw pointer cast.
+    let raw_locals: Vec<MirLocal> = params.iter()
+        .map(|p| lb.declare_local(&format!("{}_boxed", p.name), Ty::Var(0)))
+        .collect();
+    for (p, raw) in params.iter().zip(raw_locals.iter()) {
+        let real_ty = if matches!(p.ty, Ty::Error) {
+            param_ty_hint.cloned().unwrap_or(Ty::Error)
+        } else {
+            p.ty.clone()
+        };
+        let real = lb.map_hir_local(p.local, &p.name, real_ty.clone());
+        lb.assign(real, Rvalue::Unbox { value: Operand::Local(*raw), ty: real_ty });
+    }
+
+    let lam_result = lower_expr(body, &mut lb);
+    let lam_ret_ty = infer_operand_ty(&lam_result, &lb);
+    if matches!(lam_ret_ty, Ty::Unit) {
+        lb.locals[ret_slot as usize].ty = Ty::Var(0);
+    } else {
+        lb.assign(ret_slot, Rvalue::Box { value: lam_result, ty: lam_ret_ty });
+    }
+    emit_defers_then_return(Operand::Local(ret_slot), &mut lb);
+
+    let lam_fn = MirFn {
+        name: lam_name.clone(),
+        param_count: params.len(),
+        locals: lb.locals,
+        blocks: lb.blocks,
+    };
+    b.lifted_fns.extend(lb.lifted_fns);
+    b.lifted_fns.push(lam_fn);
+
+    let dest = b.declare_local("_lam_ptr", Ty::Error);
+    b.assign(dest, Rvalue::Use(Operand::Global(lam_name)));
+    Operand::Local(dest)
+}
+
 /// Derive the Certo type of a MIR operand from its constant or declared local type.
 fn infer_operand_ty(op: &Operand, b: &Builder) -> Ty {
     match op {
@@ -279,7 +349,27 @@ fn lower_expr(expr: &HirExpr, b: &mut Builder) -> Operand {
                 }
             }
             let func_op = lower_expr(func, b);
-            let arg_ops: Vec<Operand> = args.iter().map(|a| lower_expr(a, b)).collect();
+            // A lambda literal passed directly to one of BOXED_ABI_CALLEES
+            // needs the boxed-ABI lift instead of the normal native one —
+            // see lower_lambda_boxed's doc comment (BACKLOG item 112).
+            let needs_boxed_callback = matches!(&func.kind, HirExprKind::Global(name) if BOXED_ABI_CALLEES.contains(&name.as_str()));
+            // The callback's param type is almost never annotated in source
+            // (`(x) => ...`) — recover it from the scrutinee list's own
+            // known element type instead (all BOXED_ABI_CALLEES take
+            // `(List<T>, T => ...)`, so it's always the first argument).
+            let elem_ty_hint: Option<Ty> = if needs_boxed_callback {
+                args.first().and_then(|a| match &a.ty { Ty::List(inner) => Some((**inner).clone()), _ => None })
+            } else {
+                None
+            };
+            let arg_ops: Vec<Operand> = args.iter().map(|a| {
+                if needs_boxed_callback {
+                    if let HirExprKind::Lambda { params, body } = &a.kind {
+                        return lower_lambda_boxed(params, body, elem_ty_hint.as_ref(), b);
+                    }
+                }
+                lower_expr(a, b)
+            }).collect();
             let dest = b.declare_local("_call", expr.ty.clone());
             let next = b.new_block();
             b.terminate(Terminator::Call { func: func_op, args: arg_ops, dest, next });
