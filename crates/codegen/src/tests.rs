@@ -117,6 +117,30 @@ fn new_collection_functions_emit_expected_call_names() {
 }
 
 #[test]
+fn list_get_or_panic_on_float_list_unboxes_return_value() {
+    // List.getOrPanic always returns a raw void* at the C level, but HIR now
+    // recovers its logical return type as the list's element type (BACKLOG
+    // item 113). When that's Float, the raw pointer must be unboxed via
+    // __certo_i2f rather than assigned straight into a `double` local
+    // (which used to be a C type error, and before item 113 wasn't even a
+    // `double` local to begin with).
+    let c = codegen(
+        "module A\nimport Stdlib.Collections.{ List }\n\
+         fn f(xs: List<Float>): Float = List.getOrPanic(xs, 0)");
+    assert_contains(&c, "__certo_i2f");
+    assert_contains(&c, "double certo_f");
+}
+
+#[test]
+fn list_get_or_panic_on_int_list_does_not_unbox() {
+    // Int is already pointer-compatible — no bit-cast needed or wanted.
+    let c = codegen(
+        "module A\nimport Stdlib.Collections.{ List }\n\
+         fn f(xs: List<Int>): Int = List.getOrPanic(xs, 0)");
+    assert_not_contains(&c, "__certo_i2f");
+}
+
+#[test]
 fn float_callback_to_list_map_is_boxed() {
     // A lambda passed directly to List.map lifts to its own real native
     // signature (e.g. double(double)) but List.map's C runtime parameter is

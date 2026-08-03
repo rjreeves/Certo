@@ -1,4 +1,5 @@
 use certo_parser::parse;
+use certo_typeck::Ty;
 use crate::lower_module;
 use crate::hir::{HirItem, HirExprKind, BinOp};
 
@@ -142,5 +143,78 @@ fn lower_match_guard_no_guard_arms() {
                 assert!(arm.guard.is_none());
             }
         }
+    }
+}
+
+// ------------------------------------------------------------------ //
+// Stdlib call return-type recovery (BACKLOG item 113)
+// ------------------------------------------------------------------ //
+
+#[test]
+fn binop_type_recovers_from_operand_instead_of_always_error() {
+    // `x * 2.0` must resolve to Float, not the old unconditional Ty::Error —
+    // a prerequisite for List.map's callback return type being recoverable.
+    let m = lower("module A\nfn f(x: Float): Float = x * 2.0");
+    if let HirItem::Fn(f) = &m.items[0] {
+        assert_eq!(f.body.as_ref().unwrap().ty, Ty::Float);
+    }
+}
+
+#[test]
+fn list_get_or_panic_return_type_is_element_type() {
+    let m = lower("module A\nimport Stdlib.Collections.{ List }\nfn f(xs: List<Float>): Float = List.getOrPanic(xs, 0)");
+    if let HirItem::Fn(f) = &m.items[0] {
+        assert_eq!(f.body.as_ref().unwrap().ty, Ty::Float);
+    }
+}
+
+#[test]
+fn list_filter_sort_reverse_distinct_preserve_list_type() {
+    for call in ["List.filter(xs, (x) => true)", "List.reverse(xs)", "List.distinct(xs)"] {
+        let src = format!("module A\nimport Stdlib.Collections.{{ List }}\nfn f(xs: List<Float>): List<Float> = {call}");
+        let m = lower(&src);
+        if let HirItem::Fn(f) = &m.items[0] {
+            assert_eq!(f.body.as_ref().unwrap().ty, Ty::List(Box::new(Ty::Float)), "for {call}");
+        }
+    }
+}
+
+#[test]
+fn list_map_return_type_recovered_via_lambda_param_hint() {
+    // The callback's param is unannotated, so its type must come from the
+    // scrutinee list's own element type (Float) — then `x * 2.0`'s own
+    // recovered BinOp type (via binop_result_ty) becomes List.map's element
+    // type, closing the loop that item 112's fix alone couldn't.
+    let m = lower("module A\nimport Stdlib.Collections.{ List }\nfn f(xs: List<Float>): List<Float> = List.map(xs, (x) => x * 2.0)");
+    if let HirItem::Fn(f) = &m.items[0] {
+        assert_eq!(f.body.as_ref().unwrap().ty, Ty::List(Box::new(Ty::Float)));
+    }
+}
+
+#[test]
+fn list_group_by_return_type_is_map_of_key_to_list() {
+    let m = lower(
+        "module A\nimport Stdlib.Collections.{ List }\nfn f(xs: List<Float>): Map<Int, List<Float>> = List.groupBy(xs, (x) => 1)");
+    if let HirItem::Fn(f) = &m.items[0] {
+        assert_eq!(f.body.as_ref().unwrap().ty, Ty::Map(Box::new(Ty::Int), Box::new(Ty::List(Box::new(Ty::Float)))));
+    }
+}
+
+#[test]
+fn map_get_return_type_is_option_of_value_type() {
+    let m = lower("module A\nimport Stdlib.Collections.{ Map }\nfn f(m: Map<Text, Float>): Float? = Map.get(m, \"k\")");
+    if let HirItem::Fn(f) = &m.items[0] {
+        assert_eq!(f.body.as_ref().unwrap().ty, Ty::Option(Box::new(Ty::Float)));
+    }
+}
+
+#[test]
+fn annotated_lambda_param_overrides_hint() {
+    // An explicit lambda param annotation must still win over the inferred
+    // hint from the scrutinee list.
+    let m = lower(
+        "module A\nimport Stdlib.Collections.{ List }\nfn f(xs: List<Int>): List<Float> = List.map(xs, (x: Int) => 1.0)");
+    if let HirItem::Fn(f) = &m.items[0] {
+        assert_eq!(f.body.as_ref().unwrap().ty, Ty::List(Box::new(Ty::Float)));
     }
 }

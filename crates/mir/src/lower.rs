@@ -370,11 +370,29 @@ fn lower_expr(expr: &HirExpr, b: &mut Builder) -> Operand {
                 }
                 lower_expr(a, b)
             }).collect();
-            let dest = b.declare_local("_call", expr.ty.clone());
+            // `List.getOrPanic` (and any similarly-shaped stdlib function
+            // returning a bare, unwrapped element type) always returns a raw
+            // `void*` at the C level, regardless of the logical element type
+            // HIR now recovers via `generic_container_ret` (BACKLOG item
+            // 113) — when that logical type needs bit-preservation
+            // (`Float`/`Decimal`), the raw pointer must be unboxed rather
+            // than assigned directly, or the bits get numeric-converted
+            // instead of reinterpreted.
+            const RAW_RETURN_CALLEES: &[&str] = &["List.getOrPanic"];
+            let needs_return_unbox = matches!(&func.kind, HirExprKind::Global(name) if RAW_RETURN_CALLEES.contains(&name.as_str()))
+                && matches!(expr.ty, Ty::Float | Ty::Decimal);
+
+            let dest = b.declare_local("_call", if needs_return_unbox { Ty::Var(0) } else { expr.ty.clone() });
             let next = b.new_block();
             b.terminate(Terminator::Call { func: func_op, args: arg_ops, dest, next });
             b.switch_to(next);
-            Operand::Local(dest)
+            if needs_return_unbox {
+                let real = b.declare_local("_call_unboxed", expr.ty.clone());
+                b.assign(real, Rvalue::Unbox { value: Operand::Local(dest), ty: expr.ty.clone() });
+                Operand::Local(real)
+            } else {
+                Operand::Local(dest)
+            }
         }
 
         HirExprKind::If { cond, then_expr, else_expr } => {
