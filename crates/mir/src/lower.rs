@@ -219,36 +219,72 @@ fn infer_operand_ty(op: &Operand, b: &Builder) -> Ty {
     }
 }
 
-/// Bind a `Result` payload from `__result_unwrap`. The Result payload slot is
-/// pointer-sized, so a `Float` comes back as raw int64 bits and must be
-/// bit-restored to a `double`; other payload types are used as-is.
-fn unwrap_result_payload(b: &mut Builder, scrut: &Operand, hir_local: LocalId, name: &str, payload_ty: &Ty) {
+/// A payload type that doesn't fit `certo_result_t`'s pointer-sized `intptr_t`
+/// slot as-is and was heap-boxed on construction (see the `Ok`/`Err` special
+/// case in `HirExprKind::Call` below) — `Decimal`/`UUID` are themselves
+/// multi-field C structs, and any other user-declared `Ty::Named` could be a
+/// record or a payload-carrying sum type (also a real struct); the handful
+/// of opaque int64-handle types are excluded since those already fit.
+/// Conservative on purpose: a nullary-enum `Named` type would technically
+/// also fit unboxed, but boxing it anyway is harmless (one extra small
+/// allocation), whereas *not* boxing an actual struct is a C compile error —
+/// see BACKLOG item 114.
+fn needs_result_box(ty: &Ty) -> bool {
+    matches!(ty, Ty::Decimal | Ty::Uuid)
+        || matches!(ty, Ty::Named { name, args } if args.is_empty()
+            && !matches!(name.as_str(),
+                "HttpRequest" | "HttpResponse" | "Bytes" | "DbResult" | "Query" | "Mutation" | "__CertoTask"))
+}
+
+/// Extract a `Result` payload from `__result_unwrap` into `dest`, shared by
+/// both `Ok(v)`/`Err(e)` match-arm binding and the `?` (Try) desugar. The
+/// payload slot is pointer-sized, so anything that doesn't naturally fit
+/// needs a conversion: `Float` comes back as raw int64 bits and must be
+/// bit-restored via `__certo_i2f`; a `needs_result_box` type was heap-boxed
+/// on construction and must be dereferenced via `Rvalue::UnboxSome`;
+/// everything else already fits and is used as-is.
+fn unwrap_result_into(b: &mut Builder, scrut: &Operand, payload_ty: &Ty, dest: MirLocal) {
     if matches!(payload_ty, Ty::Float) {
         let bits = b.declare_local("_bits", Ty::Int);
-        let unwrap_bb = b.new_block();
+        let next = b.new_block();
         b.terminate(Terminator::Call {
             func: Operand::Global("__result_unwrap".into()),
             args: vec![scrut.clone()],
             dest: bits,
-            next: unwrap_bb,
+            next,
         });
-        b.switch_to(unwrap_bb);
-        let ml = b.map_hir_local(hir_local, name, Ty::Float);
-        b.assign(ml, Rvalue::Call {
+        b.switch_to(next);
+        b.assign(dest, Rvalue::Call {
             func: Operand::Global("__certo_i2f".into()),
             args: vec![Operand::Local(bits)],
         });
-    } else {
-        let ml = b.map_hir_local(hir_local, name, Ty::Error);
-        let unwrap_bb = b.new_block();
+    } else if needs_result_box(payload_ty) {
+        let boxed = b.declare_local("_boxed", Ty::Int);
+        let next = b.new_block();
         b.terminate(Terminator::Call {
             func: Operand::Global("__result_unwrap".into()),
             args: vec![scrut.clone()],
-            dest: ml,
-            next: unwrap_bb,
+            dest: boxed,
+            next,
         });
-        b.switch_to(unwrap_bb);
+        b.switch_to(next);
+        b.assign(dest, Rvalue::UnboxSome { opt: Operand::Local(boxed), ty: payload_ty.clone() });
+    } else {
+        let next = b.new_block();
+        b.terminate(Terminator::Call {
+            func: Operand::Global("__result_unwrap".into()),
+            args: vec![scrut.clone()],
+            dest,
+            next,
+        });
+        b.switch_to(next);
     }
+}
+
+/// Bind a match-arm's `Ok(v)`/`Err(e)` payload local; see `unwrap_result_into`.
+fn unwrap_result_payload(b: &mut Builder, scrut: &Operand, hir_local: LocalId, name: &str, payload_ty: &Ty) {
+    let ml = b.map_hir_local(hir_local, name, payload_ty.clone());
+    unwrap_result_into(b, scrut, payload_ty, ml);
 }
 
 /// Best-effort result type for a binary operation, used when HIR lowering left
@@ -341,6 +377,29 @@ fn lower_expr(expr: &HirExpr, b: &mut Builder) -> Operand {
                     b.terminate(Terminator::Call {
                         func: Operand::Global(name.clone()),
                         args: vec![Operand::Local(bits)],
+                        dest,
+                        next,
+                    });
+                    b.switch_to(next);
+                    return Operand::Local(dest);
+                }
+                // `Ok(v)` / `Err(e)` with a struct-shaped payload (`Decimal`,
+                // `UUID`, or any user-declared record/sum type): heap-box it
+                // the same way `Some(v)` already does, since it doesn't fit
+                // the pointer-sized `intptr_t` slot `certo_ok`/`certo_err`
+                // take — see `needs_result_box` (BACKLOG item 114).
+                if (name == "Ok" || name == "Err") && args.len() == 1
+                    && needs_result_box(&args[0].ty)
+                {
+                    let payload_ty = args[0].ty.clone();
+                    let value = lower_expr(&args[0], b);
+                    let boxed = b.declare_local("_boxed", certo_typeck::Ty::Error);
+                    b.assign(boxed, Rvalue::BoxSome { value, ty: payload_ty });
+                    let dest = b.declare_local("_res", expr.ty.clone());
+                    let next = b.new_block();
+                    b.terminate(Terminator::Call {
+                        func: Operand::Global(name.clone()),
+                        args: vec![Operand::Local(boxed)],
                         dest,
                         next,
                     });
@@ -790,14 +849,7 @@ fn lower_expr(expr: &HirExpr, b: &mut Builder) -> Operand {
             // ok_block: extract the Ok payload.
             b.switch_to(ok_block);
             let val_local = b.declare_local("_try_val", expr.ty.clone());
-            let after_unwrap = b.new_block();
-            b.terminate(Terminator::Call {
-                func: Operand::Global("__result_unwrap".into()),
-                args: vec![Operand::Local(result_local)],
-                dest: val_local,
-                next: after_unwrap,
-            });
-            b.switch_to(after_unwrap);
+            unwrap_result_into(b, &Operand::Local(result_local), &expr.ty, val_local);
             Operand::Local(val_local)
         }
 
