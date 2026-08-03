@@ -120,16 +120,96 @@ fn stdlib_ret_type(name: &str) -> Option<Ty> {
 /// Return types for generic stdlib functions whose result depends on an
 /// argument's element type (e.g. `List.get<T>(List<T>, Int): T?`). Recovering
 /// the element type lets the caller unbox the payload correctly (Float bits).
+/// Deliberately mechanical/structural, not real inference — BACKLOG item 113.
 fn generic_container_ret(full: Option<&str>, args: &[HirExpr]) -> Option<Ty> {
+    let list_elem = |a: &HirExpr| match &a.ty { Ty::List(inner) => Some((**inner).clone()), _ => None };
+    let map_kv = |a: &HirExpr| match &a.ty { Ty::Map(k, v) => Some(((**k).clone(), (**v).clone())), _ => None };
+
     match full {
         Some("List.get") | Some("List.first") | Some("List.last") | Some("List.find") => {
-            match args.first().map(|a| &a.ty) {
-                Some(Ty::List(inner)) => Some(Ty::Option(inner.clone())),
+            args.first().and_then(list_elem).map(|e| Ty::Option(Box::new(e)))
+        }
+        Some("List.getOrPanic") => args.first().and_then(list_elem),
+        Some("List.filter") | Some("List.sort") | Some("List.reverse") | Some("List.distinct")
+        | Some("List.slice") | Some("List.concat") | Some("List.push") => {
+            args.first().map(|a| a.ty.clone())
+        }
+        Some("List.partition") => {
+            args.first().map(|a| Ty::Tuple(vec![a.ty.clone(), a.ty.clone()]))
+        }
+        Some("List.chunked") => args.first().map(|a| Ty::List(Box::new(a.ty.clone()))),
+        // The callback (args[1]) was lowered via `lower_lambda_with_param_hint`,
+        // so its body's type is now recoverable (not guaranteed — only when the
+        // hinted param propagated through, e.g. a direct arithmetic/literal
+        // body) rather than unconditionally `Ty::Error`.
+        Some("List.map") => {
+            match args.get(1).map(|a| &a.kind) {
+                Some(HirExprKind::Lambda { body, .. }) if !matches!(body.ty, Ty::Error) => {
+                    Some(Ty::List(Box::new(body.ty.clone())))
+                }
                 _ => None,
             }
         }
+        Some("List.groupBy") => {
+            let elem = args.first().and_then(list_elem)?;
+            match args.get(1).map(|a| &a.kind) {
+                Some(HirExprKind::Lambda { body, .. }) if !matches!(body.ty, Ty::Error) => {
+                    Some(Ty::Map(Box::new(body.ty.clone()), Box::new(Ty::List(Box::new(elem)))))
+                }
+                _ => None,
+            }
+        }
+        Some("Map.get") => args.first().and_then(map_kv).map(|(_, v)| Ty::Option(Box::new(v))),
+        Some("Map.remove") | Some("Map.insert") => args.first().map(|a| a.ty.clone()),
+        Some("Map.keys") => args.first().and_then(map_kv).map(|(k, _)| Ty::List(Box::new(k))),
+        Some("Map.values") => args.first().and_then(map_kv).map(|(_, v)| Ty::List(Box::new(v))),
         _ => None,
     }
+}
+
+/// Mirrors `mir::lower::binop_result_ty` at the HIR level, operating directly
+/// on already-known operand types instead of MIR operands. Lets e.g.
+/// `x * 2.0` (inside a lambda whose param type was hinted — see
+/// `lower_lambda_with_param_hint`) resolve to `Float` instead of `Ty::Error`,
+/// which is what let a `List.map` call's return type stay unrecoverable
+/// even after this fix — BACKLOG item 113 (the compounding gap found while
+/// verifying item 112).
+fn binop_result_ty(op: &crate::hir::BinOp, lhs: &Ty, rhs: &Ty) -> Ty {
+    use crate::hir::BinOp::*;
+    match op {
+        Eq | NotEq | Lt | LtEq | Gt | GtEq | And | Or => Ty::Bool,
+        Concat => Ty::Text,
+        NullCoalesce => match lhs {
+            Ty::Option(inner) => (**inner).clone(),
+            _ => rhs.clone(),
+        },
+        Add | Sub | Mul | Div | Rem | Pow => match lhs {
+            Ty::Error => rhs.clone(),
+            t => t.clone(),
+        },
+    }
+}
+
+/// Lower a lambda literal used directly as the callback argument to a stdlib
+/// call whose param type is known from context (currently `List.map`'s and
+/// `List.groupBy`'s first argument — the scrutinee list's element type).
+/// Lambda params are almost always unannotated, so without this hint the
+/// param — and anything the body computes from it — stays `Ty::Error`
+/// through HIR, and downstream code (e.g. a `val` binding to the call's
+/// result, or a `for` loop over it) can't tell it's ever handling a `Float`
+/// and skips unboxing it. See BACKLOG item 113.
+fn lower_lambda_with_param_hint(params: &[certo_ast::expr::LambdaParam], body: &S<Expr>, hint: &Ty, cx: &mut Cx, span: Span) -> HirExpr {
+    cx.push_scope();
+    let hir_params: Vec<HirParam> = params.iter().enumerate().map(|(i, p)| {
+        let local = cx.define_local(&p.name.node);
+        let ty = p.ty.as_ref().map(|t| ast_ty_to_ty_with_params(&t.node, &[]))
+            .unwrap_or_else(|| if i == 0 { hint.clone() } else { Ty::Error });
+        if !matches!(ty, Ty::Error) { cx.local_types.insert(local, ty.clone()); }
+        HirParam { local, name: p.name.node.clone(), ty, span: p.span }
+    }).collect();
+    let body = lower_expr(body, cx);
+    cx.pop_scope();
+    HirExpr { kind: HirExprKind::Lambda { params: hir_params, body: Box::new(body) }, ty: Ty::Error, span }
 }
 
 fn stdlib_param_names() -> HashMap<&'static str, &'static [&'static str]> {
@@ -502,7 +582,25 @@ fn lower_expr(expr: &S<Expr>, cx: &mut Cx) -> HirExpr {
                         maybe.unwrap_or_else(|| HirExpr { kind: HirExprKind::Unit, ty: Ty::Error, span })
                     }).collect()
                 } else {
-                    args.iter().map(|a| lower_expr(&a.value, cx)).collect()
+                    // List.map/groupBy's callback param is almost always
+                    // unannotated; hint its type from the already-lowered
+                    // scrutinee list's element type (BACKLOG item 113).
+                    let needs_lambda_hint = matches!(fn_full_path.as_deref(), Some("List.map") | Some("List.groupBy"));
+                    let mut out: Vec<HirExpr> = Vec::with_capacity(args.len());
+                    for (i, arg) in args.iter().enumerate() {
+                        if needs_lambda_hint && i == 1 {
+                            if let Expr::Lambda { params, body, .. } = &arg.value.node {
+                                let hint = out.first().and_then(|a: &HirExpr| match &a.ty {
+                                    Ty::List(inner) => Some((**inner).clone()),
+                                    _ => None,
+                                }).unwrap_or(Ty::Error);
+                                out.push(lower_lambda_with_param_hint(params, body, &hint, cx, arg.value.span));
+                                continue;
+                            }
+                        }
+                        out.push(lower_expr(&arg.value, cx));
+                    }
+                    out
                 }
             } else if let Some(params) = user_params {
                 if has_labels || args.len() < params.len() {
@@ -567,9 +665,10 @@ fn lower_expr(expr: &S<Expr>, cx: &mut Cx) -> HirExpr {
                 _ => {
                     let lhs = lower_expr(left, cx);
                     let rhs = lower_expr(right, cx);
+                    let ty = binop_result_ty(&lower_binop(op), &lhs.ty, &rhs.ty);
                     HirExpr {
                         kind: HirExprKind::BinOp { op: lower_binop(op), lhs: Box::new(lhs), rhs: Box::new(rhs) },
-                        ty: Ty::Error,
+                        ty,
                         span,
                     }
                 }
