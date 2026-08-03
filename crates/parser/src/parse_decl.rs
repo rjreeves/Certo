@@ -199,7 +199,14 @@ fn parse_type_decl(cur: &mut Cursor<'_>, is_pub: bool) -> Result<TypeDecl, Parse
     let type_params = parse_type_params(cur)?;
     cur.expect(&Token::Eq)?;
 
-    let body = if cur.peek() == Some(&Token::LBrace) {
+    // `type X = priv X(...)` — smart-constructor newtype: a single sum
+    // variant sharing the type's own name, whose raw constructor call is
+    // restricted to `impl X { ... }` blocks (enforced in typeck).
+    let is_priv_ctor = cur.eat(|t| matches!(t, Token::Priv)).is_some();
+
+    let body = if is_priv_ctor {
+        TypeBody::Sum(parse_sum_variants_no_leading_bar(cur)?)
+    } else if cur.peek() == Some(&Token::LBrace) {
         TypeBody::Record(parse_record_type_def(cur)?)
     } else if cur.peek() == Some(&Token::Bar) {
         // `type T = | Variant1 | Variant2` — leading bar present
@@ -217,7 +224,7 @@ fn parse_type_decl(cur: &mut Cursor<'_>, is_pub: bool) -> Result<TypeDecl, Parse
     };
 
     let span = start.to(cur.peek_span());
-    Ok(TypeDecl { is_pub, name: S::new(name, name_span), type_params, body, span })
+    Ok(TypeDecl { is_pub, is_priv_ctor, name: S::new(name, name_span), type_params, body, span })
 }
 
 fn parse_record_type_def(cur: &mut Cursor<'_>) -> Result<RecordTypeDef, ParseError> {

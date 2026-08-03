@@ -697,3 +697,67 @@ fn int_match_requires_wildcard_e0213() {
 fn int_match_with_wildcard_ok() {
     check("module A\nfn f(n: Int): Text = match n {\n  0 => \"zero\"\n  _ => \"other\"\n}").unwrap();
 }
+
+// ------------------------------------------------------------------ //
+// Smart constructors — `type X = priv X(...)` (item 74)
+// ------------------------------------------------------------------ //
+
+#[test]
+fn priv_ctor_call_outside_impl_is_e0214() {
+    let kind = first_error_kind(
+        "module A
+type Email = priv Email(Text)
+fn f(): Email = Email(\"x\")"
+    );
+    assert!(matches!(kind, TypeErrorKind::PrivConstructorCall { ref type_name } if type_name == "Email"),
+        "expected E0214, got {kind:?}");
+}
+
+#[test]
+fn priv_ctor_call_in_own_impl_ok() {
+    check(
+        "module A
+type Email = priv Email(Text)
+impl Email {
+    fn new(raw: Text): Email = Email(raw)
+}"
+    ).unwrap();
+}
+
+#[test]
+fn priv_ctor_call_in_other_types_impl_is_e0214() {
+    // Being inside *some* impl block isn't enough — it must be an impl for
+    // the same type as the constructor.
+    let kind = first_error_kind(
+        "module A
+type Email = priv Email(Text)
+type Widget = { id: Int }
+impl Widget {
+    fn make(): Email = Email(\"x\")
+}"
+    );
+    assert!(matches!(kind, TypeErrorKind::PrivConstructorCall { .. }), "expected E0214, got {kind:?}");
+}
+
+#[test]
+fn priv_ctor_call_in_top_level_val_is_e0214() {
+    // The spec's own motivating example: a bare top-level `val` binding
+    // constructing directly, not just a function body.
+    let kind = first_error_kind(
+        "module A
+type Email = priv Email(Text)
+val bad: Email = Email(\"bad\")"
+    );
+    assert!(matches!(kind, TypeErrorKind::PrivConstructorCall { .. }), "expected E0214, got {kind:?}");
+}
+
+#[test]
+fn non_priv_sum_type_constructor_call_anywhere_ok() {
+    // Sanity: a plain (non-priv) sum type's constructor is unrestricted —
+    // this check must not fire for ordinary sum types.
+    check(
+        "module A
+type Shape = | Circle(radius: Float) | Square(side: Float)
+fn f(): Shape = Circle(1.0)"
+    ).unwrap();
+}

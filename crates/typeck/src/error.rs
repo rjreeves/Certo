@@ -43,6 +43,10 @@ pub enum TypeErrorKind {
     /// E0213 — a `match` doesn't cover every possible value of the scrutinee's type.
     NonExhaustiveMatch { ty: Ty, missing: Vec<String> },
 
+    /// E0214 — a `type X = priv X(...)` smart-constructor's raw constructor
+    /// was called outside an `impl X { ... }` block for the same type.
+    PrivConstructorCall { type_name: String },
+
     /// E0708 — temporal declaration body does not resolve to Duration.
     TemporalNotDuration { found: Ty },
 
@@ -77,6 +81,8 @@ impl TypeError {
             TypeErrorKind::NonExhaustiveMatch { ty, missing } =>
                 format!("E0213: match on `{}` is not exhaustive — missing: {}",
                     ty.display(), missing.join(", ")),
+            TypeErrorKind::PrivConstructorCall { type_name } =>
+                format!("E0214: constructor `{type_name}` is private — call it only from within `impl {type_name} {{ ... }}`, e.g. via a validating `{type_name}.new` factory"),
             TypeErrorKind::TemporalNotDuration { found } =>
                 format!("E0708: temporal body must resolve to Duration, found `{}`", found.display()),
             TypeErrorKind::AgeOnNonTimestamp { found } =>

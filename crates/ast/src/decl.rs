@@ -100,6 +100,13 @@ pub struct FnParam {
 #[derive(Debug, Clone, PartialEq)]
 pub struct TypeDecl {
     pub is_pub:      bool,
+    /// `type X = priv X(...)` — a single-constructor "smart constructor"
+    /// newtype whose raw constructor may only be called from within an
+    /// `impl X { ... }` block for the same type (typically a validating
+    /// `X.new` factory); everywhere else must go through that factory.
+    /// Only meaningful when `body` is `TypeBody::Sum` with exactly one
+    /// variant named the same as `name`.
+    pub is_priv_ctor: bool,
     pub name:        Ident,
     pub type_params: Vec<TypeParam>,
     pub body:        TypeBody,
