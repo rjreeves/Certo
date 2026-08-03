@@ -287,6 +287,12 @@ fn emit_stmt(stmt: &MirStmt, locals: &[MirLocalDecl], fn_cname: &str, spawn_idx:
             let cty = ty_to_c(ty);
             writeln!(out, "    {} = *({cty}*)({});", lhs, emit_operand(opt)).unwrap();
         }
+        Rvalue::Box { value, ty } => {
+            writeln!(out, "    {} = {};", lhs, box_value(&emit_operand(value), ty)).unwrap();
+        }
+        Rvalue::Unbox { value, ty } => {
+            writeln!(out, "    {} = {};", lhs, unbox_value(&emit_operand(value), ty)).unwrap();
+        }
     }
 }
 

@@ -117,6 +117,52 @@ fn new_collection_functions_emit_expected_call_names() {
 }
 
 #[test]
+fn float_callback_to_list_map_is_boxed() {
+    // A lambda passed directly to List.map lifts to its own real native
+    // signature (e.g. double(double)) but List.map's C runtime parameter is
+    // the generic `void* (*)(void*)` (CertoFn1) — calling one through the
+    // other is a calling-convention mismatch that silently corrupts Float
+    // values (BACKLOG item 112). The lambda must instead be lifted with a
+    // boxed void* signature, unboxing its param and boxing its return.
+    let c = codegen(
+        "module A\nimport Stdlib.Collections.{ List }\n\
+         fn f(xs: List<Float>): Int = {\n\
+         \x20 val ys = List.map(xs, (x) => x * 2.0)\n\
+         \x20 List.len(ys)\n\
+         }");
+    assert_contains(&c, "__lam_f_0_boxed");
+    assert_contains(&c, "__certo_i2f");   // unbox the incoming boxed param
+    assert_contains(&c, "__certo_f2i");   // box the Float return
+}
+
+#[test]
+fn int_callback_to_list_map_is_still_boxed_but_no_float_conversion() {
+    // Int/Bool callbacks were already safe under the old convention (both
+    // pointer-sized, general-purpose-register compatible) — confirm the new
+    // boxed lift doesn't regress them: still boxed (uniform, simple), but no
+    // f2i/i2f bit-cast needed since Int isn't Float.
+    let c = codegen(
+        "module A\nimport Stdlib.Collections.{ List }\n\
+         fn f(xs: List<Int>): Int = List.len(List.map(xs, (x) => x * 2))");
+    assert_contains(&c, "__lam_f_0_boxed");
+    assert_not_contains(&c, "__certo_i2f");
+    assert_not_contains(&c, "__certo_f2i");
+}
+
+#[test]
+fn float_callback_to_user_defined_hof_is_not_boxed() {
+    // The fix is deliberately narrow (BACKLOG item 112): only the specific
+    // stdlib functions with a generic void* C ABI get the boxed lift.
+    // A user-defined higher-order function keeps its existing, already-
+    // consistent native ABI on both sides (see item 108) — boxing here
+    // would be an unrelated regression, not a fix.
+    let c = codegen(
+        "module A\nfn twice(f: (Float) => Float, x: Float): Float = f(f(x))\n\
+         fn g(): Float = twice((x) => x * 2.0, 1.0)");
+    assert_not_contains(&c, "_boxed");
+}
+
+#[test]
 fn map_typed_local_uses_void_star_not_undeclared_typedef() {
     // Ty::Map(k, v) used to mangle into `certo_map_{k}_{v}_t` — a typedef
     // that's never actually emitted anywhere, so any Map-typed local/param/

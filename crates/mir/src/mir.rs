@@ -75,6 +75,16 @@ pub enum Rvalue {
     BoxSome { value: Operand, ty: Ty },
     /// Read the payload out of a non-null `Option` pointer, as `ty`.
     UnboxSome { opt: Operand, ty: Ty },
+    /// Pack `value` (of type `ty`) into a pointer-sized generic slot,
+    /// bit-preserving (a `Float` is bit-cast via `__certo_f2i`, everything
+    /// else is already pointer-sized). Used to adapt a lambda's real,
+    /// natively-typed parameters/return into the boxed `void*` ABI a
+    /// handful of stdlib higher-order functions require — see BACKLOG
+    /// item 112.
+    Box { value: Operand, ty: Ty },
+    /// Recover a value of type `ty` from a pointer-sized generic slot —
+    /// the inverse of `Box`.
+    Unbox { value: Operand, ty: Ty },
 }
 
 #[derive(Debug, Clone)]
