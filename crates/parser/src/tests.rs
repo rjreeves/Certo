@@ -154,6 +154,48 @@ fn val_decl() {
     assert!(matches!(m.decls[0].node, Decl::Val(_)));
 }
 
+#[test]
+fn priv_constructor_newtype() {
+    let m = ok("module A\ntype Email = priv Email(Text)");
+    match &m.decls[0].node {
+        Decl::Type(t) => {
+            assert!(t.is_priv_ctor, "expected is_priv_ctor to be set");
+            match &t.body {
+                certo_ast::decl::TypeBody::Sum(variants) => {
+                    assert_eq!(variants.len(), 1);
+                    assert_eq!(variants[0].name.node, "Email");
+                    assert_eq!(variants[0].fields.len(), 1);
+                }
+                other => panic!("expected sum type, got {other:?}"),
+            }
+        }
+        _ => panic!("expected Decl::Type"),
+    }
+}
+
+#[test]
+fn priv_constructor_with_named_field() {
+    let m = ok("module A\ntype UserId = priv UserId(value: Int)");
+    match &m.decls[0].node {
+        Decl::Type(t) => match &t.body {
+            certo_ast::decl::TypeBody::Sum(variants) => {
+                assert_eq!(variants[0].fields[0].name.as_ref().map(|n| n.node.as_str()), Some("value"));
+            }
+            other => panic!("expected sum type, got {other:?}"),
+        },
+        _ => panic!(),
+    }
+}
+
+#[test]
+fn non_priv_type_has_is_priv_ctor_false() {
+    let m = ok("module A\ntype Point = { x: Int, y: Int }");
+    match &m.decls[0].node {
+        Decl::Type(t) => assert!(!t.is_priv_ctor),
+        _ => panic!(),
+    }
+}
+
 // ------------------------------------------------------------------ //
 // Expressions
 // ------------------------------------------------------------------ //

@@ -22,6 +22,7 @@ fn named_ty(name: &str) -> S<TypeExpr> {
 fn record_type(name: &str, fields: &[(&str, &str)]) -> Decl {
     Decl::Type(TypeDecl {
         is_pub:      false,
+        is_priv_ctor: false,
         name:        ident(name),
         type_params: vec![],
         body:        TypeBody::Record(RecordTypeDef {

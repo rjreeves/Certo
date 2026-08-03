@@ -70,6 +70,10 @@ pub fn check_module_seeded(
     // Pass 3 — FFI safety: calls to `extern "C"` functions must be inside `unsafe { }`.
     check_ffi_unsafe(module, &mut errors);
 
+    // Pass 4 — smart constructors: a `priv` type's raw constructor may only
+    // be called from within an `impl` block for that same type.
+    check_priv_ctors(module, &mut errors);
+
     if errors.is_empty() { Ok(()) } else { Err(errors) }
 }
 
@@ -191,6 +195,142 @@ fn walk_ffi(
         Expr::Record { base, fields, .. } => {
             if let Some(b) = base { walk_ffi(b, in_unsafe, extern_fns, errors); }
             for fld in fields { walk_ffi(&fld.value, in_unsafe, extern_fns, errors); }
+        }
+    }
+}
+
+// ------------------------------------------------------------------ //
+// Smart constructors — `type X = priv X(...)`'s raw constructor may only
+// be called from within an `impl X { ... }` block for the same type.
+// ------------------------------------------------------------------ //
+
+/// Collect the names of `priv`-constructor types, then walk every top-level
+/// function/val/var body and every `impl` block's methods, flagging any bare
+/// call to one of those constructors that isn't lexically inside an `impl`
+/// block for that same type.
+fn check_priv_ctors(module: &Module, errors: &mut Vec<TypeError>) {
+    use std::collections::HashSet;
+    let priv_ctors: HashSet<&str> = module.decls.iter()
+        .filter_map(|d| match &d.node {
+            Decl::Type(t) if t.is_priv_ctor => Some(t.name.node.as_str()),
+            _ => None,
+        })
+        .collect();
+    if priv_ctors.is_empty() { return; }
+
+    for sdecl in &module.decls {
+        match &sdecl.node {
+            Decl::Fn(f) => {
+                if let Some(body) = &f.body {
+                    walk_priv_ctors(body, None, &priv_ctors, errors);
+                }
+            }
+            Decl::Impl(i) => {
+                let self_type = i.type_path.segments.last().map(|s| s.node.as_str());
+                for m in &i.methods {
+                    if let Some(body) = &m.body {
+                        walk_priv_ctors(body, self_type, &priv_ctors, errors);
+                    }
+                }
+            }
+            Decl::Val(v) => walk_priv_ctors(&v.value, None, &priv_ctors, errors),
+            Decl::Var(v) => walk_priv_ctors(&v.value, None, &priv_ctors, errors),
+            _ => {}
+        }
+    }
+}
+
+fn walk_priv_ctors(
+    expr:       &S<Expr>,
+    self_type:  Option<&str>,
+    priv_ctors: &std::collections::HashSet<&str>,
+    errors:     &mut Vec<TypeError>,
+) {
+    use certo_ast::expr::Stmt;
+    match &expr.node {
+        Expr::App { func, args, span } => {
+            if let Expr::Path { path, .. } = &func.node {
+                // A bare, single-segment call to the type's own name is the
+                // raw constructor (`Email(raw)`); `Email.new(raw)` parses as
+                // Expr::Field, not Path, so it never matches here.
+                if let [seg] = path.segments.as_slice() {
+                    let name = seg.node.as_str();
+                    if priv_ctors.contains(name) && self_type != Some(name) {
+                        errors.push(TypeError {
+                            kind: TypeErrorKind::PrivConstructorCall { type_name: name.to_string() },
+                            span: *span,
+                        });
+                    }
+                }
+            }
+            walk_priv_ctors(func, self_type, priv_ctors, errors);
+            for a in args { walk_priv_ctors(&a.value, self_type, priv_ctors, errors); }
+        }
+
+        Expr::Lit { .. } | Expr::Path { .. } => {}
+        Expr::Pipe { left, right, .. } | Expr::BinOp { left, right, .. } => {
+            walk_priv_ctors(left, self_type, priv_ctors, errors);
+            walk_priv_ctors(right, self_type, priv_ctors, errors);
+        }
+        Expr::UnOp { expr, .. }
+        | Expr::Field { expr, .. } | Expr::SafeField { expr, .. }
+        | Expr::Try { expr, .. } | Expr::Await { expr, .. } | Expr::Spawn { expr, .. }
+        | Expr::Ascribe { expr, .. } | Expr::Age { expr, .. } | Expr::Unsafe { body: expr, .. } => {
+            walk_priv_ctors(expr, self_type, priv_ctors, errors);
+        }
+        Expr::If { cond, then_expr, else_expr, .. } => {
+            walk_priv_ctors(cond, self_type, priv_ctors, errors);
+            walk_priv_ctors(then_expr, self_type, priv_ctors, errors);
+            walk_priv_ctors(else_expr, self_type, priv_ctors, errors);
+        }
+        Expr::Match { scrutinee, arms, .. } => {
+            walk_priv_ctors(scrutinee, self_type, priv_ctors, errors);
+            for arm in arms {
+                if let Some(g) = &arm.guard { walk_priv_ctors(g, self_type, priv_ctors, errors); }
+                walk_priv_ctors(&arm.body, self_type, priv_ctors, errors);
+            }
+        }
+        Expr::Block { stmts, .. } => {
+            for st in stmts {
+                match st {
+                    Stmt::Val { value, .. } | Stmt::Var { value, .. } | Stmt::Assign { value, .. } => {
+                        walk_priv_ctors(value, self_type, priv_ctors, errors);
+                    }
+                    Stmt::Defer { body, .. } | Stmt::Expr { expr: body, .. } => {
+                        walk_priv_ctors(body, self_type, priv_ctors, errors);
+                    }
+                }
+            }
+        }
+        Expr::Lambda { body, .. } | Expr::Transaction { body, .. } => {
+            walk_priv_ctors(body, self_type, priv_ctors, errors);
+        }
+        Expr::For { iter, body, .. } => {
+            walk_priv_ctors(iter, self_type, priv_ctors, errors);
+            walk_priv_ctors(body, self_type, priv_ctors, errors);
+        }
+        Expr::While { cond, body, .. } => {
+            walk_priv_ctors(cond, self_type, priv_ctors, errors);
+            walk_priv_ctors(body, self_type, priv_ctors, errors);
+        }
+        Expr::Guard { cond, else_expr, .. } => {
+            walk_priv_ctors(cond, self_type, priv_ctors, errors);
+            walk_priv_ctors(else_expr, self_type, priv_ctors, errors);
+        }
+        Expr::Require { expr, error, .. } => {
+            walk_priv_ctors(expr, self_type, priv_ctors, errors);
+            walk_priv_ctors(error, self_type, priv_ctors, errors);
+        }
+        Expr::List { elements, .. } | Expr::Tuple { elements, .. } => {
+            for e in elements { walk_priv_ctors(e, self_type, priv_ctors, errors); }
+        }
+        Expr::Parallel { tasks, timeout, .. } => {
+            for t in tasks { walk_priv_ctors(t, self_type, priv_ctors, errors); }
+            if let Some(t) = timeout { walk_priv_ctors(t, self_type, priv_ctors, errors); }
+        }
+        Expr::Record { base, fields, .. } => {
+            if let Some(b) = base { walk_priv_ctors(b, self_type, priv_ctors, errors); }
+            for fld in fields { walk_priv_ctors(&fld.value, self_type, priv_ctors, errors); }
         }
     }
 }

@@ -641,9 +641,16 @@ fn lower_expr(expr: &S<Expr>, cx: &mut Cx) -> HirExpr {
             };
 
             // Look up the return type: statemachine fns first, then user-defined fns.
+            // `impl X { fn m(...) }` methods are registered in cx.fn_ret_types under
+            // their qualified name ("X.m", set during hoisting below) — try that
+            // full path before falling back to the short name (which is what a
+            // plain top-level function's own unqualified name equals), otherwise
+            // a `Type.method(...)` call's return type is silently never found and
+            // defaults to Ty::Error.
             let short = fn_short_name.as_deref().unwrap_or("");
             let call_ty = fn_full_path.as_deref()
                 .and_then(|fp| cx.sm_returns.get(fp).cloned())
+                .or_else(|| fn_full_path.as_deref().and_then(|fp| cx.fn_ret_types.get(fp).cloned()))
                 .or_else(|| cx.fn_ret_types.get(short).cloned())
                 .or_else(|| stdlib_ret_type(short))
                 .or_else(|| generic_container_ret(fn_full_path.as_deref(), &lowered_args))

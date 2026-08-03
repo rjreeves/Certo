@@ -73,9 +73,15 @@ pub fn type_expr_to_ty(te: &TypeExpr, ctx: &mut Ctx<'_>) -> Ty {
                 }
                 _ => {
                     // If this name is a type parameter in scope, use its var.
+                    // Type parameters are always registered as a bare `Ty::Var`
+                    // (see hoist_decl); anything else found in `env` under this
+                    // name is a *value* binding (a function, a sum-type
+                    // constructor, ...) that just happens to share the name —
+                    // e.g. a `priv` newtype's constructor is named identically
+                    // to its own type — and must not be mistaken for it here.
                     if targs.is_empty() {
-                        if let Some(ty) = ctx.env.lookup(&name) {
-                            return ty.clone();
+                        if let Some(Ty::Var(v)) = ctx.env.lookup(&name) {
+                            return Ty::Var(*v);
                         }
                     }
                     Ty::Named { name, args: targs }

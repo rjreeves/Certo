@@ -59,6 +59,13 @@ fn hoist_decls(module: &Module, scope: &mut ScopeChain) {
         if let Decl::Type(t) = &decl.node {
             if let TypeBody::Sum(variants) = &t.body {
                 for v in variants {
+                    // A `priv` smart-constructor newtype's single variant is
+                    // named identically to its own type (`type Email = priv
+                    // Email(Text)`) — the general per-decl hoisting below
+                    // already registers that name once; skip it here so it
+                    // isn't defined twice (which `define_top_level` would
+                    // otherwise correctly-but-spuriously flag as E0102).
+                    if v.name.node == t.name.node { continue; }
                     scope.define_top_level(
                         &v.name.node,
                         Res::Decl { name: v.name.node.clone(), span: v.name.span },
