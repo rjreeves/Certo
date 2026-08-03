@@ -860,7 +860,15 @@ fn lower_expr(expr: &S<Expr>, cx: &mut Cx) -> HirExpr {
 
         Expr::Try { expr, .. } => {
             let inner = lower_expr(expr, cx);
-            HirExpr { kind: HirExprKind::Try(Box::new(inner)), ty: Ty::Error, span }
+            // `e?`'s type is `e`'s Result Ok-payload type — needed so MIR's
+            // unwrap knows whether to bit-restore a Float or dereference a
+            // heap-boxed struct payload (see BACKLOG item 114); previously
+            // always Ty::Error, silently truncating a Float here too.
+            let ty = match &inner.ty {
+                Ty::Result(t, _) => (**t).clone(),
+                _ => Ty::Error,
+            };
+            HirExpr { kind: HirExprKind::Try(Box::new(inner)), ty, span }
         }
 
         Expr::Unsafe { body, .. } => {

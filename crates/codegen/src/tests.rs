@@ -230,6 +230,58 @@ fn result_float_payload_is_bit_preserved() {
 }
 
 #[test]
+fn result_struct_payload_is_heap_boxed() {
+    // A struct-shaped payload (a user-declared sum type here — same C
+    // representation as a record) doesn't fit certo_ok/certo_err's
+    // pointer-sized intptr_t slot; it must be heap-boxed on construction
+    // (BoxSome-style) and dereferenced on extraction, same as Option's
+    // Some(v) already does — BACKLOG item 114.
+    let c = codegen(
+        "module A\ntype Shape = | Circle(radius: Float)\n\
+         fn mk(): Result<Shape, Text> = Ok(Circle(1.0))\n\
+         fn f(): Float = match mk() {\n  Ok(s) => match s { Circle(r) => r }\n  Err(e) => 0.0\n}");
+    assert_contains(&c, "malloc(sizeof(Shape))");
+    assert_contains(&c, "*(Shape*)");
+}
+
+#[test]
+fn result_decimal_payload_is_heap_boxed() {
+    // Decimal is itself a multi-field C struct (certo_decimal_t) — same
+    // boxing requirement as any user-declared struct-shaped payload.
+    let c = codegen("module A\nfn mk(d: Decimal): Result<Decimal, Text> = Ok(d)");
+    assert_contains(&c, "malloc(sizeof(certo_decimal_t))");
+}
+
+#[test]
+fn result_int_payload_is_not_boxed() {
+    // Sanity: a plain pointer-sized payload must not regress to boxing —
+    // it already fits certo_ok's intptr_t slot directly.
+    let c = codegen("module A\nfn mk(): Result<Int, Text> = Ok(5)");
+    assert_not_contains(&c, "malloc(sizeof(int64_t))");
+}
+
+#[test]
+fn try_desugar_preserves_float_payload() {
+    // `e?`'s type used to always be Ty::Error, so the Ok-payload extraction
+    // never bit-restored a Float — same truncation bug as match arms had,
+    // via a second, independent code path (BACKLOG item 114).
+    let c = codegen(
+        "module A\nfn mk(): Result<Float, Text> = Ok(3.5)\n\
+         fn f(): Float = mk()?");
+    assert_contains(&c, "__certo_i2f");
+}
+
+#[test]
+fn try_desugar_preserves_struct_payload() {
+    let c = codegen(
+        "module A\ntype Shape = | Circle(radius: Float)\n\
+         fn mk(): Result<Shape, Text> = Ok(Circle(1.0))\n\
+         fn f(): Shape = mk()?");
+    assert_contains(&c, "malloc(sizeof(Shape))");
+    assert_contains(&c, "*(Shape*)");
+}
+
+#[test]
 fn nullary_enum_flows_through_result() {
     // The point of the int representation: a user enum can be a Result error.
     let c = codegen(
