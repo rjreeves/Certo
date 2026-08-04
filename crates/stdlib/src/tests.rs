@@ -133,7 +133,7 @@ fn map_insert_registered() {
 #[test]
 fn text_functions_registered() {
     let env = seeded_env();
-    for name in &["Text.len", "Text.concat", "Text.contains", "Text.toUpper",
+    for name in &["Text.len", "Text.byteLength", "Text.concat", "Text.contains", "Text.toUpper",
                   "Text.toLower", "Text.trim", "Text.split", "Text.join",
                   "Text.replace", "Text.indexOf"] {
         assert!(env.lookup(name).is_some(), "missing: {}", name);
@@ -144,6 +144,18 @@ fn text_functions_registered() {
 fn text_len_type() {
     let env = seeded_env();
     match env.lookup("Text.len").unwrap() {
+        Ty::Fn { params, ret } => {
+            assert_eq!(params, &[Ty::Text]);
+            assert_eq!(ret.as_ref(), &Ty::Int);
+        }
+        other => panic!("expected Fn, got {:?}", other),
+    }
+}
+
+#[test]
+fn text_byte_length_type() {
+    let env = seeded_env();
+    match env.lookup("Text.byteLength").unwrap() {
         Ty::Fn { params, ret } => {
             assert_eq!(params, &[Ty::Text]);
             assert_eq!(ret.as_ref(), &Ty::Int);
@@ -220,6 +232,12 @@ fn text_c_contains_key_functions() {
     assert!(TEXT_C.contains("certo_text_trim"),       "missing text_trim");
     assert!(TEXT_C.contains("certo_text_split"),      "missing text_split");
     assert!(TEXT_C.contains("certo_text_replace"),    "missing text_replace");
+    assert!(TEXT_C.contains("certo_text_byte_length"),"missing text_byte_length");
+}
+
+#[test]
+fn money_c_contains_parse_decimal() {
+    assert!(MONEY_C.contains("certo_parse_decimal"), "missing certo_parse_decimal");
 }
 
 #[test]
@@ -267,7 +285,7 @@ fn seed_advances_counter() {
 fn conversion_functions_registered() {
     let env = seeded_env();
     for name in &["intToText", "floatToText", "boolToText",
-                  "floatToInt", "intToFloat", "parseInt", "parseFloat"] {
+                  "floatToInt", "intToFloat", "parseInt", "parseFloat", "parseDecimal"] {
         assert!(env.lookup(name).is_some(), "missing: {}", name);
     }
 }
@@ -303,6 +321,18 @@ fn parse_float_returns_option_float() {
         Ty::Fn { params, ret } => {
             assert_eq!(params, &[Ty::Text]);
             assert_eq!(ret.as_ref(), &Ty::Option(Box::new(Ty::Float)));
+        }
+        other => panic!("expected Fn, got {:?}", other),
+    }
+}
+
+#[test]
+fn parse_decimal_returns_option_decimal() {
+    let env = seeded_env();
+    match env.lookup("parseDecimal").unwrap() {
+        Ty::Fn { params, ret } => {
+            assert_eq!(params, &[Ty::Text]);
+            assert_eq!(ret.as_ref(), &Ty::Option(Box::new(Ty::Decimal)));
         }
         other => panic!("expected Fn, got {:?}", other),
     }

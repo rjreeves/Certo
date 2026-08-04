@@ -100,6 +100,16 @@ fn option_match_derefs_through_val_binding() {
 }
 
 #[test]
+fn option_match_derefs_decimal_payload() {
+    // parseDecimal returns Option<Decimal> — a struct-shaped payload, like
+    // Result's Decimal case (BACKLOG item 114). Matching Some(x) must
+    // dereference the boxed certo_decimal_t, not treat the pointer as the value.
+    let c = codegen(
+        "module A\nfn f(): Decimal = match parseDecimal(\"1.5\") { Some(x) => x  None => Decimal.fromInt(0) }");
+    assert_contains(&c, "*(certo_decimal_t*)");
+}
+
+#[test]
 fn new_collection_functions_emit_expected_call_names() {
     let c = codegen(
         "module A\nimport Stdlib.Collections.{ List }\n\
