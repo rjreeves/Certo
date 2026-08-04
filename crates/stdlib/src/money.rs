@@ -33,6 +33,33 @@ certo_decimal_t certo_decimal_parse(const char* s) {
     return d;
 }
 
+/* Strict decimal parse: optional leading '-'/'+', digits, optional '.' plus
+   digits. Rejects empty/garbage input — unlike certo_decimal_parse above
+   (used for `d"..."` literals, which trusts the parser and silently
+   tolerates junk), this backs a fallible Certo-level function so it must
+   actually validate. Returns NULL (None) on failure, heap-allocated
+   certo_decimal_t* on success — mirrors certo_parse_int/certo_parse_float's
+   nullable-box convention so Option<Decimal> unboxes the same way. */
+certo_decimal_t* certo_parse_decimal(certo_text_t s) {
+    if (!s || !*s) return NULL;
+    const char* p = s;
+    if (*p == '-' || *p == '+') p++;
+    const char* int_start = p;
+    while (*p >= '0' && *p <= '9') p++;
+    if (p == int_start) return NULL;
+    if (*p == '.') {
+        p++;
+        const char* frac_start = p;
+        while (*p >= '0' && *p <= '9') p++;
+        if (p == frac_start) return NULL;
+    }
+    if (*p != '\0') return NULL;
+    certo_decimal_t* box = (certo_decimal_t*)malloc(sizeof(certo_decimal_t));
+    if (!box) certo_panic("out of memory");
+    *box = certo_decimal_parse(s);
+    return box;
+}
+
 certo_text_t certo_decimal_to_text(certo_decimal_t d) {
     char* buf = (char*)malloc(64);
     if (!buf) certo_panic("out of memory");

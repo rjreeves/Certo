@@ -53,6 +53,7 @@ floatToInt(f: Float): Int           // truncates toward zero
 intToFloat(n: Int): Float
 parseInt(s: Text): Int?             // None if not a valid integer
 parseFloat(s: Text): Float?         // None if not a valid float
+parseDecimal(s: Text): Decimal?     // None if not a valid decimal (strict — no trailing garbage)
 ```
 
 ### Arithmetic helpers
@@ -133,7 +134,8 @@ Result.allSettled<T, E>(results: List<Result<T, E>>): List<Result<T, E>>
 `import Stdlib.Text`
 
 ```
-Text.len(s: Text): Int
+Text.len(s: Text): Int                     // byte count
+Text.byteLength(s: Text): Int              // byte count (explicit alias — see Text.len)
 Text.concat(a: Text, b: Text): Text        // same as a ++ b
 Text.eq(a: Text, b: Text): Bool
 Text.contains(s: Text, sub: Text): Bool

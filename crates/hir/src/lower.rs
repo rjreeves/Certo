@@ -111,8 +111,9 @@ impl Cx {
 /// producers (`List.get<T>`) are omitted — their payload isn't known here.
 fn stdlib_ret_type(name: &str) -> Option<Ty> {
     match name {
-        "parseInt"   => Some(Ty::Option(Box::new(Ty::Int))),
-        "parseFloat" => Some(Ty::Option(Box::new(Ty::Float))),
+        "parseInt"     => Some(Ty::Option(Box::new(Ty::Int))),
+        "parseFloat"   => Some(Ty::Option(Box::new(Ty::Float))),
+        "parseDecimal" => Some(Ty::Option(Box::new(Ty::Decimal))),
         _ => None,
     }
 }

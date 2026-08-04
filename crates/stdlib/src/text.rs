@@ -10,6 +10,14 @@ int64_t certo_text_len(certo_text_t s) {
     return s ? (int64_t)strlen(s) : 0;
 }
 
+/* UTF-8 byte count. Certo Text values are UTF-8 encoded C strings, so this
+   is identical to certo_text_len — a distinct name exists because callers
+   who need character count (not yet implemented, see BACKLOG) must not
+   accidentally reach for `len` and get bytes instead. */
+int64_t certo_text_byte_length(certo_text_t s) {
+    return s ? (int64_t)strlen(s) : 0;
+}
+
 certo_text_t certo_text_concat(certo_text_t a, certo_text_t b) {
     size_t la = a ? strlen(a) : 0;
     size_t lb = b ? strlen(b) : 0;

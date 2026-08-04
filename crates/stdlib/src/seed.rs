@@ -28,8 +28,9 @@ pub fn seed_stdlib(env: &mut TypeEnv, counter: &mut u32) {
     def!("intToFloat",  fn1(Ty::Int,   Ty::Float));
     def!("textToIntUnsafe", fn1(Ty::Text, Ty::Int));
 
-    def!("parseInt",   fn1(Ty::Text, Ty::Option(Box::new(Ty::Int))));
-    def!("parseFloat", fn1(Ty::Text, Ty::Option(Box::new(Ty::Float))));
+    def!("parseInt",     fn1(Ty::Text, Ty::Option(Box::new(Ty::Int))));
+    def!("parseFloat",   fn1(Ty::Text, Ty::Option(Box::new(Ty::Float))));
+    def!("parseDecimal", fn1(Ty::Text, Ty::Option(Box::new(Ty::Decimal))));
 
     // Option constructors — Some(x) / None
     {
@@ -388,6 +389,7 @@ pub fn seed_stdlib(env: &mut TypeEnv, counter: &mut u32) {
     // ---------------------------------------------------------------- //
 
     def!("Text.len",        fn1(Ty::Text, Ty::Int));
+    def!("Text.byteLength", fn1(Ty::Text, Ty::Int));
     def!("Text.concat",     fn2(Ty::Text, Ty::Text, Ty::Text));
     def!("Text.eq",         fn2(Ty::Text, Ty::Text, Ty::Bool));
     def!("Text.contains",   fn2(Ty::Text, Ty::Text, Ty::Bool));
