@@ -1,3 +1,0 @@
-﻿Order,RelativePath,FullPath,StartedAt,FinishedAt,DurationSeconds,ExitCode,Success,StandardOutput,StandardError
-"1","001_schema.sql","C:\Users\rreev\OneDrive\Documents\GitHub\Certo\oe\sql\001_schema.sql","2026-06-16T13:01:44.7187505+10:00","2026-06-16T13:01:44.7939548+10:00","0.075","2","False","","psql: error: connection to server at ""192.168.0.2"", port 5433 failed: FATAL:  database ""Oe"" does not exist
-"
