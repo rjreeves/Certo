@@ -75,6 +75,40 @@ fn payload_sum_type_emits_tagged_union() {
 }
 
 #[test]
+fn record_field_with_generic_list_type_is_void_ptr() {
+    // A field typed `List<Int>` (or any parameterized type) is a pointer
+    // everywhere else in codegen (`ty_to_c(Ty::List(_)) => "void*"`); the
+    // struct-emission pre-pass previously ignored the type's generic args
+    // entirely and emitted the bare name (`List items;`) — an undeclared
+    // C type name — instead of matching that representation.
+    let c = codegen("module A\ntype Order = { items: List<Int> }");
+    assert_contains(&c, "void* items;");
+    assert_not_contains(&c, "List items;");
+}
+
+#[test]
+fn record_field_with_generic_map_type_is_void_ptr() {
+    let c = codegen("module A\ntype Roster = { scores: Map<Text, Int> }");
+    assert_contains(&c, "void* scores;");
+}
+
+#[test]
+fn record_field_with_option_type_is_void_ptr() {
+    // `T?` fields previously emitted the FFI-header-only `certo_option_t`
+    // struct — mismatched against the internal nullable-pointer Option
+    // representation every other read/write of the field actually uses.
+    let c = codegen("module A\ntype Person = { name: Text, nickname: Text? }");
+    assert_contains(&c, "void* nickname;");
+    assert_not_contains(&c, "certo_option_t");
+}
+
+#[test]
+fn sum_type_variant_with_generic_payload_is_void_ptr() {
+    let c = codegen("module A\ntype Bag = | Empty | Items(List<Int>)");
+    assert_contains(&c, "void* f0;");
+}
+
+#[test]
 fn option_some_is_heap_boxed() {
     // `Some(v)` must heap-box the payload (so Some(0) ≠ None and Float bits survive).
     let c = codegen("module A\nfn f(): Int? = Some(7)");
