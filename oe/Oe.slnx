@@ -1,8 +1,0 @@
-<Solution>
-  <Folder Name="/src/">
-    <Project Path="src/Oe.Api/Oe.Api.csproj" />
-    <Project Path="src/Oe.Application/Oe.Application.csproj" />
-    <Project Path="src/Oe.Domain/Oe.Domain.csproj" />
-    <Project Path="src/Oe.Infrastructure/Oe.Infrastructure.csproj" />
-  </Folder>
-</Solution>

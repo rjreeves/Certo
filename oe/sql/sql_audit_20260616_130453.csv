@@ -1,3 +1,0 @@
-﻿Order,RelativePath,FullPath,StartedAt,FinishedAt,DurationSeconds,ExitCode,Success,StandardOutput,StandardError
-"7","006_rule_triggers.sql","C:\Users\rreev\OneDrive\Documents\GitHub\Certo\oe\sql\006_rule_triggers.sql","2026-06-16T13:04:53.8157152+10:00","2026-06-16T13:04:53.8964466+10:00","0.081","2","False","","psql: error: connection to server at ""192.168.0.2"", port 5433 failed: FATAL:  database ""Oe"" does not exist
-"
