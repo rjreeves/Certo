@@ -439,6 +439,31 @@ pub fn seed_stdlib(env: &mut TypeEnv, counter: &mut u32) {
     def!("DateTime.second",     fn1(dt(), Ty::Int));
 
     // ---------------------------------------------------------------- //
+    // Duration
+    // ---------------------------------------------------------------- //
+
+    let dur = || Ty::Named { name: "Duration".into(), args: vec![] };
+
+    def!("Duration.seconds",   fn1(Ty::Int, dur()));
+    def!("Duration.minutes",   fn1(Ty::Int, dur()));
+    def!("Duration.hours",     fn1(Ty::Int, dur()));
+    def!("Duration.days",      fn1(Ty::Int, dur()));
+    def!("Duration.toSeconds", fn1(dur(), Ty::Int));
+    def!("Duration.toMinutes", fn1(dur(), Ty::Int));
+    def!("Duration.toHours",   fn1(dur(), Ty::Int));
+    def!("Duration.toDays",    fn1(dur(), Ty::Int));
+    def!("Duration.add",       fn2(dur(), dur(), dur()));
+    def!("Duration.sub",       fn2(dur(), dur(), dur()));
+    def!("Duration.negate",    fn1(dur(), dur()));
+    def!("Duration.eq",        fn2(dur(), dur(), Ty::Bool));
+    def!("Duration.lt",        fn2(dur(), dur(), Ty::Bool));
+    def!("Duration.gt",        fn2(dur(), dur(), Ty::Bool));
+
+    def!("DateTime.addDuration", fn2(dt(), dur(), dt()));
+    def!("DateTime.diff",        fn2(dt(), dt(), dur()));
+    def!("Date.addDuration",     fn2(date(), dur(), date()));
+
+    // ---------------------------------------------------------------- //
     // Money / Decimal
     // ---------------------------------------------------------------- //
 
@@ -1008,6 +1033,16 @@ pub fn seed_stdlib(env: &mut TypeEnv, counter: &mut u32) {
     pm!("DateTime.before",      "a", "b");
     pm!("DateTime.after",       "a", "b");
     pm!("Date.format",          "date", "fmt");
+
+    // Duration
+    pm!("Duration.add",          "a", "b");
+    pm!("Duration.sub",          "a", "b");
+    pm!("Duration.eq",           "a", "b");
+    pm!("Duration.lt",           "a", "b");
+    pm!("Duration.gt",           "a", "b");
+    pm!("DateTime.addDuration",  "dt", "duration");
+    pm!("DateTime.diff",         "a", "b");
+    pm!("Date.addDuration",      "date", "duration");
 
     // Decimal
     pm!("Decimal.add",    "a", "b");

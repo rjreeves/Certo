@@ -617,6 +617,99 @@ fn datetime_diff_seconds_type() {
 }
 
 // ------------------------------------------------------------------ //
+// Duration
+// ------------------------------------------------------------------ //
+
+#[test]
+fn duration_functions_registered() {
+    let env = seeded_env();
+    for name in &["Duration.seconds", "Duration.minutes", "Duration.hours", "Duration.days",
+                  "Duration.toSeconds", "Duration.toMinutes", "Duration.toHours", "Duration.toDays",
+                  "Duration.add", "Duration.sub", "Duration.negate",
+                  "Duration.eq", "Duration.lt", "Duration.gt",
+                  "DateTime.addDuration", "DateTime.diff", "Date.addDuration"] {
+        assert!(env.lookup(name).is_some(), "missing: {}", name);
+    }
+}
+
+#[test]
+fn duration_days_type() {
+    let env = seeded_env();
+    let dur = Ty::Named { name: "Duration".into(), args: vec![] };
+    match env.lookup("Duration.days").unwrap() {
+        Ty::Fn { params, ret } => {
+            assert_eq!(params, &[Ty::Int]);
+            assert_eq!(ret.as_ref(), &dur);
+        }
+        other => panic!("expected Fn, got {:?}", other),
+    }
+}
+
+#[test]
+fn duration_add_type() {
+    let env = seeded_env();
+    let dur = Ty::Named { name: "Duration".into(), args: vec![] };
+    match env.lookup("Duration.add").unwrap() {
+        Ty::Fn { params, ret } => {
+            assert_eq!(params, &[dur.clone(), dur.clone()]);
+            assert_eq!(ret.as_ref(), &dur);
+        }
+        other => panic!("expected Fn, got {:?}", other),
+    }
+}
+
+#[test]
+fn datetime_add_duration_type() {
+    let env = seeded_env();
+    let dt = Ty::Named { name: "DateTime".into(), args: vec![] };
+    let dur = Ty::Named { name: "Duration".into(), args: vec![] };
+    match env.lookup("DateTime.addDuration").unwrap() {
+        Ty::Fn { params, ret } => {
+            assert_eq!(params, &[dt.clone(), dur]);
+            assert_eq!(ret.as_ref(), &dt);
+        }
+        other => panic!("expected Fn, got {:?}", other),
+    }
+}
+
+#[test]
+fn datetime_diff_returns_duration() {
+    let env = seeded_env();
+    let dt = Ty::Named { name: "DateTime".into(), args: vec![] };
+    let dur = Ty::Named { name: "Duration".into(), args: vec![] };
+    match env.lookup("DateTime.diff").unwrap() {
+        Ty::Fn { params, ret } => {
+            assert_eq!(params, &[dt.clone(), dt]);
+            assert_eq!(ret.as_ref(), &dur);
+        }
+        other => panic!("expected Fn, got {:?}", other),
+    }
+}
+
+#[test]
+fn date_add_duration_type() {
+    let env = seeded_env();
+    let date = Ty::Named { name: "Date".into(), args: vec![] };
+    let dur = Ty::Named { name: "Duration".into(), args: vec![] };
+    match env.lookup("Date.addDuration").unwrap() {
+        Ty::Fn { params, ret } => {
+            assert_eq!(params, &[date.clone(), dur]);
+            assert_eq!(ret.as_ref(), &date);
+        }
+        other => panic!("expected Fn, got {:?}", other),
+    }
+}
+
+#[test]
+fn datetime_c_contains_duration_functions() {
+    assert!(DATETIME_C.contains("certo_duration_seconds"),      "missing duration_seconds");
+    assert!(DATETIME_C.contains("certo_duration_add"),          "missing duration_add");
+    assert!(DATETIME_C.contains("certo_datetime_add_duration"), "missing datetime_add_duration");
+    assert!(DATETIME_C.contains("certo_datetime_diff"),         "missing datetime_diff");
+    assert!(DATETIME_C.contains("certo_date_add_duration"),     "missing date_add_duration");
+}
+
+// ------------------------------------------------------------------ //
 // Money / Decimal extras
 // ------------------------------------------------------------------ //
 

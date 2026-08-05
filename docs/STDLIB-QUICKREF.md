@@ -16,6 +16,7 @@ Signatures only — one line per function. For narrative usage see
 | [Collections](#collections) | `import Stdlib.Collections` |
 | [Money / Decimal](#money--decimal) | `import Stdlib.Money` |
 | [DateTime](#datetime) | `import Stdlib.DateTime` |
+| [Duration](#duration) | `import Stdlib.DateTime` |
 | [Math](#math) | `import Stdlib.Math` |
 | [Json](#json) | `import Stdlib.Json` |
 | [Http](#http) | `import Stdlib.Http` |
@@ -298,6 +299,10 @@ DateTime.addHours(dt: DateTime, h: Int): DateTime
 DateTime.addDays(dt: DateTime, d: Int): DateTime
 DateTime.diffSeconds(a: DateTime, b: DateTime): Int   // a - b
 DateTime.diffDays(a: DateTime, b: DateTime): Int      // (a - b) / 86400
+
+DateTime.addDuration(dt: DateTime, duration: Duration): DateTime
+DateTime.diff(a: DateTime, b: DateTime): Duration     // a - b
+Date.addDuration(date: Date, duration: Duration): Date
 ```
 
 ### Comparison
@@ -317,6 +322,44 @@ DateTime.day(dt: DateTime): Int      // 1–31
 DateTime.hour(dt: DateTime): Int     // 0–23
 DateTime.minute(dt: DateTime): Int   // 0–59
 DateTime.second(dt: DateTime): Int   // 0–60
+```
+
+---
+
+## Duration
+
+`import Stdlib.DateTime`
+
+`Duration` is an `Int` (signed seconds) representing a span of time —
+not a point in time. No `Timezone` type exists yet; see BACKLOG.
+
+### Constructors
+
+```
+Duration.seconds(n: Int): Duration
+Duration.minutes(n: Int): Duration
+Duration.hours(n: Int): Duration
+Duration.days(n: Int): Duration
+```
+
+### Accessors (truncating)
+
+```
+Duration.toSeconds(d: Duration): Int
+Duration.toMinutes(d: Duration): Int
+Duration.toHours(d: Duration): Int
+Duration.toDays(d: Duration): Int
+```
+
+### Arithmetic and comparison
+
+```
+Duration.add(a: Duration, b: Duration): Duration
+Duration.sub(a: Duration, b: Duration): Duration
+Duration.negate(d: Duration): Duration
+Duration.eq(a: Duration, b: Duration): Bool
+Duration.lt(a: Duration, b: Duration): Bool
+Duration.gt(a: Duration, b: Duration): Bool
 ```
 
 ---

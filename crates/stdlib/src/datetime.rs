@@ -15,6 +15,7 @@ pub const DATETIME_C: &str = r#"
 
 typedef int64_t CertoDateTime;   /* Unix seconds */
 typedef int64_t CertoDate;       /* Unix seconds at midnight UTC */
+typedef int64_t CertoDuration;   /* signed span, in seconds */
 
 /* ---- constructors ---- */
 
@@ -81,6 +82,38 @@ int64_t certo_datetime_hour  (CertoDateTime dt) { time_t t = (time_t)dt; struct 
 int64_t certo_datetime_minute(CertoDateTime dt) { time_t t = (time_t)dt; struct tm* m = gmtime(&t); return m->tm_min; }
 int64_t certo_datetime_second(CertoDateTime dt) { time_t t = (time_t)dt; struct tm* m = gmtime(&t); return m->tm_sec; }
 
+/* ---- Duration: constructors ---- */
+
+CertoDuration certo_duration_seconds(int64_t n) { return (CertoDuration)n; }
+CertoDuration certo_duration_minutes(int64_t n) { return (CertoDuration)(n * 60); }
+CertoDuration certo_duration_hours  (int64_t n) { return (CertoDuration)(n * 3600); }
+CertoDuration certo_duration_days   (int64_t n) { return (CertoDuration)(n * 86400); }
+
+/* ---- Duration: accessors (truncating) ---- */
+
+int64_t certo_duration_to_seconds(CertoDuration d) { return d; }
+int64_t certo_duration_to_minutes(CertoDuration d) { return d / 60; }
+int64_t certo_duration_to_hours  (CertoDuration d) { return d / 3600; }
+int64_t certo_duration_to_days   (CertoDuration d) { return d / 86400; }
+
+/* ---- Duration: arithmetic ---- */
+
+CertoDuration certo_duration_add   (CertoDuration a, CertoDuration b) { return a + b; }
+CertoDuration certo_duration_sub   (CertoDuration a, CertoDuration b) { return a - b; }
+CertoDuration certo_duration_negate(CertoDuration d) { return -d; }
+
+/* ---- Duration: comparison ---- */
+
+bool certo_duration_eq (CertoDuration a, CertoDuration b) { return a == b; }
+bool certo_duration_lt (CertoDuration a, CertoDuration b) { return a < b; }
+bool certo_duration_gt (CertoDuration a, CertoDuration b) { return a > b; }
+
+/* ---- DateTime/Date <-> Duration ---- */
+
+CertoDateTime certo_datetime_add_duration(CertoDateTime dt, CertoDuration d) { return dt + d; }
+CertoDuration certo_datetime_diff        (CertoDateTime a, CertoDateTime b)  { return a - b; }
+CertoDate     certo_date_add_duration    (CertoDate d, CertoDuration dur)    { return d + dur; }
+
 /* ---- parse ISO 8601 ---- */
 CertoDateTime certo_datetime_parse_iso(certo_text_t s) {
     if (!s) certo_panic("datetime_parse_iso: null input");
@@ -118,4 +151,6 @@ CertoDateTime certo_datetime_parse_iso(certo_text_t s) {
 #define certo_date_time_hour         certo_datetime_hour
 #define certo_date_time_minute       certo_datetime_minute
 #define certo_date_time_second       certo_datetime_second
+#define certo_date_time_add_duration certo_datetime_add_duration
+#define certo_date_time_diff         certo_datetime_diff
 "#;

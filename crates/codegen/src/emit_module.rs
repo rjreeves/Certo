@@ -31,6 +31,17 @@ pub fn emit_module(module: &Module, opts: &CodegenOptions) -> String {
         .map(|f| f.name.node.as_str())
         .collect();
 
+    // `@export("name")` — maps a pub fn's Certo name to the custom C symbol it
+    // should additionally be exported under (parser guarantees export_name
+    // implies is_pub). The internal function keeps its usual mangled name
+    // (`certo_<name>`) for in-module calls; a thin exported wrapper is emitted
+    // separately (see `export_wrappers` below) so callers inside the module
+    // aren't affected by the external symbol name.
+    let export_names: std::collections::HashMap<&str, &str> = module.decls.iter()
+        .filter_map(|d| if let Decl::Fn(f) = &d.node { Some(f) } else { None })
+        .filter_map(|f| f.export_name.as_deref().map(|n| (f.name.node.as_str(), n)))
+        .collect();
+
     let export = |name: &str| -> &'static str {
         let _ = name; // checked by caller
         if opts.export_public { "CERTO_EXPORT " } else { "" }
@@ -173,15 +184,29 @@ pub fn emit_module(module: &Module, opts: &CodegenOptions) -> String {
         .collect();
 
     // Forward declarations — use MIR local[0].ty for the return type.
+    // Also collect signatures for any `@export("name")` wrapper (emitted
+    // below, after all forward declarations exist for it to call into).
+    let mut export_wrappers: Vec<String> = Vec::new();
     for (mir, _) in &fn_mirs {
         let ret_ty = mir.locals.first().map(|l| &l.ty).unwrap_or(&certo_typeck::Ty::Unit);
         let ret_c  = ret_ty_to_c(ret_ty);
-        let params: Vec<String> = mir.locals.iter().skip(1).take(mir.param_count)
-            .map(|l| format!("{} _l{}", ty_to_c(&l.ty), l.id))
+        let arg_tys: Vec<(String, u32)> = mir.locals.iter().skip(1).take(mir.param_count)
+            .map(|l| (ty_to_c(&l.ty), l.id))
             .collect();
+        let params: Vec<String> = arg_tys.iter().map(|(ty, id)| format!("{} _l{}", ty, id)).collect();
         let param_str = if params.is_empty() { "void".into() } else { params.join(", ") };
         let pfx = if pub_fns.contains(mir.name.as_str()) { export(&mir.name) } else { "" };
         writeln!(out, "{}{} {}({});", pfx, ret_c, c_fn_name(&mir.name), param_str).unwrap();
+        if let Some(export_name) = export_names.get(mir.name.as_str()) {
+            let args: Vec<String> = arg_tys.iter().map(|(_, id)| format!("_l{}", id)).collect();
+            export_wrappers.push(format!("{}{} {}({}) {{ return {}({}); }}",
+                export(export_name), ret_c, c_ident(export_name), param_str, c_fn_name(&mir.name), args.join(", ")));
+        }
+    }
+    // Emit the exported wrappers: a thin function under the custom C symbol
+    // name that just forwards to the internal `certo_<name>` definition.
+    for wrapper in &export_wrappers {
+        writeln!(out, "{}", wrapper).unwrap();
     }
     // Forward-declare `extern "C"` FFI functions. They have no Certo body; the
     // definition is provided by a library linked via `--link`. Emitting an

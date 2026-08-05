@@ -88,6 +88,7 @@ pub fn build_harness(module: &Module) -> (String, Vec<TestEntry>) {
             effects:     None,
             body:        Some(body),
             is_extern:   false,
+            export_name: None,
             span:        zero_span,
         };
         augmented.decls.push(S::new(Decl::Fn(fn_decl), zero_span));

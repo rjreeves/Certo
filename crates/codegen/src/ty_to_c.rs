@@ -33,6 +33,15 @@ pub fn ty_to_c(ty: &Ty) -> String {
         }
         // A spawned-task handle is an opaque heap pointer.
         Ty::Named { name, .. } if name == "__CertoTask" => "void*".into(),
+        // These stdlib scalar types have a C-side typedef prefixed `Certo`
+        // (`CertoDateTime`, etc. — see crates/stdlib/src/datetime.rs) rather
+        // than matching their bare Certo name; an explicit `DateTime`/`Date`/
+        // `Duration` annotation previously emitted an undeclared C identifier
+        // (only `val`-inferred bindings worked, by defaulting to `int64_t` via
+        // HIR's Ty::Error fallback, which happens to be layout-compatible).
+        Ty::Named { name, args } if args.is_empty() && matches!(name.as_str(), "DateTime" | "Date" | "Duration") => {
+            format!("Certo{}", name)
+        }
         Ty::Named { name, args } if args.is_empty() => c_ident(name),
         Ty::Named { name, args } => {
             format!("{}_{}_t", c_ident(name), args.iter().map(mangle).collect::<Vec<_>>().join("_"))

@@ -10,14 +10,28 @@ use crate::parse_pattern::parse_pattern;
 
 pub fn parse_decl(cur: &mut Cursor<'_>) -> Result<S<Decl>, ParseError> {
     let span = cur.peek_span();
+    let export_name = parse_export_annotation(cur)?;
     let is_pub = cur.eat(|t| matches!(t, Token::Pub)).is_some();
 
     match cur.peek() {
         Some(Token::Async) | Some(Token::Fn) => {
-            let d = parse_fn_decl(cur, is_pub)?;
+            let mut d = parse_fn_decl(cur, is_pub)?;
+            if let Some(name) = export_name {
+                if !is_pub {
+                    return Err(ParseError {
+                        kind: ParseErrorKind::Custom("`@export(...)` requires `pub fn`".into()),
+                        span,
+                    });
+                }
+                d.export_name = Some(name);
+            }
             let s = d.span;
             Ok(S::new(Decl::Fn(d), s))
         }
+        _ if export_name.is_some() => Err(ParseError {
+            kind: ParseErrorKind::Custom("`@export(...)` may only be used before `pub fn`".into()),
+            span,
+        }),
         Some(Token::Type) => {
             let d = parse_type_decl(cur, is_pub)?;
             let s = d.span;
@@ -118,6 +132,38 @@ pub fn parse_decl(cur: &mut Cursor<'_>) -> Result<S<Decl>, ParseError> {
     }
 }
 
+/// `@export("cSymbolName")` — optional annotation immediately before a
+/// `pub fn`, overriding the generated C export name (default `certo_<name>`)
+/// for FFI interop. No general `@`-annotation system exists yet — this is
+/// parsed narrowly for just this one form, matching the spec's only
+/// documented usage (`docs/Certo_Language_Specification.md` §12.3).
+fn parse_export_annotation(cur: &mut Cursor<'_>) -> Result<Option<String>, ParseError> {
+    if cur.eat(|t| matches!(t, Token::At)).is_none() {
+        return Ok(None);
+    }
+    let word_span = cur.peek_span();
+    // `export` is a reserved keyword (`Token::Export`), not a plain identifier.
+    if cur.eat(|t| matches!(t, Token::Export)).is_none() {
+        let found = cur.peek().map(|t| format!("{t:?}")).unwrap_or_else(|| "end of file".into());
+        return Err(ParseError {
+            kind: ParseErrorKind::Custom(format!("unknown annotation `@{found}` — only `@export(\"name\")` is supported")),
+            span: word_span,
+        });
+    }
+    cur.expect(&Token::LParen)?;
+    let (tok, tok_span) = cur.bump().ok_or(ParseError { kind: ParseErrorKind::UnexpectedEof, span: word_span })?;
+    let name = if let Token::StringLit(s) = tok {
+        s.to_string()
+    } else {
+        return Err(ParseError {
+            kind: ParseErrorKind::Expected { expected: "string literal".into(), found: format!("{tok:?}") },
+            span: tok_span,
+        });
+    };
+    cur.expect(&Token::RParen)?;
+    Ok(Some(name))
+}
+
 // ------------------------------------------------------------------ //
 // Function
 // ------------------------------------------------------------------ //
@@ -153,7 +199,7 @@ pub fn parse_fn_decl(cur: &mut Cursor<'_>, is_pub: bool) -> Result<FnDecl, Parse
     };
 
     let span = start.to(body.as_ref().map(|b| b.span).unwrap_or(name_span));
-    Ok(FnDecl { is_async, is_pub, name: S::new(name, name_span), type_params, params, ret_ty, effects, body, is_extern: false, span })
+    Ok(FnDecl { is_async, is_pub, name: S::new(name, name_span), type_params, params, ret_ty, effects, body, is_extern: false, export_name: None, span })
 }
 
 /// Parse an `extern "C" { fn name(params): Ret ... }` block into a list of
