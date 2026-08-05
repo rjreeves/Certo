@@ -87,7 +87,12 @@ pub fn generate_header(module: &Module, guard_name: Option<&str>) -> String {
 
 fn c_prototype(f: &FnDecl) -> String {
     let ret = ret_ty_to_c(f.ret_ty.as_ref().map(|t| &t.node));
-    let name = format!("certo_{}", c_ident(&f.name.node));
+    // `@export("name")` overrides the default `certo_<name>` symbol — matches
+    // the exported wrapper codegen emits (see `emit_module.rs`'s `export_wrappers`).
+    let name = match &f.export_name {
+        Some(n) => c_ident(n),
+        None    => format!("certo_{}", c_ident(&f.name.node)),
+    };
     let params: Vec<String> = f.params.iter()
         .map(|p| format!("{} {}", ty_to_c(&p.ty.node), c_ident(&p.name.node)))
         .collect();
@@ -200,5 +205,13 @@ mod tests {
         let m = module("module M\npub fn now(): Int = 0\n");
         let h = generate_header(&m, None);
         assert!(h.contains("int64_t certo_now(void);"), "no-param fn should use void\n{}", h);
+    }
+
+    #[test]
+    fn export_annotation_overrides_prototype_name() {
+        let m = module("module M\n@export(\"my_custom_add\")\npub fn add(a: Int, b: Int): Int = a + b\n");
+        let h = generate_header(&m, None);
+        assert!(h.contains("int64_t my_custom_add(int64_t a, int64_t b);"), "missing custom-named prototype\n{}", h);
+        assert!(!h.contains("certo_add("), "should not also emit the default-named prototype\n{}", h);
     }
 }

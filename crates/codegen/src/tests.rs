@@ -100,6 +100,46 @@ fn option_match_derefs_through_val_binding() {
 }
 
 #[test]
+fn export_annotation_emits_wrapper_under_custom_name() {
+    // `@export("name")` must not rename the internal function (in-module call
+    // sites still use `certo_<name>`) — it adds a thin forwarding wrapper
+    // under the literal custom C symbol name instead.
+    let c = codegen("module A\n@export(\"my_custom_add\")\npub fn addNumbers(a: Int, b: Int): Int = a + b");
+    assert_contains(&c, "certo_add_numbers(int64_t _l1, int64_t _l2)");
+    assert_contains(&c, "int64_t my_custom_add(int64_t _l1, int64_t _l2) { return certo_add_numbers(_l1, _l2); }");
+}
+
+#[test]
+fn export_annotation_wrapper_is_marked_export_public() {
+    let module = parse("module A\n@export(\"my_custom_add\")\npub fn addNumbers(a: Int, b: Int): Int = a + b")
+        .expect("parse error");
+    let c = emit_module(&module, &CodegenOptions { inline_runtime: false, export_public: true });
+    assert_contains(&c, "CERTO_EXPORT int64_t my_custom_add(int64_t _l1, int64_t _l2)");
+}
+
+#[test]
+fn datetime_typed_local_uses_certo_prefixed_c_type() {
+    // A local bound from a call to a user function with an explicit `DateTime`
+    // return annotation carries the real `Ty::Named("DateTime")` (unlike a
+    // direct stdlib call, which HIR defaults to `Ty::Error`/`int64_t`) — so its
+    // declared local type previously emitted the bare Certo name as a C type
+    // (`DateTime _l1;`), an undeclared identifier, since only
+    // `CertoDateTime`/`CertoDate`/`CertoDuration` typedefs exist.
+    let c = codegen(
+        "module A\nfn makeNow(): DateTime = DateTime.now()\nfn f(): Unit = {\n  val dt = makeNow()\n  val dt2 = dt\n  println(DateTime.toIso(dt2))\n}");
+    assert_contains(&c, "CertoDateTime");
+    assert_not_contains(&c, "    DateTime _l");
+}
+
+#[test]
+fn duration_typed_local_uses_certo_prefixed_c_type() {
+    let c = codegen(
+        "module A\nfn oneDay(): Duration = Duration.days(1)\nfn f(): Unit = {\n  val d = oneDay()\n  val d2 = d\n  println(intToText(Duration.toSeconds(d2)))\n}");
+    assert_contains(&c, "CertoDuration");
+    assert_not_contains(&c, "    Duration _l");
+}
+
+#[test]
 fn option_match_derefs_decimal_payload() {
     // parseDecimal returns Option<Decimal> — a struct-shaped payload, like
     // Result's Decimal case (BACKLOG item 114). Matching Some(x) must

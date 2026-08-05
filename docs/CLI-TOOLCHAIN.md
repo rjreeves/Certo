@@ -140,6 +140,21 @@ Public (`pub`) functions are exported with `__declspec(dllexport)` on Windows
 and default visibility on Unix. On Windows an import library `mylib.lib` is
 also generated alongside the DLL.
 
+By default the exported C symbol is `certo_<name>` (e.g. `pub fn addNumbers`
+exports as `certo_add_numbers`). To pick an explicit symbol name — for a
+stable C ABI, or to match what a calling language expects — annotate the
+function with `@export("name")`:
+
+```
+@export("my_custom_add")
+pub fn addNumbers(a: Int, b: Int): Int = a + b
+```
+
+`@export(...)` requires `pub` and only overrides the *exported* symbol; calls
+to `addNumbers(...)` from other Certo code are unaffected — they still go
+through the usual internal `certo_add_numbers` symbol. `certo-ffi`'s generated
+header uses the same custom name.
+
 ### Inspecting the generated C
 
 ```sh

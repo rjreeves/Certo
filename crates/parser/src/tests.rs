@@ -128,6 +128,36 @@ fn async_fn_decl() {
 }
 
 #[test]
+fn export_annotation_sets_export_name() {
+    let m = ok("module A\n@export(\"my_custom_add\")\npub fn addNumbers(a: Int, b: Int): Int = a + b");
+    let Decl::Fn(f) = &m.decls[0].node else { panic!("expected fn decl") };
+    assert!(f.is_pub);
+    assert_eq!(f.export_name.as_deref(), Some("my_custom_add"));
+}
+
+#[test]
+fn fn_without_export_annotation_has_none() {
+    let m = ok("module A\npub fn f(): Int = 1");
+    let Decl::Fn(f) = &m.decls[0].node else { panic!("expected fn decl") };
+    assert_eq!(f.export_name, None);
+}
+
+#[test]
+fn export_annotation_without_pub_is_error() {
+    err("module A\n@export(\"x\")\nfn f(): Int = 1");
+}
+
+#[test]
+fn export_annotation_before_non_fn_decl_is_error() {
+    err("module A\n@export(\"x\")\ntype T = Int");
+}
+
+#[test]
+fn unknown_annotation_is_error() {
+    err("module A\n@bogus(\"x\")\npub fn f(): Int = 1");
+}
+
+#[test]
 fn type_alias() {
     let m = ok("module A\ntype UserId = UUID");
     match &m.decls[0].node {

@@ -82,6 +82,9 @@ pub struct FnDecl {
     pub effects:     Option<EffectSet>,
     pub body:        Option<S<Expr>>,   // None for trait method signatures and `extern` declarations
     pub is_extern:   bool,              // true for fns declared in an `extern "C"` block (no body; linked externally)
+    /// `@export("name")` — overrides the generated C export symbol name
+    /// (default `certo_<name>`). Only valid on `pub fn`; enforced by the parser.
+    pub export_name: Option<String>,
     pub span:        Span,
 }
 

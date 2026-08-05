@@ -49,6 +49,7 @@ fn fn_decl(name: &str, effects: Option<EffectSet>, body: S<Expr>) -> FnDecl {
         effects,
         body:        Some(body),
         is_extern:   false,
+        export_name: None,
         span:        DUMMY,
     }
 }
