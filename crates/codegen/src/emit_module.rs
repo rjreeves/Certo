@@ -452,7 +452,14 @@ fn emit_statemachine(sm: &StateMachineDecl, out: &mut String) {
 fn ast_ty_to_c_str(te: &certo_ast::types::TypeExpr) -> String {
     use certo_ast::types::TypeExpr;
     match te {
-        TypeExpr::Named { path, .. } => {
+        TypeExpr::Named { path, args, .. } => {
+            // Any generic instantiation — a built-in (`List<Int>`, `Map<K,V>`,
+            // an explicit `Option<T>`/`Result<A,B>`) or a user's own
+            // (`Box<T>`) — is an opaque pointer everywhere else in codegen
+            // (`ty_to_c` on the resolved `Ty`); a bare `Named` name lookup
+            // below would either hit the wrong branch or fall through to a
+            // literal (and undeclared) C type name like `List`.
+            if !args.is_empty() { return "void*".into(); }
             let name = path.segments.last().map(|s| s.node.as_str()).unwrap_or("void");
             match name {
                 "Int"     => "int64_t".into(),
@@ -465,8 +472,14 @@ fn ast_ty_to_c_str(te: &certo_ast::types::TypeExpr) -> String {
                 other     => c_ident(other),
             }
         }
-        TypeExpr::Option { .. }  => "certo_option_t".into(),
-        TypeExpr::Tuple { .. }   => "certo_tuple_t".into(),
+        // `T?` — matches the internal nullable-pointer Option representation
+        // used everywhere else (`ty_to_c(Ty::Option(_)) => "void*"`), not the
+        // separate ABI-stable `certo_option_t` struct crates/ffi's header
+        // generator deliberately uses instead for its public-facing API.
+        TypeExpr::Option { .. }  => "void*".into(),
+        TypeExpr::Tuple { elements, .. } => {
+            if elements.is_empty() { "int64_t".into() } else { "void*".into() }
+        }
         TypeExpr::Fn { .. }      => "certo_fn_t".into(),
         TypeExpr::Record { .. }  => "void*".into(),
         TypeExpr::Ptr { inner, .. } => format!("{}*", ast_ty_to_c_str(&inner.node)),
