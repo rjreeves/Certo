@@ -693,7 +693,11 @@ void*   certo_coalesce(void* opt, void* fallback);
 #define __NULL ((int64_t)0)
 
 /* Panic */
-__attribute__((noreturn)) void certo_panic(certo_text_t msg);
+/* Returns int64_t (never actually returns) so a user-level `panic(...)` call in
+   tail/expression position — where its polymorphic return type unifies with
+   whatever the surrounding context expects — can still be assigned to a C temp,
+   same convention as certo_println's "return int64_t for a Unit-typed builtin". */
+__attribute__((noreturn)) int64_t certo_panic(certo_text_t msg);
 #define certo_unreachable() certo_panic("unreachable")
 #define certo_todo()        certo_panic("not yet implemented")
 

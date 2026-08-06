@@ -964,6 +964,34 @@ fn await_emits_thread_join() {
 }
 
 #[test]
+fn certo_panic_declared_returning_int64_not_void() {
+    // A user-level `panic("msg")` call has Certo type `forall a. Text -> a`, so
+    // when it's the tail expression of e.g. a `Unit`-returning function, codegen
+    // assigns its result to a C temp (`_lN = certo_panic(...)`). That only
+    // compiles if the prelude declares certo_panic as returning int64_t (the
+    // same convention as certo_println for other Unit-typed builtins) — a real
+    // `void` return type makes the assignment a C compile error.
+    let module = parse("module A").expect("parse");
+    let c = emit_module(&module, &CodegenOptions { inline_runtime: true, export_public: false });
+    assert_contains(&c, "int64_t certo_panic(certo_text_t msg);");
+    assert_not_contains(&c, "void certo_panic(certo_text_t msg);");
+}
+
+#[test]
+fn tail_position_panic_call_is_assigned_to_a_temp() {
+    // Regression repro for the confirmed bug: `panic(...)` as the last
+    // statement of a `Unit`-returning function used to emit
+    // `_lN = certo_panic(...)`, which failed to compile against the old
+    // `void certo_panic(...)` declaration ("assigning to 'int64_t' from
+    // incompatible type 'void'"). certo_panic must now be declared to return
+    // int64_t so this exact pattern compiles.
+    let c = codegen(
+        "module A\nfn main(): Unit = {\n  println(\"before panic\")\n  panic(\"boom\")\n}");
+    assert_contains(&c, "certo_println(");
+    assert_contains(&c, "= certo_panic(CERTO_STR(\"boom\"));");
+}
+
+#[test]
 fn parallel_timeout_emits_timed_join_and_panic() {
     // BACKLOG item 81: `parallel(timeout: ...)` must actually enforce the
     // timeout at runtime instead of silently dropping it.

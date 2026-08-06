@@ -207,6 +207,36 @@ fn core_c_contains_certo_print() {
 }
 
 #[test]
+fn certo_panic_flushes_stdout_before_aborting() {
+    // Confirmed bug: output written via println before a panic() call was
+    // silently lost, because certo_panic called abort() without first
+    // flushing stdio buffers — abort() skips the normal atexit-time flush,
+    // so anything sitting in stdout's (fully-buffered-when-not-a-tty) buffer
+    // was dropped. certo_panic must flush stdout (and stderr, for symmetry)
+    // before it aborts.
+    let panic_fn = CORE_C.split("/* ---- panic ---- */").nth(1)
+        .expect("CORE_C must have a panic section");
+    let flush_pos = panic_fn.find("fflush(stdout)").expect("certo_panic must fflush(stdout) before aborting");
+    let abort_pos = panic_fn.find("abort()").expect("certo_panic must call abort()");
+    assert!(flush_pos < abort_pos, "fflush(stdout) must happen before abort()");
+}
+
+#[test]
+fn certo_panic_returns_int64_not_void() {
+    // A user-level `panic("msg")` call has Certo type `forall a. Text -> a`,
+    // so codegen may need to assign its result to a temp of whatever type the
+    // call site expects (e.g. the tail expression of a `Unit`-returning
+    // function). certo_panic must therefore return int64_t like the other
+    // Unit-typed builtins (certo_println, certo_flush, ...) rather than a
+    // real C `void`, or `_tmp = certo_panic(...)` fails to compile with
+    // "assigning to 'int64_t' from incompatible type 'void'".
+    assert!(
+        CORE_C.contains("int64_t certo_panic(certo_text_t msg)"),
+        "certo_panic must return int64_t, not void"
+    );
+}
+
+#[test]
 fn collections_c_contains_list_and_map() {
     assert!(COLLECTIONS_C.contains("certo_list_len"),      "missing list_len");
     assert!(COLLECTIONS_C.contains("certo_list_map"),      "missing list_map");
