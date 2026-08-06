@@ -487,7 +487,15 @@ pub fn infer(expr: &S<Expr>, ctx: &mut Ctx<'_>) -> Ty {
             ok_ty
         }
 
-        Expr::Parallel { tasks, .. } => {
+        Expr::Parallel { tasks, timeout, span } => {
+            // `parallel(timeout: ...) { ... }` — the timeout clause was parsed
+            // but never actually type-checked (or even threaded past parsing
+            // at all) before BACKLOG item 81; constrain it to `Duration` like
+            // any other typed value.
+            if let Some(t) = timeout {
+                let ty = infer(t, ctx);
+                ctx.unify(ty, Ty::Named { name: "Duration".into(), args: vec![] }, *span);
+            }
             Ty::Tuple(tasks.iter().map(|t| infer(t, ctx)).collect())
         }
 

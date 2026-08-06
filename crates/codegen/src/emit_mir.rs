@@ -73,6 +73,7 @@ pub fn emit_spawn_support(sites: &[SpawnSite], emitted_joins: &mut HashSet<Strin
         writeln!(out, "static void* {}(void* _p) {{", s.worker_name).unwrap();
         writeln!(out, "    {}* c = ({}*)_p;", s.ctx_name, s.ctx_name).unwrap();
         writeln!(out, "    c->result = {}({});", s.func_c, call_args).unwrap();
+        writeln!(out, "    __certo_task_signal_done(&c->hdr);").unwrap();
         writeln!(out, "    return 0;").unwrap();
         writeln!(out, "}}").unwrap();
     }
@@ -257,6 +258,7 @@ fn emit_stmt(stmt: &MirStmt, locals: &[MirLocalDecl], fn_cname: &str, spawn_idx:
             *spawn_idx += 1;
             writeln!(out, "    {{").unwrap();
             writeln!(out, "      {ctx}* _sc = ({ctx}*)malloc(sizeof({ctx}));").unwrap();
+            writeln!(out, "      __certo_task_hdr_init(&_sc->hdr);").unwrap();
             for (i, a) in args.iter().enumerate() {
                 writeln!(out, "      _sc->a{} = {};", i, emit_operand(a)).unwrap();
             }
@@ -272,6 +274,25 @@ fn emit_stmt(stmt: &MirStmt, locals: &[MirLocalDecl], fn_cname: &str, spawn_idx:
             writeln!(out, "    __certo_thread_join(((__certo_task_hdr_t*)({t}))->thread);").unwrap();
             writeln!(out, "    {} = ((__certo_join_{}_t*)({t}))->result;", lhs, rmangle).unwrap();
             writeln!(out, "    free((void*)({t}));").unwrap();
+        }
+        Rvalue::JoinTimed { task, deadline, ret_ty } => {
+            // `parallel(timeout: ...) { ... }` — BACKLOG item 81. `deadline`
+            // is an absolute monotonic-clock millisecond value shared by
+            // every task in the block (computed once in HIR); the remaining
+            // budget for *this* join is whatever's left of it right now, so
+            // time already spent waiting on earlier tasks is correctly
+            // deducted rather than each task getting its own full timeout.
+            let t = emit_operand(task);
+            let d = emit_operand(deadline);
+            let rmangle = mangle(ret_ty);
+            writeln!(out, "    {{").unwrap();
+            writeln!(out, "      int64_t _remaining_ms = ({d}) - certo_monotonic_millis();").unwrap();
+            writeln!(out, "      if (!__certo_thread_join_timed((__certo_task_hdr_t*)({t}), _remaining_ms)) {{").unwrap();
+            writeln!(out, "        certo_panic(\"parallel(timeout: ...) block exceeded its timeout\");").unwrap();
+            writeln!(out, "      }}").unwrap();
+            writeln!(out, "      {} = ((__certo_join_{}_t*)({t}))->result;", lhs, rmangle).unwrap();
+            writeln!(out, "      free((void*)({t}));").unwrap();
+            writeln!(out, "    }}").unwrap();
         }
         Rvalue::BoxSome { value, ty } => {
             // Heap-box the payload with its own C type so its bits are preserved

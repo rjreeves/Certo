@@ -281,4 +281,18 @@ int64_t certo_monotonic_millis(void) {
     return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
 #endif
 }
+
+/* Block the current thread for `ms` milliseconds. */
+int64_t certo_sleep(int64_t ms) {
+    if (ms <= 0) return 0;
+#ifdef _WIN32
+    Sleep((DWORD)ms);
+#else
+    struct timespec ts;
+    ts.tv_sec  = ms / 1000;
+    ts.tv_nsec = (ms % 1000) * 1000000L;
+    nanosleep(&ts, NULL);
+#endif
+    return 0;
+}
 "#;

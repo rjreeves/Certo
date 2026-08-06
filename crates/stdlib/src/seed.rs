@@ -121,6 +121,7 @@ pub fn seed_stdlib(env: &mut TypeEnv, counter: &mut u32) {
     def!("argCount",  Ty::Fn { params: vec![], ret: Box::new(Ty::Int) });
     def!("arg",       fn1(Ty::Int, Ty::Option(Box::new(Ty::Text))));
     def!("monotonicMillis", Ty::Fn { params: vec![], ret: Box::new(Ty::Int) });
+    def!("sleep", fn1(Ty::Int, Ty::Unit));
 
     // ---------------------------------------------------------------- //
     // Collections — List<T>

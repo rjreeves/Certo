@@ -69,6 +69,11 @@ pub enum Rvalue {
     Spawn { func: Operand, args: Vec<Operand>, ret_ty: Ty },
     /// Join a task handle produced by `Spawn`, yielding its result of `ret_ty`.
     Join { task: Operand, ret_ty: Ty },
+    /// Join a task handle with a shared deadline (an absolute monotonic-clock
+    /// millisecond value) instead of waiting indefinitely — `parallel(timeout:
+    /// ...) { ... }`, BACKLOG item 81. Panics at runtime if the deadline
+    /// passes before the task finishes.
+    JoinTimed { task: Operand, deadline: Operand, ret_ty: Ty },
     /// Heap-box a value into an `Option` (`Some(v)`): allocate a slot, store
     /// `value` with its own type (bit-preserving), yield the pointer. `ty` is
     /// the payload type. `None` is a null pointer.

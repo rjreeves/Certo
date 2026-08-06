@@ -1259,6 +1259,22 @@ fn runsql_support_functions_registered() {
 }
 
 #[test]
+fn sleep_registered() {
+    // sleep(ms: Int): Unit — added as the test harness for BACKLOG item 81's
+    // parallel(timeout:) enforcement, but a generally useful primitive in
+    // its own right.
+    let env = seeded_env();
+    match env.lookup("sleep").unwrap() {
+        Ty::Fn { params, ret } => {
+            assert_eq!(params, &[Ty::Int]);
+            assert_eq!(ret.as_ref(), &Ty::Unit);
+        }
+        other => panic!("expected Fn, got {:?}", other),
+    }
+    assert!(CORE_C.contains("certo_sleep"), "missing certo_sleep in CORE_C");
+}
+
+#[test]
 fn dbresult_functions_registered() {
     let env = seeded_env();
     for name in &["dbRunScriptResult", "DbResult.ok", "DbResult.error",
