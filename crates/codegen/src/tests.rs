@@ -109,6 +109,55 @@ fn sum_type_variant_with_generic_payload_is_void_ptr() {
 }
 
 #[test]
+fn generic_record_field_is_void_ptr_in_struct() {
+    // `type Box<T> = { value: T }` — a bare type-param field's C storage is
+    // `void*` (the parser never actually constructs `TypeExpr::Param`, so
+    // this needs `field_c_ty`'s type-param-name lookup, not `ast_ty_to_c_str`
+    // alone) — BACKLOG item 119.
+    let c = codegen("module A\ntype Box<T> = { value: T }");
+    assert_contains(&c, "void* value;");
+    assert_not_contains(&c, "    T value;");
+}
+
+#[test]
+fn generic_record_construction_boxes_type_param_field() {
+    let c = codegen("module A\ntype Box<T> = { value: T }\nfn f(): Int = { val b = Box { value: 42 }\n  b.value }");
+    assert_contains(&c, "malloc(sizeof("); // BoxSome on construction
+}
+
+#[test]
+fn generic_record_field_read_unboxes() {
+    let c = codegen("module A\ntype Box<T> = { value: T }\nfn f(): Int = { val b = Box { value: 42 }\n  b.value }");
+    assert_contains(&c, "*(int64_t*)"); // UnboxSome on read, substituted to the recovered concrete type
+}
+
+#[test]
+fn generic_sum_variant_field_is_void_ptr_in_struct() {
+    let c = codegen("module A\ntype Bag<T> = | Empty | Items(T)");
+    assert_contains(&c, "void* f0;");
+}
+
+#[test]
+fn generic_sum_variant_construction_and_match_box_unbox() {
+    let c = codegen(
+        "module A\ntype Bag<T> = | Empty | Items(T)\nfn f(): Int = match Items(42) { Empty => 0  Items(v) => v }");
+    assert_contains(&c, "malloc(sizeof("); // BoxSome on Items(42) construction
+    assert_contains(&c, "*(int64_t*)");    // UnboxSome on Items(v) match-arm read
+}
+
+#[test]
+fn impl_type_params_merge_with_method_type_params_in_hir() {
+    // `impl<T> Secret { fn wrap(v: T): Secret<T> = ... }` — HIR has its own
+    // separate `Decl::Impl` lowering pass, independent of typeck's (already
+    // fixed in item 115); without merging `i.type_params` in HIR too, `T`
+    // resolves to a literal (and undeclared) C type name instead of `void*`.
+    let c = codegen(
+        "module A\ntype Secret<T> = priv Secret(T)\nimpl<T> Secret {\n  fn wrap(v: T): Secret<T> = Secret(v)\n}");
+    assert_contains(&c, "Secret certo_secret_wrap(void* _l1)");
+    assert_not_contains(&c, "(T _l1)");
+}
+
+#[test]
 fn option_some_is_heap_boxed() {
     // `Some(v)` must heap-box the payload (so Some(0) ≠ None and Float bits survive).
     let c = codegen("module A\nfn f(): Int? = Some(7)");

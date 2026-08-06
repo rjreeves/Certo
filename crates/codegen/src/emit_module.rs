@@ -64,11 +64,12 @@ pub fn emit_module(module: &Module, opts: &CodegenOptions) -> String {
     // --- Struct definitions from `type` declarations ---
     for sdecl in &module.decls {
         if let Decl::Type(t) = &sdecl.node {
+            let type_params: Vec<String> = t.type_params.iter().map(|tp| tp.name.node.clone()).collect();
             match &t.body {
                 TypeBody::Record(rec) => {
                     writeln!(out, "typedef struct {{").unwrap();
                     for f in &rec.fields {
-                        let cty = ast_ty_to_c_str(&f.ty.node);
+                        let cty = field_c_ty(&f.ty.node, &type_params);
                         writeln!(out, "    {} {};", cty, f.name.node).unwrap();
                     }
                     writeln!(out, "}} {};", c_ident(&t.name.node)).unwrap();
@@ -93,7 +94,7 @@ pub fn emit_module(module: &Module, opts: &CodegenOptions) -> String {
                                 for (i, f) in v.fields.iter().enumerate() {
                                     let fname = f.name.as_ref().map(|n| n.node.clone())
                                         .unwrap_or_else(|| format!("f{}", i));
-                                    let cty = ast_ty_to_c_str(&f.ty.node);
+                                    let cty = field_c_ty(&f.ty.node, &type_params);
                                     writeln!(out, "            {} {};", cty, fname).unwrap();
                                 }
                                 writeln!(out, "        }} {};", c_ident(&v.name.node).to_lowercase()).unwrap();
@@ -132,7 +133,7 @@ pub fn emit_module(module: &Module, opts: &CodegenOptions) -> String {
                             let cname = crate::emit_mir::c_fn_name(&v.name.node);
                             let params: Vec<String> = v.fields.iter().enumerate().map(|(i, f)| {
                                 let fname = f.name.as_ref().map(|n| n.node.clone()).unwrap_or_else(|| format!("f{i}"));
-                                let cty = ast_ty_to_c_str(&f.ty.node);
+                                let cty = field_c_ty(&f.ty.node, &type_params);
                                 format!("{cty} {fname}")
                             }).collect();
                             let inits: Vec<String> = v.fields.iter().enumerate().map(|(i, f)| {
@@ -175,7 +176,7 @@ pub fn emit_module(module: &Module, opts: &CodegenOptions) -> String {
     let mut lifted_fns: Vec<certo_mir::MirFn> = Vec::new();
     let fn_mirs: Vec<(certo_mir::MirFn, &str)> = hir.items.iter()
         .filter_map(|item| if let HirItem::Fn(f) = item {
-            let (mir, lifted) = lower_fn(f);
+            let (mir, lifted) = lower_fn(f, &hir.record_field_types, &hir.variant_field_types);
             lifted_fns.extend(lifted);
             Some((mir, f.name.as_str()))
         } else {
@@ -485,6 +486,27 @@ fn ast_ty_to_c_str(te: &certo_ast::types::TypeExpr) -> String {
         TypeExpr::Ptr { inner, .. } => format!("{}*", ast_ty_to_c_str(&inner.node)),
         TypeExpr::Param { .. }   => "void*".into(),
     }
+}
+
+/// A field's C type, aware of the enclosing `type`'s own declared type
+/// parameters (`type Box<T> = { value: T }`'s `T`) — BACKLOG item 119. The
+/// parser never actually constructs `TypeExpr::Param` (verified dead code),
+/// so a bare type-param reference always parses as an ordinary
+/// `TypeExpr::Named` with an empty-args, single-segment path; `ast_ty_to_c_str`
+/// alone has no way to tell that apart from a real (and here, undeclared) type
+/// name. Its C storage is `void*` regardless of what it's instantiated to,
+/// matching how `crates/mir/src/lower.rs` heap-boxes/unboxes such fields.
+fn field_c_ty(te: &certo_ast::types::TypeExpr, type_params: &[String]) -> String {
+    if let certo_ast::types::TypeExpr::Named { path, args, .. } = te {
+        if args.is_empty() && path.segments.len() == 1 {
+            if let Some(seg) = path.segments.first() {
+                if type_params.iter().any(|p| p == &seg.node) {
+                    return "void*".into();
+                }
+            }
+        }
+    }
+    ast_ty_to_c_str(te)
 }
 
 fn const_expr_to_c(expr: &certo_hir::HirExpr) -> String {

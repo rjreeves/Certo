@@ -42,9 +42,14 @@ pub fn ty_to_c(ty: &Ty) -> String {
         Ty::Named { name, args } if args.is_empty() && matches!(name.as_str(), "DateTime" | "Date" | "Duration") => {
             format!("Certo{}", name)
         }
-        Ty::Named { name, args } if args.is_empty() => c_ident(name),
-        Ty::Named { name, args } => {
-            format!("{}_{}_t", c_ident(name), args.iter().map(mangle).collect::<Vec<_>>().join("_"))
+        Ty::Named { name, .. } => {
+            // A user-defined generic type (`Box<Int>`, `Box<Text>`, ...) isn't
+            // monomorphized — there is exactly one `Box` struct, with its
+            // type-param fields stored as `void*` (BACKLOG item 119), reused
+            // for every instantiation. So the C type is always the bare
+            // struct name regardless of `args` — a mangled per-instantiation
+            // name here would reference a typedef nothing ever emits.
+            c_ident(name)
         }
 
         Ty::Record(_) => "void*".into(), // anonymous records become void* until struct is emitted

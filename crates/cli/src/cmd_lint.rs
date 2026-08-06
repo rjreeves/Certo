@@ -218,7 +218,7 @@ fn recurse_lint(expr: &HirExpr, path: &Path, src: &str,
         HirExprKind::Field { base, .. } => {
             count += lint_block_stmts(base, path, src, reads, color);
         }
-        HirExprKind::Record(fields) => {
+        HirExprKind::Record { fields, .. } => {
             for (_, e) in fields { count += lint_block_stmts(e, path, src, reads, color); }
         }
         HirExprKind::Tuple(elems) | HirExprKind::List(elems) => {
@@ -278,7 +278,7 @@ fn collect_reads(expr: &HirExpr, out: &mut HashSet<LocalId>) {
         }
         HirExprKind::UnOp { arg, .. } => collect_reads(arg, out),
         HirExprKind::Field { base, .. } => collect_reads(base, out),
-        HirExprKind::Record(fields) => {
+        HirExprKind::Record { fields, .. } => {
             for (_, e) in fields { collect_reads(e, out); }
         }
         HirExprKind::Tuple(elems) | HirExprKind::List(elems) => {

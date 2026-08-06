@@ -43,6 +43,14 @@ struct Cx {
     variant_field_types: HashMap<String, Vec<Ty>>,
     /// Record type name → ordered field names (for spread desugar).
     record_field_names: HashMap<String, Vec<String>>,
+    /// Record type name → ordered declared field types, mirroring
+    /// `variant_field_types` — a bare type-param field (e.g. `value: T`)
+    /// resolves to the opaque `Ty::Var(0)` sentinel via
+    /// `ast_ty_to_ty_with_params`. Used for BACKLOG item 119's generic
+    /// type-erasure boxing: a `Ty::Var(0)` field is heap-boxed on
+    /// construction and unboxed on read, since its real C storage is `void*`
+    /// regardless of what concrete type it's instantiated to.
+    record_field_types: HashMap<String, Vec<Ty>>,
     /// LocalId → type, for local variables whose type is known (val bindings,
     /// function params). Lets a variable *reference* carry its type — needed so
     /// `match q { Some(x) => … }` knows `q`'s Option payload type.
@@ -66,6 +74,7 @@ impl Cx {
             variant_field_names: HashMap::new(),
             variant_field_types: HashMap::new(),
             record_field_names:  HashMap::new(),
+            record_field_types:  HashMap::new(),
             local_types:         HashMap::new(),
             errors:              Vec::new(),
         }
@@ -324,16 +333,30 @@ pub fn lower_module(module: &Module) -> Result<HirModule, Vec<LowerError>> {
                 cx.globals.insert(qname.clone(), id);
                 cx.fn_params.insert(qname.clone(), m.params.clone());
                 if let Some(ret) = &m.ret_ty {
-                    let tp_names: Vec<&str> = m.type_params.iter().map(|tp| tp.name.node.as_str()).collect();
+                    // Same `i.type_params.chain(m.type_params)` fix as the
+                    // actual lowering pass below — this pre-registration loop
+                    // is what populates `fn_ret_types` for *callers* (e.g.
+                    // `Secret.expose`'s return type as seen from `main`), so
+                    // it needs the impl block's own `<T>` in scope too, or a
+                    // caller's bound local gets the literal (and undeclared)
+                    // C type `T` instead of `Ty::Var(0)`/`void*` — BACKLOG item 119.
+                    let tp_names: Vec<&str> = i.type_params.iter().chain(m.type_params.iter())
+                        .map(|tp| tp.name.node.as_str()).collect();
                     cx.fn_ret_types.insert(qname, ast_ty_to_ty_with_params(&ret.node, &tp_names));
                 }
             }
         }
-        // Register record field names for spread desugar.
+        // Register record field names for spread desugar, and declared field
+        // types (item 119's generic-erasure boxing — see `record_field_types` doc).
         if let Decl::Type(t) = &sdecl.node {
             if let certo_ast::decl::TypeBody::Record(rec) = &t.body {
                 let names: Vec<String> = rec.fields.iter().map(|f| f.name.node.clone()).collect();
                 cx.record_field_names.insert(t.name.node.clone(), names);
+                let tp_names: Vec<&str> = t.type_params.iter().map(|tp| tp.name.node.as_str()).collect();
+                let field_types: Vec<Ty> = rec.fields.iter()
+                    .map(|f| ast_ty_to_ty_with_params(&f.ty.node, &tp_names))
+                    .collect();
+                cx.record_field_types.insert(t.name.node.clone(), field_types);
             }
         }
         // Register sum variant constructors and unit values.
@@ -435,7 +458,15 @@ pub fn lower_module(module: &Module) -> Result<HirModule, Vec<LowerError>> {
                     let qname = format!("{}.{}", type_name, m.name.node);
                     let Some(&id) = cx.globals.get(&qname) else { continue };
                     cx.push_scope();
-                    let tp_names: Vec<&str> = m.type_params.iter().map(|tp| tp.name.node.as_str()).collect();
+                    // Both the impl block's own `<T>` and the method's `<U>`
+                    // are in scope — mirrors typeck's identical fix (item 115)
+                    // for the same gap; HIR has its own separate lowering pass
+                    // that never got it. Without `i.type_params` here, `T`
+                    // inside `impl<T> Secret { fn wrap(v: T): Secret<T> = ... }`
+                    // doesn't resolve to `Ty::Var(0)` and falls through to a
+                    // literal (and undeclared) C type name `T` — BACKLOG item 119.
+                    let tp_names: Vec<&str> = i.type_params.iter().chain(m.type_params.iter())
+                        .map(|tp| tp.name.node.as_str()).collect();
                     let params: Vec<HirParam> = m.params.iter().map(|p| {
                         let local = cx.define_local(&p.name.node);
                         let ty = ast_ty_to_ty_with_params(&p.ty.node, &tp_names);
@@ -463,7 +494,11 @@ pub fn lower_module(module: &Module) -> Result<HirModule, Vec<LowerError>> {
         .unwrap_or_default();
 
     if cx.errors.is_empty() {
-        Ok(HirModule { name, items })
+        Ok(HirModule {
+            name, items,
+            record_field_types:  cx.record_field_types,
+            variant_field_types: cx.variant_field_types,
+        })
     } else {
         Err(cx.errors)
     }
@@ -656,6 +691,12 @@ fn lower_expr(expr: &S<Expr>, cx: &mut Cx) -> HirExpr {
                 .or_else(|| stdlib_ret_type(short))
                 .or_else(|| generic_container_ret(fn_full_path.as_deref(), &lowered_args))
                 .unwrap_or(Ty::Error);
+            // Recover a generic sum-type variant constructor's concrete
+            // instantiation argument from the call's args (e.g. `Secret(42)`
+            // ⇒ `Ty::Named{"Secret", args:[Ty::Int]}` instead of the plain,
+            // always-empty-args lookup above) — BACKLOG item 119. Lets later
+            // field access/pattern-matching substitute the type param back.
+            let call_ty = recover_generic_variant_call_ty(short, &lowered_args, cx).unwrap_or(call_ty);
 
             HirExpr { kind: HirExprKind::Call { func: Box::new(func_hir), args: lowered_args }, ty: call_ty, span }
         }
@@ -715,7 +756,8 @@ fn lower_expr(expr: &S<Expr>, cx: &mut Cx) -> HirExpr {
                 HirExpr { kind: HirExprKind::Global(global_name), ty: Ty::Error, span }
             } else {
                 let base = lower_expr(expr, cx);
-                HirExpr { kind: HirExprKind::Field { base: Box::new(base), field: field.node.clone() }, ty: Ty::Error, span }
+                let (field_ty, boxed) = resolve_field_ty(&base.ty, &field.node, cx);
+                HirExpr { kind: HirExprKind::Field { base: Box::new(base), field: field.node.clone(), boxed }, ty: field_ty, span }
             }
         }
 
@@ -728,6 +770,7 @@ fn lower_expr(expr: &S<Expr>, cx: &mut Cx) -> HirExpr {
                 kind: HirExprKind::Field {
                     base:  Box::new(HirExpr { kind: HirExprKind::Local(tmp), ty: Ty::Error, span }),
                     field: field.node.clone(),
+                    boxed: false, // base type unknown here — see item 119's documented scope
                 },
                 ty: Ty::Error, span,
             };
@@ -839,15 +882,21 @@ fn lower_expr(expr: &S<Expr>, cx: &mut Cx) -> HirExpr {
                         (field_name.clone(), explicit[pos].1.clone())
                     } else {
                         let base_ref = HirExpr { kind: HirExprKind::Local(base_local), ty: base_ty.clone(), span };
+                        // Base's own args aren't recovered here (a spread base's
+                        // instantiation isn't tracked through the temp local) —
+                        // best-effort: falls back to Ty::Error/unboxed for a
+                        // spread-copied generic field. See BACKLOG item 119.
+                        let (field_ty, boxed) = resolve_field_ty(&base_ty, field_name, cx);
                         let field_access = HirExpr {
-                            kind: HirExprKind::Field { base: Box::new(base_ref), field: field_name.clone() },
-                            ty: Ty::Error,
+                            kind: HirExprKind::Field { base: Box::new(base_ref), field: field_name.clone(), boxed },
+                            ty: field_ty,
                             span,
                         };
                         (field_name.clone(), field_access)
                     }
                 }).collect();
-                let record_expr = HirExpr { kind: HirExprKind::Record(merged), ty: record_ty.clone(), span };
+                let (record_ty, field_types) = recover_generic_record_ty(ty_name.as_deref(), &merged, cx);
+                let record_expr = HirExpr { kind: HirExprKind::Record { fields: merged, field_types }, ty: record_ty.clone(), span };
                 return HirExpr {
                     kind: HirExprKind::Block { stmts: vec![base_let], tail: Box::new(record_expr) },
                     ty: record_ty,
@@ -856,7 +905,8 @@ fn lower_expr(expr: &S<Expr>, cx: &mut Cx) -> HirExpr {
             } else {
                 explicit
             };
-            HirExpr { kind: HirExprKind::Record(hir_fields), ty: record_ty, span }
+            let (record_ty, field_types) = recover_generic_record_ty(ty_name.as_deref(), &hir_fields, cx);
+            HirExpr { kind: HirExprKind::Record { fields: hir_fields, field_types }, ty: record_ty, span }
         }
 
         Expr::Try { expr, .. } => {
@@ -1064,7 +1114,7 @@ fn lower_block(stmts: &[Stmt], span: Span, cx: &mut Cx) -> HirExpr {
                                 let local = cx.define_local(&name.node);
                                 let base = HirExpr { kind: HirExprKind::Local(tmp), ty: tup_ty.clone(), span };
                                 let field_expr = HirExpr {
-                                    kind: HirExprKind::Field { base: Box::new(base), field: i.to_string() },
+                                    kind: HirExprKind::Field { base: Box::new(base), field: i.to_string(), boxed: false },
                                     ty: elem_ty.clone(), span,
                                 };
                                 if !matches!(elem_ty, Ty::Error) {
@@ -1086,7 +1136,7 @@ fn lower_block(stmts: &[Stmt], span: Span, cx: &mut Cx) -> HirExpr {
                             let local = cx.define_local(&binding_name);
                             let base = HirExpr { kind: HirExprKind::Local(tmp), ty: Ty::Error, span };
                             let field_expr = HirExpr {
-                                kind: HirExprKind::Field { base: Box::new(base), field: pf.name.node.clone() },
+                                kind: HirExprKind::Field { base: Box::new(base), field: pf.name.node.clone(), boxed: false },
                                 ty: Ty::Error, span,
                             };
                             hir_stmts.push(HirStmt::Let { local, name: binding_name, ty: Ty::Error, init: field_expr });
@@ -1268,4 +1318,70 @@ fn ast_ty_to_ty_with_params(te: &certo_ast::types::TypeExpr, type_params: &[&str
         TypeExpr::Param { .. } => Ty::Var(0),
         _ => Ty::Error,
     }
+}
+
+/// Resolve a record field access's declared type and whether it needs
+/// unboxing — BACKLOG item 119. Only succeeds when `base_ty` is a known
+/// `Ty::Named` record type; otherwise conservatively falls back to
+/// `(Ty::Error, false)`, matching this access's pre-existing behavior.
+/// A `Ty::Var(_)` declared field type is substituted using the base type's
+/// own recovered instantiation argument (single-type-param scope only —
+/// `args.first()`), and `boxed` is set so MIR knows to unbox the read.
+fn resolve_field_ty(base_ty: &Ty, field: &str, cx: &Cx) -> (Ty, bool) {
+    let Ty::Named { name, args } = base_ty else { return (Ty::Error, false) };
+    let Some(names) = cx.record_field_names.get(name) else { return (Ty::Error, false) };
+    let Some(pos) = names.iter().position(|n| n == field) else { return (Ty::Error, false) };
+    let Some(declared) = cx.record_field_types.get(name).and_then(|tys| tys.get(pos)) else { return (Ty::Error, false) };
+    match declared {
+        Ty::Var(_) => (args.first().cloned().unwrap_or(Ty::Error), true),
+        other => (other.clone(), false),
+    }
+}
+
+/// Recover a generic sum-type variant constructor call's concrete
+/// instantiation argument — the constructor-call analog of
+/// `recover_generic_record_ty` below, BACKLOG item 119. `None` when
+/// `variant_name` isn't a known sum-type variant at all (the ordinary,
+/// non-generic call path), so the caller falls back to its own `call_ty`.
+fn recover_generic_variant_call_ty(variant_name: &str, args: &[HirExpr], cx: &Cx) -> Option<Ty> {
+    let parent = cx.variant_to_type.get(variant_name)?;
+    let field_types = cx.variant_field_types.get(variant_name)?;
+    let recovered = field_types.iter().zip(args.iter())
+        .find(|(fty, _)| matches!(fty, Ty::Var(_)))
+        .map(|(_, arg)| arg.ty.clone());
+    let ty_args = match recovered {
+        Some(t) if !matches!(t, Ty::Error) => vec![t],
+        _ => vec![],
+    };
+    Some(Ty::Named { name: parent.clone(), args: ty_args })
+}
+
+/// Recover a generic record literal's concrete instantiation argument from
+/// its field values — BACKLOG item 119. For each field whose *declared*
+/// type is a bare type parameter (`Ty::Var(0)`), the field's own (already
+/// lowered) value type is taken as the recovered argument (single-type-param
+/// scope: the first such field found wins, and any additional type params
+/// beyond the first aren't recovered). Returns the record's `Ty::Named`
+/// tagged with that argument (empty args if the type isn't generic, or
+/// nothing could be recovered) plus the declared field types in `fields`'
+/// order, so MIR knows which fields to heap-box on construction.
+fn recover_generic_record_ty(ty_name: Option<&str>, fields: &[(String, HirExpr)], cx: &Cx) -> (Ty, Vec<Ty>) {
+    let Some(name) = ty_name else { return (Ty::Error, vec![Ty::Error; fields.len()]) };
+    let Some(names) = cx.record_field_names.get(name) else {
+        return (Ty::Named { name: name.to_string(), args: vec![] }, vec![Ty::Error; fields.len()]);
+    };
+    let declared: Vec<Ty> = fields.iter().map(|(fname, _)| {
+        names.iter().position(|n| n == fname)
+            .and_then(|pos| cx.record_field_types.get(name).and_then(|tys| tys.get(pos)))
+            .cloned()
+            .unwrap_or(Ty::Error)
+    }).collect();
+    let recovered = fields.iter().zip(declared.iter())
+        .find(|(_, ty)| matches!(ty, Ty::Var(_)))
+        .map(|((_, value), _)| value.ty.clone());
+    let args = match recovered {
+        Some(t) if !matches!(t, Ty::Error) => vec![t],
+        _ => vec![],
+    };
+    (Ty::Named { name: name.to_string(), args }, declared)
 }

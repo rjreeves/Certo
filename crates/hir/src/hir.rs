@@ -15,6 +15,14 @@ pub type FnId = u32;
 pub struct HirModule {
     pub name:  String,
     pub items: Vec<HirItem>,
+    /// Record type name → ordered declared field types (a bare type-param
+    /// field is `Ty::Var(0)`). Exposed so MIR's `lower_fn` can decide when a
+    /// generic type's field construction/read needs heap-boxing — BACKLOG
+    /// item 119.
+    pub record_field_types: std::collections::HashMap<String, Vec<Ty>>,
+    /// Sum variant name → ordered declared payload field types. Same purpose
+    /// as `record_field_types`, for sum-type variant constructors/patterns.
+    pub variant_field_types: std::collections::HashMap<String, Vec<Ty>>,
 }
 
 #[derive(Debug, Clone)]
@@ -108,10 +116,23 @@ pub enum HirExprKind {
     Field {
         base:  Box<HirExpr>,
         field: String,
+        /// True when the field's *declared* type is a bare type parameter
+        /// (`Ty::Var(0)` in `record_field_types`/`variant_field_types`) —
+        /// its C storage is `void*` regardless of the concrete type it's
+        /// instantiated to, so the read must unbox (BACKLOG item 119).
+        /// The outer `HirExpr.ty` carries the substituted concrete type
+        /// (or `Ty::Error` when it can't be recovered).
+        boxed: bool,
     },
 
     /// Record construction: `{ field: value, ... }`.
-    Record(Vec<(String, HirExpr)>),
+    /// `field_types` are the *declared* field types (parallel to the value
+    /// list, by index) — a `Ty::Var(0)` entry marks a field that must be
+    /// heap-boxed on construction (BACKLOG item 119).
+    Record {
+        fields:      Vec<(String, HirExpr)>,
+        field_types: Vec<Ty>,
+    },
 
     /// Tuple construction: `(a, b)`.
     Tuple(Vec<HirExpr>),
