@@ -1252,6 +1252,12 @@ certo mylib.cto --emit-dll -o mylib.dll
 # Type-check only (no compilation)
 certo check myapp.cto
 
+# Type-check + fail on lint warnings (unused vars, dead code, ...)
+certo check myapp.cto --strict
+
+# Type-check + print full explanations for each diagnostic code
+certo check myapp.cto --explain
+
 # Print generated C (no compilation)
 certo myapp.cto --emit-c
 
@@ -1261,12 +1267,16 @@ certo myapp.cto -o myapp.exe -v
 # Watch mode — rebuild on file change
 certo myapp.cto -o myapp.exe --watch
 
+# Compile, run, and re-run on every file change
+certo run myapp.cto --watch
+
 # Interactive REPL
 certo repl
 
 # Run unit tests
 certo test myapp_test.cto
 certo test myapp_test.cto --timeout=10000
+certo test myapp_test.cto --filter "addition"   # only tests whose name contains this
 
 # Lint for unused variables and dead code
 certo lint myapp.cto
