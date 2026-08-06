@@ -79,6 +79,18 @@ pub fn emit_spawn_support(sites: &[SpawnSite], emitted_joins: &mut HashSet<Strin
     }
 }
 
+/// `panic(msg)` is `∀a. Text -> a` at the Certo level (usable in any
+/// expression position) but `certo_panic` is a genuinely `noreturn void` C
+/// function — unlike an ordinary `Unit`-returning Certo function, which
+/// fakes a capturable `int64_t` zero return so call sites can always assign
+/// the result uniformly. Assigning a `void` call's result is a C compile
+/// error, so a call to `panic` must be emitted as a bare statement instead.
+/// (`unreachable`/`todo` are deliberately not included here — they're
+/// zero-arg C macros with their own separate, unrelated argument-count bug.)
+fn is_void_noreturn_callee(func: &Operand) -> bool {
+    matches!(func, Operand::Global(name) if name == "panic")
+}
+
 fn operand_ty(op: &Operand, locals: &[MirLocalDecl]) -> Ty {
     match op {
         Operand::Local(id) => locals.iter().find(|l| l.id == *id).map(|l| l.ty.clone()).unwrap_or(Ty::Error),
@@ -191,7 +203,16 @@ fn emit_stmt(stmt: &MirStmt, locals: &[MirLocalDecl], fn_cname: &str, spawn_idx:
         }
         Rvalue::Call { func, args } => {
             let args_str = emit_call_args(func, args);
-            writeln!(out, "    {} = {}({});", lhs, emit_callee(func, locals), args_str).unwrap();
+            if is_void_noreturn_callee(func) {
+                // `panic(msg)` — genuinely `noreturn void` in C (unlike an
+                // ordinary `Unit`-returning Certo function, which fakes a
+                // capturable `int64_t` return of 0); assigning its result
+                // is a compile error. `lhs` is left unset, which is sound
+                // since `noreturn` means nothing after this line executes.
+                writeln!(out, "    {}({});", emit_callee(func, locals), args_str).unwrap();
+            } else {
+                writeln!(out, "    {} = {}({});", lhs, emit_callee(func, locals), args_str).unwrap();
+            }
         }
         Rvalue::Field { base, field } => {
             // For an all-nullary enum (represented as a plain int), the value *is*
@@ -338,7 +359,13 @@ fn emit_terminator(term: &Terminator, ret_ty: &Ty, locals: &[MirLocalDecl], out:
         }
         Terminator::Call { func, args, dest, next } => {
             let args_str = emit_call_args(func, args);
-            writeln!(out, "    {} = {}({});", local_name(*dest), emit_callee(func, locals), args_str).unwrap();
+            // See `Rvalue::Call`'s identical special case: `panic(msg)`'s C
+            // implementation is genuinely `noreturn void`.
+            if is_void_noreturn_callee(func) {
+                writeln!(out, "    {}({});", emit_callee(func, locals), args_str).unwrap();
+            } else {
+                writeln!(out, "    {} = {}({});", local_name(*dest), emit_callee(func, locals), args_str).unwrap();
+            }
             writeln!(out, "    goto bb{};", next).unwrap();
         }
         Terminator::Switch { discr, targets, otherwise } => {

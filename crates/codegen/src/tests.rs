@@ -42,6 +42,22 @@ fn inline_runtime_embeds_types() {
 }
 
 // ------------------------------------------------------------------ //
+// panic() — noreturn void, not an assignable call result
+// ------------------------------------------------------------------ //
+
+#[test]
+fn panic_call_in_if_branch_is_a_bare_statement() {
+    // `panic(msg)` is `forall a. Text -> a` at the Certo level (usable in any
+    // expression position), but `certo_panic` is a genuinely `noreturn void`
+    // C function — unlike an ordinary Unit-returning Certo function, which
+    // fakes a capturable int64_t zero return. Assigning a void call's result
+    // is a C compile error, so the call must be emitted as a bare statement.
+    let c = codegen("module A\nfn f(b: Bool): Unit = if b then panic(\"nope\") else ()");
+    assert_contains(&c, "certo_panic(");
+    assert_not_contains(&c, "= certo_panic(");
+}
+
+// ------------------------------------------------------------------ //
 // Struct emission
 // ------------------------------------------------------------------ //
 
@@ -1031,14 +1047,18 @@ fn gen_sm(src: &str) -> String {
 
 #[test]
 fn state_machine_generates_enum_and_functions() {
+    // The machine is a real struct (`state` + any accumulated event-param
+    // fields), not a bare enum — BACKLOG item 82 needs somewhere to run
+    // on_enter hooks / check invariants against (`self`).
     let src = "module A\nstatemachine M {\n  states:\n    Off, On\n  transitions:\n    Off -> On : turnOn()\n    On -> Off : turnOff()\n}";
     let out = gen_sm(src);
-    assert_contains(&out, "type M = | Off | On");
-    assert_contains(&out, "fn M_new(): M = Off");        // initial = first state
+    assert_contains(&out, "type MState = | Off | On");
+    assert_contains(&out, "type M = { state: MState }");
+    assert_contains(&out, "fn M_new(): M = M { state: Off }"); // initial = first state
     assert_contains(&out, "fn M_turnOn(m: M): M");
-    assert_contains(&out, "Off => On");                   // the transition arm
+    assert_contains(&out, "Off => M { ..m, state: On }");      // the transition arm
     assert_contains(&out, "fn M_isOn(m: M): Bool");
-    assert_contains(&out, "fn M_state(m: M): M = m");
+    assert_contains(&out, "fn M_state(m: M): MState = m.state");
 }
 
 #[test]
@@ -1046,10 +1066,35 @@ fn state_machine_groups_shared_event() {
     // `cancel` from two states must produce one function with both arms.
     let src = "module A\nstatemachine M {\n  states:\n    A, B, Dead\n  transitions:\n    A -> Dead : cancel()\n    B -> Dead : cancel()\n}";
     let out = gen_sm(src);
-    assert_contains(&out, "A => Dead");
-    assert_contains(&out, "B => Dead");
+    assert_contains(&out, "A => M { ..m, state: Dead }");
+    assert_contains(&out, "B => M { ..m, state: Dead }");
     // One combined function, not two.
     assert_eq!(out.matches("fn M_cancel(").count(), 1, "expected a single cancel fn:\n{}", out);
+}
+
+#[test]
+fn state_machine_accumulates_fields_from_transition_params() {
+    let src = "module A\nstatemachine M {\n  states:\n    Trial, Active\n  transitions:\n    Trial -> Active : activate(amount: Int)\n}";
+    let out = gen_sm(src);
+    assert_contains(&out, "type M = { state: MState, amount: Int? }");
+    assert_contains(&out, "fn M_new(): M = M { state: Trial, amount: None }");
+    assert_contains(&out, "Trial => M { ..m, state: Active, amount: Some(amount) }");
+}
+
+#[test]
+fn state_machine_on_enter_runs_after_state_update() {
+    let src = "module A\nstatemachine M {\n  states:\n    Off, On\n  transitions:\n    Off -> On : turnOn()\n\n  on_enter On: println(\"hi\")\n}";
+    let out = gen_sm(src);
+    let state_set_pos = out.find("state: On").expect("state update");
+    let hook_pos = out.find("println(\"hi\")").expect("on_enter hook body");
+    assert!(state_set_pos < hook_pos, "on_enter must run after the state field is set:\n{out}");
+}
+
+#[test]
+fn state_machine_invariant_panics_with_condition_text() {
+    let src = "module A\nstatemachine M {\n  states:\n    Off, On\n  transitions:\n    Off -> On : turnOn()\n\n  invariant On: 1 > 0\n}";
+    let out = gen_sm(src);
+    assert_contains(&out, "if !(1 > 0) then panic(\"invariant violated entering On: 1 > 0\")");
 }
 
 #[test]

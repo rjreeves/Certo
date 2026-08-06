@@ -17,11 +17,11 @@ Last reviewed: 2026-06-22.
 > 2026-06-22 found and fixed a `Result` re-wrapping type-checker bug — `Ok`/`Err`
 > now correctly quantify both type variables.)
 >
-> **Scope decision (2026-06-22):** two narrow items are **explicitly deferred to
-> post-1.0** and are *out of scope* for the v1.0 guarantee — payload-*carrying*
-> enums in `Result`/`List`/tuple slots (§10) and state-machine
-> `on_enter`/`invariant` blocks (§8). Both have clean workarounds and neither
-> blocks the v1.0 feature set.
+> **Scope decision (2026-06-22):** one narrow item is **explicitly deferred to
+> post-1.0** and is *out of scope* for the v1.0 guarantee — payload-*carrying*
+> enums in `Result`/`List`/tuple slots (§10). Has a clean workaround and doesn't
+> block the v1.0 feature set. (State-machine `on_enter`/`invariant` blocks,
+> previously also deferred here, are implemented as of BACKLOG item 82 — see §8.)
 >
 > **Fixed 2026-06-23:** `Option` is now uniformly heap-boxed, so `parseInt` /
 > `parseFloat` return correct values, `Some(0)` ≠ `None`, and `Option<Float>`
@@ -182,13 +182,14 @@ Caveats:
 
 ---
 
-## 8. State machines — executable (transitions, predicates, accessor)
+## 8. State machines — executable (transitions, `on_enter`, `invariant`, predicates, accessor)
 
-**Status:** Implemented. `on_enter` hooks and `invariant`s are **deferred to
-post-1.0** (out of the v1.0 scope) — see the scope decision at the top.
+**Status:** Implemented, including `on_enter` hooks and `invariant`s (BACKLOG
+item 82).
 
-A `statemachine { states: … transitions: … }` is expanded into a state enum plus
-functions ([crates/codegen/src/emit_statemachine.rs](../crates/codegen/src/emit_statemachine.rs),
+A `statemachine { states: … transitions: … }` is expanded into a machine
+struct plus functions
+([crates/codegen/src/emit_statemachine.rs](../crates/codegen/src/emit_statemachine.rs),
 spliced in by `expand_state_machines`):
 
 ```
@@ -197,25 +198,41 @@ statemachine Traffic {
   transitions: Stopped -> Going : go()
                Going -> Slowing : caution()
                Slowing -> Stopped : stop()
+
+  on_enter Going: println("go!")
+
+  invariant Slowing: true
 }
 …
 val s = Traffic_new()            // initial state (first listed) = Stopped
-val s2 = Traffic_go(s)           // -> Going
+val s2 = Traffic_go(s)           // -> Going; runs on_enter, prints "go!"
 Traffic_isGoing(s2)              // true
-Traffic_state(s2)                // the current state, matchable as an enum
+Traffic_state(s2)                // the current state, an MState enum value
 ```
 
-The machine value *is* its current state (a pointer-sized int enum). Each event
-generates one `Machine_<event>(m, params…)` that moves to the target state for a
-valid transition or stays put; plus `Machine_is<State>` predicates and a
-`Machine_state` accessor. Transition parameters are accepted (for signature
-compatibility) but not otherwise used. Verified running end-to-end on
-2026-06-22, including events shared across multiple source states.
+The machine value is a real struct (`{ state: TrafficState, … }`), not a bare
+enum — every transition's event params are accumulated as `Option`-typed
+fields on it (`None` until the transition that sets them fires), so
+`on_enter`/`invariant` bodies can reference the machine's own data via a
+`self` binding, matching the spec's own examples (`invariant Active:
+self.paymentMethod.isSome()`... though `Option` has no `.isSome()` method
+today — use `match self.field { Some(x) => … None => … }`). Each event
+generates one `Machine_<event>(m, params…)` that: updates the struct (new
+state + this transition's params), runs the target state's `on_enter` hook
+(if any) with `self` bound to the *new* machine value, then panics if any of
+the target state's `invariant`s don't hold — or stays put for an invalid
+transition (still a no-op, not a panic — that part of the original caveat
+is unchanged). Plus `Machine_is<State>` predicates and a `Machine_state`
+accessor (returns the state enum, not the whole struct). Verified end-to-end
+via `certo.exe` on real programs: `on_enter` side effects fire after the
+state commits, a satisfied invariant lets the transition succeed silently,
+and a violated one panics with the invariant's own source text in the
+message.
 
-Caveat: **`on_enter` hooks and `invariant` blocks are not expanded** — they are
-parsed and dropped. Compile-time *typestate* enforcement (rejecting an invalid
-transition at the call site) is also not done; an invalid transition is a no-op
-at runtime.
+Caveat: compile-time *typestate* enforcement (rejecting an invalid transition
+at the call site) is still not done. `invariant`s are only checked once, at
+the moment their state is entered — not continuously enforced for as long as
+the machine remains in that state.
 
 ---
 
@@ -240,17 +257,16 @@ during the 2026-06-22 smoke pass:
 - **Traits / `impl`**: methods compile to `Type.method` functions and run via
   qualified calls (static dispatch) — see §6 for the two caveats.
 - **Validators** with a `Text` or nullary-enum error type — see §7.
-- **State machines**: `new`, transitions, `is<State>` predicates, and the state
-  accessor all run — see §8 (`on_enter`/`invariant` excepted).
+- **State machines**: `new`, transitions, `on_enter`, `invariant`, `is<State>`
+  predicates, and the state accessor all run — see §8.
 - Type inference (Hindley-Milner) across all of the above.
 - Structured database migrations (parse → schema-check → SQL DDL generation) —
   verified at the unit/integration level.
 
 **All headline features now execute.** The remaining limitations are explicitly
 **out of v1.0 scope** and deferred to post-1.0: payload-*carrying* enums in
-`Result`/`List`/tuple slots (§10), state-machine `on_enter`/`invariant` blocks
-(§8), and validator `context`/`overrides`/`trigger` blocks (§7). Each has a clean
-workaround and none blocks the v1.0 feature set.
+`Result`/`List`/tuple slots (§10), and validator `context`/`overrides`/`trigger`
+blocks (§7). Each has a clean workaround and neither blocks the v1.0 feature set.
 
 ---
 
