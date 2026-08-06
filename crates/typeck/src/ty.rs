@@ -15,8 +15,10 @@ pub enum Ty {
     Int32,
     UInt,   // UInt64
     Float,
+    Float32,
     Decimal,
     Bool,
+    Char,   // single ASCII byte — same byte-oriented convention as Text
     Text,
     Unit,
     Uuid,
@@ -182,8 +184,10 @@ impl Ty {
             Ty::Int32   => "Int32".into(),
             Ty::UInt    => "UInt".into(),
             Ty::Float   => "Float".into(),
+            Ty::Float32 => "Float32".into(),
             Ty::Decimal => "Decimal".into(),
             Ty::Bool    => "Bool".into(),
+            Ty::Char    => "Char".into(),
             Ty::Text    => "Text".into(),
             Ty::Unit    => "Unit".into(),
             Ty::Uuid    => "UUID".into(),

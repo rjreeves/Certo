@@ -250,7 +250,13 @@ fn auto_print_for(ty: &Ty, expr: &str) -> Option<String> {
         Ty::Int | Ty::Int8 | Ty::Int16 | Ty::Int32 | Ty::UInt
                   => Some(format!("print(intToText({}))", expr)),
         Ty::Float => Some(format!("print(floatToText({}))", expr)),
+        // Float32 is a distinct type from Float (does not unify — see
+        // crates/typeck/src/unify.rs), so it needs its own conversion here,
+        // not floatToText (which is typed exactly Ty::Float -> Ty::Text and
+        // would fail to type-check against a Float32-typed expr).
+        Ty::Float32 => Some(format!("print(float32ToText({}))", expr)),
         Ty::Bool  => Some(format!("print(boolToText({}))", expr)),
+        Ty::Char  => Some(format!("print(Char.toText({}))", expr)),
         _ => None,
     }
 }

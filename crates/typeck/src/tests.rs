@@ -858,3 +858,58 @@ fn run(): (Int, Int) = await parallel(timeout: 5) { work(), work() }";
         "expected a type mismatch for a non-Duration timeout, got: {:?}", kind
     );
 }
+
+// ------------------------------------------------------------------ //
+// Float32 / Char — BACKLOG item 75
+// ------------------------------------------------------------------ //
+
+#[test]
+fn float32_param_and_return_type_check() {
+    check("module A\nfn f(x: Float32): Float32 = x").unwrap();
+}
+
+#[test]
+fn float32_arithmetic_type_checks() {
+    // BinOp::Add etc. just unify(lt, rt) and return lt — generic over any
+    // type that unifies with itself, so this should work with zero special
+    // casing once the Ty variant exists (confirmed by reading infer_binop).
+    check("module A\nfn f(x: Float32, y: Float32): Float32 = x + y").unwrap();
+}
+
+#[test]
+fn float32_does_not_unify_with_float() {
+    // Mirrors Int8's existing exclusivity — Float32 must be a fully
+    // distinct type, not silently coercible from/to Float.
+    let src = "module A\nfn f(x: Float): Float32 = x";
+    let kind = first_error_kind(src);
+    assert!(
+        matches!(kind, TypeErrorKind::Mismatch { .. } | TypeErrorKind::CannotUnify { .. }),
+        "expected Float32/Float to be exclusive, got: {:?}", kind
+    );
+}
+
+#[test]
+fn char_param_and_return_type_check() {
+    check("module A\nfn f(c: Char): Char = c").unwrap();
+}
+
+#[test]
+fn char_does_not_unify_with_text() {
+    let src = "module A\nfn f(s: Text): Char = s";
+    let kind = first_error_kind(src);
+    assert!(
+        matches!(kind, TypeErrorKind::Mismatch { .. } | TypeErrorKind::CannotUnify { .. }),
+        "expected Char/Text to be exclusive, got: {:?}", kind
+    );
+}
+
+#[test]
+fn char_does_not_unify_with_int() {
+    let src = "module A\nfn f(n: Int): Char = n";
+    let kind = first_error_kind(src);
+    assert!(
+        matches!(kind, TypeErrorKind::Mismatch { .. } | TypeErrorKind::CannotUnify { .. }),
+        "expected Char/Int to be exclusive, got: {:?}", kind
+    );
+}
+

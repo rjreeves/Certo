@@ -71,6 +71,46 @@ certo_text_t certo_text_to_lower(certo_text_t s) {
     return out;
 }
 
+/* ---- Char — a single ASCII byte, same byte-oriented convention as the rest
+   of Text (toUpper/toLower/len are all byte-based, not real Unicode). ---- */
+
+/* Bounds-checked single-character access — Text had no char-level access at
+   all before this. Returns Option<Char> (heap-boxed via __certo_opt_box,
+   same convention as every other Option-returning stdlib function). */
+void* certo_text_char_at(certo_text_t s, int64_t i) {
+    if (!s || i < 0) return NULL;
+    size_t len = strlen(s);
+    if ((size_t)i >= len) return NULL;
+    return __certo_opt_box((int64_t)(unsigned char)s[i]);
+}
+
+certo_text_t certo_char_to_text(char c) {
+    char* out = (char*)malloc(2);
+    if (!out) certo_panic("out of memory");
+    out[0] = c;
+    out[1] = '\0';
+    return out;
+}
+
+int64_t certo_char_to_int(char c) {
+    return (int64_t)(unsigned char)c;
+}
+
+/* Truncates to a byte, same convention as certo_float_to_int's silent
+   truncation rather than an Option — out-of-range input is a caller bug,
+   not a representable failure mode worth threading through every call site. */
+char certo_char_from_int(int64_t n) {
+    return (char)(n & 0xFF);
+}
+
+bool certo_char_is_digit(char c)      { return isdigit((unsigned char)c) != 0; }
+bool certo_char_is_alpha(char c)      { return isalpha((unsigned char)c) != 0; }
+bool certo_char_is_upper_case(char c) { return isupper((unsigned char)c) != 0; }
+bool certo_char_is_lower_case(char c) { return islower((unsigned char)c) != 0; }
+bool certo_char_is_whitespace(char c) { return isspace((unsigned char)c) != 0; }
+char certo_char_to_upper_case(char c) { return (char)toupper((unsigned char)c); }
+char certo_char_to_lower_case(char c) { return (char)tolower((unsigned char)c); }
+
 certo_text_t certo_text_trim(certo_text_t s) {
     if (!s) return "";
     while (*s && isspace((unsigned char)*s)) s++;

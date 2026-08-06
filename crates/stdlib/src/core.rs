@@ -78,6 +78,34 @@ double certo_int_to_float(int64_t n) {
     return (double)n;
 }
 
+/* ---- Float32 ----
+   `float` is a genuinely distinct C type from `double` (Ty::Float32 vs
+   Ty::Float do not unify — see crates/typeck/src/unify.rs), so it needs its
+   own construction/conversion path rather than reusing the Float ones. */
+
+certo_text_t certo_float32_to_text(float f) {
+    char* buf = (char*)malloc(64);
+    if (!buf) certo_panic("out of memory");
+    snprintf(buf, 64, "%g", (double)f);
+    return buf;
+}
+
+int64_t certo_float32_to_int(float f) {
+    return (int64_t)f;
+}
+
+float certo_int_to_float32(int64_t n) {
+    return (float)n;
+}
+
+double certo_float32_to_float(float f) {
+    return (double)f;
+}
+
+float certo_float_to_float32(double f) {
+    return (float)f;
+}
+
 int64_t certo_text_to_int_unsafe(certo_text_t s) {
     if (!s) certo_panic("text_to_int: null string");
     return (int64_t)strtoll(s, NULL, 10);
