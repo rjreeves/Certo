@@ -6,7 +6,7 @@ fn mir_fn(src: &str) -> crate::MirFn {
     let module = parse(src).expect("parse error");
     let hir = lower_module(&module).expect("hir error");
     let HirItem::Fn(f) = &hir.items[0] else { panic!("expected fn"); };
-    lower_fn(f).0
+    lower_fn(f, &hir.record_field_types, &hir.variant_field_types).0
 }
 
 #[test]

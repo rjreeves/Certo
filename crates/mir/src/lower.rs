@@ -21,10 +21,22 @@ struct Builder {
     /// Deferred expressions accumulated by `defer { ... }` statements.
     /// Emitted in LIFO order before every `Return` terminator.
     defers:      Vec<certo_hir::HirExpr>,
+    /// Record type name → ordered declared field types (BACKLOG item 119) —
+    /// a `Ty::Var(0)` entry marks a bare type-param field, which is
+    /// heap-boxed on construction and unboxed on read since its C storage
+    /// is `void*` regardless of what concrete type it's instantiated to.
+    record_field_types:  std::collections::HashMap<String, Vec<Ty>>,
+    /// Sum variant name → ordered declared payload field types. Same
+    /// purpose as `record_field_types`, for variant constructors/patterns.
+    variant_field_types: std::collections::HashMap<String, Vec<Ty>>,
 }
 
 impl Builder {
-    fn new(fn_name: &str) -> Self {
+    fn new(
+        fn_name: &str,
+        record_field_types:  std::collections::HashMap<String, Vec<Ty>>,
+        variant_field_types: std::collections::HashMap<String, Vec<Ty>>,
+    ) -> Self {
         let entry = BasicBlock { id: 0, ..Default::default() };
         Builder {
             locals:    Vec::new(),
@@ -36,6 +48,8 @@ impl Builder {
             lambda_count: 0,
             fn_name: fn_name.to_string(),
             defers:    Vec::new(),
+            record_field_types,
+            variant_field_types,
         }
     }
 
@@ -98,8 +112,14 @@ fn emit_defers_then_return(return_op: Operand, b: &mut Builder) {
 // ------------------------------------------------------------------ //
 
 /// Lower a HIR function to MIR. Returns the primary function plus any lambdas lifted to top level.
-pub fn lower_fn(f: &HirFn) -> (MirFn, Vec<MirFn>) {
-    let mut b = Builder::new(&f.name);
+/// `record_field_types`/`variant_field_types` come from `HirModule` (BACKLOG item 119) —
+/// used to decide when a generic type's field construction/read needs heap-boxing.
+pub fn lower_fn(
+    f: &HirFn,
+    record_field_types:  &std::collections::HashMap<String, Vec<Ty>>,
+    variant_field_types: &std::collections::HashMap<String, Vec<Ty>>,
+) -> (MirFn, Vec<MirFn>) {
+    let mut b = Builder::new(&f.name, record_field_types.clone(), variant_field_types.clone());
 
     // Declare params as locals (index 0 = return slot, type patched below).
     let ret_slot = b.declare_local("_ret", Ty::Error);
@@ -154,7 +174,7 @@ fn lower_lambda_boxed(params: &[certo_hir::HirParam], body: &HirExpr, param_ty_h
     b.lambda_count += 1;
     let lam_name = format!("__lam_{}_{}_boxed", b.fn_name, idx);
 
-    let mut lb = Builder::new(&lam_name);
+    let mut lb = Builder::new(&lam_name, b.record_field_types.clone(), b.variant_field_types.clone());
     let ret_slot = lb.declare_local("_ret", Ty::Var(0));
 
     // The C signature's params (locals 1..=param_count) are always void* —
@@ -421,13 +441,29 @@ fn lower_expr(expr: &HirExpr, b: &mut Builder) -> Operand {
             } else {
                 None
             };
-            let arg_ops: Vec<Operand> = args.iter().map(|a| {
+            // A generic sum-type variant constructor call (e.g. `Secret(42)`)
+            // must heap-box any argument whose corresponding *declared*
+            // field type is a bare type parameter (`Ty::Var(_)`) — its C
+            // storage is `void*` regardless of the concrete type instantiated
+            // here, mirroring how `Some`/`Ok`/`Err` box their own payload
+            // above — BACKLOG item 119.
+            let variant_field_types: Option<Vec<Ty>> = match &func.kind {
+                HirExprKind::Global(name) => b.variant_field_types.get(name).cloned(),
+                _ => None,
+            };
+            let arg_ops: Vec<Operand> = args.iter().enumerate().map(|(i, a)| {
                 if needs_boxed_callback {
                     if let HirExprKind::Lambda { params, body } = &a.kind {
                         return lower_lambda_boxed(params, body, elem_ty_hint.as_ref(), b);
                     }
                 }
-                lower_expr(a, b)
+                let value_op = lower_expr(a, b);
+                if matches!(variant_field_types.as_ref().and_then(|tys| tys.get(i)), Some(Ty::Var(_))) {
+                    let boxed = b.declare_local("_boxed_arg", Ty::Var(0));
+                    b.assign(boxed, Rvalue::BoxSome { value: value_op, ty: a.ty.clone() });
+                    return Operand::Local(boxed);
+                }
+                value_op
             }).collect();
             // `List.getOrPanic` (and any similarly-shaped stdlib function
             // returning a bare, unwrapped element type) always returns a raw
@@ -650,16 +686,37 @@ fn lower_expr(expr: &HirExpr, b: &mut Builder) -> Operand {
                                 // `name` here is the fully-qualified `Type__Variant`, so take
                                 // the last segment.
                                 let variant = name.rsplit("__").next().unwrap_or(name).to_lowercase();
+                                // Substitute a bare-type-param field's declared
+                                // `Ty::Var(_)` with the scrutinee's own recovered
+                                // instantiation argument (single-type-param scope
+                                // — `args.first()`) and unbox the read, mirroring
+                                // `Some`/`Ok`/`Err`'s existing boxed-payload
+                                // handling — BACKLOG item 119.
+                                let scrut_args: &[Ty] = match &scrutinee.ty { Ty::Named { args, .. } => args, _ => &[] };
                                 for (i, field_pat) in fields.iter().enumerate() {
                                     if let HirPat::Bind { local, name: fname } = field_pat {
-                                        let ml = b.map_hir_local(*local, fname, field_types[i].clone());
+                                        let declared = &field_types[i];
+                                        let (real_ty, needs_unbox) = match declared {
+                                            Ty::Var(_) => (scrut_args.first().cloned().unwrap_or(Ty::Error), true),
+                                            other => (other.clone(), false),
+                                        };
+                                        let ml = b.map_hir_local(*local, fname, real_ty.clone());
                                         // Read the payload directly via a nested path
                                         // `scrut.<variant>.<field>` — avoids an intermediate
                                         // local whose (anonymous struct) type we can't name.
-                                        b.assign(ml, Rvalue::Field {
-                                            base: scrut_op.clone(),
-                                            field: format!("{}.{}", variant, field_names[i]),
-                                        });
+                                        if needs_unbox {
+                                            let raw = b.declare_local("_variant_field_raw", Ty::Var(0));
+                                            b.assign(raw, Rvalue::Field {
+                                                base: scrut_op.clone(),
+                                                field: format!("{}.{}", variant, field_names[i]),
+                                            });
+                                            b.assign(ml, Rvalue::UnboxSome { opt: Operand::Local(raw), ty: real_ty });
+                                        } else {
+                                            b.assign(ml, Rvalue::Field {
+                                                base: scrut_op.clone(),
+                                                field: format!("{}.{}", variant, field_names[i]),
+                                            });
+                                        }
                                     }
                                 }
                                 let cmp = b.declare_local("_cmp", Ty::Bool);
@@ -740,8 +797,21 @@ fn lower_expr(expr: &HirExpr, b: &mut Builder) -> Operand {
             Operand::Local(result)
         }
 
-        HirExprKind::Record(fields) => {
-            let ops: Vec<Operand> = fields.iter().map(|(_, v)| lower_expr(v, b)).collect();
+        HirExprKind::Record { fields, field_types } => {
+            // A field whose *declared* type is a bare type parameter
+            // (`Ty::Var(_)`) is stored as `void*` in the struct regardless of
+            // its concrete instantiation, so its value must be heap-boxed
+            // the same way `Some(v)` boxes an Option payload — BACKLOG item 119.
+            let ops: Vec<Operand> = fields.iter().zip(field_types.iter()).map(|((_, v), fty)| {
+                let value_op = lower_expr(v, b);
+                if matches!(fty, Ty::Var(_)) {
+                    let boxed = b.declare_local("_boxed_field", Ty::Var(0));
+                    b.assign(boxed, Rvalue::BoxSome { value: value_op, ty: v.ty.clone() });
+                    Operand::Local(boxed)
+                } else {
+                    value_op
+                }
+            }).collect();
             let names: Vec<String> = fields.iter().map(|(n, _)| n.clone()).collect();
             let dest = b.declare_local("_rec", expr.ty.clone());
             b.assign(dest, Rvalue::Aggregate(AggregateKind::Record(names), ops));
@@ -762,11 +832,22 @@ fn lower_expr(expr: &HirExpr, b: &mut Builder) -> Operand {
             Operand::Local(dest)
         }
 
-        HirExprKind::Field { base, field } => {
+        HirExprKind::Field { base, field, boxed } => {
             let base_op = lower_expr(base, b);
-            let dest = b.declare_local(&format!("_field_{}", field), expr.ty.clone());
-            b.assign(dest, Rvalue::Field { base: base_op, field: field.clone() });
-            Operand::Local(dest)
+            if *boxed {
+                // Declared as a bare type-param field — the raw `.field` read
+                // is a `void*` box that must be unboxed to the substituted
+                // concrete type (`expr.ty`) — BACKLOG item 119.
+                let raw = b.declare_local(&format!("_field_{}", field), Ty::Var(0));
+                b.assign(raw, Rvalue::Field { base: base_op, field: field.clone() });
+                let dest = b.declare_local(&format!("_field_{}_unboxed", field), expr.ty.clone());
+                b.assign(dest, Rvalue::UnboxSome { opt: Operand::Local(raw), ty: expr.ty.clone() });
+                Operand::Local(dest)
+            } else {
+                let dest = b.declare_local(&format!("_field_{}", field), expr.ty.clone());
+                b.assign(dest, Rvalue::Field { base: base_op, field: field.clone() });
+                Operand::Local(dest)
+            }
         }
 
         HirExprKind::Lambda { params, body } => {
@@ -776,7 +857,7 @@ fn lower_expr(expr: &HirExpr, b: &mut Builder) -> Operand {
             let lam_name = format!("__lam_{}_{}", b.fn_name, idx);
 
             // Build MIR for the lambda body using a fresh builder.
-            let mut lb = Builder::new(&lam_name);
+            let mut lb = Builder::new(&lam_name, b.record_field_types.clone(), b.variant_field_types.clone());
             let ret_slot = lb.declare_local("_ret", Ty::Error);
             for p in params {
                 lb.map_hir_local(p.local, &p.name, p.ty.clone());
