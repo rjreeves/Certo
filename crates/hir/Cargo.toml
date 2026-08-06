@@ -4,8 +4,9 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-certo-ast   = { path = "../ast" }
+certo-ast    = { path = "../ast" }
 certo-typeck = { path = "../typeck" }
+certo-stdlib = { path = "../stdlib" }
 
 [dev-dependencies]
 certo-parser  = { path = "../parser" }

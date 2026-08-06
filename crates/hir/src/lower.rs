@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::OnceLock;
 use certo_ast::module::Module;
 use certo_ast::decl::{Decl, FnParam};
 use certo_ast::expr::{Expr, Stmt, Lit, BinOp as AstBinOp, UnOp as AstUnOp, FStringPart};
@@ -113,47 +114,38 @@ impl Cx {
     }
 }
 
-/// Stdlib function parameter names, keyed by fully-qualified name (e.g. "Text.split").
-/// Used to reorder named args at call sites for stdlib functions.
-/// Return types for monomorphic stdlib functions whose result type the HIR needs
-/// (e.g. to know an `Option`'s payload type for heap-box/unbox). Generic
-/// producers (`List.get<T>`) are omitted — their payload isn't known here.
-fn stdlib_ret_type(name: &str) -> Option<Ty> {
-    match name {
-        "parseInt"     => Some(Ty::Option(Box::new(Ty::Int))),
-        "parseFloat"   => Some(Ty::Option(Box::new(Ty::Float))),
-        "parseDecimal" => Some(Ty::Option(Box::new(Ty::Decimal))),
-        // Float32 (BACKLOG item 75) — without these, the call's HirExpr.ty
-        // defaults to Ty::Error, which maps to int64_t in codegen; a real
-        // `float`/`double` result assigned into a wrongly-typed int64_t
-        // local gets silently truncated by C's implicit conversion rules
-        // (confirmed: intToFloat/floatToInt have this exact same gap
-        // pre-existing — not fixed here, out of this item's scope, flagged
-        // separately).
-        "float32ToText"  => Some(Ty::Text),
-        "float32ToInt"   => Some(Ty::Int),
-        "intToFloat32"   => Some(Ty::Float32),
-        "float32ToFloat" => Some(Ty::Float),
-        "floatToFloat32" => Some(Ty::Float32),
-        _ => None,
-    }
-}
-
-/// Return types for stdlib `Type.method(...)` calls, keyed by the *full*
-/// qualified name — unlike `stdlib_ret_type` above (bare top-level function
-/// names), a short method name like `toText` is too generic to key on
-/// safely (collides across unrelated types' same-named methods).
-fn qualified_stdlib_ret_type(full: &str) -> Option<Ty> {
-    match full {
-        "Char.toText"  => Some(Ty::Text),
-        "Char.toInt"   => Some(Ty::Int),
-        "Char.fromInt" => Some(Ty::Char),
-        "Char.isDigit" | "Char.isAlpha" | "Char.isUpperCase"
-        | "Char.isLowerCase" | "Char.isWhitespace" => Some(Ty::Bool),
-        "Char.toUpperCase" | "Char.toLowerCase" => Some(Ty::Char),
-        "Text.charAt" => Some(Ty::Option(Box::new(Ty::Char))),
-        _ => None,
-    }
+/// Return types for monomorphic stdlib functions whose result type the HIR
+/// needs (e.g. to know an `Option`'s payload type for heap-box/unbox, or to
+/// give a `val` binding's local its real C type instead of the `Ty::Error`
+/// → `int64_t` fallback, which silently truncates non-int64-layout results
+/// like `Float`/`Float32`/`Text`).
+///
+/// Derived mechanically from `certo_stdlib::seed_stdlib`'s registered
+/// `TypeEnv` — the same table typeck itself checks calls against — instead
+/// of hand-listing individual function names. Two hand-maintained copies of
+/// this table previously existed here (one for bare top-level names, one for
+/// qualified `Type.method` names) and both missed functions from time to
+/// time (confirmed: `intToFloat`/`floatToInt` were never added to either,
+/// so `val f = intToFloat(3); val g = f / 2.0` silently computed truncating
+/// integer division instead of `Float` division — BACKLOG item 129).
+/// Every concrete (non-generic) stdlib function is now picked up
+/// automatically; generic producers (`List.get<T>`, registered as `Forall`)
+/// are skipped here — their payload type depends on the call's argument
+/// types, which `generic_container_ret` below recovers structurally instead.
+fn stdlib_ret_types() -> &'static HashMap<String, Ty> {
+    static TABLE: OnceLock<HashMap<String, Ty>> = OnceLock::new();
+    TABLE.get_or_init(|| {
+        let mut env = certo_typeck::TypeEnv::new();
+        let mut counter = 0u32;
+        certo_stdlib::seed_stdlib(&mut env, &mut counter);
+        env.names()
+            .into_iter()
+            .filter_map(|name| match env.lookup(&name) {
+                Some(Ty::Fn { ret, .. }) if !ret.has_vars() => Some((name, (**ret).clone())),
+                _ => None,
+            })
+            .collect()
+    })
 }
 
 /// Return types for generic stdlib functions whose result depends on an
@@ -717,8 +709,8 @@ fn lower_expr(expr: &S<Expr>, cx: &mut Cx) -> HirExpr {
                 .and_then(|fp| cx.sm_returns.get(fp).cloned())
                 .or_else(|| fn_full_path.as_deref().and_then(|fp| cx.fn_ret_types.get(fp).cloned()))
                 .or_else(|| cx.fn_ret_types.get(short).cloned())
-                .or_else(|| fn_full_path.as_deref().and_then(qualified_stdlib_ret_type))
-                .or_else(|| stdlib_ret_type(short))
+                .or_else(|| fn_full_path.as_deref().and_then(|fp| stdlib_ret_types().get(fp).cloned()))
+                .or_else(|| stdlib_ret_types().get(short).cloned())
                 .or_else(|| generic_container_ret(fn_full_path.as_deref(), &lowered_args))
                 .unwrap_or(Ty::Error);
             // Recover a generic sum-type variant constructor's concrete

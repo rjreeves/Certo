@@ -209,6 +209,45 @@ fn map_get_return_type_is_option_of_value_type() {
 }
 
 #[test]
+fn int_to_float_call_type_is_float_not_error() {
+    // BACKLOG item 129: intToFloat/floatToInt were never in the old hand-
+    // maintained stdlib_ret_type table, so the call's HirExpr.ty defaulted
+    // to Ty::Error, which codegen maps to int64_t — a `val` bound to the
+    // call's result got wrongly declared int64_t, and any further float
+    // arithmetic on it silently ran as truncating integer math instead of
+    // real Float division. Now derived mechanically from `seed_stdlib`.
+    let m = lower("module A\nfn f(n: Int): Float = intToFloat(n)");
+    if let HirItem::Fn(f) = &m.items[0] {
+        assert_eq!(f.body.as_ref().unwrap().ty, Ty::Float);
+    } else {
+        panic!("expected Fn");
+    }
+}
+
+#[test]
+fn float_to_int_call_type_is_int_not_error() {
+    let m = lower("module A\nfn f(x: Float): Int = floatToInt(x)");
+    if let HirItem::Fn(f) = &m.items[0] {
+        assert_eq!(f.body.as_ref().unwrap().ty, Ty::Int);
+    } else {
+        panic!("expected Fn");
+    }
+}
+
+#[test]
+fn stdlib_ret_types_covers_qualified_and_bare_names_mechanically() {
+    // A spot-check that the mechanically-derived table (crate::lower::stdlib_ret_types)
+    // picks up both bare top-level names and qualified `Type.method` names
+    // straight from seed_stdlib, without any name needing a hand-added entry.
+    let m = lower("module A\nimport Stdlib.Text.{ Char }\nfn f(c: Char): Int = Char.toInt(c)");
+    if let HirItem::Fn(f) = &m.items[0] {
+        assert_eq!(f.body.as_ref().unwrap().ty, Ty::Int);
+    } else {
+        panic!("expected Fn");
+    }
+}
+
+#[test]
 fn annotated_lambda_param_overrides_hint() {
     // An explicit lambda param annotation must still win over the inferred
     // hint from the scrutinee list.
