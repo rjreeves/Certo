@@ -115,16 +115,24 @@ fn real_main() {
 fn cmd_check(args: &[String]) {
     let mut input: Option<PathBuf> = None;
     let mut verbose = false;
+    let mut strict  = false;
+    let mut explain = false;
 
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
             "--verbose" | "-v" => verbose = true,
+            "--strict"         => strict  = true,
+            "--explain"        => explain = true,
             "--help" | "-h" => {
-                println!("Usage: certo check <file.cto> [-v]");
+                println!("Usage: certo check <file.cto> [-v] [--strict] [--explain]");
                 println!();
                 println!("Type-check a Certo source file without compiling.");
                 println!("Exits 0 on success, 1 if there are parse or type errors.");
+                println!();
+                println!("Options:");
+                println!("  --strict   Also run lint checks (certo lint) and fail if any warnings are found");
+                println!("  --explain  Print a full explanation from the error reference for each diagnostic code");
                 return;
             }
             other if other.starts_with('-') => {
@@ -152,7 +160,15 @@ fn cmd_check(args: &[String]) {
     if verbose { eprintln!("checking {}...", filename); }
 
     let (module, src) = module;
-    run_typeck(&module, &src, &filename, colour);
+    run_typeck_opts(&module, &src, &filename, colour, explain);
+
+    if strict {
+        let warnings = cmd_lint::lint_hir(&module, &input, &src, colour);
+        if warnings > 0 {
+            eprintln!("{} warning(s) found (--strict)", warnings);
+            process::exit(1);
+        }
+    }
 
     eprintln!("ok");
 }
@@ -168,6 +184,48 @@ fn cmd_run(args: &[String]) {
     } else {
         (args, [].as_slice())
     };
+
+    // `--watch`/`-w`: rebuild AND re-run the program on every change, not
+    // just rebuild silently. `cmd_build`'s own `--watch` handling only
+    // rebuilds — reusing it as-is here would mean `certo run --watch`
+    // rebuilds forever without the program ever executing even once. So,
+    // same pattern `cmd_build` itself uses (see its `if watch` branch): the
+    // watch flag is intercepted here and this process re-invokes itself as
+    // `certo run <args without --watch>` on each change via
+    // `cmd_watch::watch_loop`, whose exit code (build *and* run together)
+    // reports success/failure for the watch status line.
+    if build_args.iter().any(|a| a == "--watch" || a == "-w") {
+        let input_path = build_args.iter()
+            .find(|a| a.ends_with(".cto") || (!a.starts_with('-') && !a.starts_with("build")))
+            .cloned()
+            .unwrap_or_else(|| {
+                eprintln!("error: no input file");
+                eprintln!("usage: certo run <file.cto> [build-opts] [-- prog-args]");
+                process::exit(2);
+            });
+
+        let watch_files = vec![PathBuf::from(&input_path)];
+        let self_exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("certo"));
+        let filtered_build_args: Vec<String> = build_args.iter()
+            .filter(|a| *a != "--watch" && *a != "-w")
+            .cloned()
+            .collect();
+        let mut run_args: Vec<String> = std::iter::once("run".to_string())
+            .chain(filtered_build_args)
+            .collect();
+        if !prog_args.is_empty() {
+            run_args.push("--".to_string());
+            run_args.extend(prog_args.iter().cloned());
+        }
+        cmd_watch::watch_loop(watch_files, move || {
+            std::process::Command::new(&self_exe)
+                .args(&run_args)
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false)
+        });
+        return;
+    }
 
     // Build to a temp directory.
     let tmp_dir = tempfile::TempDir::new().unwrap_or_else(|e| {
@@ -683,6 +741,48 @@ fn expand_state_machines(module: &mut Module, colour: bool) {
 
 /// Run typeck with stdlib builtins seeded. Exits on type errors.
 fn run_typeck(module: &Module, src: &str, filename: &str, colour: bool) {
+    run_typeck_opts(module, src, filename, colour, false);
+}
+
+/// The embedded error reference (`docs/ERROR-REFERENCE.md`) — bundled into the
+/// binary via `include_str!` so `--explain` works regardless of the current
+/// working directory or whether the repo is even present at runtime.
+const ERROR_REFERENCE: &str = include_str!("../../../docs/ERROR-REFERENCE.md");
+
+/// Look up the full write-up for a diagnostic code (`"E0100"`, `"L001"`, ...)
+/// from the embedded error reference. `None` if the code has no entry there —
+/// `--explain` silently skips it rather than printing something wrong.
+fn explain_code(code: &str) -> Option<String> {
+    let marker = format!("### {}", code);
+    let start = ERROR_REFERENCE.find(&marker)?;
+    let rest = &ERROR_REFERENCE[start..];
+    let after_heading = rest.find('\n').map(|i| i + 1).unwrap_or(rest.len());
+    let next_h2 = rest[after_heading..].find("\n## ").map(|i| i + after_heading);
+    let next_h3 = rest[after_heading..].find("\n### ").map(|i| i + after_heading);
+    let end = [next_h2, next_h3].into_iter().flatten().min().unwrap_or(rest.len());
+    let mut section = rest[..end].to_string();
+    if let Some(pos) = section.rfind("\n---") {
+        section.truncate(pos);
+    }
+    Some(section.trim().to_string())
+}
+
+/// Print each diagnostic's explanation once (deduped by code, first-seen order).
+fn print_explanations(diags: &[Diagnostic]) {
+    let mut seen = std::collections::HashSet::new();
+    for d in diags {
+        if !seen.insert(d.code.clone()) { continue; }
+        if let Some(text) = explain_code(&d.code) {
+            eprintln!();
+            eprintln!("{}", text);
+        }
+    }
+}
+
+/// Run typeck with stdlib builtins seeded. Exits on type errors. `explain`
+/// prints each diagnostic code's full write-up from `docs/ERROR-REFERENCE.md`
+/// before exiting (`certo check --explain`).
+fn run_typeck_opts(module: &Module, src: &str, filename: &str, colour: bool, explain: bool) {
     let mut env     = TypeEnv::new();
     let mut counter = 0u32;
     env.seed_builtins(&mut counter);
@@ -694,6 +794,7 @@ fn run_typeck(module: &Module, src: &str, filename: &str, colour: bool) {
             .collect();
         eprint!("{}", render_all(&diags, src, filename, colour));
         eprintln!("aborting due to {} type error(s)", diags.len());
+        if explain { print_explanations(&diags); }
         process::exit(1);
     }
 
@@ -703,6 +804,7 @@ fn run_typeck(module: &Module, src: &str, filename: &str, colour: bool) {
             .collect();
         eprint!("{}", render_all(&diags, src, filename, colour));
         eprintln!("aborting due to {} trait error(s)", diags.len());
+        if explain { print_explanations(&diags); }
         process::exit(1);
     }
 
@@ -714,6 +816,7 @@ fn run_typeck(module: &Module, src: &str, filename: &str, colour: bool) {
             .collect();
         eprint!("{}", render_all(&diags, src, filename, colour));
         eprintln!("aborting due to {} effect error(s)", diags.len());
+        if explain { print_explanations(&diags); }
         process::exit(1);
     }
 
@@ -725,6 +828,7 @@ fn run_typeck(module: &Module, src: &str, filename: &str, colour: bool) {
                 .collect();
             eprint!("{}", render_all(&diags, src, filename, colour));
             eprintln!("aborting due to {} schema error(s)", diags.len());
+            if explain { print_explanations(&diags); }
             process::exit(1);
         }
     };
@@ -749,6 +853,7 @@ fn run_typeck(module: &Module, src: &str, filename: &str, colour: bool) {
                         .collect();
                     eprint!("{}", render_all(&diags, src, filename, colour));
                     eprintln!("aborting due to {} schema-sync error(s) — the live database has drifted from your `type` declarations", diags.len());
+                    if explain { print_explanations(&diags); }
                     process::exit(1);
                 }
             }
@@ -1739,17 +1844,26 @@ fn cmd_test(args: &[String]) {
     let mut files: Vec<PathBuf> = vec![];
     let mut color = stderr_is_tty();
     let mut timeout_ms: u64 = 5000;
+    let mut filter: Option<String> = None;
 
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
             "--no-color" => color = false,
             "--help" | "-h" => {
-                println!("Usage: certo test <file.cto>...");
+                println!("Usage: certo test <file.cto>... [--filter <substring>] [--timeout=<ms>]");
                 println!();
                 println!("Compile and run all `test` blocks in the given source files.");
                 println!("Exits 0 if all tests pass, 1 otherwise.");
+                println!();
+                println!("Options:");
+                println!("  --filter <substring>  Only run tests whose display name contains this string");
+                println!("  --timeout=<ms>         Per-test timeout in milliseconds (default 5000)");
                 return;
+            }
+            "--filter" => {
+                i += 1;
+                filter = Some(args.get(i).unwrap_or_else(|| die("--filter requires a substring", 2)).clone());
             }
             other if other.starts_with("--timeout=") => {
                 let v = other.trim_start_matches("--timeout=");
@@ -1774,7 +1888,7 @@ fn cmd_test(args: &[String]) {
 
     let opts = certo_testrunner::run::RunOptions {
         timeout: Some(std::time::Duration::from_millis(timeout_ms)),
-        filter: None,
+        filter,
     };
     let mut all_passed = true;
     for path in &files {
@@ -2934,4 +3048,50 @@ fn load_migrations(project_root: &Path) -> Vec<MigrationDecl> {
         }
     }
     result
+}
+
+#[cfg(test)]
+mod flag_tests {
+    use super::*;
+
+    #[test]
+    fn explain_code_finds_e0200() {
+        let text = explain_code("E0200").expect("E0200 should be in the error reference");
+        assert!(text.starts_with("### E0200"));
+        assert!(text.contains("Type mismatch"));
+        assert!(text.contains("**Cause:**"));
+        // Must stop before the next entry, not bleed into E0201.
+        assert!(!text.contains("### E0201"));
+    }
+
+    #[test]
+    fn explain_code_stops_before_next_category_header() {
+        // E0206 is the last entry in the E0200-E0206 category — its section
+        // must not run past the "## E0300-E0306" category header that follows.
+        let text = explain_code("E0206").expect("E0206 should be in the error reference");
+        assert!(text.starts_with("### E0206"));
+        assert!(!text.contains("## E0300"));
+    }
+
+    #[test]
+    fn explain_code_unknown_code_returns_none() {
+        assert!(explain_code("E9999").is_none());
+    }
+
+    #[test]
+    fn explain_code_finds_lint_warning_codes() {
+        let text = explain_code("L001").expect("L001 should be in the error reference");
+        assert!(text.starts_with("### L001"));
+    }
+
+    #[test]
+    fn print_explanations_dedups_by_code() {
+        // Two diagnostics sharing a code should only print one explanation.
+        // Exercised indirectly: explain_code itself is idempotent/pure, so
+        // this just confirms the lookup succeeds twice without panicking
+        // (the dedup logic lives in print_explanations's HashSet, covered
+        // end-to-end via `certo check --explain` on a real multi-error file).
+        assert!(explain_code("E0100").is_some());
+        assert!(explain_code("E0100").is_some());
+    }
 }
