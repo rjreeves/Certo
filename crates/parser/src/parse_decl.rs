@@ -918,9 +918,22 @@ fn parse_property_decl(cur: &mut Cursor<'_>) -> Result<PropertyDecl, ParseError>
     let start = cur.expect(&Token::Property)?;
     let (tok, _) = cur.bump().ok_or(ParseError { kind: ParseErrorKind::UnexpectedEof, span: start })?;
     let name = if let Token::StringLit(s) = tok { s.to_string() } else { String::new() };
+
+    // Optional typed parameter list: `property "name"(x: Int, y: Text) { .. }`.
+    // A bare `property "name" { .. }` (no parens) still parses — same as before
+    // this was added — and just means "no generated inputs, run once".
+    let mut params = Vec::new();
+    if cur.eat(|t| matches!(t, Token::LParen)).is_some() {
+        while cur.peek() != Some(&Token::RParen) && !cur.at_end() {
+            params.push(parse_fn_param(cur)?);
+            if cur.eat(|t| matches!(t, Token::Comma)).is_none() { break; }
+        }
+        cur.expect(&Token::RParen)?;
+    }
+
     let body = parse_block(cur)?;
     let span = start.to(body.span);
-    Ok(PropertyDecl { name, body, span })
+    Ok(PropertyDecl { name, params, body, span })
 }
 
 fn parse_dbtest_decl(cur: &mut Cursor<'_>) -> Result<DbTestDecl, ParseError> {

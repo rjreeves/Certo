@@ -19,9 +19,10 @@ impl Summary {
         let mut s = Summary { total: results.len(), ..Default::default() };
         for r in results {
             match r.outcome {
-                Outcome::Passed         => s.passed  += 1,
-                Outcome::Failed { .. }  => s.failed  += 1,
-                Outcome::SpawnError(_)  => s.errored += 1,
+                Outcome::Passed                  => s.passed  += 1,
+                Outcome::Failed { .. }           => s.failed  += 1,
+                Outcome::PropertyFailed { .. }   => s.failed  += 1,
+                Outcome::SpawnError(_)           => s.errored += 1,
             }
             s.elapsed += r.duration;
         }
@@ -39,16 +40,18 @@ impl Summary {
 pub fn print_results(results: &[TestResult], color: bool) {
     for r in results {
         let (symbol, label) = match &r.outcome {
-            Outcome::Passed            => ("✓", "PASS"),
-            Outcome::Failed { .. }     => ("✗", "FAIL"),
-            Outcome::SpawnError(_)     => ("!", "ERR "),
+            Outcome::Passed              => ("✓", "PASS"),
+            Outcome::Failed { .. }       => ("✗", "FAIL"),
+            Outcome::PropertyFailed{..}  => ("✗", "FAIL"),
+            Outcome::SpawnError(_)       => ("!", "ERR "),
         };
 
         let (sym_col, reset) = if color {
             match &r.outcome {
-                Outcome::Passed           => ("\x1b[32m", "\x1b[0m"), // green
-                Outcome::Failed { .. }    => ("\x1b[31m", "\x1b[0m"), // red
-                Outcome::SpawnError(_)    => ("\x1b[33m", "\x1b[0m"), // yellow
+                Outcome::Passed              => ("\x1b[32m", "\x1b[0m"), // green
+                Outcome::Failed { .. }       => ("\x1b[31m", "\x1b[0m"), // red
+                Outcome::PropertyFailed{..}  => ("\x1b[31m", "\x1b[0m"), // red
+                Outcome::SpawnError(_)       => ("\x1b[33m", "\x1b[0m"), // yellow
             }
         } else {
             ("", "")
@@ -67,6 +70,13 @@ pub fn print_results(results: &[TestResult], color: bool) {
 
         // Show captured output for failures.
         if !r.outcome.is_passed() {
+            if let Outcome::PropertyFailed { seed, case_index, cases, counterexample, .. } = &r.outcome {
+                println!("  counterexample (case {} of {}, seed {}):", case_index, cases, seed);
+                for (name, value) in counterexample {
+                    println!("    {} = {}", name, value);
+                }
+                println!("  reproduce with: CERTO_TEST_SEED={} CERTO_TEST_CASES={}", seed, cases);
+            }
             if !r.stdout.is_empty() {
                 println!("  stdout:\n{}", indent(&r.stdout, "    "));
             }
@@ -121,7 +131,7 @@ mod tests {
 
     fn passed(name: &str) -> TestResult {
         TestResult {
-            entry:    TestEntry { display_name: name.into(), kind: TestKind::Unit, c_fn_name: String::new() },
+            entry:    TestEntry { display_name: name.into(), kind: TestKind::Unit, c_fn_name: String::new(), params: vec![] },
             outcome:  Outcome::Passed,
             duration: Duration::from_millis(5),
             stdout:   String::new(),
@@ -131,7 +141,7 @@ mod tests {
 
     fn failed(name: &str) -> TestResult {
         TestResult {
-            entry:    TestEntry { display_name: name.into(), kind: TestKind::Unit, c_fn_name: String::new() },
+            entry:    TestEntry { display_name: name.into(), kind: TestKind::Unit, c_fn_name: String::new(), params: vec![] },
             outcome:  Outcome::Failed { exit_code: 1 },
             duration: Duration::from_millis(12),
             stdout:   "assertion failed".into(),

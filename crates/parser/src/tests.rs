@@ -75,6 +75,36 @@ fn fn_decl_simple() {
 }
 
 #[test]
+fn property_decl_without_params_still_parses() {
+    // Backward compat: a bare `property "name" { .. }` (BACKLOG item 86's
+    // typed params are optional) must keep parsing exactly as before.
+    let m = ok("module A\nproperty \"reverse twice is identity\" { true }");
+    assert_eq!(m.decls.len(), 1);
+    match &m.decls[0].node {
+        Decl::Property(p) => {
+            assert_eq!(p.name, "reverse twice is identity");
+            assert!(p.params.is_empty());
+        }
+        _ => panic!("expected property decl"),
+    }
+}
+
+#[test]
+fn property_decl_with_typed_params_parses() {
+    let m = ok("module A\nproperty \"addition commutes\"(x: Int, y: Int) { x + y == y + x }");
+    assert_eq!(m.decls.len(), 1);
+    match &m.decls[0].node {
+        Decl::Property(p) => {
+            assert_eq!(p.name, "addition commutes");
+            assert_eq!(p.params.len(), 2);
+            assert_eq!(p.params[0].name.node, "x");
+            assert_eq!(p.params[1].name.node, "y");
+        }
+        _ => panic!("expected property decl"),
+    }
+}
+
+#[test]
 fn row_bound_parses() {
     use certo_ast::types::Bound;
     let m = ok("module A\nfn getName<R: { name: Text }>(record: R): Text = record.name");

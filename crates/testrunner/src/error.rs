@@ -14,6 +14,8 @@ pub enum TestRunnerError {
     CompileFailed { exit_code: i32 },
     /// I/O error (temp files, etc.).
     Io(String),
+    /// A `property` parameter's type has no value generator yet.
+    UnsupportedPropertyParamType { property_name: String, param_name: String },
 }
 
 impl fmt::Display for TestRunnerError {
@@ -29,6 +31,13 @@ impl fmt::Display for TestRunnerError {
                 write!(f, "C compilation failed (exit {})", exit_code),
             TestRunnerError::Io(e)            =>
                 write!(f, "I/O error: {}", e),
+            TestRunnerError::UnsupportedPropertyParamType { property_name, param_name } =>
+                write!(
+                    f,
+                    "property \"{}\" parameter `{}`: value generation is only supported for \
+                     Int, Float, Bool, and Text today",
+                    property_name, param_name
+                ),
         }
     }
 }

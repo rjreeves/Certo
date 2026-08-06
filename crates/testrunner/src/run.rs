@@ -4,7 +4,14 @@ use std::path::Path;
 use std::process::Command;
 use std::time::{Duration, Instant};
 
+use crate::gen::{generate_case, shrink, GenType, Rng};
 use crate::harness::TestEntry;
+
+/// Number of generated cases per property test, unless overridden by
+/// `CERTO_TEST_CASES` — matches the QuickCheck/proptest convention.
+const DEFAULT_CASES: usize = 100;
+/// Upper bound on subprocess spawns spent shrinking a single failing case.
+const MAX_SHRINK_ATTEMPTS: usize = 200;
 
 /// Outcome of a single test run.
 #[derive(Debug, Clone)]
@@ -20,6 +27,19 @@ pub struct TestResult {
 pub enum Outcome {
     Passed,
     Failed { exit_code: i32 },
+    /// A property test found a generated input that fails, shrunk to a
+    /// minimal (or attempt-budget-limited) counterexample.
+    PropertyFailed {
+        exit_code:      i32,
+        seed:           u64,
+        /// How many generated cases ran (in order) before this one failed.
+        case_index:     usize,
+        /// Total case count this run used — case generation's "size" scaling
+        /// depends on it, so reproducing the same seed needs the same count.
+        cases:          usize,
+        /// (parameter name, shrunk value's display text) in declaration order.
+        counterexample: Vec<(String, String)>,
+    },
     /// The test process could not be launched at all.
     SpawnError(String),
 }
@@ -58,7 +78,13 @@ pub fn run_tests(
                 .map(|f| e.display_name.contains(f))
                 .unwrap_or(true)
         })
-        .map(|entry| run_one(binary, entry, timeout))
+        .map(|entry| {
+            if entry.params.is_empty() {
+                run_one(binary, entry, timeout)
+            } else {
+                run_property(binary, entry, timeout)
+            }
+        })
         .collect()
 }
 
@@ -96,6 +122,113 @@ fn run_one(binary: &Path, entry: &TestEntry, _timeout: Duration) -> TestResult {
     }
 }
 
+fn property_seed() -> u64 {
+    if let Ok(s) = std::env::var("CERTO_TEST_SEED") {
+        if let Ok(v) = s.parse::<u64>() { return v; }
+    }
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0)
+}
+
+fn property_num_cases() -> usize {
+    std::env::var("CERTO_TEST_CASES")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(DEFAULT_CASES)
+}
+
+/// Spawn one case of a property test with generated args. `None` means the
+/// binary itself couldn't be launched (distinct from the test failing).
+fn spawn_property_case(binary: &Path, entry: &TestEntry, args: &[String]) -> Option<bool> {
+    Command::new(binary)
+        .arg(&entry.display_name)
+        .args(args)
+        .output()
+        .ok()
+        .map(|out| out.status.success())
+}
+
+/// Run a property test: generate `CERTO_TEST_CASES` (default 100) random
+/// cases from a `CERTO_TEST_SEED`-derived (or time-based) seed, spawning the
+/// already-compiled binary once per case with the generated values as argv.
+/// On the first failure, shrink toward a minimal counterexample the same
+/// way — by re-spawning the binary with smaller candidates and checking its
+/// exit code — then report it. No changes to `certo_panic`/`abort()` are
+/// involved anywhere; a failing case is just a nonzero exit code, same as
+/// any other test.
+fn run_property(binary: &Path, entry: &TestEntry, _timeout: Duration) -> TestResult {
+    let start = Instant::now();
+    let seed  = property_seed();
+    let cases = property_num_cases();
+    let types: Vec<GenType> = entry.params.iter().map(|(_, t)| *t).collect();
+    let mut rng = Rng::new(seed);
+
+    for case_idx in 0..cases {
+        let values = generate_case(&mut rng, &types, case_idx, cases);
+        let args: Vec<String> = values.iter().map(|v| v.to_arg()).collect();
+
+        match spawn_property_case(binary, entry, &args) {
+            None => {
+                return TestResult {
+                    entry:    entry.clone(),
+                    outcome:  Outcome::SpawnError("failed to launch test binary".into()),
+                    duration: start.elapsed(),
+                    stdout:   String::new(),
+                    stderr:   String::new(),
+                };
+            }
+            Some(true) => continue,
+            Some(false) => {
+                let shrunk = shrink(
+                    values,
+                    |trial| {
+                        let trial_args: Vec<String> = trial.iter().map(|v| v.to_arg()).collect();
+                        matches!(spawn_property_case(binary, entry, &trial_args), Some(false))
+                    },
+                    MAX_SHRINK_ATTEMPTS,
+                );
+
+                // Re-run the final (shrunk) counterexample once more to
+                // capture its stdout/stderr/exit code for the report.
+                let shrunk_args: Vec<String> = shrunk.iter().map(|v| v.to_arg()).collect();
+                let out = Command::new(binary).arg(&entry.display_name).args(&shrunk_args).output();
+                let (stdout, stderr, exit_code) = match out {
+                    Ok(o) => (
+                        String::from_utf8_lossy(&o.stdout).into_owned(),
+                        String::from_utf8_lossy(&o.stderr).into_owned(),
+                        o.status.code().unwrap_or(-1),
+                    ),
+                    Err(_) => (String::new(), String::new(), -1),
+                };
+
+                let counterexample: Vec<(String, String)> = entry.params.iter()
+                    .zip(shrunk.iter())
+                    .map(|((name, _), v)| (name.clone(), v.to_arg()))
+                    .collect();
+
+                return TestResult {
+                    entry:    entry.clone(),
+                    outcome:  Outcome::PropertyFailed { exit_code, seed, case_index: case_idx, cases, counterexample },
+                    duration: start.elapsed(),
+                    stdout,
+                    stderr,
+                };
+            }
+        }
+    }
+
+    TestResult {
+        entry:    entry.clone(),
+        outcome:  Outcome::Passed,
+        duration: start.elapsed(),
+        stdout:   String::new(),
+        stderr:   String::new(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -106,6 +239,7 @@ mod tests {
             display_name: name.into(),
             kind:         TestKind::Unit,
             c_fn_name:    format!("__test_{}", name),
+            params:       vec![],
         }
     }
 
