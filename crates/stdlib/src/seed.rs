@@ -28,6 +28,14 @@ pub fn seed_stdlib(env: &mut TypeEnv, counter: &mut u32) {
     def!("intToFloat",  fn1(Ty::Int,   Ty::Float));
     def!("textToIntUnsafe", fn1(Ty::Text, Ty::Int));
 
+    // Float32 — a distinct type from Float (does not unify), so it needs its
+    // own full conversion set rather than reusing Float's.
+    def!("float32ToText",  fn1(Ty::Float32, Ty::Text));
+    def!("float32ToInt",   fn1(Ty::Float32, Ty::Int));
+    def!("intToFloat32",   fn1(Ty::Int,     Ty::Float32));
+    def!("float32ToFloat", fn1(Ty::Float32, Ty::Float));
+    def!("floatToFloat32", fn1(Ty::Float,   Ty::Float32));
+
     def!("parseInt",     fn1(Ty::Text, Ty::Option(Box::new(Ty::Int))));
     def!("parseFloat",   fn1(Ty::Text, Ty::Option(Box::new(Ty::Float))));
     def!("parseDecimal", fn1(Ty::Text, Ty::Option(Box::new(Ty::Decimal))));
@@ -473,6 +481,22 @@ pub fn seed_stdlib(env: &mut TypeEnv, counter: &mut u32) {
     def!("Text.split",      fn2(Ty::Text, Ty::Text, Ty::List(Box::new(Ty::Text))));
     def!("Text.join",       fn2(Ty::List(Box::new(Ty::Text)), Ty::Text, Ty::Text));
     def!("Text.repeat",     fn2(Ty::Text, Ty::Int, Ty::Text));
+    def!("Text.charAt",     fn2(Ty::Text, Ty::Int, Ty::Option(Box::new(Ty::Char))));
+
+    // ---------------------------------------------------------------- //
+    // Char
+    // ---------------------------------------------------------------- //
+
+    def!("Char.toText",      fn1(Ty::Char, Ty::Text));
+    def!("Char.toInt",       fn1(Ty::Char, Ty::Int));
+    def!("Char.fromInt",     fn1(Ty::Int,  Ty::Char));
+    def!("Char.isDigit",     fn1(Ty::Char, Ty::Bool));
+    def!("Char.isAlpha",     fn1(Ty::Char, Ty::Bool));
+    def!("Char.isUpperCase", fn1(Ty::Char, Ty::Bool));
+    def!("Char.isLowerCase", fn1(Ty::Char, Ty::Bool));
+    def!("Char.isWhitespace", fn1(Ty::Char, Ty::Bool));
+    def!("Char.toUpperCase", fn1(Ty::Char, Ty::Char));
+    def!("Char.toLowerCase", fn1(Ty::Char, Ty::Char));
 
     // ---------------------------------------------------------------- //
     // DateTime  (represented as Int / Named types in the type system)
@@ -1096,6 +1120,7 @@ pub fn seed_stdlib(env: &mut TypeEnv, counter: &mut u32) {
     pm!("Text.split",      "text", "sep");
     pm!("Text.join",       "parts", "sep");
     pm!("Text.repeat",     "text", "n");
+    pm!("Text.charAt",     "text", "index");
 
     // DateTime
     pm!("DateTime.format",      "dt", "fmt");

@@ -13,7 +13,9 @@ Signatures only — one line per function. For narrative usage see
 | [Core](#core) | *(auto-imported)* |
 | [Result](#result) | `import Stdlib.Result` |
 | [Text](#text) | `import Stdlib.Text` |
+| [Char](#char) | `import Stdlib.Text` |
 | [Collections](#collections) | `import Stdlib.Collections` |
+| [Channel\<T\>](#channelt) | `import Stdlib.Collections` |
 | [Money / Decimal](#money--decimal) | `import Stdlib.Money` |
 | [DateTime](#datetime) | `import Stdlib.DateTime` |
 | [Duration](#duration) | `import Stdlib.DateTime` |
@@ -56,6 +58,13 @@ intToFloat(n: Int): Float
 parseInt(s: Text): Int?             // None if not a valid integer
 parseFloat(s: Text): Float?         // None if not a valid float
 parseDecimal(s: Text): Decimal?     // None if not a valid decimal (strict — no trailing garbage)
+
+// Float32 — a distinct type from Float (32-bit vs 64-bit, does not unify)
+float32ToText(f: Float32): Text
+float32ToInt(f: Float32): Int       // truncates toward zero
+intToFloat32(n: Int): Float32
+float32ToFloat(f: Float32): Float   // widen
+floatToFloat32(f: Float): Float32   // narrow, may lose precision
 ```
 
 ### Arithmetic helpers
@@ -154,6 +163,44 @@ Text.replace(s: Text, from: Text, to: Text): Text // all occurrences
 Text.split(s: Text, sep: Text): List<Text> // empty sep → char list
 Text.join(parts: List<Text>, sep: Text): Text
 Text.repeat(s: Text, n: Int): Text
+Text.charAt(s: Text, index: Int): Char?    // bounds-checked; None if out of range
+```
+
+---
+
+## Char
+
+`import Stdlib.Text` — `Char` is a single ASCII byte, the same byte-oriented
+convention as the rest of `Text` (`toUpper`/`toLower`/`len` are all
+byte-based, not real Unicode). There's no `Char` literal syntax yet —
+construct one via `Text.charAt` or `Char.fromInt`.
+
+```
+Char.toText(c: Char): Text
+Char.toInt(c: Char): Int                   // 0-255
+Char.fromInt(n: Int): Char                 // truncates to a byte (n & 0xFF)
+Char.isDigit(c: Char): Bool
+Char.isAlpha(c: Char): Bool
+Char.isUpperCase(c: Char): Bool
+Char.isLowerCase(c: Char): Bool
+Char.isWhitespace(c: Char): Bool
+Char.toUpperCase(c: Char): Char
+Char.toLowerCase(c: Char): Char
+```
+
+```certo
+fn countDigits(s: Text): Int = {
+  var n = 0
+  var i = 0
+  while i < Text.len(s) {
+    match Text.charAt(s, i) {
+      Some(c) => { if Char.isDigit(c) then n = n + 1 }
+      None => {}
+    }
+    i = i + 1
+  }
+  n
+}
 ```
 
 ---

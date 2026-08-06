@@ -16,7 +16,9 @@ pub fn llvm_ty(ty: &Ty) -> String {
         Ty::Int32      => "i32".into(),
         Ty::UInt       => "i64".into(),  // LLVM has no unsigned; use i64 with zext where needed
         Ty::Float      => "double".into(),
+        Ty::Float32    => "float".into(),
         Ty::Bool       => "i1".into(),
+        Ty::Char       => "i8".into(),
         Ty::Text       => "ptr".into(),    // const char*
         Ty::Unit       => "i8".into(),     // placeholder; void used for return type
         Ty::Uuid       => "ptr".into(),
@@ -59,7 +61,9 @@ pub fn ast_ty_to_llvm(te: &certo_ast::types::TypeExpr) -> String {
                 "Int32"   => "i32".into(),
                 "UInt"    => "i64".into(),
                 "Float"   => "double".into(),
+                "Float32" => "float".into(),
                 "Bool"    => "i1".into(),
+                "Char"    => "i8".into(),
                 "Text"    => "ptr".into(),
                 "Unit"    => "i8".into(),
                 "Decimal" => "ptr".into(),
@@ -98,7 +102,9 @@ pub fn mangle(ty: &Ty) -> String {
         Ty::Int32   => "i32".into(),
         Ty::UInt    => "i64".into(),
         Ty::Float   => "f64".into(),
+        Ty::Float32 => "f32".into(),
         Ty::Bool    => "i1".into(),
+        Ty::Char    => "i8".into(),
         Ty::Text    => "ptr".into(),
         Ty::Unit    => "void".into(),
         _           => "ptr".into(),

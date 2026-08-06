@@ -123,6 +123,35 @@ fn stdlib_ret_type(name: &str) -> Option<Ty> {
         "parseInt"     => Some(Ty::Option(Box::new(Ty::Int))),
         "parseFloat"   => Some(Ty::Option(Box::new(Ty::Float))),
         "parseDecimal" => Some(Ty::Option(Box::new(Ty::Decimal))),
+        // Float32 (BACKLOG item 75) — without these, the call's HirExpr.ty
+        // defaults to Ty::Error, which maps to int64_t in codegen; a real
+        // `float`/`double` result assigned into a wrongly-typed int64_t
+        // local gets silently truncated by C's implicit conversion rules
+        // (confirmed: intToFloat/floatToInt have this exact same gap
+        // pre-existing — not fixed here, out of this item's scope, flagged
+        // separately).
+        "float32ToText"  => Some(Ty::Text),
+        "float32ToInt"   => Some(Ty::Int),
+        "intToFloat32"   => Some(Ty::Float32),
+        "float32ToFloat" => Some(Ty::Float),
+        "floatToFloat32" => Some(Ty::Float32),
+        _ => None,
+    }
+}
+
+/// Return types for stdlib `Type.method(...)` calls, keyed by the *full*
+/// qualified name — unlike `stdlib_ret_type` above (bare top-level function
+/// names), a short method name like `toText` is too generic to key on
+/// safely (collides across unrelated types' same-named methods).
+fn qualified_stdlib_ret_type(full: &str) -> Option<Ty> {
+    match full {
+        "Char.toText"  => Some(Ty::Text),
+        "Char.toInt"   => Some(Ty::Int),
+        "Char.fromInt" => Some(Ty::Char),
+        "Char.isDigit" | "Char.isAlpha" | "Char.isUpperCase"
+        | "Char.isLowerCase" | "Char.isWhitespace" => Some(Ty::Bool),
+        "Char.toUpperCase" | "Char.toLowerCase" => Some(Ty::Char),
+        "Text.charAt" => Some(Ty::Option(Box::new(Ty::Char))),
         _ => None,
     }
 }
@@ -688,6 +717,7 @@ fn lower_expr(expr: &S<Expr>, cx: &mut Cx) -> HirExpr {
                 .and_then(|fp| cx.sm_returns.get(fp).cloned())
                 .or_else(|| fn_full_path.as_deref().and_then(|fp| cx.fn_ret_types.get(fp).cloned()))
                 .or_else(|| cx.fn_ret_types.get(short).cloned())
+                .or_else(|| fn_full_path.as_deref().and_then(qualified_stdlib_ret_type))
                 .or_else(|| stdlib_ret_type(short))
                 .or_else(|| generic_container_ret(fn_full_path.as_deref(), &lowered_args))
                 .unwrap_or(Ty::Error);
@@ -1336,8 +1366,10 @@ fn ast_ty_to_ty_with_params(te: &certo_ast::types::TypeExpr, type_params: &[&str
                 "Int32"   => Ty::Int32,
                 "UInt"    => Ty::UInt,
                 "Float"   => Ty::Float,
+                "Float32" => Ty::Float32,
                 "Decimal" => Ty::Decimal,
                 "Bool"    => Ty::Bool,
+                "Char"    => Ty::Char,
                 "Text"    => Ty::Text,
                 "Unit"    => Ty::Unit,
                 "UUID"    => Ty::Uuid,

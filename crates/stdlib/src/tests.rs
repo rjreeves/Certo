@@ -135,6 +135,83 @@ fn map_insert_registered() {
 // ------------------------------------------------------------------ //
 
 #[test]
+fn float32_conversion_functions_registered() {
+    let env = seeded_env();
+    let cases: &[(&str, Ty, Ty)] = &[
+        ("float32ToText",  Ty::Float32, Ty::Text),
+        ("float32ToInt",   Ty::Float32, Ty::Int),
+        ("intToFloat32",   Ty::Int,     Ty::Float32),
+        ("float32ToFloat", Ty::Float32, Ty::Float),
+        ("floatToFloat32", Ty::Float,   Ty::Float32),
+    ];
+    for (name, param, ret) in cases {
+        match env.lookup(name).unwrap_or_else(|| panic!("missing: {}", name)) {
+            Ty::Fn { params, ret: actual_ret } => {
+                assert_eq!(params, &[param.clone()], "{} param mismatch", name);
+                assert_eq!(actual_ret.as_ref(), ret, "{} return mismatch", name);
+            }
+            other => panic!("{} expected Fn, got {:?}", name, other),
+        }
+    }
+}
+
+#[test]
+fn text_char_at_returns_option_char() {
+    let env = seeded_env();
+    match env.lookup("Text.charAt").unwrap() {
+        Ty::Fn { params, ret } => {
+            assert_eq!(params, &[Ty::Text, Ty::Int]);
+            assert_eq!(ret.as_ref(), &Ty::Option(Box::new(Ty::Char)));
+        }
+        other => panic!("expected Fn, got {:?}", other),
+    }
+}
+
+#[test]
+fn char_functions_registered() {
+    let env = seeded_env();
+    for name in &["Char.toText", "Char.toInt", "Char.fromInt",
+                  "Char.isDigit", "Char.isAlpha", "Char.isUpperCase",
+                  "Char.isLowerCase", "Char.isWhitespace",
+                  "Char.toUpperCase", "Char.toLowerCase"] {
+        assert!(env.lookup(name).is_some(), "missing: {}", name);
+    }
+}
+
+#[test]
+fn char_case_functions_round_trip_char_to_char() {
+    let env = seeded_env();
+    for name in &["Char.toUpperCase", "Char.toLowerCase"] {
+        match env.lookup(name).unwrap() {
+            Ty::Fn { params, ret } => {
+                assert_eq!(params, &[Ty::Char]);
+                assert_eq!(ret.as_ref(), &Ty::Char);
+            }
+            other => panic!("{} expected Fn, got {:?}", name, other),
+        }
+    }
+}
+
+#[test]
+fn char_c_contains_expected_symbols() {
+    for sym in &["certo_text_char_at", "certo_char_to_text", "certo_char_to_int",
+                 "certo_char_from_int", "certo_char_is_digit", "certo_char_is_alpha",
+                 "certo_char_is_upper_case", "certo_char_is_lower_case",
+                 "certo_char_is_whitespace", "certo_char_to_upper_case",
+                 "certo_char_to_lower_case"] {
+        assert!(TEXT_C.contains(sym), "missing {} in TEXT_C", sym);
+    }
+}
+
+#[test]
+fn core_c_contains_float32_symbols() {
+    for sym in &["certo_float32_to_text", "certo_float32_to_int", "certo_int_to_float32",
+                 "certo_float32_to_float", "certo_float_to_float32"] {
+        assert!(CORE_C.contains(sym), "missing {} in CORE_C", sym);
+    }
+}
+
+#[test]
 fn channel_functions_registered() {
     let env = seeded_env();
     for name in &["Channel.new", "Channel.send", "Channel.receive",
