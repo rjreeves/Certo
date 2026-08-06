@@ -163,7 +163,9 @@ void* certo_range_inclusive(int64_t start, int64_t end_incl) {
 /* ---- panic ---- */
 
 __attribute__((noreturn)) void certo_panic(certo_text_t msg) {
+    fflush(stdout);
     fprintf(stderr, "certo panic: %s\n", msg ? msg : "(no message)");
+    fflush(stderr);
     abort();
 }
 
