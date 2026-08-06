@@ -31,6 +31,13 @@ pub fn resolve_decl(decl: &S<Decl>, scope: &mut ScopeChain) {
         }
         Decl::Property(p) => {
             scope.push();
+            for param in &p.params {
+                scope.define(
+                    &param.name.node,
+                    Res::Local { span: param.name.span },
+                    param.name.span,
+                );
+            }
             resolve_expr(&p.body, scope);
             scope.pop();
         }

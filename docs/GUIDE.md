@@ -599,11 +599,55 @@ test runner captures the non-zero exit and marks it as `FAIL`.
 dbTest "user exists after insert" {
     { /* runs with a real DB connection */ }
 }
+```
 
-property "reverse twice is identity" {
-    { /* property-based test */ }
+`property "name"(params...) { body }` runs `body` against many randomly
+generated values for each declared parameter — not just once. Generation is
+supported for `Int`, `Float`, `Bool`, and `Text` today:
+
+```certo
+property "addition commutes"(x: Int, y: Int) {
+    assert(x + y == y + x, "commutativity failed")
 }
 ```
+
+```
+$ certo test props.cto
+PASS  addition commutes [property] (12ms)
+All 1 tests passed (0.01s)
+```
+
+100 cases run by default, each against a fresh generated `(x, y)`. When a
+case fails, the runner doesn't just report the first random input it found —
+it shrinks: it re-runs the property against smaller and simpler candidates
+(toward `0`, `false`, and `""`) until it can't shrink any further without the
+failure disappearing, then reports that minimal counterexample:
+
+```certo
+property "every int is less than 50"(x: Int) {
+    assert(x < 50, "counterexample found")
+}
+```
+
+```
+$ certo test props.cto
+FAIL  every int is less than 50 [property] (18ms)
+  counterexample (case 54 of 100, seed 1234567890):
+    x = 50
+  reproduce with: CERTO_TEST_SEED=1234567890 CERTO_TEST_CASES=100
+```
+
+That's the exact boundary the assertion was checking for — not some
+arbitrary large number the generator happened to pick. Set `CERTO_TEST_SEED`
+(and `CERTO_TEST_CASES` if you changed the count) to replay a failure
+deterministically, e.g. in CI logs.
+
+A `property "name" { body }` with no parameters still runs exactly once,
+same as before — there's nothing to generate.
+
+Generation for `List<T>`, records, and sum types isn't implemented yet;
+declaring a property parameter of an unsupported type is a build-time error
+naming the offending parameter, not a silent no-op.
 
 ---
 

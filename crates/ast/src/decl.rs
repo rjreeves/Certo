@@ -450,9 +450,14 @@ pub struct TestDecl {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct PropertyDecl {
-    pub name: String,
-    pub body: S<Expr>,
-    pub span: Span,
+    pub name:   String,
+    /// Typed inputs the test runner generates random values for and shrinks
+    /// on failure (BACKLOG item 86). Empty for a plain `property "name" { .. }`
+    /// with no declared inputs, which still just runs once — same as before
+    /// this field existed.
+    pub params: Vec<FnParam>,
+    pub body:   S<Expr>,
+    pub span:   Span,
 }
 
 #[derive(Debug, Clone, PartialEq)]

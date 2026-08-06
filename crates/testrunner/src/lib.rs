@@ -26,6 +26,7 @@ pub mod harness;
 pub mod compile;
 pub mod run;
 pub mod report;
+pub mod gen;
 
 use std::path::Path;
 
@@ -64,7 +65,7 @@ pub fn run_file(
     })?;
 
     // ── Build harness ──────────────────────────────────────────────────────
-    let (c_src, entries) = build_harness(&module);
+    let (c_src, entries) = build_harness(&module)?;
     if entries.is_empty() {
         return Err(TestRunnerError::NoTests);
     }

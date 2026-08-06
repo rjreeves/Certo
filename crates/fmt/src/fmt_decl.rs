@@ -12,9 +12,9 @@ pub fn fmt_decl(decl: &Decl, indent: usize) -> String {
         Decl::Trait(t)        => fmt_trait(t, indent),
         Decl::Impl(i)         => fmt_impl(i, indent),
         Decl::Migration(m)    => fmt_migration(m, indent),
-        Decl::Test(t)         => fmt_test_decl("test", &t.name, &t.body.node, indent),
-        Decl::Property(p)     => fmt_test_decl("property", &p.name, &p.body.node, indent),
-        Decl::DbTest(d)       => fmt_test_decl("dbTest", &d.name, &d.body.node, indent),
+        Decl::Test(t)         => fmt_test_decl("test", &t.name, &[], &t.body.node, indent),
+        Decl::Property(p)     => fmt_test_decl("property", &p.name, &p.params, &p.body.node, indent),
+        Decl::DbTest(d)       => fmt_test_decl("dbTest", &d.name, &[], &d.body.node, indent),
         Decl::StateMachine(sm) => fmt_statemachine(sm, indent),
         Decl::Validator(v)      => fmt_validator(v, indent),
         Decl::Constraint(c)     => fmt_constraint(c),
@@ -232,8 +232,13 @@ fn fmt_fk_action(a: &FkAction) -> &'static str {
 // test / property / dbTest
 // ------------------------------------------------------------------ //
 
-fn fmt_test_decl(kw: &str, name: &str, body: &certo_ast::expr::Expr, indent: usize) -> String {
-    format!("{} \"{}\" {{\n{}{}\n{}}}", kw, name, ind(indent + 1), fmt_expr(body, indent + 1), ind(indent))
+fn fmt_test_decl(kw: &str, name: &str, params: &[FnParam], body: &certo_ast::expr::Expr, indent: usize) -> String {
+    let params_str = if params.is_empty() {
+        String::new()
+    } else {
+        format!("({})", params.iter().map(fmt_fn_param).collect::<Vec<_>>().join(", "))
+    };
+    format!("{} \"{}\"{} {{\n{}{}\n{}}}", kw, name, params_str, ind(indent + 1), fmt_expr(body, indent + 1), ind(indent))
 }
 
 // ------------------------------------------------------------------ //
