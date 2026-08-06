@@ -2,6 +2,7 @@ mod core;
 mod bytes;
 mod credential;
 mod collections;
+mod channel;
 mod result;
 mod text;
 mod datetime;
@@ -29,6 +30,7 @@ pub use core::CORE_C;
 pub use bytes::BYTES_C;
 pub use credential::CREDENTIAL_C;
 pub use collections::COLLECTIONS_C;
+pub use channel::CHANNEL_C;
 pub use result::RESULT_C;
 pub use text::TEXT_C;
 pub use datetime::DATETIME_C;
@@ -49,7 +51,7 @@ pub use csv::CSV_C;
 
 /// The full C runtime header: base types + all stdlib implementations.
 pub fn full_c_runtime() -> String {
-    [CORE_C, BYTES_C, CREDENTIAL_C, COLLECTIONS_C, RESULT_C, TEXT_C, DATETIME_C, MONEY_C,
+    [CORE_C, BYTES_C, CREDENTIAL_C, COLLECTIONS_C, CHANNEL_C, RESULT_C, TEXT_C, DATETIME_C, MONEY_C,
      ENV_C, FILE_C, PATH_C, PROCESS_C, JSON_C, HTTP_C, MATH_C,
      CRYPTO_C, REGEX_C, CSV_C].concat()
 }

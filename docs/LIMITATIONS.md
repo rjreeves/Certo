@@ -53,6 +53,20 @@ val total  = (await t1) + (await t2)        // await inline in an expression
 Only a direct call to a named function is threaded (`spawn work(x)`). Spawning a
 non-call expression falls back to sequential evaluation (still correct).
 
+`parallel(timeout: Duration.seconds(n)) { ... }` panics if any task hasn't
+finished by the deadline (BACKLOG item 81). `Channel<T>` (BACKLOG item 80) is a
+real thread-safe bounded queue for streaming values between tasks — see
+[CONCURRENCY.md](CONCURRENCY.md#example-3--channelt-producer-and-consumer).
+
+**Not implemented:** the runtime has no task-cancellation mechanism at all —
+once `spawn` starts a thread, it always runs to completion. `withTimeout`,
+supervised `spawn`/`every()` (periodic background jobs), and cancellation
+scopes from [CERTO-SPEC.md §7](Certo_Language_Specification.md) are a design
+target only; a real implementation needs actual cancellation infrastructure
+first (a cooperative cancel-check point or OS-level thread termination),
+which `parallel(timeout:)`'s "leak the thread, panic anyway" approach
+deliberately sidesteps rather than provides.
+
 ---
 
 ## 2. `Http.serve` — Windows only

@@ -386,6 +386,72 @@ pub fn seed_stdlib(env: &mut TypeEnv, counter: &mut u32) {
     }
 
     // ---------------------------------------------------------------- //
+    // Concurrency — Channel<T>
+    // ---------------------------------------------------------------- //
+
+    {
+        let t = fresh();
+        env.define("Channel.new", Ty::Forall {
+            vars: vec![t],
+            body: Box::new(Ty::Fn {
+                params: vec![Ty::Int],
+                ret: Box::new(Ty::Named { name: "Channel".into(), args: vec![Ty::Var(t)] }),
+            }),
+        });
+    }
+    {
+        let t = fresh();
+        env.define("Channel.send", Ty::Forall {
+            vars: vec![t],
+            body: Box::new(fn2(
+                Ty::Named { name: "Channel".into(), args: vec![Ty::Var(t)] },
+                Ty::Var(t),
+                Ty::Unit,
+            )),
+        });
+    }
+    {
+        let t = fresh();
+        env.define("Channel.receive", Ty::Forall {
+            vars: vec![t],
+            body: Box::new(fn1(
+                Ty::Named { name: "Channel".into(), args: vec![Ty::Var(t)] },
+                Ty::Option(Box::new(Ty::Var(t))),
+            )),
+        });
+    }
+    {
+        let t = fresh();
+        env.define("Channel.tryReceive", Ty::Forall {
+            vars: vec![t],
+            body: Box::new(fn1(
+                Ty::Named { name: "Channel".into(), args: vec![Ty::Var(t)] },
+                Ty::Option(Box::new(Ty::Var(t))),
+            )),
+        });
+    }
+    {
+        let t = fresh();
+        env.define("Channel.close", Ty::Forall {
+            vars: vec![t],
+            body: Box::new(fn1(
+                Ty::Named { name: "Channel".into(), args: vec![Ty::Var(t)] },
+                Ty::Unit,
+            )),
+        });
+    }
+    {
+        let t = fresh();
+        env.define("Channel.isClosed", Ty::Forall {
+            vars: vec![t],
+            body: Box::new(fn1(
+                Ty::Named { name: "Channel".into(), args: vec![Ty::Var(t)] },
+                Ty::Bool,
+            )),
+        });
+    }
+
+    // ---------------------------------------------------------------- //
     // Text
     // ---------------------------------------------------------------- //
 
@@ -1010,6 +1076,14 @@ pub fn seed_stdlib(env: &mut TypeEnv, counter: &mut u32) {
     pm!("Map.get",         "map", "key");
     pm!("Map.contains",    "map", "key");
     pm!("Map.remove",      "map", "key");
+
+    // Channel
+    pm!("Channel.new",         "capacity");
+    pm!("Channel.send",        "channel", "item");
+    pm!("Channel.receive",     "channel");
+    pm!("Channel.tryReceive",  "channel");
+    pm!("Channel.close",       "channel");
+    pm!("Channel.isClosed",    "channel");
 
     // Text
     pm!("Text.concat",     "a", "b");

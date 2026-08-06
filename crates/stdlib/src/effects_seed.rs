@@ -65,6 +65,10 @@ const IO_FUNCTIONS: &[&str] = &[
     "DateTime.now", "Date.today",
     // Json (in-place mutation)
     "JsonValue.push", "JsonValue.set",
+    // Channel — cross-thread communication (allocation alone, Channel.new,
+    // is not marked: same convention as List.empty/Map.empty).
+    "Channel.send", "Channel.receive", "Channel.tryReceive",
+    "Channel.close", "Channel.isClosed",
 ];
 
 const FALLIBLE_FUNCTIONS: &[&str] = &[

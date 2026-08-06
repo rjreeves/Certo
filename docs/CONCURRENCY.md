@@ -161,6 +161,67 @@ code.
 
 ---
 
+## Example 3 — `Channel<T>`, producer and consumer
+
+`spawn`/`await` hand a value back once, at the end. When two tasks need to
+exchange a *stream* of values while both are still running, use a
+`Channel<T>` — a thread-safe, capacity-bounded queue.
+
+```certo
+module Channels
+
+fn producer(ch: Channel<Int>): Unit [io] = {
+  var i = 0
+  while i < 5 {
+    Channel.send(ch, i)   // blocks if the channel is full
+    i = i + 1
+  }
+  Channel.close(ch)       // no more items are coming
+}
+
+fn consumer(ch: Channel<Int>): Int [io] = {
+  var sum = 0
+  var running = true
+  while running {
+    match Channel.receive(ch) {   // blocks until an item arrives
+      Some(item) => { sum = sum + item }
+      None => { running = false }  // closed and drained
+    }
+  }
+  sum
+}
+
+pub async fn main(): Unit [io] = {
+  val ch = Channel.new(capacity: 2)
+  val p = spawn producer(ch)
+  val c = spawn consumer(ch)
+  await p
+  println(intToText(await c))
+}
+```
+
+```
+$ certo run channels.cto
+10
+```
+
+- `send` blocks while the channel is at capacity; `receive` blocks while it's
+  empty — this is how the producer and consumer stay in lockstep without
+  either one needing to poll.
+- `close` doesn't discard what's already buffered. `receive` keeps handing out
+  queued items after `close`; it only returns `None` once the channel is
+  *both* closed and empty. That's why the consumer's loop condition is "did I
+  get `None`", not "is the channel closed".
+- Sending after `close` panics — same convention as Go's channels. A closed
+  channel means "no more sends will happen", enforced at the point of misuse
+  rather than silently swallowed.
+- Non-blocking variant: `Channel.tryReceive(ch)` returns `None` immediately if
+  nothing is buffered right now, instead of waiting.
+
+See [STDLIB-QUICKREF.md](STDLIB-QUICKREF.md#channelt) for the full method list.
+
+---
+
 ## How it works under the hood
 
 For each `spawn` call site the compiler generates:
@@ -192,6 +253,8 @@ the result back out. You never see any of this — it's all in the generated C.
 
 For the precise list of what is and isn't supported in concurrency today, see
 [LIMITATIONS.md §1](LIMITATIONS.md). The higher-level structured-concurrency
-features sketched in [CERTO-SPEC.md §7](CERTO-SPEC.md) (cancellation scopes,
-channels, `withTimeout`, supervised background jobs) are a design target and not
-implemented yet — `spawn` / `await` / `parallel {}` are what runs today.
+features sketched in [CERTO-SPEC.md §7](CERTO-SPEC.md) — cancellation scopes,
+`withTimeout`, supervised background jobs (`every()`) — are a design target
+and not implemented yet: the runtime has no task-cancellation mechanism at
+all today, spawned threads always run to completion once started. `spawn` /
+`await` / `parallel {}` / `Channel<T>` are what runs today.

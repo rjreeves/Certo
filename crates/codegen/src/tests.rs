@@ -350,6 +350,19 @@ fn map_typed_local_uses_void_star_not_undeclared_typedef() {
 }
 
 #[test]
+fn channel_typed_local_uses_void_star_not_undeclared_typedef() {
+    // Same shape of bug as Map above, for BACKLOG item 80's Channel<T>: a
+    // Ty::Named{name:"Channel", args:[T]} local/param/return must map to
+    // `void*` (CertoChannel* is opaque regardless of T, never a
+    // per-instantiation typedef) rather than falling into the generic
+    // Ty::Named arm, which assumes a real user-defined struct named
+    // "Channel" exists.
+    let c = codegen("module A\nfn f(ch: Channel<Int>): Channel<Int> = ch");
+    assert_not_contains(&c, "certo_channel_int_t");
+    assert_contains(&c, "void* certo_f(void* _l1)");
+}
+
+#[test]
 fn tuple_float_element_is_bit_preserved() {
     // A Float tuple element must be bit-cast into/out of the pointer-sized slot.
     let c = codegen(
