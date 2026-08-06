@@ -33,6 +33,11 @@ pub fn ty_to_c(ty: &Ty) -> String {
         }
         // A spawned-task handle is an opaque heap pointer.
         Ty::Named { name, .. } if name == "__CertoTask" => "void*".into(),
+        // `Channel<T>` is a `CertoChannel*` regardless of `T` — like `Map<K,V>`
+        // above, no per-instantiation typedef is ever emitted, so this must be
+        // checked before the generic `Ty::Named` arm below (which assumes a
+        // real struct named after the type exists).
+        Ty::Named { name, .. } if name == "Channel" => "void*".into(),
         // These stdlib scalar types have a C-side typedef prefixed `Certo`
         // (`CertoDateTime`, etc. — see crates/stdlib/src/datetime.rs) rather
         // than matching their bare Certo name; an explicit `DateTime`/`Date`/

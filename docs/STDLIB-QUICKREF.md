@@ -212,6 +212,57 @@ Map.values<K, V>(map: Map<K, V>): List<V>
 Map.fromList<K, V>(pairs: List<(K, V)>): Map<K, V>
 ```
 
+### Channel\<T\>
+
+A thread-safe, capacity-bounded queue for communicating between `spawn`ed
+tasks. `send` blocks while the channel is full; `receive` blocks while it's
+empty. Sending on a closed channel panics. `receive` keeps delivering
+already-buffered items after `close` — it only returns `None` once the
+channel is both closed *and* drained, so "no more items" is a real `Option`
+value, not a special sentinel.
+
+```
+Channel.new<T>(capacity: Int): Channel<T>
+Channel.send<T>(channel: Channel<T>, item: T): Unit          // blocks if full; panics if closed
+Channel.receive<T>(channel: Channel<T>): T?                  // blocks if empty; None once closed+drained
+Channel.tryReceive<T>(channel: Channel<T>): T?                // never blocks; None if empty right now
+Channel.close<T>(channel: Channel<T>): Unit                  // idempotent
+Channel.isClosed<T>(channel: Channel<T>): Bool
+```
+
+```certo
+module Producer
+
+fn producer(ch: Channel<Int>): Unit [io] = {
+  var i = 0
+  while i < 5 {
+    Channel.send(ch, i)
+    i = i + 1
+  }
+  Channel.close(ch)
+}
+
+fn consumer(ch: Channel<Int>): Int [io] = {
+  var sum = 0
+  var running = true
+  while running {
+    match Channel.receive(ch) {
+      Some(item) => { sum = sum + item }
+      None => { running = false }
+    }
+  }
+  sum
+}
+
+pub async fn main(): Unit [io] = {
+  val ch = Channel.new(capacity: 2)
+  val p = spawn producer(ch)
+  val c = spawn consumer(ch)
+  await p
+  println(intToText(await c))   // 10
+}
+```
+
 ---
 
 ## Money / Decimal

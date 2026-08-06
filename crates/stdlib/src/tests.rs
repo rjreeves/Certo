@@ -1,6 +1,6 @@
 use certo_typeck::{Ty, TypeEnv};
 use crate::seed::seed_stdlib;
-use crate::{CORE_C, BYTES_C, CREDENTIAL_C, COLLECTIONS_C, TEXT_C, DATETIME_C, MONEY_C,
+use crate::{CORE_C, BYTES_C, CREDENTIAL_C, COLLECTIONS_C, CHANNEL_C, TEXT_C, DATETIME_C, MONEY_C,
             ENV_C, FILE_C, PATH_C, PROCESS_C, JSON_C, HTTP_C, DB_C,
             full_c_runtime};
 
@@ -128,6 +128,78 @@ fn map_empty_is_a_zero_arg_function_not_a_bare_value() {
 fn map_insert_registered() {
     let env = seeded_env();
     assert!(matches!(env.lookup("Map.insert").unwrap(), Ty::Forall { .. }));
+}
+
+// ------------------------------------------------------------------ //
+// Channel<T> — BACKLOG item 80
+// ------------------------------------------------------------------ //
+
+#[test]
+fn channel_functions_registered() {
+    let env = seeded_env();
+    for name in &["Channel.new", "Channel.send", "Channel.receive",
+                  "Channel.tryReceive", "Channel.close", "Channel.isClosed"] {
+        assert!(env.lookup(name).is_some(), "missing: {}", name);
+        assert!(matches!(env.lookup(name).unwrap(), Ty::Forall { .. }),
+                "{} should be polymorphic over T", name);
+    }
+}
+
+#[test]
+fn channel_new_returns_channel_of_t() {
+    let env = seeded_env();
+    match env.lookup("Channel.new").unwrap() {
+        Ty::Forall { vars, body } => {
+            assert_eq!(vars.len(), 1, "Channel.new should be generic over exactly one T");
+            match body.as_ref() {
+                Ty::Fn { params, ret } => {
+                    assert_eq!(params, &[Ty::Int], "capacity: Int");
+                    match ret.as_ref() {
+                        Ty::Named { name, args } => {
+                            assert_eq!(name, "Channel");
+                            assert_eq!(args.len(), 1);
+                            assert_eq!(args[0], Ty::Var(vars[0]));
+                        }
+                        other => panic!("expected Channel<T>, got {:?}", other),
+                    }
+                }
+                other => panic!("expected Fn, got {:?}", other),
+            }
+        }
+        other => panic!("expected Forall, got {:?}", other),
+    }
+}
+
+#[test]
+fn channel_receive_returns_option_t() {
+    let env = seeded_env();
+    for name in &["Channel.receive", "Channel.tryReceive"] {
+        match env.lookup(name).unwrap() {
+            Ty::Forall { vars, body } => match body.as_ref() {
+                Ty::Fn { params, ret } => {
+                    assert_eq!(params.len(), 1);
+                    assert_eq!(ret.as_ref(), &Ty::Option(Box::new(Ty::Var(vars[0]))),
+                               "{} should return Option<T>", name);
+                }
+                other => panic!("expected Fn, got {:?}", other),
+            },
+            other => panic!("expected Forall, got {:?}", other),
+        }
+    }
+}
+
+#[test]
+fn channel_c_contains_expected_symbols() {
+    for sym in &["certo_channel_new", "certo_channel_send", "certo_channel_receive",
+                 "certo_channel_try_receive", "certo_channel_close", "certo_channel_is_closed"] {
+        assert!(CHANNEL_C.contains(sym), "missing {} in CHANNEL_C", sym);
+    }
+}
+
+#[test]
+fn full_c_runtime_includes_channel() {
+    assert!(full_c_runtime().contains("certo_channel_new"),
+            "full_c_runtime() is missing CHANNEL_C");
 }
 
 #[test]
