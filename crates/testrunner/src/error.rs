@@ -35,7 +35,9 @@ impl fmt::Display for TestRunnerError {
                 write!(
                     f,
                     "property \"{}\" parameter `{}`: value generation is only supported for \
-                     Int, Float, Bool, and Text today",
+                     Int, Float, Bool, Text, List<T> of those, and named record/sum types built \
+                     from them today (not anonymous record types, Map/Decimal/DateTime/tuples/\
+                     Option/Result, a List of a record/sum type, or a self-referential type)",
                     property_name, param_name
                 ),
         }
