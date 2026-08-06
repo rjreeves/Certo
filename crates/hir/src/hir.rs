@@ -194,6 +194,16 @@ pub enum HirExprKind {
 
     /// `await task` — join a spawned Task, returning its result as int64_t.
     Await(Box<HirExpr>),
+
+    /// `await task` inside a `parallel(timeout: ...) { ... }` block — like
+    /// `Await`, but joins with a shared deadline (an absolute monotonic-clock
+    /// millisecond value, computed once for the whole block and referenced
+    /// by every task's join) instead of waiting indefinitely. Panics at
+    /// runtime if the deadline passes before the task finishes — BACKLOG item 81.
+    AwaitTimed {
+        task:     Box<HirExpr>,
+        deadline: LocalId,
+    },
 }
 
 // ------------------------------------------------------------------ //

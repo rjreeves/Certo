@@ -112,6 +112,22 @@ machine the total time is roughly the time of the *slower* task, not the sum of
 the two. (Measured: this runs ~2× faster than doing the two calls one after the
 other.)
 
+#### With a timeout
+
+`parallel(timeout: Duration.seconds(5)) { … }` enforces an overall deadline
+across *all* the tasks combined (not a separate timeout per task) — if any
+task is still running once the deadline passes, the program panics:
+
+```certo
+val results = await parallel(timeout: Duration.seconds(5)) {
+  fetchFromServiceA(),
+  fetchFromServiceB(),
+}
+```
+
+There's no cancellation — a task past the deadline is abandoned, not stopped,
+and the process is expected to exit via the panic shortly after.
+
 ### The explicit way — `spawn` then `await`
 
 Sometimes you want to name each task, or interleave other work between starting

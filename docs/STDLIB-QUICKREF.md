@@ -42,6 +42,7 @@ print(s: Text): Unit [io]           // stdout, no newline
 println(s: Text): Unit [io]         // stdout + newline
 eprint(s: Text): Unit [io]          // stderr, no newline
 eprintln(s: Text): Unit [io]        // stderr + newline
+sleep(ms: Int): Unit [io]           // block the current thread for ms milliseconds
 ```
 
 ### Conversions

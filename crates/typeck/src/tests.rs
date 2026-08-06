@@ -836,3 +836,25 @@ fn f(): Maybe<Int> = Just(1)
 fn g(): Maybe<Int> = Nothing"
     ).unwrap();
 }
+
+#[test]
+fn parallel_timeout_accepts_duration() {
+    // BACKLOG item 81: `timeout:` was parsed but never actually type-checked
+    // against `Duration` at all before this.
+    let src = "module A
+fn work(): Int = 1
+fn run(): (Int, Int) = await parallel(timeout: Duration.seconds(5)) { work(), work() }";
+    assert!(check(src).is_ok(), "{:?}", check(src).err());
+}
+
+#[test]
+fn parallel_timeout_rejects_non_duration() {
+    let src = "module A
+fn work(): Int = 1
+fn run(): (Int, Int) = await parallel(timeout: 5) { work(), work() }";
+    let kind = first_error_kind(src);
+    assert!(
+        matches!(kind, TypeErrorKind::Mismatch { .. } | TypeErrorKind::CannotUnify { .. }),
+        "expected a type mismatch for a non-Duration timeout, got: {:?}", kind
+    );
+}

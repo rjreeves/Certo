@@ -752,15 +752,54 @@ typedef void* (*__certo_worker_fn)(void*);
       WaitForSingleObject(th, INFINITE);
       CloseHandle(th);
   }
+  /* Fixed-layout task header — the common prefix of every spawn context struct.
+     WaitForSingleObject already natively supports a millisecond timeout on
+     the thread handle itself, so no extra completion signal is needed here. */
+  typedef struct { __certo_thread_t thread; } __certo_task_hdr_t;
+  static inline void __certo_task_hdr_init(__certo_task_hdr_t* hdr) { (void)hdr; }
+  static inline void __certo_task_signal_done(__certo_task_hdr_t* hdr) { (void)hdr; }
+  /* `parallel(timeout: ...) { ... }` — BACKLOG item 81. Returns true if the
+     thread finished within `timeout_ms` (clamped to >= 0), false on timeout.
+     On timeout the thread/handle are deliberately leaked: Certo has no
+     thread-cancellation mechanism, and the caller panics immediately after,
+     so the process is about to exit anyway. */
+  static bool __certo_thread_join_timed(__certo_task_hdr_t* hdr, int64_t timeout_ms) {
+      if (timeout_ms < 0) timeout_ms = 0;
+      DWORD r = WaitForSingleObject(hdr->thread, (DWORD)timeout_ms);
+      if (r == WAIT_OBJECT_0) { CloseHandle(hdr->thread); return true; }
+      return false;
+  }
 #else
   #include <pthread.h>
+  #include <semaphore.h>
+  #include <time.h>
   typedef pthread_t __certo_thread_t;
   static __certo_thread_t __certo_thread_spawn(__certo_worker_fn fn, void* arg) {
       pthread_t th; pthread_create(&th, NULL, fn, arg); return th;
   }
   static void __certo_thread_join(__certo_thread_t th) { pthread_join(th, NULL); }
+  /* Fixed-layout task header — the common prefix of every spawn context struct.
+     `pthread_join` has no portable timeout (`pthread_timedjoin_np` is a
+     Linux-only glibc extension), so a semaphore the worker posts on
+     completion backs the portable timed wait below. */
+  typedef struct { __certo_thread_t thread; sem_t done; } __certo_task_hdr_t;
+  static inline void __certo_task_hdr_init(__certo_task_hdr_t* hdr) { sem_init(&hdr->done, 0, 0); }
+  static inline void __certo_task_signal_done(__certo_task_hdr_t* hdr) { sem_post(&hdr->done); }
+  /* `parallel(timeout: ...) { ... }` — BACKLOG item 81. Returns true if the
+     thread finished within `timeout_ms` (clamped to >= 0), false on timeout.
+     On timeout the thread is deliberately leaked (not joined, semaphore not
+     destroyed): Certo has no thread-cancellation mechanism, and the caller
+     panics immediately after, so the process is about to exit anyway. */
+  static bool __certo_thread_join_timed(__certo_task_hdr_t* hdr, int64_t timeout_ms) {
+      if (timeout_ms < 0) timeout_ms = 0;
+      struct timespec ts;
+      clock_gettime(CLOCK_REALTIME, &ts);
+      ts.tv_sec  += timeout_ms / 1000;
+      ts.tv_nsec += (long)(timeout_ms % 1000) * 1000000L;
+      if (ts.tv_nsec >= 1000000000L) { ts.tv_sec += 1; ts.tv_nsec -= 1000000000L; }
+      if (sem_timedwait(&hdr->done, &ts) == 0) { pthread_join(hdr->thread, NULL); return true; }
+      return false;
+  }
 #endif
-/* Fixed-layout task header — the common prefix of every spawn context struct. */
-typedef struct { __certo_thread_t thread; } __certo_task_hdr_t;
 /* ---- end Certo runtime ---- */
 "#;

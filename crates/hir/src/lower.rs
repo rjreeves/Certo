@@ -961,10 +961,53 @@ fn lower_expr(expr: &S<Expr>, cx: &mut Cx) -> HirExpr {
             HirExpr { kind: HirExprKind::Try(Box::new(inner)), ty: Ty::Error, span }
         }
 
-        Expr::Parallel { tasks, .. } => {
+        Expr::Parallel { tasks, timeout, .. } => {
             // parallel { a, b, c } — spawn each task then await all, yielding a tuple.
             // Lower as: { val t0 = spawn a; val t1 = spawn b; ...; (await t0, await t1, ...) }
+            //
+            // parallel(timeout: d) { ... } additionally computes a single
+            // shared deadline (an absolute monotonic-clock millisecond value)
+            // *before* spawning, and every task's join is a timed join
+            // against that same deadline instead of an unbounded wait —
+            // BACKLOG item 81. A prior sequential timed-join still enforces
+            // the *overall* block deadline correctly: the remaining budget
+            // for task N is `deadline - now()`, computed fresh at codegen
+            // time for that join, so time spent waiting on earlier tasks is
+            // correctly deducted rather than each task getting its own full
+            // `timeout`.
             let mut stmts: Vec<HirStmt> = Vec::new();
+            let deadline_local = timeout.as_ref().map(|t| {
+                let timeout_hir = lower_expr(t, cx);
+                let to_seconds = HirExpr {
+                    kind: HirExprKind::Call {
+                        func: Box::new(HirExpr { kind: HirExprKind::Global("Duration.toSeconds".into()), ty: Ty::Error, span }),
+                        args: vec![timeout_hir],
+                    },
+                    ty: Ty::Int, span,
+                };
+                let to_ms = HirExpr {
+                    kind: HirExprKind::BinOp {
+                        op: BinOp::Mul,
+                        lhs: Box::new(to_seconds),
+                        rhs: Box::new(HirExpr { kind: HirExprKind::Int(1000), ty: Ty::Int, span }),
+                    },
+                    ty: Ty::Int, span,
+                };
+                let now_ms = HirExpr {
+                    kind: HirExprKind::Call {
+                        func: Box::new(HirExpr { kind: HirExprKind::Global("monotonicMillis".into()), ty: Ty::Error, span }),
+                        args: vec![],
+                    },
+                    ty: Ty::Int, span,
+                };
+                let deadline_expr = HirExpr {
+                    kind: HirExprKind::BinOp { op: BinOp::Add, lhs: Box::new(now_ms), rhs: Box::new(to_ms) },
+                    ty: Ty::Int, span,
+                };
+                let local = cx.fresh_local();
+                stmts.push(HirStmt::Let { local, name: "__parallel_deadline".into(), ty: Ty::Int, init: deadline_expr });
+                local
+            });
             let mut task_locals: Vec<LocalId> = Vec::new();
             for (i, task) in tasks.iter().enumerate() {
                 let spawn_inner = lower_expr(task, cx);
@@ -978,7 +1021,11 @@ fn lower_expr(expr: &S<Expr>, cx: &mut Cx) -> HirExpr {
             }
             let awaited: Vec<HirExpr> = task_locals.iter().map(|&l| {
                 let local_expr = HirExpr { kind: HirExprKind::Local(l), ty: Ty::Error, span };
-                HirExpr { kind: HirExprKind::Await(Box::new(local_expr)), ty: Ty::Error, span }
+                let kind = match deadline_local {
+                    Some(d) => HirExprKind::AwaitTimed { task: Box::new(local_expr), deadline: d },
+                    None    => HirExprKind::Await(Box::new(local_expr)),
+                };
+                HirExpr { kind, ty: Ty::Error, span }
             }).collect();
             let tail = HirExpr { kind: HirExprKind::Tuple(awaited), ty: Ty::Error, span };
             HirExpr { kind: HirExprKind::Block { stmts, tail: Box::new(tail) }, ty: Ty::Error, span }

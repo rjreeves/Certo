@@ -37,7 +37,7 @@ fn define(env: &mut EffectEnv, name: &str, effect: Effect) {
 const IO_FUNCTIONS: &[&str] = &[
     // Core — console / process
     "print", "println", "eprint", "eprintln", "flush",
-    "readLine", "readAll", "monotonicMillis",
+    "readLine", "readAll", "monotonicMillis", "sleep",
     // Env
     "setEnv", "unsetEnv",
     // File

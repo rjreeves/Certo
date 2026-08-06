@@ -107,6 +107,7 @@ fn infer_rvalue(map: &HashMap<MirLocal, String>, rv: &Rvalue) -> Option<String> 
         // Concurrency is not supported by the experimental LLVM backend.
         Rvalue::Spawn { .. }     => Some("ptr".into()),
         Rvalue::Join { .. }      => Some("ptr".into()),
+        Rvalue::JoinTimed { .. } => Some("ptr".into()),
         Rvalue::BoxSome { .. }   => Some("ptr".into()),
         Rvalue::UnboxSome { .. } => Some("ptr".into()),
         Rvalue::Box { .. }       => Some("ptr".into()),
@@ -281,7 +282,7 @@ impl<'ctx> FnEmitter<'ctx> {
 
             // Concurrency (`spawn`/`await`) not supported by the experimental
             // LLVM backend — emit null placeholders (the C backend is canonical).
-            Rvalue::Spawn { .. } | Rvalue::Join { .. }
+            Rvalue::Spawn { .. } | Rvalue::Join { .. } | Rvalue::JoinTimed { .. }
             | Rvalue::BoxSome { .. } | Rvalue::UnboxSome { .. }
             | Rvalue::Box { .. } | Rvalue::Unbox { .. } => {
                 let v = self.fresh();

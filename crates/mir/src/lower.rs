@@ -1089,6 +1089,26 @@ fn lower_expr(expr: &HirExpr, b: &mut Builder) -> Operand {
             b.assign(dest, Rvalue::Use(task_op));
             Operand::Local(dest)
         }
+
+        HirExprKind::AwaitTimed { task, deadline } => {
+            let task_op = lower_expr(task, b);
+            let deadline_op = Operand::Local(b.get_local(*deadline));
+            // Same real-task-vs-sequential-fallback split as plain `Await`.
+            if let certo_typeck::Ty::Named { name, args } = infer_operand_ty(&task_op, b) {
+                if name == "__CertoTask" {
+                    let ret_ty = args.into_iter().next().unwrap_or(certo_typeck::Ty::Error);
+                    let dest = b.declare_local("__await_timed_result", ret_ty.clone());
+                    b.assign(dest, Rvalue::JoinTimed { task: task_op, deadline: deadline_op, ret_ty });
+                    return Operand::Local(dest);
+                }
+            }
+            // Fallback: sequential-eval handle already holds the value
+            // directly — nothing to wait on, so the deadline is moot.
+            let val_ty = infer_operand_ty(&task_op, b);
+            let dest = b.declare_local("__await_timed_result", val_ty);
+            b.assign(dest, Rvalue::Use(task_op));
+            Operand::Local(dest)
+        }
     }
 }
 

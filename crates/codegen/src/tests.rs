@@ -964,6 +964,44 @@ fn await_emits_thread_join() {
 }
 
 #[test]
+fn parallel_timeout_emits_timed_join_and_panic() {
+    // BACKLOG item 81: `parallel(timeout: ...)` must actually enforce the
+    // timeout at runtime instead of silently dropping it.
+    let c = codegen(
+        "module A\nfn work(): Int = 1\n\
+         fn run(): (Int, Int) = await parallel(timeout: Duration.seconds(5)) { work(), work() }");
+    assert_contains(&c, "__certo_thread_join_timed");
+    assert_contains(&c, "certo_panic(\"parallel(timeout: ...) block exceeded its timeout\")");
+}
+
+#[test]
+fn parallel_timeout_deadline_computed_once_and_shared() {
+    // The deadline (now + timeout) must be computed exactly once and reused
+    // by every task's join — not recomputed per task, which would silently
+    // give each task its own full timeout instead of a shared overall budget.
+    let c = codegen(
+        "module A\nfn work(): Int = 1\n\
+         fn run(): (Int, Int) = await parallel(timeout: Duration.seconds(5)) { work(), work() }");
+    // One deadline-base read (`now()` folded into the deadline expression)
+    // plus one `now()` per join's remaining-time computation (2 tasks).
+    assert_eq!(c.matches("certo_monotonic_millis()").count(), 3,
+        "expected 1 deadline computation + 2 per-join remaining-time reads\n{c}");
+    assert_eq!(c.matches("__certo_thread_join_timed").count(), 2, "one timed join per task\n{c}");
+}
+
+#[test]
+fn parallel_without_timeout_does_not_use_timed_join() {
+    // The runtime prelude always *defines* __certo_thread_join_timed
+    // (regardless of use), so check for an actual call site, not the bare
+    // substring.
+    let c = codegen(
+        "module A\nfn work(): Int = 1\n\
+         fn run(): (Int, Int) = await parallel { work(), work() }");
+    assert_not_contains(&c, "!__certo_thread_join_timed(");
+    assert_contains(&c, "__certo_thread_join(((__certo_task_hdr_t*)");
+}
+
+#[test]
 fn parallel_spawns_all_before_joining() {
     // `parallel { a, b }` must launch both tasks before awaiting either, so they
     // actually run concurrently. Verify both spawns precede the first join.
