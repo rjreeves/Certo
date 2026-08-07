@@ -163,12 +163,12 @@ fn run_property(binary: &Path, entry: &TestEntry, _timeout: Duration) -> TestRes
     let start = Instant::now();
     let seed  = property_seed();
     let cases = property_num_cases();
-    let types: Vec<GenType> = entry.params.iter().map(|(_, t)| *t).collect();
+    let types: Vec<GenType> = entry.params.iter().map(|(_, t)| t.clone()).collect();
     let mut rng = Rng::new(seed);
 
     for case_idx in 0..cases {
         let values = generate_case(&mut rng, &types, case_idx, cases);
-        let args: Vec<String> = values.iter().map(|v| v.to_arg()).collect();
+        let args: Vec<String> = values.iter().flat_map(|v| v.to_args()).collect();
 
         match spawn_property_case(binary, entry, &args) {
             None => {
@@ -185,7 +185,7 @@ fn run_property(binary: &Path, entry: &TestEntry, _timeout: Duration) -> TestRes
                 let shrunk = shrink(
                     values,
                     |trial| {
-                        let trial_args: Vec<String> = trial.iter().map(|v| v.to_arg()).collect();
+                        let trial_args: Vec<String> = trial.iter().flat_map(|v| v.to_args()).collect();
                         matches!(spawn_property_case(binary, entry, &trial_args), Some(false))
                     },
                     MAX_SHRINK_ATTEMPTS,
@@ -193,7 +193,7 @@ fn run_property(binary: &Path, entry: &TestEntry, _timeout: Duration) -> TestRes
 
                 // Re-run the final (shrunk) counterexample once more to
                 // capture its stdout/stderr/exit code for the report.
-                let shrunk_args: Vec<String> = shrunk.iter().map(|v| v.to_arg()).collect();
+                let shrunk_args: Vec<String> = shrunk.iter().flat_map(|v| v.to_args()).collect();
                 let out = Command::new(binary).arg(&entry.display_name).args(&shrunk_args).output();
                 let (stdout, stderr, exit_code) = match out {
                     Ok(o) => (
@@ -206,7 +206,7 @@ fn run_property(binary: &Path, entry: &TestEntry, _timeout: Duration) -> TestRes
 
                 let counterexample: Vec<(String, String)> = entry.params.iter()
                     .zip(shrunk.iter())
-                    .map(|((name, _), v)| (name.clone(), v.to_arg()))
+                    .map(|((name, _), v)| (name.clone(), v.display()))
                     .collect();
 
                 return TestResult {
