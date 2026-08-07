@@ -170,23 +170,8 @@ double  certo_ceil(double f)  { return ceil(f); }
 double  certo_round(double f) { return round(f); }
 double  certo_sqrt(double f)  { return sqrt(f); }
 
-/* ---- range ---- */
-
-/* Returns a heap-allocated array of int64_t preceded by a length header.
-   Layout: [int64_t len] [int64_t data[len]]
-   Caller owns the allocation. */
-void* certo_range(int64_t start, int64_t end_excl) {
-    int64_t len = end_excl > start ? end_excl - start : 0;
-    int64_t* arr = (int64_t*)malloc((1 + (size_t)len) * sizeof(int64_t));
-    if (!arr) certo_panic("out of memory");
-    arr[0] = len;
-    for (int64_t i = 0; i < len; i++) arr[i + 1] = start + i;
-    return arr;
-}
-
-void* certo_range_inclusive(int64_t start, int64_t end_incl) {
-    return certo_range(start, end_incl + 1);
-}
+/* range()/rangeInclusive() live in collections.rs, right after CertoList/
+   list_alloc are defined — see the comment there for why. */
 
 /* ---- panic ---- */
 

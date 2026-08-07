@@ -1174,8 +1174,17 @@ pub fn seed_stdlib(env: &mut TypeEnv, counter: &mut u32) {
     pm!("Credential.set", "target", "secret");
     pm!("Http.request", "method", "url", "headers", "body");
     pm!("Http.requestBytes", "method", "url", "headers", "body");
-    pm!("Http.post",    "url", "content_type", "body");
-    pm!("Http.put",     "url", "content_type", "body");
+    // Real order is (url, body, content_type) — matches both the actual C
+    // implementation (crates/stdlib/src/http.rs's certo_http_post/put take
+    // (url, body, content_type)) and docs/STDLIB-QUICKREF.md's documented
+    // signature. This previously listed "content_type" before "body",
+    // silently swapping the two for any *named*-argument call
+    // (Http.post(url: ..., content_type: ..., body: ...)) — a real,
+    // confirmed bug found while verifying BACKLOG item 93's REST client
+    // generator (a positional call, unaffected by this metadata, still
+    // sent the content-type string as the request body).
+    pm!("Http.post",    "url", "body", "content_type");
+    pm!("Http.put",     "url", "body", "content_type");
     pm!("Http.respond", "status", "content_type", "body");
     pm!("Http.ok",      "content_type", "body");
     pm!("Http.serve",   "port", "handler");

@@ -351,8 +351,18 @@ fn decimal_add_type() {
 #[test]
 fn core_c_contains_certo_print() {
     assert!(CORE_C.contains("certo_print"), "missing certo_print");
-    assert!(CORE_C.contains("certo_range"), "missing certo_range");
     assert!(CORE_C.contains("certo_pow"),   "missing certo_pow");
+}
+
+#[test]
+fn collections_c_contains_certo_range() {
+    // range()/rangeInclusive() live here, not CORE_C — they need
+    // CertoList/list_alloc, which are defined here (see the comment on
+    // certo_range in collections.rs for why: a previous CORE_C-resident
+    // implementation used a completely different, incompatible memory
+    // layout that corrupted List.get/for-loop iteration over a range()).
+    assert!(COLLECTIONS_C.contains("certo_range"), "missing certo_range");
+    assert!(COLLECTIONS_C.contains("certo_range_inclusive"), "missing certo_range_inclusive");
 }
 
 #[test]

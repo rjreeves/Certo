@@ -30,6 +30,36 @@ static CertoList* list_alloc(int64_t cap) {
     return l;
 }
 
+/* range(start, end_excl): List<Int> / rangeInclusive(start, end_incl): List<Int>.
+   Lives here (not core.rs, where these are registered at the Certo level)
+   because it needs CertoList/list_alloc, defined just above — moved from a
+   previous, genuinely broken implementation that allocated a completely
+   different, incompatible layout ([int64_t len][int64_t data[len]] packed
+   inline, not the real {len,cap,void**data} struct every other List
+   function expects). That mismatch was silent for List.len(range(...))
+   (arr[0] happens to be `len` in both layouts by coincidence) but corrupted
+   everything else: List.get/`for`-loop iteration read `cap`/`data` from
+   whatever raw range values happened to occupy those byte offsets,
+   producing garbage element values or segfaulting outright when a bogus
+   `data` pointer got dereferenced. Confirmed as a real, reproducible crash
+   (not theorized) while verifying BACKLOG item 93's REST client generator,
+   whose List<T> JSON-decode loop uses `range(0, JsonValue.length(...))`.
+   Elements are boxed via the same `(void*)(intptr_t)(value)` convention
+   crates/codegen/src/emit_mir.rs's box_value uses for every other Int list
+   element, so a real List.get/for-loop/List.push on the result works
+   exactly like a range would if you'd built it with repeated List.push. */
+CertoList* certo_range(int64_t start, int64_t end_excl) {
+    int64_t len = end_excl > start ? end_excl - start : 0;
+    CertoList* l = list_alloc(len);
+    for (int64_t i = 0; i < len; i++) l->data[i] = (void*)(intptr_t)(start + i);
+    l->len = len;
+    return l;
+}
+
+CertoList* certo_range_inclusive(int64_t start, int64_t end_incl) {
+    return certo_range(start, end_incl + 1);
+}
+
 CertoList* certo_list_new_empty(void) {
     return list_alloc(8);
 }

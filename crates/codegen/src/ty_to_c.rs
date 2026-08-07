@@ -49,6 +49,17 @@ pub fn ty_to_c(ty: &Ty) -> String {
         Ty::Named { name, args } if args.is_empty() && matches!(name.as_str(), "DateTime" | "Date" | "Duration") => {
             format!("Certo{}", name)
         }
+        // `JsonValue` is a real C pointer (`CertoJsonValue*`, see
+        // crates/stdlib/src/json.rs), not a bare struct or an int64_t
+        // handle like the opaque types above — same gap as DateTime/Date/
+        // Duration just above (an explicit `JsonValue`-typed function
+        // param/return/local previously emitted the undeclared C
+        // identifier `JsonValue`; confirmed while building item 93's REST
+        // client generator, whose model decode/encode functions are the
+        // first real code to ever annotate a `JsonValue` parameter type
+        // explicitly instead of only ever using it via untyped `val`
+        // bindings).
+        Ty::Named { name, args } if args.is_empty() && name == "JsonValue" => "CertoJsonValue*".into(),
         Ty::Named { name, .. } => {
             // A user-defined generic type (`Box<Int>`, `Box<Text>`, ...) isn't
             // monomorphized — there is exactly one `Box` struct, with its
