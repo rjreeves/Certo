@@ -3,6 +3,7 @@ mod cmd_watch;
 mod cmd_repl;
 mod cmd_lint;
 mod cmd_generate;
+mod certo_toml;
 
 
 use std::path::{Path, PathBuf};
@@ -288,6 +289,7 @@ fn cmd_build(args: &[String], quiet: bool) {
     let mut emit_dll = false;
     let mut windows_gui = false;
     let mut watch    = false;
+    let mut release  = false;
     let mut links: Vec<String> = Vec::new();
 
     let mut i = 0;
@@ -308,9 +310,10 @@ fn cmd_build(args: &[String], quiet: bool) {
             "--windows-gui"    => windows_gui = true,
             "--verbose" | "-v" => verbose = true,
             "--watch" | "-w"  => watch    = true,
+            "--release"       => release  = true,
             "--help" | "-h" => {
-                println!("Usage: certo <file.cto> [-o <out>] [--emit-c] [--emit-dll] [--windows-gui] [-v] [--watch]");
-                println!("       certo build <file.cto> [-o <out>] [--emit-c] [--emit-dll] [--windows-gui] [-v] [--watch]");
+                println!("Usage: certo <file.cto> [-o <out>] [--emit-c] [--emit-dll] [--windows-gui] [-v] [--watch] [--release]");
+                println!("       certo build <file.cto> [-o <out>] [--emit-c] [--emit-dll] [--windows-gui] [-v] [--watch] [--release]");
                 println!();
                 println!("Options:");
                 println!("  -o <file>    Output path");
@@ -320,6 +323,8 @@ fn cmd_build(args: &[String], quiet: bool) {
                 println!("  --windows-gui  Build a Windows GUI-subsystem exe with no launcher console");
                 println!("  -v           Verbose: print the C compiler command");
                 println!("  --watch, -w  Watch the source file and rebuild on change");
+                println!("  --release    Apply the [targets.production] profile from certo.toml");
+                println!("               (optimize/strip-debug/schema overrides — see docs/CLI-TOOLCHAIN.md)");
                 return;
             }
             other if other.starts_with('-') => {
@@ -334,29 +339,25 @@ fn cmd_build(args: &[String], quiet: bool) {
         i += 1;
     }
 
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let cwd_toml = load_certo_toml_or_die(&cwd);
+
     let input = input.unwrap_or_else(|| {
-        // No file argument — try reading `entry` from certo.toml in cwd.
-        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-        if let Ok(toml_src) = std::fs::read_to_string(cwd.join("certo.toml")) {
-            for line in toml_src.lines() {
-                let line = line.trim();
-                if let Some(rest) = line.strip_prefix("entry").and_then(|r| {
-                    let r = r.trim_start();
-                    r.strip_prefix('=').map(|v| v.trim().trim_matches('"'))
-                }) {
-                    if !rest.is_empty() {
-                        return cwd.join(rest);
-                    }
+        // No file argument — try reading `[build] entry` from certo.toml in cwd.
+        match cwd_toml.as_ref().and_then(|c| c.build.as_ref()).and_then(|b| b.entry.as_deref()) {
+            Some(entry) if !entry.is_empty() => cwd.join(entry),
+            Some(_) | None => {
+                if cwd_toml.is_some() {
+                    eprintln!("error: certo.toml found but has no `entry` field under [build]");
+                    eprintln!("       add:  entry = \"src/main.cto\"");
+                } else {
+                    eprintln!("error: no input file and no certo.toml in current directory");
+                    eprintln!("usage: certo <file.cto> [-o <out>]");
+                    eprintln!("       or run from a project directory containing certo.toml");
                 }
+                process::exit(2);
             }
-            eprintln!("error: certo.toml found but has no `entry` field under [build]");
-            eprintln!("       add:  entry = \"src/main.cto\"");
-        } else {
-            eprintln!("error: no input file and no certo.toml in current directory");
-            eprintln!("usage: certo <file.cto> [-o <out>]");
-            eprintln!("       or run from a project directory containing certo.toml");
         }
-        process::exit(2);
     });
 
     // Watch mode: re-invoke this binary (minus --watch) on each change.
@@ -376,27 +377,49 @@ fn cmd_build(args: &[String], quiet: bool) {
         return;
     }
 
-    // Read certo.toml if present: auto-detect lib type and output directory.
+    // Read certo.toml if present: auto-detect lib type, output directory, and
+    // (with --release) the [targets.production] build profile.
     let mut toml_output_dir: Option<PathBuf> = None;
-    {
-        let project_root = input.parent().unwrap_or(Path::new("."));
-        if let Ok(toml_src) = std::fs::read_to_string(project_root.join("certo.toml")) {
-            for line in toml_src.lines() {
-                let line = line.trim();
-                if !emit_dll && (line == "type   = \"lib\"" || line == "type = \"lib\"") {
-                    emit_dll = true;
+    let mut target_optimize = true;
+    let mut target_strip_debug = false;
+    // Prefer cwd as the project root when it has its own certo.toml — matters
+    // when `input` was resolved from `[build] entry` (e.g. `src/main.cto`),
+    // whose *parent* is not the project root. Falls back to the input file's
+    // own directory only when cwd has no manifest (e.g. building a file from
+    // outside its project, the original fallback this mirrors).
+    let project_root = if cwd_toml.is_some() {
+        cwd.clone()
+    } else {
+        input.parent().unwrap_or(Path::new(".")).to_path_buf()
+    };
+    let project_toml = if project_root == cwd {
+        cwd_toml.clone()
+    } else {
+        load_certo_toml_or_die(&project_root)
+    };
+    if let Some(cfg) = &project_toml {
+        if let Some(build) = &cfg.build {
+            if !emit_dll && build.ty.as_deref() == Some("lib") {
+                emit_dll = true;
+            }
+            if let Some(output_dir) = build.output.as_deref().filter(|s| !s.is_empty()) {
+                let dir = project_root.join(output_dir);
+                std::fs::create_dir_all(&dir).ok();
+                toml_output_dir = Some(dir);
+            }
+        }
+        if release {
+            if let Some(prod) = cfg.targets.as_ref().and_then(|t| t.get("production")) {
+                target_optimize = prod.optimize.unwrap_or(true);
+                target_strip_debug = prod.strip_debug.unwrap_or(false);
+                if let Some(schema) = &prod.schema {
+                    // Overrides DATABASE_URL for this process only, so the
+                    // schema-sync check below (if enabled) connects against
+                    // the production schema URL instead of the dev default.
+                    unsafe { std::env::set_var("DATABASE_URL", certo_toml::expand_env_vars(schema)); }
                 }
-                // output = "dist/"  or  output = "dist"
-                if let Some(rest) = line.strip_prefix("output").and_then(|r| {
-                    let r = r.trim_start();
-                    r.strip_prefix('=').map(|v| v.trim().trim_matches('"'))
-                }) {
-                    if !rest.is_empty() {
-                        let dir = project_root.join(rest);
-                        std::fs::create_dir_all(&dir).ok();
-                        toml_output_dir = Some(dir);
-                    }
-                }
+            } else if verbose {
+                eprintln!("note: --release passed but certo.toml has no [targets.production] section — using defaults");
             }
         }
     }
@@ -432,7 +455,7 @@ fn cmd_build(args: &[String], quiet: bool) {
     expand_validators(&mut module, colour);
 
     // ── Type-check ────────────────────────────────────────────────────
-    run_typeck(&module, &src, &filename, colour);
+    run_typeck_opts_with_root(&module, &src, &filename, colour, false, &project_root);
 
     // ── Check for entry point ─────────────────────────────────────────
     let has_main = module.decls.iter().any(|d| {
@@ -548,13 +571,25 @@ fn cmd_build(args: &[String], quiet: bool) {
     let mut cmd = std::process::Command::new(&cc);
     cmd.arg(tmp.path())
        .arg("-o").arg(&out_path)
-       .arg("-O2")
+       .arg(if target_optimize { "-O2" } else { "-O0" })
        .arg("-Wno-int-to-pointer-cast")
        .arg("-Wno-pointer-to-int-cast")
        .arg("-Wno-int-conversion")
        .arg("-Wno-implicit-function-declaration")
        .arg("-Wno-deprecated-declarations")
        .arg("-Wno-incompatible-function-pointer-types");
+    if target_strip_debug && !cfg!(windows) {
+        // Strips the symbol table / relocation info from the linked binary — a
+        // real effect on ELF/Mach-O regardless of whether -g was ever passed
+        // (it wasn't; certo never emits debug info). On Windows this is a
+        // GNU-driver flag: this clang invocation targets the MSVC linker
+        // (`-Xlinker /subsystem:...` below), which doesn't accept `-s` and
+        // just warns it's unused — and since certo never passes `/DEBUG`
+        // there either, there's no embedded symbol table (that lives in a
+        // separate .pdb only when /DEBUG is requested) to strip in the first
+        // place, so skipping it on Windows changes nothing observable.
+        cmd.arg("-s");
+    }
 
     // POSIX threads for `parallel {}` / `spawn` / `await`. On Windows the runtime
     // uses Win32 threads (kernel32, always linked), so no extra flag is needed.
@@ -744,6 +779,19 @@ fn run_typeck(module: &Module, src: &str, filename: &str, colour: bool) {
     run_typeck_opts(module, src, filename, colour, false);
 }
 
+/// Like `run_typeck_opts`, but for callers that know the actual project root
+/// (the directory containing `certo.toml`) independently of `filename` — e.g.
+/// `cmd_build`, when `filename` came from `[build] entry` and so lives in a
+/// subdirectory (`src/main.cto`) rather than at the project root itself.
+/// Every other caller passes an explicit file path from the user, where
+/// `filename`'s own parent directory already *is* the project root, so they
+/// use the plain `run_typeck`/`run_typeck_opts` (which fall back to that).
+fn run_typeck_opts_with_root(
+    module: &Module, src: &str, filename: &str, colour: bool, explain: bool, project_root: &Path,
+) {
+    run_typeck_inner(module, src, filename, colour, explain, project_root);
+}
+
 /// The embedded error reference (`docs/ERROR-REFERENCE.md`) — bundled into the
 /// binary via `include_str!` so `--explain` works regardless of the current
 /// working directory or whether the repo is even present at runtime.
@@ -783,6 +831,13 @@ fn print_explanations(diags: &[Diagnostic]) {
 /// prints each diagnostic code's full write-up from `docs/ERROR-REFERENCE.md`
 /// before exiting (`certo check --explain`).
 fn run_typeck_opts(module: &Module, src: &str, filename: &str, colour: bool, explain: bool) {
+    let project_root = Path::new(filename).parent().unwrap_or(Path::new(".")).to_path_buf();
+    run_typeck_inner(module, src, filename, colour, explain, &project_root);
+}
+
+fn run_typeck_inner(
+    module: &Module, src: &str, filename: &str, colour: bool, explain: bool, project_root: &Path,
+) {
     let mut env     = TypeEnv::new();
     let mut counter = 0u32;
     env.seed_builtins(&mut counter);
@@ -833,14 +888,13 @@ fn run_typeck_opts(module: &Module, src: &str, filename: &str, colour: bool, exp
         }
     };
 
-    // ── Live schema-sync (opt-in via `[database] schema-sync = true` in certo.toml) ────
+    // ── Live schema-sync (opt-in via `[features] schema-sync = true` in certo.toml) ────
     // Off by default so a normal build/check never needs a database connection — this
     // only runs for projects that explicitly ask for it, and only checks `type`s marked
     // `impl DbRow for X {}` against the live database, not every declared record type.
-    let project_root = Path::new(filename).parent().unwrap_or(Path::new("."));
     if read_schema_sync_flag(project_root) {
         let db_url = resolve_database_url_for_sync().unwrap_or_else(|| {
-            eprintln!("error: `[database] schema-sync = true` is set in certo.toml, but DATABASE_URL is not set");
+            eprintln!("error: `[features] schema-sync = true` is set in certo.toml, but DATABASE_URL is not set");
             eprintln!("       set it in your environment or a .env file");
             process::exit(1);
         });
@@ -865,20 +919,30 @@ fn run_typeck_opts(module: &Module, src: &str, filename: &str, colour: bool, exp
     }
 }
 
-/// Reads `schema-sync = true` from the `[database]` section of `certo.toml` in
-/// `project_root`, if present. Same ad-hoc line parsing as the other `certo.toml` fields
-/// read elsewhere in this file (`entry`, `output`, `type`) — no structured TOML parser.
+/// Reads `schema-sync = true` from the `[features]` section of `certo.toml` in
+/// `project_root`, if present — matches `docs/Certo_Language_Specification.md`
+/// section 11.4's schema (`[features] schema-sync = true`). Previously this read
+/// (undocumented, section-blind) whatever line matched `schema-sync = ...`
+/// anywhere in the file; now parsed through `certo_toml::load` like every other
+/// field.
 fn read_schema_sync_flag(project_root: &Path) -> bool {
-    let Ok(toml_src) = std::fs::read_to_string(project_root.join("certo.toml")) else { return false; };
-    for line in toml_src.lines() {
-        let line = line.trim();
-        if let Some(rest) = line.strip_prefix("schema-sync").and_then(|r| {
-            r.trim_start().strip_prefix('=').map(|v| v.trim())
-        }) {
-            return rest.eq_ignore_ascii_case("true");
+    load_certo_toml_or_die(project_root)
+        .and_then(|cfg| cfg.features)
+        .and_then(|f| f.schema_sync)
+        .unwrap_or(false)
+}
+
+/// Loads `certo.toml` from `project_root`, exiting with a clear parse error if
+/// the file exists but is malformed TOML. `None` (not an error) if the file is
+/// simply absent — callers fall back to defaults/explicit CLI args.
+fn load_certo_toml_or_die(project_root: &Path) -> Option<certo_toml::CertoToml> {
+    match certo_toml::load(project_root) {
+        Ok(cfg) => cfg,
+        Err(msg) => {
+            eprintln!("error: {}", msg);
+            process::exit(2);
         }
     }
-    false
 }
 
 /// Resolve `DATABASE_URL` — env var first, then `.env` in the current directory. Mirrors
@@ -1610,7 +1674,18 @@ fn cmd_new(args: &[String]) {
          type   = \"{toml_type}\"\n\
          target = \"native\"\n\
          output = \"dist/\"\n\
-         {toml_entry}{toml_deps}"
+         {toml_entry}{toml_deps}\n\
+         [features]\n\
+         # schema-sync = true   # `certo build`/`check` cross-checks every `impl DbRow`\n\
+         #                      # type against the live DATABASE_URL schema; needs a\n\
+         #                      # reachable database on every build, so it's opt-in.\n\
+         \n\
+         # [targets.production]\n\
+         # optimize    = true   # -O2 (default) vs -O0 if set to false\n\
+         # strip-debug = true   # strips the linked binary's symbol table (-s)\n\
+         # schema      = \"${{DATABASE_URL}}\"  # DATABASE_URL override, used with\n\
+         #                                    # `[features] schema-sync` above\n\
+         # applied with: certo build --release\n"
     ));
 
     // src/main.cto — template-specific

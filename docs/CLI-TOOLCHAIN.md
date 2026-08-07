@@ -116,7 +116,7 @@ certo                               # reads entry from certo.toml
 2. Resolve local `import` statements by looking for sibling `.cto` files.
 3. Type-check (parse errors and type errors abort here).
 4. Emit C: preamble → runtime header → stdlib C → user code.
-5. Invoke a C compiler (`clang`, `gcc`, or `cc`) with `-O2`.
+5. Invoke a C compiler (`clang`, `gcc`, or `cc`) with `-O2` (`-O0` under `--release` if `[targets.production] optimize = false`).
 6. Write the native executable (or DLL).
 
 ### Options
@@ -128,6 +128,7 @@ certo                               # reads entry from certo.toml
 | `--emit-dll` | Compile to a shared library (`.dll` / `.so` / `.dylib`). |
 | `-v`, `--verbose` | Print the full C compiler command line. |
 | `-w`, `--watch` | Watch the source file and rebuild whenever it changes. |
+| `--release` | Apply the `[targets.production]` profile from `certo.toml` — see [§15](#15-certotoml--project-manifest). |
 | `--help`, `-h` | Show usage. |
 
 ### Compiling to a library
@@ -626,7 +627,10 @@ migrations/
 ## 15. certo.toml — project manifest
 
 When a `certo.toml` exists in the current directory, `certo build` (and bare
-`certo`) reads it for defaults.
+`certo`) reads it for defaults. It's parsed as real, structured TOML (via the
+`toml`/`serde` crates, `crates/cli/src/certo_toml.rs`) — a malformed file, or
+an unrecognized key in a known section, is a clear parse error naming the
+file and line/column, not a silently-ignored typo.
 
 ### Minimal example
 
@@ -660,6 +664,51 @@ output = "dist/"
 
 When `type = "lib"`, `certo build` automatically passes `--emit-dll`.
 
+### `[features]` — opt-in compiler behavior
+
+```toml
+[features]
+schema-sync = true
+```
+
+| Field | Description |
+|---|---|
+| `schema-sync` | If `true`, every `certo build`/`certo check` connects to `DATABASE_URL` (env var, then `.env`) and cross-checks every `impl DbRow for X {}` type's fields against the live database schema — see `certo_dbschema::check_schema_sync`. Off by default so an ordinary build never needs a reachable database. |
+
+`strict-nulls`, `query-logging`, and `effect-checking` are reserved (parsed,
+schema-validated) for the full manifest shape documented in
+`docs/Certo_Language_Specification.md` §11.4, but have **no enforcement wired
+up yet** — setting them does nothing today. (`effect-checking`'s underlying
+mechanism, in fact, already always runs unconditionally — see item 95 in
+`BACKLOG.md` — there's no toggle for it to gate.) They're accepted rather than
+rejected so a manifest written against the full spec doesn't hard-error, but
+don't rely on them for behavior.
+
+### `[targets.production]` — the `--release` build profile
+
+```toml
+[targets.production]
+optimize    = true                 # -O2 (default) vs -O0 if false
+strip-debug = true                 # strips the linked binary's symbol table
+schema      = "${DATABASE_URL}"    # DATABASE_URL override for schema-sync
+```
+
+Applied only when `certo build --release` is passed; a plain `certo build`
+ignores this section entirely. `${VAR}` in `schema` expands against the
+process environment (so a real connection string never has to live in
+version control) — a reference to an unset variable is left verbatim rather
+than silently blanked.
+
+| Field | Description |
+|---|---|
+| `optimize` | `true` (default) compiles with `-O2`; `false` compiles with `-O0`. |
+| `strip-debug` | `true` adds `-s` to the linker invocation. Only has an observable effect on ELF/Mach-O targets — Certo never emits `/DEBUG` on Windows, so there's no embedded symbol table there to strip in the first place; the flag is skipped on Windows rather than passed and ignored with a compiler warning. |
+| `schema` | Overrides `DATABASE_URL` (for this build only) when `[features] schema-sync` is also enabled — lets a dev-database default and a production connection string live in the same manifest without either being hardcoded. |
+
+`[targets.<name>]` is a map — only the `production` key is read today (there's
+no `--profile <name>` flag to select any other target name), matching the one
+example in the language spec.
+
 ### Fields
 
 | Field | Section | Description |
@@ -667,10 +716,14 @@ When `type = "lib"`, `certo build` automatically passes `--emit-dll`.
 | `name` | `[project]` | Project name |
 | `version` | `[project]` | SemVer string |
 | `edition` | `[project]` | Language edition (e.g. `"2026"`) |
+| `authors`, `license` | `[project]` | Parsed, not consumed anywhere yet |
 | `type` | `[build]` | `"app"` or `"lib"` |
 | `target` | `[build]` | Always `"native"` for now |
 | `output` | `[build]` | Output directory; created automatically |
 | `entry` | `[build]` | Entry file (required for apps) |
+| `schema`, `migrations`, `seeds` | `[database]` | Parsed, not consumed anywhere yet — `certo db` subcommands still take explicit args |
+| `port`, `host` | `[server]` | Parsed, not consumed anywhere yet — no `certo run --port` today; a program reads flags/env itself |
+| (any key) | `[dependencies]`, `[dev-dependencies]` | Parsed, not consumed anywhere yet — no package manager (`certo add`/`certo audit` are unimplemented) |
 
 ---
 
