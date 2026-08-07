@@ -1,16 +1,20 @@
-//! `certo-ffi` — C header and REST client generator.
+//! `certo-ffi` — C header, REST client, and OpenAPI client generator.
 //!
 //! # Usage
 //!
 //!   certo-ffi --header <file.cto> [-o <out.h>] [--guard <GUARD_H>]
 //!   certo-ffi --rest-client <schema.json> [-o <out.cto>]
+//!   certo-ffi --openapi <spec.json> [-o <out.cto>] [--module <Name>]
 //!
 //! # Options
 //!
 //!   --header <file>       Generate a C header from Certo pub fns
 //!   --rest-client <file>  Generate Certo client stubs from a REST JSON schema
+//!   --openapi <file>      Generate Certo client stubs from an OpenAPI 3.x JSON document
 //!   -o <file>             Output path (default: stdout)
 //!   --guard <NAME>        Override the C include-guard name (--header only)
+//!   --module <Name>       Override the generated module name (--openapi only;
+//!                         otherwise derived from the spec's info.title)
 //!
 //! # Exit codes
 //!
@@ -22,13 +26,14 @@ use std::path::PathBuf;
 use std::process;
 
 use certo_parser::parse;
-use certo_ffi::{generate_header, parse_schema, generate_client};
+use certo_ffi::{generate_header, parse_schema, parse_openapi, generate_client};
 
 fn main() {
     let mut args    = std::env::args().skip(1).peekable();
     let mut mode:     Option<Mode>    = None;
     let mut output:   Option<String>  = None;
     let mut guard:    Option<String>  = None;
+    let mut module:   Option<String>  = None;
 
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -40,11 +45,18 @@ fn main() {
                 let path = args.next().unwrap_or_else(|| die("--rest-client requires a path", 2));
                 mode = Some(Mode::Rest(PathBuf::from(path)));
             }
+            "--openapi" => {
+                let path = args.next().unwrap_or_else(|| die("--openapi requires a path", 2));
+                mode = Some(Mode::OpenApi(PathBuf::from(path)));
+            }
             "-o" => {
                 output = Some(args.next().unwrap_or_else(|| die("-o requires a path", 2)));
             }
             "--guard" => {
                 guard = Some(args.next().unwrap_or_else(|| die("--guard requires a name", 2)));
+            }
+            "--module" => {
+                module = Some(args.next().unwrap_or_else(|| die("--module requires a name", 2)));
             }
             other => die(&format!("unknown option '{}'", other), 2),
         }
@@ -53,6 +65,7 @@ fn main() {
     let mode = mode.unwrap_or_else(|| {
         eprintln!("usage: certo-ffi --header <file.cto> [-o <out.h>]");
         eprintln!("       certo-ffi --rest-client <schema.json> [-o <out.cto>]");
+        eprintln!("       certo-ffi --openapi <spec.json> [-o <out.cto>] [--module <Name>]");
         process::exit(2);
     });
 
@@ -68,6 +81,14 @@ fn main() {
         Mode::Rest(path) => {
             let json = read_file(&path);
             let schema = parse_schema(&json).unwrap_or_else(|e| {
+                eprintln!("error: {}", e);
+                process::exit(1);
+            });
+            generate_client(&schema)
+        }
+        Mode::OpenApi(path) => {
+            let json = read_file(&path);
+            let schema = parse_openapi(&json, module.as_deref()).unwrap_or_else(|e| {
                 eprintln!("error: {}", e);
                 process::exit(1);
             });
@@ -92,6 +113,7 @@ fn main() {
 enum Mode {
     Header(PathBuf),
     Rest(PathBuf),
+    OpenApi(PathBuf),
 }
 
 fn read_file(path: &PathBuf) -> String {

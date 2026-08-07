@@ -424,6 +424,14 @@ static inline int64_t          certo_json_array_append(CertoJsonValue* a, CertoJ
 #define certo_json_value_is_object  certo_json_is_object
 #define certo_json_value_length     certo_json_length
 #define certo_json_value_keys       certo_json_keys
-#define certo_json_value_push       certo_json_array_push
+/* JsonValue.push is registered (seed.rs) as returning Unit — every
+   Unit-returning stdlib function compiles to int64_t 0 (see
+   ret_ty_to_c's doc comment in crates/codegen/src/ty_to_c.rs), so this
+   must alias to the already-defined int64_t-returning wrapper
+   (certo_json_array_append, right above), not directly to the raw
+   void-returning certo_json_array_push — that mismatch was a real,
+   confirmed compile error ("assigning to 'int64_t' from incompatible
+   type 'void'"), caught while building item 93's REST client generator. */
+#define certo_json_value_push       certo_json_array_append
 #define certo_json_value_null       certo_json_null
 "#;

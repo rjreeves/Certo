@@ -14,18 +14,33 @@
 //!
 //! ## REST client  (`--rest-client`)
 //!
-//! Takes a JSON schema file describing a REST API and emits a `.cto` source
-//! file with typed `pub fn` stubs and `[async, io]` effects.
+//! Takes a JSON schema file describing a REST API — including named `models`
+//! (typed records, with generated JSON encode/decode functions) — and emits
+//! a `.cto` source file with typed `pub fn` stubs returning `Result<T, Text>`,
+//! `[io]`-effectful.
 //!
 //! ```sh
 //! certo-ffi --rest-client api/users.json -o src/UserApi.cto
+//! ```
+//!
+//! ## OpenAPI client  (`--openapi`)
+//!
+//! Same output as `--rest-client`, generated from an OpenAPI 3.x JSON
+//! document instead of the hand-written schema format — reads `paths` and
+//! `components.schemas` and produces the identical `RestSchema` shape (see
+//! `openapi` module docs for the exact subset supported).
+//!
+//! ```sh
+//! certo-ffi --openapi openapi.json -o src/StripeApi.cto
 //! ```
 
 pub mod error;
 pub mod ty;
 pub mod header;
 pub mod rest;
+pub mod openapi;
 
 pub use error::FfiError;
 pub use header::generate_header;
 pub use rest::{parse_schema, generate_client, RestSchema};
+pub use openapi::parse_openapi;
