@@ -24,3 +24,4 @@ certo-effects     = { path = "../effects" }
 tempfile          = "3"
 serde             = { version = "1", features = ["derive"] }
 serde_yaml        = "0.9"
+toml              = "0.8"
