@@ -93,6 +93,8 @@ fn real_main() {
             "new"     => cmd_new(&args[2..]),
             "migrate" => cmd_migrate(&args[2..]),
             "db"      => cmd_db(&args[2..]),
+            "add"     => cmd_add(&args[2..]),
+            "audit"   => cmd_audit(&args[2..]),
             "repl"    => cmd_repl::cmd_repl(),
             "help" | "--help" | "-h" => { print_top_help(); }
             "--version" | "-V" => { println!("certo {}", CERTO_VERSION); }
@@ -1828,6 +1830,188 @@ fn write_file(path: &Path, contents: &str) {
     });
 }
 
+// ------------------------------------------------------------------ //
+// add / audit
+// ------------------------------------------------------------------ //
+//
+// `[dependencies]` in certo.toml only ever lists *stdlib* module names today
+// (e.g. `"Stdlib.Http" = "*"` — see `cmd_new`'s template above) — there is no
+// package registry, fetch mechanism, or lockfile anywhere in this toolchain.
+// `certo add` and `certo audit` are scoped to that reality: manifest/import
+// bookkeeping, not a package manager. `certo add` appends a validated stdlib
+// module entry to `[dependencies]`; `certo audit` cross-checks that list
+// against the modules the entry file's source actually `import`s.
+
+/// Every module `certo_stdlib::seed_stdlib`/`full_c_runtime` actually provides —
+/// mirrors the `pub use *_C` list in `crates/stdlib/src/lib.rs` exactly, so
+/// `certo add <name>` rejects a typo instead of writing a manifest entry for a
+/// module that will never resolve to anything.
+const STDLIB_MODULES: &[&str] = &[
+    "Core", "Bytes", "Credential", "Collections", "Channel", "Result", "Text", "DateTime",
+    "Money", "Db", "DbQuery", "DbMutation", "Env", "File", "Path", "Process", "Json", "Http",
+    "Math", "Crypto", "Regex", "Csv",
+];
+
+/// Validates a user-supplied module name (`"Http"` or `"Stdlib.Http"`) against
+/// `STDLIB_MODULES` and normalizes it to the canonical `"Stdlib.X"` form every
+/// real `.cto` file and `certo.toml` in this codebase actually uses. Returns
+/// `Err` naming the invalid module and listing valid names.
+fn normalize_stdlib_module_name(input: &str) -> Result<String, String> {
+    let last_seg = input.rsplit('.').next().unwrap_or(input);
+    if !STDLIB_MODULES.contains(&last_seg) {
+        let mut names = STDLIB_MODULES.to_vec();
+        names.sort_unstable();
+        return Err(format!(
+            "unknown stdlib module '{}'\n       valid modules: {}",
+            input,
+            names.join(", ")
+        ));
+    }
+    Ok(format!("Stdlib.{}", last_seg))
+}
+
+fn cmd_add(args: &[String]) {
+    let mut module: Option<String> = None;
+    for a in args {
+        match a.as_str() {
+            "--help" | "-h" => {
+                println!("Usage: certo add <module>");
+                println!();
+                println!("Add a stdlib module to [dependencies] in certo.toml.");
+                println!("Example: certo add Http    (writes \"Stdlib.Http\" = \"*\")");
+                return;
+            }
+            other if other.starts_with('-') => {
+                eprintln!("Unknown option: {}", other);
+                process::exit(2);
+            }
+            path => {
+                if module.is_some() { die("only one module supported", 2); }
+                module = Some(path.to_string());
+            }
+        }
+    }
+    let module = module.unwrap_or_else(|| {
+        eprintln!("error: no module given");
+        eprintln!("usage: certo add <module>");
+        process::exit(2);
+    });
+
+    let key = normalize_stdlib_module_name(&module).unwrap_or_else(|msg| {
+        eprintln!("error: {}", msg);
+        process::exit(1);
+    });
+
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let manifest_path = cwd.join("certo.toml");
+    let src = std::fs::read_to_string(&manifest_path).unwrap_or_else(|_| {
+        eprintln!("error: no certo.toml in current directory");
+        eprintln!("       run `certo new <name>` to scaffold a project, or create one by hand");
+        process::exit(1);
+    });
+
+    let mut doc = src.parse::<toml_edit::DocumentMut>().unwrap_or_else(|e| {
+        eprintln!("error: failed to parse {}:\n{}", manifest_path.display(), e);
+        process::exit(2);
+    });
+
+    if doc.get("dependencies").and_then(|d| d.get(&key)).is_some() {
+        eprintln!("{} is already in [dependencies]", key);
+        return;
+    }
+
+    if doc.get("dependencies").is_none() {
+        doc["dependencies"] = toml_edit::table();
+    }
+    doc["dependencies"][&key] = toml_edit::value("*");
+
+    let new_src = doc.to_string();
+    // Sanity-check the edit through the strict, deny-unknown-fields schema
+    // loader before touching disk — a toml_edit bug here would otherwise
+    // silently corrupt the user's manifest.
+    if let Err(msg) = toml::from_str::<certo_toml::CertoToml>(&new_src) {
+        eprintln!("error: internal error — edited certo.toml failed to re-parse: {}", msg);
+        process::exit(1);
+    }
+    std::fs::write(&manifest_path, &new_src).unwrap_or_else(|e| {
+        eprintln!("error: cannot write {}: {}", manifest_path.display(), e);
+        process::exit(1);
+    });
+    eprintln!("added {} to [dependencies]", key);
+}
+
+fn cmd_audit(args: &[String]) {
+    let mut strict = false;
+    for a in args {
+        match a.as_str() {
+            "--strict" => strict = true,
+            "--help" | "-h" => {
+                println!("Usage: certo audit [--strict]");
+                println!();
+                println!("Cross-check [dependencies] in certo.toml against the stdlib modules");
+                println!("actually `import`ed by the project's entry file.");
+                println!();
+                println!("  --strict   Also fail (exit 1) on declared-but-unused dependencies");
+                return;
+            }
+            other => {
+                eprintln!("Unknown option: {}", other);
+                process::exit(2);
+            }
+        }
+    }
+
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let cfg = load_certo_toml_or_die(&cwd).unwrap_or_else(|| {
+        eprintln!("error: no certo.toml in current directory");
+        process::exit(1);
+    });
+    let entry = cfg.build.as_ref().and_then(|b| b.entry.as_deref()).unwrap_or_else(|| {
+        eprintln!("error: certo.toml has no `entry` field under [build]");
+        process::exit(1);
+    });
+    let entry_path = cwd.join(entry);
+    let colour = stderr_is_tty();
+    let (module, _src) = parse_file_or_exit(&entry_path, colour);
+
+    // Same scope as `cmd_build`'s own `uses_db` detection: only the entry
+    // file's own declared imports, not a transitive walk through locally
+    // imported files — matches the one place import declarations already
+    // drive real compiler behavior today, rather than inventing a deeper
+    // resolution pass audit alone would need to justify.
+    let stdlib_prefixes = ["Stdlib", "Core", "Collections", "Text", "DateTime", "Money"];
+    let imported: std::collections::BTreeSet<String> = module.imports.iter()
+        .filter(|imp| {
+            let first = imp.path.segments.first().map(|s| s.node.as_str()).unwrap_or("");
+            stdlib_prefixes.contains(&first)
+        })
+        .map(|imp| imp.path.segments.iter().map(|s| s.node.as_str()).collect::<Vec<_>>().join("."))
+        .collect();
+
+    let declared: std::collections::BTreeSet<String> = cfg.dependencies
+        .unwrap_or_default()
+        .into_keys()
+        .collect();
+
+    let missing: Vec<&String> = imported.difference(&declared).collect();
+    let unused: Vec<&String> = declared.difference(&imported).collect();
+
+    for m in &missing {
+        eprintln!("error: `{}` is imported but not declared in [dependencies]", m);
+        eprintln!("       fix with: certo add {}", m);
+    }
+    for m in &unused {
+        eprintln!("warning: `{}` is declared in [dependencies] but never imported", m);
+    }
+
+    if !missing.is_empty() || (strict && !unused.is_empty()) {
+        process::exit(1);
+    }
+    if missing.is_empty() && unused.is_empty() {
+        eprintln!("certo audit: ok — {} stdlib import(s) match declared dependencies", imported.len());
+    }
+}
+
 /// Convert a project name like "Lattice-Project" to a module name "latticeProject".
 fn to_module_name(name: &str) -> String {
     let mut out = String::new();
@@ -2301,6 +2485,8 @@ fn print_top_help() {
     eprintln!("  certo lint  <file.cto>...      Lint for unused params / dead code");
     eprintln!("  certo bench <file.cto>...      Run bench_ functions");
   eprintln!("  certo generate validators ...  Generate .cto from YAML definitions");
+    eprintln!("  certo add   <module>           Add a stdlib module to [dependencies]");
+    eprintln!("  certo audit [--strict]         Check [dependencies] against actual imports");
     eprintln!("  certo db <subcommand>            Database tools (migrate, rollback, status, pull)");
     eprintln!("  certo migrate <subcommand>       Alias for certo db
   certo --version                  Print version and exit");
@@ -3168,5 +3354,50 @@ mod flag_tests {
         // end-to-end via `certo check --explain` on a real multi-error file).
         assert!(explain_code("E0100").is_some());
         assert!(explain_code("E0100").is_some());
+    }
+}
+
+#[cfg(test)]
+mod add_audit_tests {
+    use super::*;
+
+    #[test]
+    fn normalize_accepts_bare_name() {
+        assert_eq!(normalize_stdlib_module_name("Http").unwrap(), "Stdlib.Http");
+    }
+
+    #[test]
+    fn normalize_accepts_dotted_name() {
+        assert_eq!(normalize_stdlib_module_name("Stdlib.Http").unwrap(), "Stdlib.Http");
+    }
+
+    #[test]
+    fn normalize_rejects_unknown_module() {
+        let err = normalize_stdlib_module_name("Bogus").unwrap_err();
+        assert!(err.contains("unknown stdlib module 'Bogus'"), "unexpected message: {err}");
+        assert!(err.contains("Http"), "should list valid modules: {err}");
+    }
+
+    #[test]
+    fn cmd_add_inserts_dependency_preserving_rest_of_file() {
+        let dir = std::env::temp_dir().join(format!("certo_add_test_{}_{}", std::process::id(), line!()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let manifest = dir.join("certo.toml");
+        std::fs::write(&manifest, "# a comment that must survive\n[project]\nname = \"x\"\n\n[build]\nentry = \"src/main.cto\"\n").unwrap();
+
+        let src = std::fs::read_to_string(&manifest).unwrap();
+        let mut doc = src.parse::<toml_edit::DocumentMut>().unwrap();
+        assert!(doc.get("dependencies").is_none());
+        doc["dependencies"] = toml_edit::table();
+        doc["dependencies"]["Stdlib.Http"] = toml_edit::value("*");
+        let new_src = doc.to_string();
+
+        assert!(new_src.contains("# a comment that must survive"), "comment lost:\n{new_src}");
+        assert!(new_src.contains("\"Stdlib.Http\""), "dependency not written:\n{new_src}");
+
+        let cfg: certo_toml::CertoToml = toml::from_str(&new_src).expect("edited manifest must still parse");
+        assert_eq!(cfg.dependencies.unwrap().get("Stdlib.Http").map(String::as_str), Some("*"));
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 }
