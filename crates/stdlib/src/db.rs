@@ -28,7 +28,12 @@ static char* certo_db_strdup(const char* s) {
  * to PQexecParams, which libpq treats as SQL NULL. */
 static const char certo_db_null_sentinel_str[] = "\001CERTO_DB_NULL\001";
 
-certo_text_t certo_db_null_param(void) {
+/* Name must be exactly `certo_db_null` — `crates/codegen`'s `c_fn_name`
+   mechanically derives the C symbol from the Certo name `dbNull` (camelCase
+   → snake_case, `certo_` prefix), with no per-function override mechanism;
+   a `_param` suffix here was an undefined-symbol link error waiting to
+   happen the first time any generated code actually called `dbNull()`. */
+certo_text_t certo_db_null(void) {
     return (certo_text_t)certo_db_null_sentinel_str;
 }
 
