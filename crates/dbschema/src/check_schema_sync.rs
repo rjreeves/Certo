@@ -63,7 +63,8 @@ pub fn check_schema_sync(module: &Module, schema: &Schema, live: &[LiveTable]) -
             // via the field's separate `optional` flag — strip it the same defensive way
             // `check_migrations::types_compat` does, since `nullable` is the real signal.
             let declared_ty = col.ty.trim_end_matches('?');
-            if declared_ty != live_col.certo_type {
+            if declared_ty != live_col.certo_type
+                && !crate::schema::decimal_bare_vs_param(declared_ty, &live_col.certo_type) {
                 errors.push(DbError {
                     kind: DbErrorKind::SchemaSyncTypeMismatch {
                         table: type_name.clone(), column: col.name.clone(),

@@ -69,7 +69,12 @@ impl UnionFind {
             (Ty::UInt,    Ty::UInt)    => Ok(()),
             (Ty::Float,   Ty::Float)   => Ok(()),
             (Ty::Float32, Ty::Float32) => Ok(()),
-            (Ty::Decimal, Ty::Decimal) => Ok(()),
+            // A bare `Decimal` unifies with any `Decimal(p,s)` (same runtime
+            // representation, the parameter is purely a compile-time
+            // refinement — see `Ty::Decimal`'s doc comment). Two *different*
+            // parameterizations don't unify with each other; that falls
+            // through to the generic mismatch arm below.
+            (Ty::Decimal(a), Ty::Decimal(b)) if a.is_none() || b.is_none() || a == b => Ok(()),
             (Ty::Bool,    Ty::Bool)    => Ok(()),
             (Ty::Char,    Ty::Char)    => Ok(()),
             (Ty::Text,    Ty::Text)    => Ok(()),

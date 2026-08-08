@@ -31,6 +31,7 @@ pub fn fmt_type(te: &TypeExpr, indent: usize) -> String {
         }
         Ptr  { inner, .. } => format!("*{}", fmt_type(&inner.node, indent)),
         Param { name, .. }  => name.node.clone(),
+        DecimalParam { precision, scale, .. } => format!("Decimal({}, {})", precision, scale),
     }
 }
 

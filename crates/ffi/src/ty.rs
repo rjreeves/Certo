@@ -26,6 +26,9 @@ pub fn ty_to_c(te: &TypeExpr) -> String {
         TypeExpr::Record { .. } => "void*".into(),
         TypeExpr::Ptr { inner, .. } => format!("{}*", ty_to_c(&inner.node)),
         TypeExpr::Param { .. }  => "void*".into(),
+        // Same runtime representation as bare `Decimal` — the parameter is a
+        // compile-time-only refinement, not a distinct C type.
+        TypeExpr::DecimalParam { .. } => "certo_decimal_t".into(),
     }
 }
 

@@ -919,3 +919,57 @@ fn plain_tuple_type_not_followed_by_arrow_still_parses() {
     let Decl::Fn(decl) = &m.decls[0].node else { panic!("expected fn decl") };
     assert!(matches!(&decl.params[0].ty.node, TypeExpr::Tuple { elements, .. } if elements.len() == 2));
 }
+
+// ------------------------------------------------------------------ //
+// Decimal(p, s) — BACKLOG item 128
+// ------------------------------------------------------------------ //
+
+#[test]
+fn decimal_with_precision_scale_parses() {
+    use certo_ast::types::TypeExpr;
+    let m = ok("module A\nfn f(x: Decimal(19, 4)): Unit = todo()");
+    let Decl::Fn(decl) = &m.decls[0].node else { panic!("expected fn decl") };
+    let TypeExpr::DecimalParam { precision, scale, .. } = &decl.params[0].ty.node
+        else { panic!("expected DecimalParam, got {:?}", decl.params[0].ty.node) };
+    assert_eq!(*precision, 19);
+    assert_eq!(*scale, 4);
+}
+
+#[test]
+fn bare_decimal_still_parses_as_named() {
+    // Regression guard: plain `Decimal` (no parens) must be unaffected —
+    // only the `Decimal(` form is special-cased.
+    use certo_ast::types::TypeExpr;
+    let m = ok("module A\nfn f(x: Decimal): Unit = todo()");
+    let Decl::Fn(decl) = &m.decls[0].node else { panic!("expected fn decl") };
+    assert!(matches!(&decl.params[0].ty.node,
+        TypeExpr::Named { path, args, .. } if path.segments[0].node == "Decimal" && args.is_empty()));
+}
+
+#[test]
+fn decimal_optional_parses() {
+    // `Decimal(19, 4)?` — the `?` suffix loop in parse_type must apply on
+    // top of the DecimalParam atom just like it does for any other type.
+    use certo_ast::types::TypeExpr;
+    let m = ok("module A\nfn f(x: Decimal(19, 4)?): Unit = todo()");
+    let Decl::Fn(decl) = &m.decls[0].node else { panic!("expected fn decl") };
+    let TypeExpr::Option { inner, .. } = &decl.params[0].ty.node
+        else { panic!("expected Option, got {:?}", decl.params[0].ty.node) };
+    assert!(matches!(&inner.node, TypeExpr::DecimalParam { .. }));
+}
+
+#[test]
+fn decimal_missing_comma_is_error() {
+    err("module A\nfn f(x: Decimal(19 4)): Unit = todo()");
+}
+
+#[test]
+fn decimal_non_integer_arg_is_error() {
+    err("module A\nfn f(x: Decimal(p, s)): Unit = todo()");
+}
+
+#[test]
+fn decimal_out_of_range_precision_is_error() {
+    // Precision/scale are u8 (0-255) — 999 doesn't fit.
+    err("module A\nfn f(x: Decimal(999, 4)): Unit = todo()");
+}

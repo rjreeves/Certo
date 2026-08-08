@@ -59,6 +59,17 @@ pub enum TypeExpr {
         name: Ident,
         span: Span,
     },
+
+    /// `Decimal(19, 4)` — precision/scale on the one builtin type that needs
+    /// compile-time-constant (not type) parameters. Deliberately not a
+    /// general mechanism: the parser only ever produces this for the exact
+    /// single-segment name `Decimal`, not a reusable "any type can take
+    /// parenthesized literal args" grammar rule.
+    DecimalParam {
+        precision: u8,
+        scale:     u8,
+        span:      Span,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]

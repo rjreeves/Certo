@@ -294,3 +294,37 @@ fn foreign_key_to_unknown_table() {
     assert!(has(&errs, |k| matches!(k, DbErrorKind::UnknownForeignKeyTarget { references, .. } if references == "Post")),
         "expected E0502: {:?}", errs.iter().map(|e| e.message()).collect::<Vec<_>>());
 }
+
+// ------------------------------------------------------------------ //
+// decimal_bare_vs_param — BACKLOG item 128
+// ------------------------------------------------------------------ //
+
+#[test]
+fn bare_decimal_compatible_with_parameterized_either_order() {
+    assert!(crate::schema::decimal_bare_vs_param("Decimal", "Decimal(19, 4)"));
+    assert!(crate::schema::decimal_bare_vs_param("Decimal(19, 4)", "Decimal"));
+}
+
+#[test]
+fn different_decimal_params_not_compatible() {
+    assert!(!crate::schema::decimal_bare_vs_param("Decimal(10, 2)", "Decimal(19, 4)"));
+}
+
+#[test]
+fn same_decimal_params_not_flagged_by_this_helper() {
+    // Exact matches are handled by the caller's own `==` check first — this
+    // helper only ever returns true for a bare/parameterized *mismatch* in
+    // form, so identical params correctly fall outside its job.
+    assert!(!crate::schema::decimal_bare_vs_param("Decimal(19, 4)", "Decimal(19, 4)"));
+}
+
+#[test]
+fn unrelated_types_not_compatible() {
+    assert!(!crate::schema::decimal_bare_vs_param("Int", "Decimal(19, 4)"));
+    assert!(!crate::schema::decimal_bare_vs_param("Decimal", "Text"));
+}
+
+#[test]
+fn decimal_bare_vs_param_strips_nullable_suffix() {
+    assert!(crate::schema::decimal_bare_vs_param("Decimal?", "Decimal(19, 4)?"));
+}

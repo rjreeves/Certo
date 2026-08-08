@@ -53,7 +53,7 @@ pub fn type_expr_to_ty(te: &TypeExpr, ctx: &mut Ctx<'_>) -> Ty {
                 "UInt"    => Ty::UInt,
                 "Float"   => Ty::Float,
                 "Float32" => Ty::Float32,
-                "Decimal" => Ty::Decimal,
+                "Decimal" => Ty::Decimal(None),
                 "Bool"    => Ty::Bool,
                 "Char"    => Ty::Char,
                 "Text"    => Ty::Text,
@@ -111,6 +111,7 @@ pub fn type_expr_to_ty(te: &TypeExpr, ctx: &mut Ctx<'_>) -> Ty {
             fresh
         }
         TE::Ptr { inner, .. } => type_expr_to_ty(&inner.node, ctx),
+        TE::DecimalParam { precision, scale, .. } => Ty::Decimal(Some((*precision, *scale))),
     }
 }
 
@@ -557,7 +558,7 @@ pub fn infer(expr: &S<Expr>, ctx: &mut Ctx<'_>) -> Ty {
 /// Types that can be interpolated into an f-string. Must stay in sync with the
 /// conversions codegen emits in `coerce_to_text` (Int/Float/Bool/Decimal/Text).
 fn is_displayable(ty: &Ty) -> bool {
-    matches!(ty, Ty::Int | Ty::Float | Ty::Bool | Ty::Decimal | Ty::Text)
+    matches!(ty, Ty::Int | Ty::Float | Ty::Bool | Ty::Decimal(_) | Ty::Text)
 }
 
 // ------------------------------------------------------------------ //
@@ -689,7 +690,7 @@ fn infer_lit(lit: &Lit) -> Ty {
     match lit {
         Lit::Int(_)     => Ty::Int,
         Lit::Float(_)   => Ty::Float,
-        Lit::Decimal(_) => Ty::Decimal,
+        Lit::Decimal(_) => Ty::Decimal(None),
         Lit::Bool(_)    => Ty::Bool,
         Lit::String(_)  => Ty::Text,
         Lit::FString(_) => Ty::Text,

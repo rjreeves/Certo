@@ -106,6 +106,28 @@ pub fn snake_to_camel(s: &str) -> String {
     first + &rest
 }
 
+/// Is one of `a`/`b` a bare `"Decimal"` and the other a parameterized
+/// `"Decimal(p, s)"` (in either order, case-insensitively, ignoring a
+/// trailing `?`)? Every place that compares a declared type against another
+/// declared/introspected type — `check_migrations::types_compat`,
+/// `check_schema_sync`, and `certo db diff` (`crates/cli`) — needs this same
+/// carve-out or'd into its own existing comparison, mirroring
+/// `certo_typeck::unify`'s rule that a bare `Ty::Decimal` unifies with any
+/// `Ty::Decimal(Some(p, s))`. Without it, a project that hasn't opted into
+/// declaring precision/scale would see every existing Decimal-typed column
+/// reported as drift the moment the live database has real `NUMERIC(p,s)`
+/// metadata, even though nothing about the code or database changed. Two
+/// *different* parameterizations (`Decimal(10, 2)` vs `Decimal(19, 4)`)
+/// still conflict — this only ever returns `true` when exactly one side is
+/// bare.
+pub fn decimal_bare_vs_param(a: &str, b: &str) -> bool {
+    let a = a.trim_end_matches('?').to_lowercase();
+    let b = b.trim_end_matches('?').to_lowercase();
+    let is_bare  = |s: &str| s == "decimal";
+    let is_param = |s: &str| s.starts_with("decimal(");
+    (is_bare(&a) && is_param(&b)) || (is_param(&a) && is_bare(&b))
+}
+
 /// Stringify a surface TypeExpr for comparison with migration column types.
 pub fn te_to_str(te: &TypeExpr) -> String {
     match te {
@@ -125,5 +147,6 @@ pub fn te_to_str(te: &TypeExpr) -> String {
         TypeExpr::Record { .. } => "{ .. }".into(),
         TypeExpr::Ptr { inner, .. } => format!("*{}", te_to_str(&inner.node)),
         TypeExpr::Param { name, .. } => name.node.clone(),
+        TypeExpr::DecimalParam { precision, scale, .. } => format!("Decimal({}, {})", precision, scale),
     }
 }

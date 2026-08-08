@@ -88,6 +88,14 @@ fn sum_type() {
 }
 
 #[test]
+fn decimal_param_round_trips() {
+    // BACKLOG item 128 — `Decimal(19, 4)` must round-trip through the
+    // formatter unchanged, not collapse to bare `Decimal`.
+    let out = fmt("module A\ntype Money = { amount: Decimal(19, 4) }");
+    assert_contains(&out, "amount: Decimal(19, 4)");
+}
+
+#[test]
 fn type_alias() {
     let out = fmt("module A\ntype Name = Text");
     assert_contains(&out, "type Name = Text");

@@ -5,7 +5,7 @@ mod check_mutation;
 mod check_schema_sync;
 mod error;
 
-pub use schema::{Schema, SchemaTable, SchemaColumn, LiveTable, LiveColumn, snake_to_pascal, snake_to_camel};
+pub use schema::{Schema, SchemaTable, SchemaColumn, LiveTable, LiveColumn, snake_to_pascal, snake_to_camel, decimal_bare_vs_param};
 pub use error::{DbError, DbErrorKind};
 pub use check_schema_sync::check_schema_sync;
 

@@ -128,6 +128,15 @@ fn parse_named_type(cur: &mut Cursor<'_>) -> Result<S<TypeExpr>, ParseError> {
     let path = parse_module_path(cur)?;
     let span_start = path.span;
 
+    // `Decimal(19, 4)` — precision/scale. Deliberately special-cased to this
+    // one exact single-segment name, not a general "any type can take
+    // parenthesized literal args" grammar rule (no other type needs this,
+    // and Certo's only other type-parameter forms are `Name<Args>` and
+    // `Name?`).
+    if path.segments.len() == 1 && path.segments[0].node == "Decimal" && cur.peek() == Some(&Token::LParen) {
+        return parse_decimal_params(cur, span_start);
+    }
+
     // Generic args: `<T, U>`
     let args = if cur.peek() == Some(&Token::Lt) {
         cur.bump();
@@ -150,6 +159,43 @@ fn parse_named_type(cur: &mut Cursor<'_>) -> Result<S<TypeExpr>, ParseError> {
     };
 
     Ok(S::new(TypeExpr::Named { path, args, span }, span))
+}
+
+/// `(19, 4)` — the precision/scale argument list for `Decimal`. `path_span`
+/// is the span of the already-consumed `Decimal` name, for the overall span.
+fn parse_decimal_params(cur: &mut Cursor<'_>, path_span: certo_ast::span::Span) -> Result<S<TypeExpr>, ParseError> {
+    cur.expect(&Token::LParen)?;
+    let precision = parse_u8_literal(cur)?;
+    cur.expect(&Token::Comma)?;
+    let scale = parse_u8_literal(cur)?;
+    let end = cur.expect(&Token::RParen)?;
+    let span = path_span.to(end);
+    Ok(S::new(TypeExpr::DecimalParam { precision, scale, span }, span))
+}
+
+/// A plain, non-negative decimal integer literal in the 0-255 range — used
+/// only for `Decimal(p, s)`'s precision/scale, which are always small.
+fn parse_u8_literal(cur: &mut Cursor<'_>) -> Result<u8, ParseError> {
+    let span = cur.peek_span();
+    match cur.peek() {
+        Some(Token::Integer(s)) => {
+            let s = *s;
+            cur.bump();
+            s.parse::<u8>().map_err(|_| ParseError {
+                kind: ParseErrorKind::InvalidLiteral(
+                    format!("`{}` is not a valid Decimal precision/scale (expected 0-255)", s)
+                ),
+                span,
+            })
+        }
+        other => {
+            let found = other.map(|t| format!("{t:?}")).unwrap_or_else(|| "end of file".into());
+            Err(ParseError {
+                kind: ParseErrorKind::Expected { expected: "integer literal".into(), found },
+                span,
+            })
+        }
+    }
 }
 
 // ------------------------------------------------------------------ //

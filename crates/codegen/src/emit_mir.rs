@@ -115,7 +115,7 @@ fn operand_ty(op: &Operand, locals: &[MirLocalDecl]) -> Ty {
 fn box_value(value: &str, ty: &Ty) -> String {
     match ty {
         // A double must be bit-cast, never numeric-converted.
-        Ty::Float | Ty::Decimal => format!("(void*)__certo_f2i({})", value),
+        Ty::Float | Ty::Decimal(_) => format!("(void*)__certo_f2i({})", value),
         // Everything else here is already pointer-sized (ints, bool, Text, and
         // handle types like Option/List/Result/Map/Tuple/nullary-enum).
         _ => format!("(void*)(intptr_t)({})", value),
@@ -125,7 +125,7 @@ fn box_value(value: &str, ty: &Ty) -> String {
 /// Recover a value of type `ty` from a pointer-sized slot.
 fn unbox_value(slot: &str, ty: &Ty) -> String {
     match ty {
-        Ty::Float | Ty::Decimal => format!("__certo_i2f((int64_t)(intptr_t)({}))", slot),
+        Ty::Float | Ty::Decimal(_) => format!("__certo_i2f((int64_t)(intptr_t)({}))", slot),
         _ => format!("({})(intptr_t)({})", ty_to_c(ty), slot),
     }
 }
@@ -465,14 +465,14 @@ fn coerce_to_text(op: &Operand, expr: String, locals: &[MirLocalDecl]) -> String
         Operand::Const(MirConst::Int(_))     => Some(Ty::Int),
         Operand::Const(MirConst::Float(_))   => Some(Ty::Float),
         Operand::Const(MirConst::Bool(_))    => Some(Ty::Bool),
-        Operand::Const(MirConst::Decimal(_)) => Some(Ty::Decimal),
+        Operand::Const(MirConst::Decimal(_)) => Some(Ty::Decimal(None)),
         _ => None,
     };
     match ty {
-        Some(Ty::Int)     => format!("certo_int_to_text({})", expr),
-        Some(Ty::Float)   => format!("certo_float_to_text({})", expr),
-        Some(Ty::Bool)    => format!("certo_bool_to_text({})", expr),
-        Some(Ty::Decimal) => format!("certo_decimal_to_text({})", expr),
+        Some(Ty::Int)        => format!("certo_int_to_text({})", expr),
+        Some(Ty::Float)      => format!("certo_float_to_text({})", expr),
+        Some(Ty::Bool)       => format!("certo_bool_to_text({})", expr),
+        Some(Ty::Decimal(_)) => format!("certo_decimal_to_text({})", expr),
         _ => expr,
     }
 }

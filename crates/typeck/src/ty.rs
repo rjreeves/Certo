@@ -16,7 +16,14 @@ pub enum Ty {
     UInt,   // UInt64
     Float,
     Float32,
-    Decimal,
+    /// `Decimal` (unparameterized, `None`) or `Decimal(p, s)` (`Some((p, s))`).
+    /// Always the same runtime representation (`certo_decimal_t`) either way —
+    /// the parameter is a compile-time-only refinement, primarily for
+    /// checking fidelity against a `NUMERIC(p,s)` database column (see
+    /// `certo_dbschema`), not a new runtime type. See `unify.rs`: a bare
+    /// `Decimal` unifies with any `Decimal(p,s)`; two different `Some(..)`
+    /// parameterizations do not unify with each other.
+    Decimal(Option<(u8, u8)>),
     Bool,
     Char,   // single ASCII byte — same byte-oriented convention as Text
     Text,
@@ -185,7 +192,8 @@ impl Ty {
             Ty::UInt    => "UInt".into(),
             Ty::Float   => "Float".into(),
             Ty::Float32 => "Float32".into(),
-            Ty::Decimal => "Decimal".into(),
+            Ty::Decimal(None)          => "Decimal".into(),
+            Ty::Decimal(Some((p, s))) => format!("Decimal({}, {})", p, s),
             Ty::Bool    => "Bool".into(),
             Ty::Char    => "Char".into(),
             Ty::Text    => "Text".into(),

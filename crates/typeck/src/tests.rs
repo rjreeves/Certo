@@ -913,3 +913,55 @@ fn char_does_not_unify_with_int() {
     );
 }
 
+// ------------------------------------------------------------------ //
+// Decimal(p, s) — BACKLOG item 128
+// ------------------------------------------------------------------ //
+
+#[test]
+fn decimal_param_type_checks() {
+    check("module A\nfn f(x: Decimal(19, 4)): Decimal(19, 4) = x").unwrap();
+}
+
+#[test]
+fn decimal_param_arithmetic_type_checks() {
+    // BinOp::Add etc. just unify(lt, rt) and return lt — generic over any
+    // type that unifies with itself, so Decimal(p,s) needs zero special
+    // casing in the operator itself (mirrors float32_arithmetic_type_checks).
+    check("module A\nfn f(x: Decimal(19, 4), y: Decimal(19, 4)): Decimal(19, 4) = x + y").unwrap();
+}
+
+#[test]
+fn bare_decimal_unifies_with_parameterized_decimal() {
+    // The core design decision: a bare `Decimal` value can be passed where
+    // `Decimal(p, s)` is expected, and vice versa — same runtime
+    // representation, the parameter is a compile-time-only refinement.
+    check("module A\nfn f(x: Decimal): Decimal(19, 4) = x").unwrap();
+    check("module A\nfn g(x: Decimal(19, 4)): Decimal = x").unwrap();
+}
+
+#[test]
+fn different_decimal_params_do_not_unify() {
+    // Decimal(10,2) and Decimal(19,4) are NOT interchangeable — only a bare
+    // Decimal on one side makes them compatible.
+    let src = "module A\nfn f(x: Decimal(10, 2)): Decimal(19, 4) = x";
+    let kind = first_error_kind(src);
+    assert!(
+        matches!(kind, TypeErrorKind::Mismatch { .. } | TypeErrorKind::CannotUnify { .. }),
+        "expected Decimal(10,2)/Decimal(19,4) to be exclusive, got: {:?}", kind
+    );
+}
+
+#[test]
+fn decimal_param_display_shows_precision_scale() {
+    let src = "module A\nfn f(x: Decimal(10, 2)): Decimal(19, 4) = x";
+    let kind = first_error_kind(src);
+    let TypeErrorKind::Mismatch { expected, found } = kind else {
+        panic!("expected Mismatch, got {:?}", kind);
+    };
+    // Don't assume which side unify labels "expected" vs "found" — just
+    // confirm both precisions appear, correctly formatted, in the error.
+    let both = format!("{} {}", expected.display(), found.display());
+    assert!(both.contains("Decimal(19, 4)"), "got: {both}");
+    assert!(both.contains("Decimal(10, 2)"), "got: {both}");
+}
+

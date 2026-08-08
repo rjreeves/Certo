@@ -38,7 +38,7 @@ pub fn seed_stdlib(env: &mut TypeEnv, counter: &mut u32) {
 
     def!("parseInt",     fn1(Ty::Text, Ty::Option(Box::new(Ty::Int))));
     def!("parseFloat",   fn1(Ty::Text, Ty::Option(Box::new(Ty::Float))));
-    def!("parseDecimal", fn1(Ty::Text, Ty::Option(Box::new(Ty::Decimal))));
+    def!("parseDecimal", fn1(Ty::Text, Ty::Option(Box::new(Ty::Decimal(None)))));
 
     // Option constructors — Some(x) / None
     {
@@ -558,24 +558,24 @@ pub fn seed_stdlib(env: &mut TypeEnv, counter: &mut u32) {
     // Money / Decimal
     // ---------------------------------------------------------------- //
 
-    def!("Decimal.add",        fn2(Ty::Decimal, Ty::Decimal, Ty::Decimal));
-    def!("Decimal.sub",        fn2(Ty::Decimal, Ty::Decimal, Ty::Decimal));
-    def!("Decimal.mul",        fn2(Ty::Decimal, Ty::Decimal, Ty::Decimal));
-    def!("Decimal.div",        fn2(Ty::Decimal, Ty::Decimal, Ty::Decimal));
-    def!("Decimal.eq",         fn2(Ty::Decimal, Ty::Decimal, Ty::Bool));
-    def!("Decimal.lt",         fn2(Ty::Decimal, Ty::Decimal, Ty::Bool));
-    def!("Decimal.gt",         fn2(Ty::Decimal, Ty::Decimal, Ty::Bool));
-    def!("Decimal.lte",        fn2(Ty::Decimal, Ty::Decimal, Ty::Bool));
-    def!("Decimal.gte",        fn2(Ty::Decimal, Ty::Decimal, Ty::Bool));
-    def!("Decimal.abs",        fn1(Ty::Decimal, Ty::Decimal));
-    def!("Decimal.negate",     fn1(Ty::Decimal, Ty::Decimal));
-    def!("Decimal.round",      fn2(Ty::Decimal, Ty::Int, Ty::Decimal));
-    def!("Decimal.toInt",      fn1(Ty::Decimal, Ty::Int));
-    def!("Decimal.fromInt",    fn1(Ty::Int, Ty::Decimal));
-    def!("Decimal.toText",     fn1(Ty::Decimal, Ty::Text));
-    def!("Money.fromCents",    fn1(Ty::Int, Ty::Decimal));
-    def!("Money.toCents",      fn1(Ty::Decimal, Ty::Int));
-    def!("Money.fromDecimal",  fn1(Ty::Decimal, Ty::Decimal));
+    def!("Decimal.add",        fn2(Ty::Decimal(None), Ty::Decimal(None), Ty::Decimal(None)));
+    def!("Decimal.sub",        fn2(Ty::Decimal(None), Ty::Decimal(None), Ty::Decimal(None)));
+    def!("Decimal.mul",        fn2(Ty::Decimal(None), Ty::Decimal(None), Ty::Decimal(None)));
+    def!("Decimal.div",        fn2(Ty::Decimal(None), Ty::Decimal(None), Ty::Decimal(None)));
+    def!("Decimal.eq",         fn2(Ty::Decimal(None), Ty::Decimal(None), Ty::Bool));
+    def!("Decimal.lt",         fn2(Ty::Decimal(None), Ty::Decimal(None), Ty::Bool));
+    def!("Decimal.gt",         fn2(Ty::Decimal(None), Ty::Decimal(None), Ty::Bool));
+    def!("Decimal.lte",        fn2(Ty::Decimal(None), Ty::Decimal(None), Ty::Bool));
+    def!("Decimal.gte",        fn2(Ty::Decimal(None), Ty::Decimal(None), Ty::Bool));
+    def!("Decimal.abs",        fn1(Ty::Decimal(None), Ty::Decimal(None)));
+    def!("Decimal.negate",     fn1(Ty::Decimal(None), Ty::Decimal(None)));
+    def!("Decimal.round",      fn2(Ty::Decimal(None), Ty::Int, Ty::Decimal(None)));
+    def!("Decimal.toInt",      fn1(Ty::Decimal(None), Ty::Int));
+    def!("Decimal.fromInt",    fn1(Ty::Int, Ty::Decimal(None)));
+    def!("Decimal.toText",     fn1(Ty::Decimal(None), Ty::Text));
+    def!("Money.fromCents",    fn1(Ty::Int, Ty::Decimal(None)));
+    def!("Money.toCents",      fn1(Ty::Decimal(None), Ty::Int));
+    def!("Money.fromDecimal",  fn1(Ty::Decimal(None), Ty::Decimal(None)));
 
     // ---------------------------------------------------------------- //
     // Env

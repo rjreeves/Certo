@@ -319,6 +319,33 @@ pub async fn main(): Unit [io] = {
 `Decimal` is stored as `{ value: Int, scale: Int }` where the true value is
 `value / 10^scale`. Never use `Float` for money.
 
+### `Decimal(p, s)` — precision/scale
+
+`Decimal(19, 4)` is the same runtime type as bare `Decimal` — the
+`(precision, scale)` is a compile-time-only refinement, not a new runtime
+representation. It exists specifically to check fidelity against a
+`NUMERIC(p,s)` database column: `certo db pull` generates it directly from a
+column's real precision/scale, and `certo db diff`/`[features] schema-sync`
+flag it as drift if your code's declared precision/scale doesn't match the
+live column's.
+
+A bare `Decimal` unifies with *any* `Decimal(p, s)` in both directions — it's
+always safe to pass a `Decimal(19, 4)` value anywhere a plain `Decimal` is
+expected, and vice versa. Every arithmetic/comparison/conversion function
+below is typed with bare `Decimal`, so none of them need a parameterized
+overload:
+
+```
+val price: Decimal(19, 4) = d"199.99"
+val tax: Decimal          = Decimal.fromInt(10)
+val total = Decimal.add(price, tax)   // Decimal — bare Decimal params accept price fine
+```
+
+Two *different* parameterizations don't unify with each other —
+`Decimal(10, 2)` and `Decimal(19, 4)` are a real type error if used
+interchangeably, since that would silently misrepresent one column's real
+constraint as another's.
+
 ### Arithmetic
 
 ```
