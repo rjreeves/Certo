@@ -11,8 +11,8 @@ use std::process;
 use certo_ast::decl::{Decl, MigrationDecl};
 use certo_ast::module::Module;
 use certo_migrate::{
-    plan_up, plan_down, run_steps, status,
-    default_manifest_path, RunOptions,
+    plan_up, plan_down, plan_sql, commit_steps, status,
+    default_manifest_path,
 };
 use certo_diagnostics::{Diagnostic, render_all};
 use certo_typeck::{TypeError, TypeErrorKind, TypeEnv, assign_var_names};
@@ -2578,20 +2578,32 @@ fn cmd_db_diff(args: &[String]) {
         }
     };
 
-    // Resolve DATABASE_URL.
-    let db_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| {
-        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-        if let Ok(contents) = std::fs::read_to_string(cwd.join(".env")) {
-            for line in contents.lines() {
-                let line = line.trim();
-                if let Some(val) = line.strip_prefix("DATABASE_URL=") {
-                    return val.trim().trim_matches('"').to_string();
-                }
-            }
+    let (diffs, ok_count) = diff_schema_against_live(&expected, &schema_name)
+        .unwrap_or_else(|msg| { eprintln!("error: {}", msg); process::exit(1); });
+
+    // ── Report ───────────────────────────────────────────────────────
+    if diffs.is_empty() {
+        println!("schema in sync — {} table(s) match the live database", ok_count);
+    } else {
+        println!("schema drift detected:\n");
+        for line in &diffs {
+            println!("{}", line);
         }
-        eprintln!("error: DATABASE_URL is not set");
+        println!();
+        println!("{} issue(s) found, {} table(s) ok", diffs.len(), ok_count);
         process::exit(1);
-    });
+    }
+}
+
+/// Connects to the live database (via `DATABASE_URL`) and diffs `expected` (a
+/// schema already parsed/validated from `type` declarations) against it.
+/// Returns `(diff_lines, tables_in_sync_count)` on success — never exits the
+/// process, so callers can react differently: `certo db diff` treats any
+/// non-empty diff as a hard failure, `certo db migrate`'s post-migrate check
+/// only warns.
+fn diff_schema_against_live(expected: &certo_dbschema::Schema, schema_name: &str) -> Result<(Vec<String>, usize), String> {
+    let db_url = resolve_database_url_for_sync()
+        .ok_or_else(|| "DATABASE_URL is not set".to_string())?;
 
     // Verify psql is available.
     let psql_ok = std::process::Command::new("psql")
@@ -2602,8 +2614,7 @@ fn cmd_db_diff(args: &[String]) {
         .map(|s| s.success())
         .unwrap_or(false);
     if !psql_ok {
-        eprintln!("error: psql not found on PATH");
-        process::exit(1);
+        return Err("psql not found on PATH".to_string());
     }
 
     // Query live columns from information_schema.
@@ -2619,25 +2630,31 @@ fn cmd_db_diff(args: &[String]) {
         .arg("--no-align").arg("--tuples-only").arg("--field-separator=|")
         .arg("--command").arg(&col_query)
         .output()
-        .unwrap_or_else(|e| { eprintln!("error running psql: {}", e); process::exit(1); });
+        .map_err(|e| format!("error running psql: {}", e))?;
     if !col_out.status.success() {
-        eprintln!("error: psql failed: {}", String::from_utf8_lossy(&col_out.stderr).trim());
-        process::exit(1);
+        return Err(format!("psql failed: {}", String::from_utf8_lossy(&col_out.stderr).trim()));
     }
 
-    // Parse live schema into HashMap<table, Vec<(col, certo_ty, nullable)>>.
+    // Parse live schema into HashMap<certo-cased table name, (raw db name, Vec<(raw col, certo-cased col, certo_ty, nullable)>)>.
+    // Bridges the same naming convention `check_schema_sync`/`certo db pull` already use
+    // (snake_case DB identifiers ↔ PascalCase types / camelCase fields) — table/column
+    // names are matched on the bridged form, but diagnostics that name a *live* DB object
+    // ("EXTRA TABLE", "EXTRA COLUMN") still print its real, raw DB name.
     use std::collections::HashMap;
-    let mut live: HashMap<String, Vec<(String, String, bool)>> = HashMap::new();
+    let mut live: HashMap<String, (String, Vec<(String, String, String, bool)>)> = HashMap::new();
     for line in String::from_utf8_lossy(&col_out.stdout).lines() {
         let line = line.trim();
         if line.is_empty() { continue; }
         let parts: Vec<&str> = line.splitn(4, '|').collect();
         if parts.len() < 4 { continue; }
-        let table    = parts[0].trim().to_string();
-        let col      = parts[1].trim().to_string();
-        let certo_ty = pg_type_to_certo(parts[2].trim());
-        let nullable = parts[3].trim().eq_ignore_ascii_case("YES");
-        live.entry(table).or_default().push((col, certo_ty, nullable));
+        let raw_table = parts[0].trim().to_string();
+        let raw_col   = parts[1].trim().to_string();
+        let certo_ty  = pg_type_to_certo(parts[2].trim());
+        let nullable  = parts[3].trim().eq_ignore_ascii_case("YES");
+        let certo_col = certo_dbschema::snake_to_camel(&raw_col);
+        let entry = live.entry(certo_dbschema::snake_to_pascal(&raw_table))
+            .or_insert_with(|| (raw_table.clone(), Vec::new()));
+        entry.1.push((raw_col, certo_col, certo_ty, nullable));
     }
 
     // ── Diff ─────────────────────────────────────────────────────────
@@ -2654,9 +2671,9 @@ fn cmd_db_diff(args: &[String]) {
             None => {
                 diffs.push(format!("  MISSING TABLE  {}", table_name));
             }
-            Some(live_cols) => {
-                let live_map: HashMap<&str, (&str, bool)> = live_cols.iter()
-                    .map(|(c, t, n)| (c.as_str(), (t.as_str(), *n)))
+            Some((_raw_table, live_cols)) => {
+                let live_map: HashMap<&str, (&str, &str, bool)> = live_cols.iter()
+                    .map(|(raw_col, certo_col, t, n)| (certo_col.as_str(), (raw_col.as_str(), t.as_str(), *n)))
                     .collect();
 
                 let mut table_diffs: Vec<String> = Vec::new();
@@ -2671,7 +2688,7 @@ fn cmd_db_diff(args: &[String]) {
                                 if ec.nullable { "?" } else { "" }
                             ));
                         }
-                        Some((live_ty, live_null)) => {
+                        Some((_raw_col, live_ty, live_null)) => {
                             // Type mismatch.
                             if !types_match(&ec.ty, live_ty) {
                                 table_diffs.push(format!(
@@ -2695,11 +2712,11 @@ fn cmd_db_diff(args: &[String]) {
                 // Columns in live but not in the type declaration.
                 let expected_cols: std::collections::HashSet<&str> =
                     expected_table.columns.iter().map(|c| c.name.as_str()).collect();
-                for (live_col, live_ty, live_null) in live_cols {
-                    if !expected_cols.contains(live_col.as_str()) {
+                for (raw_col, certo_col, live_ty, live_null) in live_cols {
+                    if !expected_cols.contains(certo_col.as_str()) {
                         table_diffs.push(format!(
                             "    EXTRA COLUMN    {}.{}: {}{}",
-                            table_name, live_col, live_ty,
+                            table_name, raw_col, live_ty,
                             if *live_null { "?" } else { "" }
                         ));
                     }
@@ -2716,27 +2733,16 @@ fn cmd_db_diff(args: &[String]) {
     }
 
     // Tables in live DB but not declared as types (informational only).
-    let mut extra_tables: Vec<&str> = live.keys()
-        .filter(|t| !expected.tables.contains_key(t.as_str()))
-        .map(|t| t.as_str())
+    let mut extra_tables: Vec<&str> = live.iter()
+        .filter(|(certo_name, _)| !expected.tables.contains_key(certo_name.as_str()))
+        .map(|(_, (raw_table, _))| raw_table.as_str())
         .collect();
     extra_tables.sort();
     for t in &extra_tables {
         diffs.push(format!("  EXTRA TABLE     {} (not declared as a type)", t));
     }
 
-    // ── Report ───────────────────────────────────────────────────────
-    if diffs.is_empty() {
-        println!("schema in sync — {} table(s) match the live database", ok_count);
-    } else {
-        println!("schema drift detected:\n");
-        for line in &diffs {
-            println!("{}", line);
-        }
-        println!();
-        println!("{} issue(s) found, {} table(s) ok", diffs.len(), ok_count);
-        process::exit(1);
-    }
+    Ok((diffs, ok_count))
 }
 
 /// Loose type comparison — ignores casing, treats nullable-stripped types as equal.
@@ -3212,18 +3218,23 @@ fn cmd_migrate(args: &[String]) {
                 .unwrap_or_else(|e| { eprintln!("error: {}", e); process::exit(1); });
             let steps = plan_up(&migrations, &state);
             if steps.is_empty() { println!("Nothing to migrate."); return; }
-            let opts = RunOptions { dry_run, manifest_path: &manifest };
-            match run_steps(&steps, &opts) {
-                Ok(sql) => {
-                    for stmt in &sql { println!("{}", stmt); }
-                    if dry_run {
-                        println!("-- dry run: {} statement(s) not executed", sql.len());
-                    } else {
-                        println!("Applied {} migration(s).", steps.len());
-                    }
-                }
-                Err(e) => { eprintln!("error: {}", e); process::exit(1); }
+            let sql = plan_sql(&steps);
+            for stmt in &sql { println!("{}", stmt); }
+
+            if dry_run {
+                println!("-- dry run: {} statement(s) not executed", sql.len());
+                return;
             }
+
+            run_migration_sql(&sql);
+            if let Err(e) = commit_steps(&steps, &manifest) {
+                eprintln!("error: migration(s) executed successfully against the database,");
+                eprintln!("       but failed to record local state: {}", e);
+                eprintln!("       `certo db status` may now be inaccurate — check .certo_migrations");
+                process::exit(1);
+            }
+            println!("Applied {} migration(s).", steps.len());
+            warn_if_schema_stale(&project_root);
         }
 
         "down" => {
@@ -3237,18 +3248,23 @@ fn cmd_migrate(args: &[String]) {
                 .unwrap_or_else(|e| { eprintln!("error: {}", e); process::exit(1); });
             let steps = plan_down(&migrations, &state, count);
             if steps.is_empty() { println!("Nothing to roll back."); return; }
-            let opts = RunOptions { dry_run, manifest_path: &manifest };
-            match run_steps(&steps, &opts) {
-                Ok(sql) => {
-                    for stmt in &sql { println!("{}", stmt); }
-                    if dry_run {
-                        println!("-- dry run: {} statement(s) not executed", sql.len());
-                    } else {
-                        println!("Rolled back {} migration(s).", steps.len());
-                    }
-                }
-                Err(e) => { eprintln!("error: {}", e); process::exit(1); }
+            let sql = plan_sql(&steps);
+            for stmt in &sql { println!("{}", stmt); }
+
+            if dry_run {
+                println!("-- dry run: {} statement(s) not executed", sql.len());
+                return;
             }
+
+            run_migration_sql(&sql);
+            if let Err(e) = commit_steps(&steps, &manifest) {
+                eprintln!("error: rollback executed successfully against the database,");
+                eprintln!("       but failed to record local state: {}", e);
+                eprintln!("       `certo db status` may now be inaccurate — check .certo_migrations");
+                process::exit(1);
+            }
+            println!("Rolled back {} migration(s).", steps.len());
+            warn_if_schema_stale(&project_root);
         }
 
         "status" => {
@@ -3286,6 +3302,79 @@ fn cmd_migrate(args: &[String]) {
             eprintln!("Unknown migrate subcommand: {}", sub);
             eprintln!("Usage: certo migrate up | down [N] | status | create <name>");
             process::exit(1);
+        }
+    }
+}
+
+/// Actually executes `sql` against `DATABASE_URL` via `psql`, exiting the
+/// process on any failure (resolution, missing `psql`, or a failing
+/// statement) — the caller (`cmd_migrate`) only calls `commit_steps` after
+/// this returns, so migration state is never marked "applied" for SQL that
+/// didn't really run. `--single-transaction` plus `ON_ERROR_STOP=1` wraps the
+/// whole batch in one `BEGIN`/`COMMIT`: a failing statement rolls back
+/// everything from this migration batch *and* makes `psql`'s own exit code
+/// reflect the failure (its default behavior otherwise keeps going after an
+/// error and can still exit 0).
+fn run_migration_sql(sql: &[String]) {
+    if sql.is_empty() { return; }
+
+    let db_url = resolve_database_url_for_sync().unwrap_or_else(|| {
+        eprintln!("error: DATABASE_URL is not set");
+        eprintln!("       set it in your environment or a .env file");
+        process::exit(1);
+    });
+
+    let psql_ok = std::process::Command::new("psql")
+        .arg("--version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if !psql_ok {
+        eprintln!("error: psql not found on PATH — required to execute migrations");
+        process::exit(1);
+    }
+
+    let script = sql.join("\n");
+    let out = std::process::Command::new("psql")
+        .arg(&db_url)
+        .arg("--single-transaction")
+        .arg("--set").arg("ON_ERROR_STOP=1")
+        .arg("--command").arg(&script)
+        .output()
+        .unwrap_or_else(|e| { eprintln!("error running psql: {}", e); process::exit(1); });
+    if !out.status.success() {
+        eprintln!("error: migration failed — no changes were committed (single transaction rolled back):");
+        eprintln!("{}", String::from_utf8_lossy(&out.stderr).trim());
+        process::exit(1);
+    }
+}
+
+/// After a successful migration, warns (doesn't fail the command) if
+/// `db/schema.cto` — the file `certo db pull` generates — is now stale
+/// relative to the database that migration just changed. Only runs the check
+/// if that file actually exists, so projects that don't use `certo db pull`
+/// at all are never forced into a DB round-trip they didn't ask for.
+fn warn_if_schema_stale(project_root: &Path) {
+    let schema_file = project_root.join("db").join("schema.cto");
+    let Ok(src) = std::fs::read_to_string(&schema_file) else { return; };
+    let Ok(module) = certo_parser::parse(&src) else {
+        eprintln!("warning: db/schema.cto failed to parse — skipping drift check");
+        return;
+    };
+    let Ok(expected) = certo_dbschema::check_module(&module) else { return; };
+
+    match diff_schema_against_live(&expected, "public") {
+        Ok((diffs, _ok_count)) if diffs.is_empty() => {}
+        Ok((diffs, _ok_count)) => {
+            eprintln!();
+            eprintln!("warning: db/schema.cto is now out of sync with the live database:");
+            for line in &diffs { eprintln!("{}", line); }
+            eprintln!("         run `certo db pull` to refresh it");
+        }
+        Err(msg) => {
+            eprintln!("warning: could not check db/schema.cto for drift: {}", msg);
         }
     }
 }

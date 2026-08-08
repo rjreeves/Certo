@@ -488,6 +488,26 @@ certo db migrate            # apply all pending migrations
 certo db migrate --dry-run  # print the SQL without executing it
 ```
 
+Without `--dry-run`, the generated SQL is actually executed against
+`DATABASE_URL` via `psql`, wrapped in a single transaction with
+`ON_ERROR_STOP=1` — if any statement fails, the whole batch rolls back and
+nothing is marked applied, so a fixed retry is always safe. Migration state
+(`.certo_migrations`) is only updated *after* execution succeeds; it's never
+marked applied for SQL that didn't actually run.
+
+If `db/schema.cto` exists (the file `certo db pull` generates), a successful
+`migrate` also checks it against the database that was just changed and
+prints a warning — not a failure — if it's now stale:
+
+```
+warning: db/schema.cto is now out of sync with the live database:
+  TABLE  Orders
+    MISSING COLUMN  Orders.discountCode: Text?
+         run `certo db pull` to refresh it
+```
+
+Requires `psql` on `PATH`.
+
 ### certo db rollback
 
 ```sh
@@ -495,6 +515,9 @@ certo db rollback           # roll back the last migration
 certo db rollback 3         # roll back the last 3 migrations
 certo db rollback --dry-run # print the rollback SQL without executing
 ```
+
+Same real-execution/single-transaction/staleness-check behavior as `certo db
+migrate` above, in reverse.
 
 ### certo db create
 

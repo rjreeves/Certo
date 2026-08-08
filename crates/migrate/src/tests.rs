@@ -4,6 +4,7 @@ use certo_ast::span::{S, Span};
 use crate::sql_gen::op_to_sql;
 use crate::state::MigrationState;
 use crate::plan::{plan_up, plan_down, Direction};
+use crate::runner::{plan_sql, commit_steps};
 
 fn dummy_span() -> Span { Span { start: 0, end: 0 } }
 fn s<T>(v: T) -> S<T> { S { node: v, span: dummy_span() } }
@@ -217,6 +218,95 @@ fn plan_up_nothing_to_do() {
     state.mark_applied("m001");
     let steps = plan_up(&migrations, &state);
     assert!(steps.is_empty());
+}
+
+// ------------------------------------------------------------------ //
+// plan_sql / commit_steps tests
+//
+// `plan_sql` must be pure (no state mutation) — `--dry-run` relies on that.
+// `commit_steps` must only ever be called by the CLI after real execution
+// succeeded; these tests just verify it persists exactly the given steps,
+// not that it's wired to real execution (that's CLI-level, not this crate's
+// concern — this crate has no process-spawning/psql code at all).
+// ------------------------------------------------------------------ //
+
+fn make_migration_with_ops(name: &str) -> MigrationDecl {
+    MigrationDecl {
+        name:        name.to_string(),
+        description: None,
+        up:          vec![MigrationOp::CreateTable {
+            name: "widgets".to_string(),
+            columns: vec![make_col("id", int_ty(), true, false)],
+            span: dummy_span(),
+        }],
+        down:        vec![MigrationOp::DropTable { name: "widgets".to_string(), span: dummy_span() }],
+        span:        dummy_span(),
+    }
+}
+
+#[test]
+fn plan_sql_generates_real_ddl_for_up_steps() {
+    let migrations = vec![make_migration_with_ops("m001")];
+    let state = MigrationState::default();
+    let steps = plan_up(&migrations, &state);
+    let sql = plan_sql(&steps);
+    assert_eq!(sql.len(), 1);
+    assert!(sql[0].contains("CREATE TABLE widgets"), "got: {}", sql[0]);
+}
+
+#[test]
+fn plan_sql_generates_real_ddl_for_down_steps() {
+    let migrations = vec![make_migration_with_ops("m001")];
+    let mut state = MigrationState::default();
+    state.mark_applied("m001");
+    let steps = plan_down(&migrations, &state, 1);
+    let sql = plan_sql(&steps);
+    assert_eq!(sql.len(), 1);
+    assert_eq!(sql[0], "DROP TABLE widgets;");
+}
+
+#[test]
+fn plan_sql_does_not_mutate_state() {
+    // Regression guard: plan_sql takes no MigrationState/manifest at all —
+    // calling it must never have a side effect on migration state, unlike
+    // the old run_steps(dry_run: false) which marked-applied unconditionally.
+    let migrations = vec![make_migration_with_ops("m001")];
+    let state = MigrationState::default();
+    let steps = plan_up(&migrations, &state);
+    let _ = plan_sql(&steps);
+    assert!(!state.is_applied("m001"));
+}
+
+#[test]
+fn commit_steps_persists_applied_state() {
+    let dir = tempfile::tempdir().unwrap();
+    let manifest = dir.path().join("migrations.json");
+    let migrations = vec![make_migration_with_ops("m001")];
+    let state = MigrationState::default();
+    let steps = plan_up(&migrations, &state);
+
+    commit_steps(&steps, &manifest).unwrap();
+
+    let loaded = MigrationState::load(&manifest).unwrap();
+    assert!(loaded.is_applied("m001"));
+}
+
+#[test]
+fn commit_steps_persists_rolled_back_state() {
+    let dir = tempfile::tempdir().unwrap();
+    let manifest = dir.path().join("migrations.json");
+    let mut initial = MigrationState::default();
+    initial.mark_applied("m001");
+    initial.save(&manifest).unwrap();
+
+    let migrations = vec![make_migration_with_ops("m001")];
+    let state = MigrationState::load(&manifest).unwrap();
+    let steps = plan_down(&migrations, &state, 1);
+
+    commit_steps(&steps, &manifest).unwrap();
+
+    let loaded = MigrationState::load(&manifest).unwrap();
+    assert!(!loaded.is_applied("m001"));
 }
 
 // ------------------------------------------------------------------ //
