@@ -80,7 +80,7 @@ pub struct LiveTable {
 }
 
 /// `orders` → `Orders` — same convention `certo db pull` uses to name generated types.
-pub(crate) fn snake_to_pascal(s: &str) -> String {
+pub fn snake_to_pascal(s: &str) -> String {
     s.split('_')
         .map(|w| {
             let mut c = w.chars();
@@ -93,7 +93,7 @@ pub(crate) fn snake_to_pascal(s: &str) -> String {
 }
 
 /// `customer_id` → `customerId` — same convention `certo db pull` uses to name generated fields.
-pub(crate) fn snake_to_camel(s: &str) -> String {
+pub fn snake_to_camel(s: &str) -> String {
     let mut parts = s.split('_');
     let first = parts.next().unwrap_or("").to_string();
     let rest: String = parts.map(|w| {
