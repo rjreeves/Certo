@@ -145,6 +145,7 @@ pub fn sig_of(f: &FnDecl) -> MethodSig {
             TypeExpr::Record { .. } => "{ .. }".into(),
             TypeExpr::Ptr { inner, .. } => format!("*{}", te_str(&inner.node)),
             TypeExpr::Param { name, .. } => name.node.clone(),
+            TypeExpr::DecimalParam { precision, scale, .. } => format!("Decimal({}, {})", precision, scale),
         }
     }
 

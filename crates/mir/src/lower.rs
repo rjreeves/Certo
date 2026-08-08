@@ -250,7 +250,7 @@ fn infer_operand_ty(op: &Operand, b: &Builder) -> Ty {
 /// allocation), whereas *not* boxing an actual struct is a C compile error —
 /// see BACKLOG item 114.
 fn needs_result_box(ty: &Ty) -> bool {
-    matches!(ty, Ty::Decimal | Ty::Uuid)
+    matches!(ty, Ty::Decimal(_) | Ty::Uuid)
         || matches!(ty, Ty::Named { name, args } if args.is_empty()
             && !matches!(name.as_str(),
                 "HttpRequest" | "HttpResponse" | "Bytes" | "DbResult" | "Query" | "Mutation" | "__CertoTask"))
@@ -475,7 +475,7 @@ fn lower_expr(expr: &HirExpr, b: &mut Builder) -> Operand {
             // instead of reinterpreted.
             const RAW_RETURN_CALLEES: &[&str] = &["List.getOrPanic"];
             let needs_return_unbox = matches!(&func.kind, HirExprKind::Global(name) if RAW_RETURN_CALLEES.contains(&name.as_str()))
-                && matches!(expr.ty, Ty::Float | Ty::Decimal);
+                && matches!(expr.ty, Ty::Float | Ty::Decimal(_));
 
             let dest = b.declare_local("_call", if needs_return_unbox { Ty::Var(0) } else { expr.ty.clone() });
             let next = b.new_block();
@@ -983,7 +983,7 @@ fn lower_expr(expr: &HirExpr, b: &mut Builder) -> Operand {
             b.switch_to(loop_body_bb);
             let binding_local = b.map_hir_local(*binding, binding_name, elem_ty.clone());
             let elem_done = b.new_block();
-            if matches!(elem_ty, Ty::Float | Ty::Decimal) {
+            if matches!(elem_ty, Ty::Float | Ty::Decimal(_)) {
                 // Element was stored bit-cast; restore the double from its bits.
                 let boxed = b.declare_local("_elem_bits", Ty::Int);
                 b.terminate(Terminator::Call {

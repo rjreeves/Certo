@@ -22,7 +22,7 @@ pub fn llvm_ty(ty: &Ty) -> String {
         Ty::Text       => "ptr".into(),    // const char*
         Ty::Unit       => "i8".into(),     // placeholder; void used for return type
         Ty::Uuid       => "ptr".into(),
-        Ty::Decimal    => "ptr".into(),    // certo_decimal_t*
+        Ty::Decimal(_) => "ptr".into(),    // certo_decimal_t*
         Ty::Option(_)  => "ptr".into(),
         Ty::Result(_, _) => "ptr".into(),
         Ty::List(_)    => "ptr".into(),
@@ -78,6 +78,7 @@ pub fn ast_ty_to_llvm(te: &certo_ast::types::TypeExpr) -> String {
         TypeExpr::Record { .. } => "ptr".into(),
         TypeExpr::Ptr { .. }    => "ptr".into(),
         TypeExpr::Param { .. }  => "ptr".into(),
+        TypeExpr::DecimalParam { .. } => "ptr".into(),
     }
 }
 

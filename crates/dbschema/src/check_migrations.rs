@@ -216,5 +216,5 @@ fn types_compat(declared: &str, migration: &str) -> bool {
     // Strip trailing `?` for nullable comparison
     let a = declared.trim_end_matches('?');
     let b = migration.trim_end_matches('?');
-    a == b
+    a == b || crate::schema::decimal_bare_vs_param(a, b)
 }

@@ -337,8 +337,8 @@ fn decimal_add_type() {
     let env = seeded_env();
     match env.lookup("Decimal.add").unwrap() {
         Ty::Fn { params, ret } => {
-            assert_eq!(params, &[Ty::Decimal, Ty::Decimal]);
-            assert_eq!(ret.as_ref(), &Ty::Decimal);
+            assert_eq!(params, &[Ty::Decimal(None), Ty::Decimal(None)]);
+            assert_eq!(ret.as_ref(), &Ty::Decimal(None));
         }
         other => panic!("expected Fn, got {:?}", other),
     }
@@ -491,7 +491,7 @@ fn parse_decimal_returns_option_decimal() {
     match env.lookup("parseDecimal").unwrap() {
         Ty::Fn { params, ret } => {
             assert_eq!(params, &[Ty::Text]);
-            assert_eq!(ret.as_ref(), &Ty::Option(Box::new(Ty::Decimal)));
+            assert_eq!(ret.as_ref(), &Ty::Option(Box::new(Ty::Decimal(None))));
         }
         other => panic!("expected Fn, got {:?}", other),
     }
@@ -889,7 +889,7 @@ fn decimal_lt_type() {
     let env = seeded_env();
     match env.lookup("Decimal.lt").unwrap() {
         Ty::Fn { params, ret } => {
-            assert_eq!(params, &[Ty::Decimal, Ty::Decimal]);
+            assert_eq!(params, &[Ty::Decimal(None), Ty::Decimal(None)]);
             assert_eq!(ret.as_ref(), &Ty::Bool);
         }
         other => panic!("expected Fn, got {:?}", other),
@@ -901,7 +901,7 @@ fn decimal_to_int_type() {
     let env = seeded_env();
     match env.lookup("Decimal.toInt").unwrap() {
         Ty::Fn { params, ret } => {
-            assert_eq!(params, &[Ty::Decimal]);
+            assert_eq!(params, &[Ty::Decimal(None)]);
             assert_eq!(ret.as_ref(), &Ty::Int);
         }
         other => panic!("expected Fn, got {:?}", other),
@@ -1117,7 +1117,7 @@ fn money_to_cents_type() {
     let env = seeded_env();
     match env.lookup("Money.toCents").unwrap() {
         Ty::Fn { params, ret } => {
-            assert_eq!(params, &[Ty::Decimal]);
+            assert_eq!(params, &[Ty::Decimal(None)]);
             assert_eq!(ret.as_ref(), &Ty::Int);
         }
         other => panic!("expected Fn, got {:?}", other),

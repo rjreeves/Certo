@@ -248,5 +248,6 @@ fn type_expr_hint(te: &certo_ast::types::TypeExpr) -> String {
         }
         TypeExpr::Ptr    { inner, .. }  => format!("*{}", type_expr_hint(&inner.node)),
         TypeExpr::Param  { name, .. }   => name.node.clone(),
+        TypeExpr::DecimalParam { precision, scale, .. } => format!("Decimal({}, {})", precision, scale),
     }
 }

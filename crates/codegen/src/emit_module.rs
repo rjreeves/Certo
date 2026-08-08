@@ -485,6 +485,9 @@ fn ast_ty_to_c_str(te: &certo_ast::types::TypeExpr) -> String {
         TypeExpr::Record { .. }  => "void*".into(),
         TypeExpr::Ptr { inner, .. } => format!("{}*", ast_ty_to_c_str(&inner.node)),
         TypeExpr::Param { .. }   => "void*".into(),
+        // Same runtime representation as bare `Decimal` — the parameter is a
+        // compile-time-only refinement.
+        TypeExpr::DecimalParam { .. } => "certo_decimal_t".into(),
     }
 }
 

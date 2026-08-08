@@ -1104,7 +1104,7 @@ fn lower_lit(lit: &Lit, span: Span) -> HirExpr {
     let (kind, ty) = match lit {
         Lit::Int(n)     => (HirExprKind::Int(*n),           Ty::Int),
         Lit::Float(f)   => (HirExprKind::Float(*f),         Ty::Float),
-        Lit::Decimal(s) => (HirExprKind::Decimal(s.clone()), Ty::Decimal),
+        Lit::Decimal(s) => (HirExprKind::Decimal(s.clone()), Ty::Decimal(None)),
         Lit::Bool(b)    => (HirExprKind::Bool(*b),          Ty::Bool),
         Lit::String(s)  => (HirExprKind::Str(s.clone()),    Ty::Text),
         Lit::FString(parts) => {
@@ -1359,7 +1359,7 @@ fn ast_ty_to_ty_with_params(te: &certo_ast::types::TypeExpr, type_params: &[&str
                 "UInt"    => Ty::UInt,
                 "Float"   => Ty::Float,
                 "Float32" => Ty::Float32,
-                "Decimal" => Ty::Decimal,
+                "Decimal" => Ty::Decimal(None),
                 "Bool"    => Ty::Bool,
                 "Char"    => Ty::Char,
                 "Text"    => Ty::Text,
@@ -1387,6 +1387,7 @@ fn ast_ty_to_ty_with_params(te: &certo_ast::types::TypeExpr, type_params: &[&str
         // Type parameters (e.g. T in fn foo<T>) are opaque at the HIR level.
         // Ty::Var(0) round-trips to void* in the C backend.
         TypeExpr::Param { .. } => Ty::Var(0),
+        TypeExpr::DecimalParam { precision, scale, .. } => Ty::Decimal(Some((*precision, *scale))),
         _ => Ty::Error,
     }
 }

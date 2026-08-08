@@ -979,7 +979,7 @@ fn introspect_live_schema_for_sync(db_url: &str, schema_name: &str) -> Result<Ve
     }
 
     let col_query = format!(
-        "SELECT table_name, column_name, data_type, is_nullable \
+        "SELECT table_name, column_name, data_type, is_nullable, numeric_precision, numeric_scale \
          FROM information_schema.columns \
          WHERE table_schema = '{}' \
          ORDER BY table_name, ordinal_position;",
@@ -1004,13 +1004,15 @@ fn introspect_live_schema_for_sync(db_url: &str, schema_name: &str) -> Result<Ve
     for line in stdout.lines() {
         let line = line.trim();
         if line.is_empty() { continue; }
-        let parts: Vec<&str> = line.splitn(4, '|').collect();
-        if parts.len() < 4 { continue; }
+        let parts: Vec<&str> = line.splitn(6, '|').collect();
+        if parts.len() < 6 { continue; }
         let table_name = parts[0].trim().to_string();
         let col_name    = parts[1].trim().to_string();
         let pg_type     = parts[2].trim();
         let nullable    = parts[3].trim().eq_ignore_ascii_case("YES");
-        let certo_type  = pg_type_to_certo(pg_type);
+        let precision   = parts[4].trim().parse::<i64>().ok();
+        let scale       = parts[5].trim().parse::<i64>().ok();
+        let certo_type  = pg_type_to_certo(pg_type, precision, scale);
 
         let idx = match tables.iter().position(|t| t.name == table_name) {
             Some(i) => i,
@@ -2619,7 +2621,7 @@ fn diff_schema_against_live(expected: &certo_dbschema::Schema, schema_name: &str
 
     // Query live columns from information_schema.
     let col_query = format!(
-        "SELECT table_name, column_name, data_type, is_nullable \
+        "SELECT table_name, column_name, data_type, is_nullable, numeric_precision, numeric_scale \
          FROM information_schema.columns \
          WHERE table_schema = '{}' \
          ORDER BY table_name, ordinal_position;",
@@ -2645,11 +2647,13 @@ fn diff_schema_against_live(expected: &certo_dbschema::Schema, schema_name: &str
     for line in String::from_utf8_lossy(&col_out.stdout).lines() {
         let line = line.trim();
         if line.is_empty() { continue; }
-        let parts: Vec<&str> = line.splitn(4, '|').collect();
-        if parts.len() < 4 { continue; }
+        let parts: Vec<&str> = line.splitn(6, '|').collect();
+        if parts.len() < 6 { continue; }
         let raw_table = parts[0].trim().to_string();
         let raw_col   = parts[1].trim().to_string();
-        let certo_ty  = pg_type_to_certo(parts[2].trim());
+        let precision = parts[4].trim().parse::<i64>().ok();
+        let scale     = parts[5].trim().parse::<i64>().ok();
+        let certo_ty  = pg_type_to_certo(parts[2].trim(), precision, scale);
         let nullable  = parts[3].trim().eq_ignore_ascii_case("YES");
         let certo_col = certo_dbschema::snake_to_camel(&raw_col);
         let entry = live.entry(certo_dbschema::snake_to_pascal(&raw_table))
@@ -2749,7 +2753,7 @@ fn diff_schema_against_live(expected: &certo_dbschema::Schema, schema_name: &str
 fn types_match(code_ty: &str, live_ty: &str) -> bool {
     let a = code_ty.trim_end_matches('?').to_lowercase();
     let b = live_ty.trim_end_matches('?').to_lowercase();
-    a == b
+    a == b || certo_dbschema::decimal_bare_vs_param(&a, &b)
 }
 
 // ------------------------------------------------------------------ //
@@ -2831,7 +2835,7 @@ fn cmd_db_pull(args: &[String]) {
 
     // Query columns from information_schema.
     let col_query = format!(
-        "SELECT table_name, column_name, data_type, is_nullable \
+        "SELECT table_name, column_name, data_type, is_nullable, numeric_precision, numeric_scale \
          FROM information_schema.columns \
          WHERE table_schema = '{}' \
          ORDER BY table_name, ordinal_position;",
@@ -2894,13 +2898,15 @@ fn cmd_db_pull(args: &[String]) {
     for line in col_text.lines() {
         let line = line.trim();
         if line.is_empty() { continue; }
-        let parts: Vec<&str> = line.splitn(4, '|').collect();
-        if parts.len() < 4 { continue; }
+        let parts: Vec<&str> = line.splitn(6, '|').collect();
+        if parts.len() < 6 { continue; }
         let table   = parts[0].trim();
         let col     = parts[1].trim();
         let pg_type = parts[2].trim();
         let nullable = parts[3].trim().eq_ignore_ascii_case("YES");
-        let certo_type = pg_type_to_certo(pg_type);
+        let precision = parts[4].trim().parse::<i64>().ok();
+        let scale     = parts[5].trim().parse::<i64>().ok();
+        let certo_type = pg_type_to_certo(pg_type, precision, scale);
         if !tables.contains(&table.to_string()) {
             tables.push(table.to_string());
         }
@@ -2938,7 +2944,7 @@ fn cmd_db_pull(args: &[String]) {
         let cols = columns.get(table).map(|v| v.as_slice()).unwrap_or(&[]);
 
         // ── Type declaration ─────────────────────────────────────────────
-        src.push_str(&format!("type {} {{\n", type_name));
+        src.push_str(&format!("type {} = {{\n", type_name));
         for (col_name, certo_ty, nullable) in cols {
             let field_name = snake_to_camel(col_name);
             let is_pk = primary_keys.contains(&(table.clone(), col_name.clone()));
@@ -3045,22 +3051,29 @@ fn cmd_db_pull(args: &[String]) {
 }
 
 /// Map a PostgreSQL type name to the closest Certo type.
-fn pg_type_to_certo(pg: &str) -> String {
+/// `precision`/`scale` come from `information_schema.columns.numeric_precision`/
+/// `numeric_scale` — only meaningful (non-NULL) for `numeric`/`decimal` columns;
+/// `money` and everything else always pass `None`, falling back to bare `Decimal`.
+/// Emits `Decimal(p, s)` (real BACKLOG item 128 fidelity) only when both are present.
+fn pg_type_to_certo(pg: &str, precision: Option<i64>, scale: Option<i64>) -> String {
     match pg {
         "integer" | "int" | "int4" | "bigint" | "int8" | "smallint" | "int2"
-            | "serial" | "bigserial" | "smallserial"   => "Int",
+            | "serial" | "bigserial" | "smallserial"   => "Int".to_string(),
         "text" | "character varying" | "varchar" | "char"
-            | "bpchar" | "name" | "citext"             => "Text",
-        "boolean" | "bool"                             => "Bool",
-        "real" | "float4" | "double precision" | "float8" => "Float",
-        "numeric" | "decimal" | "money"                => "Decimal",
-        "uuid"                                         => "UUID",
+            | "bpchar" | "name" | "citext"             => "Text".to_string(),
+        "boolean" | "bool"                             => "Bool".to_string(),
+        "real" | "float4" | "double precision" | "float8" => "Float".to_string(),
+        "numeric" | "decimal" | "money"                => match (precision, scale) {
+            (Some(p), Some(s)) => format!("Decimal({}, {})", p, s),
+            _                  => "Decimal".to_string(),
+        },
+        "uuid"                                         => "UUID".to_string(),
         "date" | "timestamp" | "timestamp without time zone"
-            | "timestamp with time zone" | "timestamptz" => "DateTime",
-        "json" | "jsonb"                               => "Text",
-        "bytea"                                        => "Text",
-        other => return snake_to_pascal(other),
-    }.to_string()
+            | "timestamp with time zone" | "timestamptz" => "DateTime".to_string(),
+        "json" | "jsonb"                               => "Text".to_string(),
+        "bytea"                                        => "Text".to_string(),
+        other => snake_to_pascal(other),
+    }
 }
 
 /// `users_table` → `UsersTable`
@@ -3092,11 +3105,19 @@ fn snake_to_camel(s: &str) -> String {
 
 /// Convert a `List<Text>` cell expression to a typed Certo expression.
 fn text_to_certo_expr(cell: &str, ty: &str) -> String {
-    match ty {
+    // `Decimal(p, s)` (BACKLOG item 128) is the same runtime type as bare
+    // `Decimal` — strip the parameter before matching so these generated
+    // conversions keep recognizing it, instead of silently falling through
+    // to the Text/unknown-type catch-all.
+    let base_ty = ty.split('(').next().unwrap_or(ty).trim();
+    match base_ty {
         "Int"      => format!("parseInt({}) ?? 0", cell),
         "Bool"     => format!("{} == \"t\"", cell),
         "Float"    => format!("parseFloat({}) ?? intToFloat(0)", cell),
-        "Decimal"  => format!("Decimal.fromInt(parseInt({}) ?? 0)", cell),
+        // `parseDecimal` (not `parseInt`) — a NUMERIC column's text representation
+        // routinely has a fractional part (`"19.99"`), which `parseInt` would
+        // silently truncate/fail to parse, corrupting the value on every row read.
+        "Decimal"  => format!("parseDecimal({}) ?? Decimal.fromInt(0)", cell),
         "DateTime" => format!("DateTime.parseIso({})", cell),
         _          => cell.to_string(), // Text, UUID, unknown named types
     }
@@ -3104,7 +3125,8 @@ fn text_to_certo_expr(cell: &str, ty: &str) -> String {
 
 /// Convert a non-nullable Certo field expression to `Text` for use in dbExec params.
 fn certo_to_text_expr(expr: &str, ty: &str) -> String {
-    match ty {
+    let base_ty = ty.split('(').next().unwrap_or(ty).trim();
+    match base_ty {
         "Int"      => format!("intToText({})", expr),
         "Bool"     => format!("boolToText({})", expr),
         "Float"    => format!("floatToText({})", expr),
@@ -3123,7 +3145,8 @@ fn certo_nullable_to_text_expr(expr: &str, ty: &str) -> String {
 
 /// A typed default used only as a dead branch for type-checker satisfaction.
 fn null_default(ty: &str) -> &'static str {
-    match ty {
+    let base_ty = ty.split('(').next().unwrap_or(ty).trim();
+    match base_ty {
         "Int"      => "0",
         "Bool"     => "false",
         "Float"    => "intToFloat(0)",
