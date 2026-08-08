@@ -257,3 +257,60 @@ fn annotated_lambda_param_overrides_hint() {
         assert_eq!(f.body.as_ref().unwrap().ty, Ty::List(Box::new(Ty::Float)));
     }
 }
+
+// ------------------------------------------------------------------ //
+// Named function reference typing + DB-query mapper return type
+// recovery (BACKLOG item 134)
+// ------------------------------------------------------------------ //
+
+#[test]
+fn bare_named_fn_reference_gets_real_fn_type() {
+    // A bare reference to a top-level `fn` (as opposed to a call) — e.g.
+    // passed as a callback argument — must resolve to the function's real
+    // `Ty::Fn{params, ret}`, not the old unconditional `Ty::Error` (which
+    // `global_types` alone left it as, since that table is never populated
+    // for ordinary `fn` declarations).
+    let m = lower("module A\nfn double(x: Int): Int = x * 2\nfn useIt(): Int = 1\nval ref = double");
+    let const_item = m.items.iter().find_map(|it| match it {
+        HirItem::Const(c) if c.name == "ref" => Some(c),
+        _ => None,
+    }).expect("expected a Const named `ref`");
+    assert_eq!(const_item.value.ty, Ty::Fn { params: vec![Ty::Int], ret: Box::new(Ty::Int) });
+}
+
+#[test]
+fn db_query_typed_return_type_is_list_of_mapper_return_type() {
+    // `dbQueryTyped` is registered as a `Forall` generic
+    // (`(Int, Text, List<Text>, List<Text?> -> T) -> List<T>`), so it's
+    // filtered out of the mechanical `stdlib_ret_types()` table (its return
+    // type has free vars) and must instead be recovered structurally via
+    // `generic_container_ret`, using the mapper argument's own `Ty::Fn`
+    // return type as `T`.
+    let m = lower(
+        "module A\nimport Stdlib.Db\ntype Widget = { id: Int }\n\
+         fn fromRow(row: List<Text?>): Widget = Widget { id: 0 }\n\
+         fn f(conn: Int): List<Widget> = dbQueryTyped(conn, \"SELECT 1\", [], fromRow)");
+    let f = m.items.iter().find_map(|it| match it {
+        HirItem::Fn(f) if f.name == "f" => Some(f),
+        _ => None,
+    }).expect("expected fn `f`");
+    let widget = Ty::Named { name: "Widget".to_string(), args: vec![] };
+    assert_eq!(f.body.as_ref().unwrap().ty, Ty::List(Box::new(widget)));
+}
+
+#[test]
+fn query_first_return_type_is_option_of_mapper_return_type() {
+    // Same mechanism as `dbQueryTyped`, but `Query.first`'s stdlib shape is
+    // `(Query, Int, List<Text?> -> T) -> T?` — the recovered type must be
+    // `Option<T>`, not `List<T>`.
+    let m = lower(
+        "module A\nimport Stdlib.Db\ntype Widget = { id: Int }\n\
+         fn fromRow(row: List<Text?>): Widget = Widget { id: 0 }\n\
+         fn f(conn: Int): Widget? = Query.first(Query.from(\"SELECT 1\"), conn, fromRow)");
+    let f = m.items.iter().find_map(|it| match it {
+        HirItem::Fn(f) if f.name == "f" => Some(f),
+        _ => None,
+    }).expect("expected fn `f`");
+    let widget = Ty::Named { name: "Widget".to_string(), args: vec![] };
+    assert_eq!(f.body.as_ref().unwrap().ty, Ty::Option(Box::new(widget)));
+}

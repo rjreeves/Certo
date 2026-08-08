@@ -194,6 +194,28 @@ fn generic_container_ret(full: Option<&str>, args: &[HirExpr]) -> Option<Ty> {
         Some("Map.remove") | Some("Map.insert") => args.first().map(|a| a.ty.clone()),
         Some("Map.keys") => args.first().and_then(map_kv).map(|(k, _)| Ty::List(Box::new(k))),
         Some("Map.values") => args.first().and_then(map_kv).map(|(_, v)| Ty::List(Box::new(v))),
+        // `dbQueryTyped`/`Query.list`/`Query.first`/`Query.groupedList` are
+        // registered in `crates/stdlib/src/seed.rs` as `Forall` generics
+        // (`(..., List<Text?> -> T) -> List<T>` / `-> T?`), so they're
+        // filtered out of `stdlib_ret_types()` (`ret.has_vars()`) and land
+        // here instead. `T` is recovered from the mapper argument's own
+        // type — always the last argument, and (per BACKLOG item 134) always
+        // a bare reference to a user-defined `fn` in practice, whose real
+        // `Ty::Fn{params, ret}` is now populated in `Expr::Path` lowering
+        // above. Without this, a `val rows = dbQueryTyped(...)` binding's
+        // type stays `Ty::Error`, which cascades into `List.first(rows)`
+        // also failing to resolve its own `Option<T>` result type — the
+        // exact gap that let a struct-element `Option` skip the
+        // `UnwrapOptStructBox` fixup and return one level of indirection
+        // too deep.
+        Some("dbQueryTyped") | Some("Query.list") | Some("Query.groupedList") => {
+            args.last().and_then(|a| match &a.ty { Ty::Fn { ret, .. } => Some((**ret).clone()), _ => None })
+                .map(|t| Ty::List(Box::new(t)))
+        }
+        Some("Query.first") => {
+            args.last().and_then(|a| match &a.ty { Ty::Fn { ret, .. } => Some((**ret).clone()), _ => None })
+                .map(|t| Ty::Option(Box::new(t)))
+        }
         _ => None,
     }
 }
@@ -562,7 +584,27 @@ fn lower_expr(expr: &S<Expr>, cx: &mut Cx) -> HirExpr {
                 let ty = cx.local_types.get(&local).cloned().unwrap_or(Ty::Error);
                 HirExpr { kind: HirExprKind::Local(local), ty, span }
             } else {
-                let ty = cx.global_types.get(name).cloned().unwrap_or(Ty::Error);
+                // `global_types` itself is only ever populated for one narrow
+                // val-destructuring case, so it misses a *bare* reference to
+                // an ordinary top-level `fn` (as opposed to a call) — e.g.
+                // passed as a named-function callback argument
+                // (`dbQueryTyped(..., widgetsFromRow)`, BACKLOG item 134).
+                // Reconstruct the real `Ty::Fn` from `fn_params`/
+                // `fn_ret_types` instead, which — unlike `global_types` — ARE
+                // populated up front for every top-level `fn` (see
+                // `lower_module`). Doesn't handle generic functions (no
+                // `type_params` are threaded through here), but a bare
+                // function reference used as a callback is never generic in
+                // practice.
+                let ty = cx.global_types.get(name).cloned().unwrap_or_else(|| {
+                    match (cx.fn_params.get(name), cx.fn_ret_types.get(name)) {
+                        (Some(params), Some(ret)) => Ty::Fn {
+                            params: params.iter().map(|p| ast_ty_to_ty_with_params(&p.ty.node, &[])).collect(),
+                            ret: Box::new(ret.clone()),
+                        },
+                        _ => Ty::Error,
+                    }
+                });
                 HirExpr { kind: HirExprKind::Global(name.to_string()), ty, span }
             }
         }

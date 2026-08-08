@@ -113,20 +113,38 @@ fn operand_ty(op: &Operand, locals: &[MirLocalDecl]) -> Ty {
 
 /// Pack `value` (of type `ty`) into a pointer-sized slot, preserving its bits.
 fn box_value(value: &str, ty: &Ty) -> String {
-    match ty {
-        // A double must be bit-cast, never numeric-converted.
-        Ty::Float | Ty::Decimal(_) => format!("(void*)__certo_f2i({})", value),
-        // Everything else here is already pointer-sized (ints, bool, Text, and
-        // handle types like Option/List/Result/Map/Tuple/nullary-enum).
-        _ => format!("(void*)(intptr_t)({})", value),
+    if ty.needs_heap_box() {
+        let cty = ty_to_c(ty);
+        // GNU statement-expression — clang/gcc are already a hard
+        // requirement for this whole toolchain (BACKLOG item 104: MSVC's
+        // cl.exe isn't a supported C compiler), and box_value must stay a
+        // single composable expression: it's used inline as a function-call
+        // argument (`certo_list_of(n, box_value(...), ...)`), not only as a
+        // standalone assignment RHS, so a plain malloc+copy+return can't be
+        // phrased as one portable C99 expression when `value` might be an
+        // rvalue (a call result), not an addressable variable.
+        format!("({{ {cty}* _cb = ({cty}*)malloc(sizeof({cty})); *_cb = ({value}); (void*)_cb; }})")
+    } else {
+        match ty {
+            // A double must be bit-cast, never numeric-converted.
+            Ty::Float => format!("(void*)__certo_f2i({})", value),
+            // Everything else here is already pointer-sized (ints, bool, Text,
+            // and handle types like Option/List/Result/Map/Tuple/nullary-enum).
+            _ => format!("(void*)(intptr_t)({})", value),
+        }
     }
 }
 
 /// Recover a value of type `ty` from a pointer-sized slot.
 fn unbox_value(slot: &str, ty: &Ty) -> String {
-    match ty {
-        Ty::Float | Ty::Decimal(_) => format!("__certo_i2f((int64_t)(intptr_t)({}))", slot),
-        _ => format!("({})(intptr_t)({})", ty_to_c(ty), slot),
+    if ty.needs_heap_box() {
+        let cty = ty_to_c(ty);
+        format!("(*({cty}*)({slot}))")
+    } else {
+        match ty {
+            Ty::Float => format!("__certo_i2f((int64_t)(intptr_t)({}))", slot),
+            _ => format!("({})(intptr_t)({})", ty_to_c(ty), slot),
+        }
     }
 }
 
@@ -202,7 +220,7 @@ fn emit_stmt(stmt: &MirStmt, locals: &[MirLocalDecl], fn_cname: &str, spawn_idx:
             writeln!(out, "    {} = {}({});", lhs, sym, emit_operand(arg)).unwrap();
         }
         Rvalue::Call { func, args } => {
-            let args_str = emit_call_args(func, args);
+            let args_str = emit_call_args(func, args, locals);
             if is_void_noreturn_callee(func) {
                 // `panic(msg)` — genuinely `noreturn void` in C (unlike an
                 // ordinary `Unit`-returning Certo function, which fakes a
@@ -335,6 +353,10 @@ fn emit_stmt(stmt: &MirStmt, locals: &[MirLocalDecl], fn_cname: &str, spawn_idx:
         Rvalue::Unbox { value, ty } => {
             writeln!(out, "    {} = {};", lhs, unbox_value(&emit_operand(value), ty)).unwrap();
         }
+        Rvalue::UnwrapOptStructBox { value, ty: _ } => {
+            let v = emit_operand(value);
+            writeln!(out, "    {} = ({v}) ? *(void**)({v}) : NULL;", lhs).unwrap();
+        }
     }
 }
 
@@ -358,7 +380,7 @@ fn emit_terminator(term: &Terminator, ret_ty: &Ty, locals: &[MirLocalDecl], out:
             writeln!(out, "    __builtin_unreachable();").unwrap();
         }
         Terminator::Call { func, args, dest, next } => {
-            let args_str = emit_call_args(func, args);
+            let args_str = emit_call_args(func, args, locals);
             // See `Rvalue::Call`'s identical special case: `panic(msg)`'s C
             // implementation is genuinely `noreturn void`.
             if is_void_noreturn_callee(func) {
@@ -411,21 +433,23 @@ fn emit_callee(func: &Operand, locals: &[MirLocalDecl]) -> String {
     format!("(({}(*)({}))({}))", ret_ty_to_c(ret), param_str, emit_operand(func))
 }
 
-fn emit_call_args(func: &Operand, args: &[Operand]) -> String {
+fn emit_call_args(func: &Operand, args: &[Operand], locals: &[MirLocalDecl]) -> String {
     let func_c = emit_operand(func);
     args.iter()
         .enumerate()
-        .map(|(idx, arg)| emit_call_arg(&func_c, idx, arg))
+        .map(|(idx, arg)| emit_call_arg(&func_c, idx, arg, locals))
         .collect::<Vec<_>>()
         .join(", ")
 }
 
-fn emit_call_arg(func_c: &str, idx: usize, arg: &Operand) -> String {
+fn emit_call_arg(func_c: &str, idx: usize, arg: &Operand, locals: &[MirLocalDecl]) -> String {
     let expr = emit_operand(arg);
     match (func_c, idx) {
-        // List<T> stores generic items in a void* slot. Text lowers to
-        // certo_text_t (const char*), so make the intentional ABI cast explicit.
-        ("certo_list_push", 1) => format!("(void*)({expr})"),
+        // List<T> stores generic items in a void* slot — for most types a
+        // plain cast is fine, but a struct-typed item (BACKLOG item 134)
+        // needs the same real heap-boxing `box_value` uses for List/Tuple
+        // literal elements, not a cast that won't even compile for a struct.
+        ("certo_list_push", 1) => box_value(&expr, &operand_ty(arg, locals)),
         _ => expr,
     }
 }
