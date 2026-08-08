@@ -152,13 +152,23 @@ pub fn lower_fn(
 /// Stdlib higher-order functions whose C runtime parameter is a single
 /// generic `void* (*)(void*)`-style function pointer (`CertoFn1`/`CertoPred`
 /// in `collections.rs`) rather than the callee's real native signature.
-/// A lambda literal passed directly as the callback argument to one of
-/// these needs the boxed-ABI treatment (see `lower_lambda_boxed`) — BACKLOG
-/// item 112. Deliberately narrow: `List.sort`'s two-argument, Int-returning
-/// comparator and user-defined higher-order functions (which already use a
-/// consistent native ABI on both sides, see item 108) are out of scope.
+/// A lambda literal *or a named function reference* passed directly as the
+/// callback argument to one of these needs the boxed-ABI treatment (see
+/// `lower_lambda_boxed`/`lower_named_fn_boxed`) — BACKLOG items 112 and 134.
+/// Deliberately narrow: `List.sort`'s two-argument, Int-returning comparator
+/// and user-defined higher-order functions (which already use a consistent
+/// native ABI on both sides, see item 108) are out of scope.
+///
+/// `dbQueryTyped`/`Query.list`/`Query.first`/`Query.groupedList` (item 134)
+/// were added after confirming their mapper callback is always a *named*
+/// function reference in practice (`certo db pull`'s own generated code:
+/// `dbQueryTyped(conn, sql, params, widgetsFromRow)`), never an inline
+/// lambda — the exact case `lower_lambda_boxed` alone didn't cover, and
+/// which segfaulted (not just misread bits) since the real mapper's return
+/// type is a struct, not a pointer-sized value.
 const BOXED_ABI_CALLEES: &[&str] = &[
     "List.map", "List.filter", "List.find", "List.any", "List.all", "List.groupBy",
+    "dbQueryTyped", "Query.list", "Query.first", "Query.groupedList",
 ];
 
 /// Lift a lambda literal that's being passed directly as the callback
@@ -216,6 +226,79 @@ fn lower_lambda_boxed(params: &[certo_hir::HirParam], body: &HirExpr, param_ty_h
 
     let dest = b.declare_local("_lam_ptr", Ty::Error);
     b.assign(dest, Rvalue::Use(Operand::Global(lam_name)));
+    Operand::Local(dest)
+}
+
+/// Synthesize a small wrapper function for a *named* function reference
+/// (not an inline lambda) passed directly as the callback argument to one
+/// of `BOXED_ABI_CALLEES` — e.g. `dbQueryTyped(conn, sql, params,
+/// widgetsFromRow)`, `certo db pull`'s own generated calling convention.
+/// Mirrors `lower_lambda_boxed`'s shape (unbox each param, call the real
+/// function, box the return) but wraps a *call* to the existing named
+/// function instead of re-lowering a lambda body — BACKLOG item 134.
+/// Before this, a bare named-function reference fell through
+/// `lower_lambda_boxed`'s lambda-only check entirely and got passed as-is:
+/// the C compiler accepts the resulting incompatible function-pointer cast
+/// (`-Wno-incompatible-function-pointer-types` is already required
+/// elsewhere in this toolchain), but calling a function whose real
+/// signature returns a struct by value through a generic `void* (*)(void*)`
+/// pointer is undefined behavior — the struct-return calling convention
+/// (a hidden caller-supplied return-slot pointer) doesn't match a plain
+/// register return, which is what caused `certo db pull`'s generated
+/// `*FindById` to segfault. `real_param_tys`/`real_ret_ty` come from the
+/// named function's own already-resolved `Ty::Fn` (the HIR `Global`
+/// reference's own `.ty`, populated from `cx.global_types` during HIR
+/// lowering), not a param-type hint — a named function's real signature is
+/// always fully known, unlike an unannotated lambda param.
+fn lower_named_fn_boxed(name: &str, real_param_tys: &[Ty], real_ret_ty: &Ty, b: &mut Builder) -> Operand {
+    let idx = b.lambda_count;
+    b.lambda_count += 1;
+    let wrap_name = format!("__fnref_{}_{}_boxed", b.fn_name, idx);
+
+    let mut lb = Builder::new(&wrap_name, b.record_field_types.clone(), b.variant_field_types.clone());
+    let ret_slot = lb.declare_local("_ret", Ty::Var(0));
+
+    // C signature params are always void*; unbox each into the real
+    // function's own declared param type before calling it.
+    let raw_locals: Vec<MirLocal> = (0..real_param_tys.len())
+        .map(|i| lb.declare_local(&format!("_p{}_boxed", i), Ty::Var(0)))
+        .collect();
+    let real_locals: Vec<MirLocal> = real_param_tys.iter().zip(raw_locals.iter())
+        .map(|(ty, raw)| {
+            let real = lb.declare_local("_p_real", ty.clone());
+            lb.assign(real, Rvalue::Unbox { value: Operand::Local(*raw), ty: ty.clone() });
+            real
+        })
+        .collect();
+
+    let call_dest = lb.declare_local("_inner_call", real_ret_ty.clone());
+    let next = lb.new_block();
+    lb.terminate(Terminator::Call {
+        func: Operand::Global(name.to_string()),
+        args: real_locals.into_iter().map(Operand::Local).collect(),
+        dest: call_dest,
+        next,
+    });
+    lb.switch_to(next);
+
+    if matches!(real_ret_ty, Ty::Unit) {
+        lb.locals[ret_slot as usize].ty = Ty::Var(0);
+    } else {
+        lb.assign(ret_slot, Rvalue::Box { value: Operand::Local(call_dest), ty: real_ret_ty.clone() });
+    }
+    emit_defers_then_return(Operand::Local(ret_slot), &mut lb);
+
+    let wrap_fn = MirFn {
+        name: wrap_name.clone(),
+        param_count: real_param_tys.len(),
+        locals: lb.locals,
+        blocks: lb.blocks,
+    };
+    b.lifted_fns.extend(lb.lifted_fns);
+    b.lifted_fns.push(wrap_fn);
+
+    let dest = b.declare_local("_fnref_ptr", Ty::Error);
+    b.assign(dest, Rvalue::Use(Operand::Global(wrap_name)));
     Operand::Local(dest)
 }
 
@@ -456,6 +539,16 @@ fn lower_expr(expr: &HirExpr, b: &mut Builder) -> Operand {
                     if let HirExprKind::Lambda { params, body } = &a.kind {
                         return lower_lambda_boxed(params, body, elem_ty_hint.as_ref(), b);
                     }
+                    // A named function reference (`dbQueryTyped(..., widgetsFromRow)`),
+                    // as opposed to an inline lambda — its real signature is
+                    // already fully known via its own resolved `Ty::Fn`
+                    // (populated from `fn_params`/`fn_ret_types` in HIR's
+                    // `Expr::Path` lowering), so no `elem_ty_hint` fallback
+                    // is needed the way an unannotated lambda param requires
+                    // — BACKLOG item 134.
+                    if let (HirExprKind::Global(fn_name), Ty::Fn { params, ret }) = (&a.kind, &a.ty) {
+                        return lower_named_fn_boxed(fn_name, params, ret, b);
+                    }
                 }
                 let value_op = lower_expr(a, b);
                 if matches!(variant_field_types.as_ref().and_then(|tys| tys.get(i)), Some(Ty::Var(_))) {
@@ -470,12 +563,29 @@ fn lower_expr(expr: &HirExpr, b: &mut Builder) -> Operand {
             // `void*` at the C level, regardless of the logical element type
             // HIR now recovers via `generic_container_ret` (BACKLOG item
             // 113) — when that logical type needs bit-preservation
-            // (`Float`/`Decimal`), the raw pointer must be unboxed rather
-            // than assigned directly, or the bits get numeric-converted
-            // instead of reinterpreted.
+            // (`Float`) or is a real struct that doesn't fit a pointer-sized
+            // slot at all (`Decimal`, `UUID`, a user record/sum type —
+            // BACKLOG item 134), the raw pointer must be unboxed rather than
+            // assigned directly, or the bits get numeric-converted (Float)
+            // or the assignment doesn't even compile (a struct).
             const RAW_RETURN_CALLEES: &[&str] = &["List.getOrPanic"];
             let needs_return_unbox = matches!(&func.kind, HirExprKind::Global(name) if RAW_RETURN_CALLEES.contains(&name.as_str()))
-                && matches!(expr.ty, Ty::Float | Ty::Decimal(_));
+                && (matches!(expr.ty, Ty::Float) || expr.ty.needs_heap_box());
+
+            // `List.first`/`.last`/`.get`/`.find`, `Map.get`, `Query.first`
+            // all box their `Option<T>` payload via the C runtime's generic
+            // `__certo_opt_box` (always allocates one `int64_t`-sized box),
+            // which double-boxes when `T` itself needs real heap-boxing —
+            // `List<T>`'s own storage already heap-boxes struct elements
+            // (BACKLOG item 134), so the raw payload `__certo_opt_box` boxes
+            // is already a `T*`, not a bit-pattern to box fresh. Needs one
+            // extra level of pointer unwrap, done null-safely (`Rvalue::
+            // UnwrapOptStructBox`) so an empty list / not-found `None`
+            // isn't mistaken for a real value.
+            const OPT_UNWRAP_CALLEES: &[&str] =
+                &["List.first", "List.last", "List.get", "List.find", "Map.get", "Query.first"];
+            let needs_opt_unwrap = matches!(&func.kind, HirExprKind::Global(name) if OPT_UNWRAP_CALLEES.contains(&name.as_str()))
+                && matches!(&expr.ty, Ty::Option(inner) if inner.needs_heap_box());
 
             let dest = b.declare_local("_call", if needs_return_unbox { Ty::Var(0) } else { expr.ty.clone() });
             let next = b.new_block();
@@ -484,6 +594,10 @@ fn lower_expr(expr: &HirExpr, b: &mut Builder) -> Operand {
             if needs_return_unbox {
                 let real = b.declare_local("_call_unboxed", expr.ty.clone());
                 b.assign(real, Rvalue::Unbox { value: Operand::Local(dest), ty: expr.ty.clone() });
+                Operand::Local(real)
+            } else if needs_opt_unwrap {
+                let real = b.declare_local("_call_opt_unwrapped", expr.ty.clone());
+                b.assign(real, Rvalue::UnwrapOptStructBox { value: Operand::Local(dest), ty: expr.ty.clone() });
                 Operand::Local(real)
             } else {
                 Operand::Local(dest)

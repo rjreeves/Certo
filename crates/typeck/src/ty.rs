@@ -83,6 +83,42 @@ pub enum Ty {
 }
 
 impl Ty {
+    /// Does this type need real heap allocation (malloc + copy) when boxed
+    /// into a pointer-sized slot (a `List<T>`/`Tuple` element, an explicit
+    /// box/unbox, or a generic `void* (*)(void*)`-style callback parameter
+    /// or return), rather than a cheap same-width cast? True for any type
+    /// whose C representation (`crates/codegen/src/ty_to_c.rs`) is a real,
+    /// value-sized struct rather than an already-pointer-or-scalar-sized
+    /// type — shared between `crates/mir` and `crates/codegen` (both need
+    /// the identical answer, e.g. for `List.getOrPanic`'s raw-`void*`
+    /// return vs. a boxed one) so it lives here on `Ty` itself rather than
+    /// risking two independently-maintained copies drifting apart — BACKLOG
+    /// item 134.
+    ///
+    /// `Decimal` (`certo_decimal_t = { int64_t value; int8_t scale; }`, 16
+    /// bytes with padding) and `UUID` (`certo_uuid_t = struct { uint8_t
+    /// bytes[16]; }`) both need this — previously `Decimal` was bit-cast
+    /// like an 8-byte `double` and `UUID` went through the same raw
+    /// pointer-cast as everything else, both wrong for a 16-byte struct.
+    pub fn needs_heap_box(&self) -> bool {
+        match self {
+            Ty::Decimal(_) | Ty::Uuid => true,
+            Ty::Named { name, args } => {
+                // Mirrors `ty_to_c`'s own opaque-handle carve-outs exactly —
+                // those compile to `int64_t`/`void*` already and need no
+                // boxing; every other `Named` (a user's own `type`/generic
+                // record or sum type, or a multi-arg generic like `Box<T>`)
+                // falls to `ty_to_c`'s catch-all, a real, named C struct.
+                let opaque_handle = (args.is_empty() && matches!(name.as_str(),
+                    "HttpRequest" | "HttpResponse" | "Bytes" | "DbResult" | "Query" | "Mutation"
+                    | "DateTime" | "Date" | "Duration" | "JsonValue"))
+                    || name == "__CertoTask" || name == "Channel";
+                !opaque_handle
+            }
+            _ => false,
+        }
+    }
+
     /// Instantiate a `Forall` by replacing each quantified var with a fresh
     /// inference variable, using the provided counter.
     pub fn instantiate(&self, counter: &mut u32) -> Ty {

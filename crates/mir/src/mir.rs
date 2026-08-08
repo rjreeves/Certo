@@ -90,6 +90,20 @@ pub enum Rvalue {
     /// Recover a value of type `ty` from a pointer-sized generic slot —
     /// the inverse of `Box`.
     Unbox { value: Operand, ty: Ty },
+    /// Fix up the result of a stdlib function that returns `Option<T>` via
+    /// the generic `__certo_opt_box` helper (`malloc(sizeof(int64_t)); *p =
+    /// bits;` — always an 8-byte box, e.g. `List.first`/`.last`/`.get`,
+    /// `List.find`, `Map.get`, `Query.first`) when `T` itself needs real
+    /// heap-boxing (a struct — BACKLOG item 134). `__certo_opt_box` boxes
+    /// whatever raw payload it's handed uniformly; when that payload is
+    /// itself already a pointer to a heap-allocated `T` (because `List<T>`'s
+    /// own storage now heap-boxes struct elements), the result is one level
+    /// of indirection too deep — a pointer to an 8-byte box *containing* the
+    /// real `T*`, not a pointer to `T` itself. This unwraps exactly that one
+    /// extra level, null-safely (`None`/empty stays `None`, not a crash):
+    /// `value == NULL ? NULL : *(void**)(value)`. `ty` is unused at codegen
+    /// time (kept for symmetry with `Box`/`Unbox` and future debugging).
+    UnwrapOptStructBox { value: Operand, ty: Ty },
 }
 
 #[derive(Debug, Clone)]

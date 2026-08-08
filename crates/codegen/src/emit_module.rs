@@ -470,6 +470,20 @@ fn ast_ty_to_c_str(te: &certo_ast::types::TypeExpr) -> String {
                 "Text"    => "certo_text_t".into(),
                 "Unit"    => "certo_unit_t".into(),
                 "UUID"    => "certo_uuid_t".into(),
+                // These stdlib scalar types have a C-side typedef prefixed
+                // `Certo` (`CertoDateTime`, etc.) rather than matching their
+                // bare Certo name — the same gap `ty_to_c.rs` (the
+                // resolved-`Ty` version of this function) already fixed, but
+                // this separate AST-level copy (used for `type X = { ... }`
+                // record *field* declarations specifically) never got the
+                // same fix, so a `DateTime`/`Date`/`Duration`-typed field
+                // emitted the literal, undeclared C identifier `DateTime`
+                // instead — confirmed via a real `certo db pull`-generated
+                // struct with a `createdAt: DateTime` field failing to
+                // compile (BACKLOG item 134, found while verifying the
+                // struct-boxing fix end-to-end, not caused by it).
+                "DateTime" | "Date" | "Duration" => format!("Certo{}", name),
+                "JsonValue" => "CertoJsonValue*".into(),
                 other     => c_ident(other),
             }
         }

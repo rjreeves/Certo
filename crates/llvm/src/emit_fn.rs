@@ -112,6 +112,7 @@ fn infer_rvalue(map: &HashMap<MirLocal, String>, rv: &Rvalue) -> Option<String> 
         Rvalue::UnboxSome { .. } => Some("ptr".into()),
         Rvalue::Box { .. }       => Some("ptr".into()),
         Rvalue::Unbox { .. }     => Some("ptr".into()),
+        Rvalue::UnwrapOptStructBox { .. } => Some("ptr".into()),
     }
 }
 
@@ -284,7 +285,8 @@ impl<'ctx> FnEmitter<'ctx> {
             // LLVM backend — emit null placeholders (the C backend is canonical).
             Rvalue::Spawn { .. } | Rvalue::Join { .. } | Rvalue::JoinTimed { .. }
             | Rvalue::BoxSome { .. } | Rvalue::UnboxSome { .. }
-            | Rvalue::Box { .. } | Rvalue::Unbox { .. } => {
+            | Rvalue::Box { .. } | Rvalue::Unbox { .. }
+            | Rvalue::UnwrapOptStructBox { .. } => {
                 let v = self.fresh();
                 self.w(&format!("  %v{v} = inttoptr i64 0 to ptr"));
                 self.w(&format!("  store ptr %v{v}, ptr {dest_ptr}"));
