@@ -258,6 +258,18 @@ CertoHttpResponse* certo_http_request(certo_text_t method, certo_text_t url, Cer
 CertoHttpResponse* certo_http_request_bytes(certo_text_t method, certo_text_t url, CertoList* headers, CertoBytes* body) { (void)method; (void)url; (void)headers; (void)body; certo_panic("Http not supported on this platform."); return NULL; }
 #endif
 
+/* Portable case-insensitive string compare — `_stricmp` is MSVC/Windows-only;
+   POSIX's equivalent lives in <strings.h> as `strcasecmp`. Used below by
+   `certo_http_request_header` (platform-independent — not itself guarded by
+   `#ifdef _WIN32`, so it must compile everywhere) and by the server's own
+   request parser further down. */
+#ifdef _WIN32
+#define certo_stricmp _stricmp
+#else
+#include <strings.h>
+#define certo_stricmp strcasecmp
+#endif
+
 /* ---- Accessors (platform-independent) -------------------------- */
 
 int64_t      certo_http_response_status      (CertoHttpResponse* r) { return r ? r->status       : 0; }
@@ -266,7 +278,9 @@ certo_text_t certo_http_response_content_type(CertoHttpResponse* r) { return r ?
 bool         certo_http_response_ok          (CertoHttpResponse* r) { return r && r->status >= 200 && r->status < 300; }
 
 /* ================================================================
-   Stdlib.Http — server (Windows-only via WinSock2)
+   Stdlib.Http — server. Windows: WinSock2. POSIX: BSD sockets.
+   Both are a plain blocking, single-connection-at-a-time accept loop —
+   no threading/concurrency, no keep-alive (mirrors Windows exactly).
    ================================================================ */
 
 /* An incoming HTTP request. */
@@ -323,13 +337,13 @@ certo_text_t certo_http_request_header(CertoHttpRequest* r, certo_text_t name) {
         CertoList* pair = (CertoList*)r->headers->data[i];
         if (!pair || pair->len < 2) continue;
         const char* k = (const char*)pair->data[0];
-        if (k && _stricmp(k, name) == 0) return (certo_text_t)pair->data[1];
+        if (k && certo_stricmp(k, name) == 0) return (certo_text_t)pair->data[1];
     }
     return "";
 }
 
-#ifdef _WIN32
-/* ---- internal: heap-duplicate a string -------------------------- */
+/* ---- internal: heap-duplicate a string (pure logic, no socket API,
+   shared verbatim by both platforms) -------------------------------- */
 static char* http_srv_strdup(const char* s) {
     if (!s) { char* e = (char*)malloc(1); e[0]='\0'; return e; }
     size_t n = strlen(s);
@@ -339,8 +353,52 @@ static char* http_srv_strdup(const char* s) {
     return out;
 }
 
-/* ---- internal: read until CRLF CRLF ----------------------------- */
-static char* http_srv_read_request(SOCKET sock) {
+/* ---- internal: status text (pure logic, shared) ------------------ */
+static const char* http_status_text(int64_t code) {
+    switch (code) {
+        case 200: return "OK";
+        case 201: return "Created";
+        case 204: return "No Content";
+        case 301: return "Moved Permanently";
+        case 302: return "Found";
+        case 304: return "Not Modified";
+        case 400: return "Bad Request";
+        case 401: return "Unauthorized";
+        case 403: return "Forbidden";
+        case 404: return "Not Found";
+        case 405: return "Method Not Allowed";
+        case 409: return "Conflict";
+        case 422: return "Unprocessable Entity";
+        case 429: return "Too Many Requests";
+        case 500: return "Internal Server Error";
+        case 502: return "Bad Gateway";
+        case 503: return "Service Unavailable";
+        default:  return "Unknown";
+    }
+}
+
+/* `recv`/`send` are BSD-sockets API with the same signature on Winsock and
+   POSIX — only the socket handle's own type, its "invalid" sentinel, and how
+   it's closed differ. `certo_socket_t` lets every helper below (`http_srv_*`)
+   be written once and shared, instead of duplicating the whole read/parse/
+   send pipeline per platform the way the client-side (WinHTTP vs POSIX-stub)
+   functions above do. */
+#ifdef _WIN32
+typedef SOCKET certo_socket_t;
+#define CERTO_INVALID_SOCKET INVALID_SOCKET
+static void certo_closesocket(certo_socket_t s) { closesocket(s); }
+#else
+#include <unistd.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+typedef int certo_socket_t;
+#define CERTO_INVALID_SOCKET (-1)
+static void certo_closesocket(certo_socket_t s) { close(s); }
+#endif
+
+/* ---- internal: read until CRLF CRLF (shared) --------------------- */
+static char* http_srv_read_request(certo_socket_t sock) {
     size_t cap = 4096, pos = 0;
     char* buf = (char*)malloc(cap);
     if (!buf) certo_panic("out of memory");
@@ -362,8 +420,8 @@ static char* http_srv_read_request(SOCKET sock) {
     return buf;
 }
 
-/* ---- internal: read exactly `len` bytes of body ----------------- */
-static char* http_srv_read_body(SOCKET sock, int64_t len) {
+/* ---- internal: read exactly `len` bytes of body (shared) --------- */
+static char* http_srv_read_body(certo_socket_t sock, int64_t len) {
     if (len <= 0) { char* e = (char*)malloc(1); e[0]='\0'; return e; }
     char* buf = (char*)malloc((size_t)len + 1);
     if (!buf) certo_panic("out of memory");
@@ -377,8 +435,8 @@ static char* http_srv_read_body(SOCKET sock, int64_t len) {
     return buf;
 }
 
-/* ---- internal: parse raw headers text into CertoHttpRequest ----- */
-static CertoHttpRequest* http_srv_parse(const char* raw, SOCKET sock) {
+/* ---- internal: parse raw headers text into CertoHttpRequest (shared) */
+static CertoHttpRequest* http_srv_parse(const char* raw, certo_socket_t sock) {
     CertoHttpRequest* req = (CertoHttpRequest*)malloc(sizeof(CertoHttpRequest));
     if (!req) certo_panic("out of memory");
     req->method  = http_srv_strdup("");
@@ -445,7 +503,7 @@ static CertoHttpRequest* http_srv_parse(const char* raw, SOCKET sock) {
             memcpy(val, vstart, vlen);
             val[vlen] = '\0';
 
-            if (_stricmp(key, "content-length") == 0)
+            if (certo_stricmp(key, "content-length") == 0)
                 content_length = atoll(val);
 
             CertoList* pair = certo_list_new_empty();
@@ -463,32 +521,8 @@ static CertoHttpRequest* http_srv_parse(const char* raw, SOCKET sock) {
     return req;
 }
 
-/* ---- internal: status text ------------------------------------- */
-static const char* http_status_text(int64_t code) {
-    switch (code) {
-        case 200: return "OK";
-        case 201: return "Created";
-        case 204: return "No Content";
-        case 301: return "Moved Permanently";
-        case 302: return "Found";
-        case 304: return "Not Modified";
-        case 400: return "Bad Request";
-        case 401: return "Unauthorized";
-        case 403: return "Forbidden";
-        case 404: return "Not Found";
-        case 405: return "Method Not Allowed";
-        case 409: return "Conflict";
-        case 422: return "Unprocessable Entity";
-        case 429: return "Too Many Requests";
-        case 500: return "Internal Server Error";
-        case 502: return "Bad Gateway";
-        case 503: return "Service Unavailable";
-        default:  return "Unknown";
-    }
-}
-
-/* ---- internal: send response ----------------------------------- */
-static void http_srv_send(SOCKET sock, CertoHttpResponse* resp) {
+/* ---- internal: send response (shared) --------------------------- */
+static void http_srv_send(certo_socket_t sock, CertoHttpResponse* resp) {
     const char* body = resp && resp->body         ? resp->body         : "";
     const char* ct   = resp && resp->content_type ? resp->content_type : "text/plain";
     int64_t     code = resp ? resp->status : 500;
@@ -507,7 +541,8 @@ static void http_srv_send(SOCKET sock, CertoHttpResponse* resp) {
     if (blen > 0) send(sock, body, (int)blen, 0);
 }
 
-/* ---- public: blocking serve loop ------------------------------- */
+#ifdef _WIN32
+/* ---- public: blocking serve loop (Windows / WinSock2) ------------ */
 int64_t certo_http_serve(int64_t port, certo_fn_t raw_handler) {
     CertoHttpHandler handler = (CertoHttpHandler)raw_handler;
 
@@ -535,7 +570,7 @@ int64_t certo_http_serve(int64_t port, certo_fn_t raw_handler) {
         struct sockaddr_in client_addr = {0};
         int addr_len = sizeof(client_addr);
         SOCKET client = accept(srv, (struct sockaddr*)&client_addr, &addr_len);
-        if (client == INVALID_SOCKET) continue;
+        if (client == CERTO_INVALID_SOCKET) continue;
 
         char* raw = http_srv_read_request(client);
         CertoHttpRequest* req = http_srv_parse(raw, client);
@@ -544,17 +579,50 @@ int64_t certo_http_serve(int64_t port, certo_fn_t raw_handler) {
         CertoHttpResponse* resp = handler(req);
         http_srv_send(client, resp);
 
-        closesocket(client);
+        certo_closesocket(client);
     }
     /* unreachable — server runs until process exits */
     return 0;
 }
 
 #else
-/* ---- POSIX stub ------------------------------------------------- */
-int64_t certo_http_serve(int64_t port, certo_fn_t handler) {
-    (void)port; (void)handler;
-    certo_panic("Http.serve is not yet supported on this platform");
+/* ---- public: blocking serve loop (POSIX / BSD sockets) ----------- */
+int64_t certo_http_serve(int64_t port, certo_fn_t raw_handler) {
+    CertoHttpHandler handler = (CertoHttpHandler)raw_handler;
+
+    int srv = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (srv == CERTO_INVALID_SOCKET) certo_panic("socket() failed");
+
+    int reuse = 1;
+    setsockopt(srv, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
+
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family      = AF_INET;
+    addr.sin_addr.s_addr = INADDR_ANY;
+    addr.sin_port        = htons((uint16_t)port);
+
+    if (bind(srv, (struct sockaddr*)&addr, sizeof(addr)) != 0)
+        certo_panic("bind() failed — port may already be in use");
+    if (listen(srv, SOMAXCONN) != 0)
+        certo_panic("listen() failed");
+
+    for (;;) {
+        struct sockaddr_in client_addr;
+        socklen_t addr_len = sizeof(client_addr);
+        int client = accept(srv, (struct sockaddr*)&client_addr, &addr_len);
+        if (client == CERTO_INVALID_SOCKET) continue;
+
+        char* raw = http_srv_read_request(client);
+        CertoHttpRequest* req = http_srv_parse(raw, client);
+        free(raw);
+
+        CertoHttpResponse* resp = handler(req);
+        http_srv_send(client, resp);
+
+        certo_closesocket(client);
+    }
+    /* unreachable — server runs until process exits */
     return 0;
 }
 #endif
