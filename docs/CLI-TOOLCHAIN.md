@@ -22,10 +22,11 @@ from the command line.
 13. [certo db — database tools](#13-certo-db--database-tools)
 14. [certo migrate — migrations](#14-certo-migrate--migrations)
 15. [certo.toml — project manifest](#15-certotoml--project-manifest)
-16. [C compiler discovery and PostgreSQL linking](#16-c-compiler-discovery-and-postgresql-linking)
-17. [Environment variables](#17-environment-variables)
-18. [Exit codes](#18-exit-codes)
-19. [CI recipe](#19-ci-recipe)
+16. [certo add / certo audit — dependency bookkeeping](#16-certo-add--certo-audit--dependency-bookkeeping)
+17. [C compiler discovery and PostgreSQL linking](#17-c-compiler-discovery-and-postgresql-linking)
+18. [Environment variables](#18-environment-variables)
+19. [Exit codes](#19-exit-codes)
+20. [CI recipe](#20-ci-recipe)
 
 ---
 
@@ -47,6 +48,8 @@ certo repl                             interactive REPL
 certo generate validators ...          generate Certo from YAML
 certo db    <subcommand>               database tools
 certo migrate <subcommand>             migration alias
+certo add   <module>                   add a stdlib module to [dependencies]
+certo audit [--strict]                 check [dependencies] against imports
 ```
 
 Running `certo` with no arguments in a directory that contains `certo.toml`
@@ -723,11 +726,74 @@ example in the language spec.
 | `entry` | `[build]` | Entry file (required for apps) |
 | `schema`, `migrations`, `seeds` | `[database]` | Parsed, not consumed anywhere yet — `certo db` subcommands still take explicit args |
 | `port`, `host` | `[server]` | Parsed, not consumed anywhere yet — no `certo run --port` today; a program reads flags/env itself |
-| (any key) | `[dependencies]`, `[dev-dependencies]` | Parsed, not consumed anywhere yet — no package manager (`certo add`/`certo audit` are unimplemented) |
+| (any key) | `[dependencies]` | Read by `certo add`/`certo audit` — see [§16](#16-certo-add--certo-audit--dependency-bookkeeping) |
+| (any key) | `[dev-dependencies]` | Parsed, not consumed anywhere yet |
 
 ---
 
-## 16. C compiler discovery and PostgreSQL linking
+## 16. certo add / certo audit — dependency bookkeeping
+
+`[dependencies]` in `certo.toml` only ever lists **stdlib module names**
+(`"Stdlib.Http" = "*"`) — there is no package registry, fetch mechanism, or
+lockfile anywhere in this toolchain. `certo add` and `certo audit` are scoped
+to that reality: they keep the manifest's `[dependencies]` list honest
+against what the project's source actually `import`s. Neither command
+installs, downloads, or resolves anything.
+
+### certo add
+
+```sh
+certo add <module>
+```
+
+Appends a validated stdlib module to `[dependencies]`, preserving the rest of
+the file (comments, ordering, formatting) via `toml_edit` rather than
+round-tripping the whole manifest through a serializer.
+
+```sh
+certo add Http           # writes "Stdlib.Http" = "*"
+certo add Stdlib.Http    # same — the "Stdlib." prefix is optional
+```
+
+`<module>` is checked against the real set of modules `certo_stdlib` provides
+(`Core`, `Bytes`, `Credential`, `Collections`, `Channel`, `Result`, `Text`,
+`DateTime`, `Money`, `Db`, `DbQuery`, `DbMutation`, `Env`, `File`, `Path`,
+`Process`, `Json`, `Http`, `Math`, `Crypto`, `Regex`, `Csv`) — an unknown name
+is a clear error listing the valid ones, not a manifest entry for a module
+that will never resolve to anything. Adding a module that's already declared
+is a no-op (prints a note, doesn't error or duplicate the entry).
+
+### certo audit
+
+```sh
+certo audit [--strict]
+```
+
+Parses the project's entry file (`[build] entry`) and compares its top-level
+`import` statements against `[dependencies]`:
+
+- **Missing** — imported but not declared: printed as an error, and `certo
+  audit` exits `1`. Each one suggests the exact `certo add` to fix it.
+- **Unused** — declared but never imported: printed as a warning. Exits `0`
+  unless `--strict` is passed, in which case unused dependencies also fail
+  the check (mirrors `certo check --strict`'s existing convention).
+
+```sh
+$ certo audit
+error: `Stdlib.Http` is imported but not declared in [dependencies]
+       fix with: certo add Stdlib.Http
+warning: `Stdlib.Text` is declared in [dependencies] but never imported
+```
+
+Only the entry file's own declared imports are checked — not a transitive
+walk through locally-imported sibling files. This matches the one place
+`import` declarations already drive real compiler behavior today (`certo
+build`'s own DB-runtime-inclusion check), rather than inventing a deeper
+resolution pass audit alone would need to justify.
+
+---
+
+## 17. C compiler discovery and PostgreSQL linking
 
 ### C compiler
 
@@ -785,7 +851,7 @@ dnf install libpq-devel
 
 ---
 
-## 17. Environment variables
+## 18. Environment variables
 
 | Variable | Used by | Description |
 |---|---|---|
@@ -826,7 +892,7 @@ Use a shell helper like `dotenv` if you need `.env` loaded for `certo run`.
 
 ---
 
-## 18. Exit codes
+## 19. Exit codes
 
 | Code | Meaning |
 |---|---|
@@ -837,7 +903,7 @@ Use a shell helper like `dotenv` if you need `.env` loaded for `certo run`.
 
 ---
 
-## 19. CI recipe
+## 20. CI recipe
 
 A complete GitHub Actions workflow for a Certo project:
 
