@@ -19,6 +19,7 @@ use certo_typeck::{TypeError, TypeErrorKind, TypeEnv, assign_var_names};
 use certo_traits::{TraitError, TraitErrorKind};
 use certo_dbschema::DbErrorKind;
 use certo_effects::{EffectError, EffectErrorKind};
+use certo_hir::{LowerError, LowerErrorKind};
 
 /// C preamble shared by the build pipeline and the REPL.
 pub(crate) const REPL_PREAMBLE: &str =
@@ -877,6 +878,16 @@ fn run_typeck_inner(
         process::exit(1);
     }
 
+    if let Err(errs) = certo_hir::lower_module(module) {
+        let diags: Vec<Diagnostic> = errs.iter()
+            .map(|e| hir_error_to_diagnostic(e))
+            .collect();
+        eprint!("{}", render_all(&diags, src, filename, colour));
+        eprintln!("aborting due to {} error(s)", diags.len());
+        if explain { print_explanations(&diags); }
+        process::exit(1);
+    }
+
     let schema = match certo_dbschema::check_module(module) {
         Ok(schema) => schema,
         Err(errs) => {
@@ -1190,6 +1201,23 @@ fn db_error_to_diagnostic(e: &certo_dbschema::DbError) -> Diagnostic {
                 format!("alias `\"{}\"` is already used in this query", alias))
                 .with_span(e.span)
                 .with_note("give each occurrence of a self-joined table a distinct alias via `.fromAs`/`.joinAs`/`.leftJoinAs`"),
+    }
+}
+
+/// HIR lowering errors previously had no diagnostic surfacing at all — codegen's
+/// own call to `lower_module` (`crates/codegen/src/emit_module.rs`) silently wrote
+/// `/* HIR lowering errors: N */` into the generated C and returned, with nothing
+/// shown to the user. Running `lower_module` here too, before codegen, gives these
+/// real diagnostics (found while adding BACKLOG's closure-capture rejection check,
+/// the first check that can genuinely fail here for ordinary, well-typed source).
+fn hir_error_to_diagnostic(e: &LowerError) -> Diagnostic {
+    match &e.kind {
+        LowerErrorKind::UnresolvedName(n) =>
+            Diagnostic::error("E0600", format!("unresolved name `{}`", n))
+                .with_span(e.span),
+        LowerErrorKind::Unsupported(msg) =>
+            Diagnostic::error("E0601", msg.clone())
+                .with_span(e.span),
     }
 }
 
