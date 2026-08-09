@@ -3,7 +3,7 @@ use certo_ast::decl::{Decl, TypeBody, StateMachineDecl};
 use certo_ast::module::Module;
 use certo_hir::{HirItem, lower_module};
 use certo_mir::lower_fn;
-use crate::emit_mir::{emit_fn_with_prefix, c_fn_name, collect_spawn_sites, emit_spawn_support};
+use crate::emit_mir::{emit_fn_with_prefix, c_fn_name, collect_spawn_sites, emit_spawn_support, LineMap};
 use crate::ty_to_c::{ty_to_c, ret_ty_to_c, c_ident};
 
 /// Options controlling C output.
@@ -13,11 +13,21 @@ pub struct CodegenOptions {
     pub inline_runtime: bool,
     /// Prefix `pub fn` declarations with `CERTO_EXPORT` for shared library builds.
     pub export_public: bool,
+    /// `Some((filename, source))` opts into emitting `#line` directives that
+    /// map generated C back to the original `.cto` file/line, so coverage
+    /// tools (`llvm-cov`) attribute results to the user's own source instead
+    /// of meaningless generated-C line numbers — BACKLOG item 126. `None`
+    /// (the default) for every normal `certo build`/`run`/`test` path;
+    /// only `certo test --coverage`'s own C generation opts in, so ordinary
+    /// compile-error messages keep pointing at the generated C as before.
+    pub line_directives: Option<(String, String)>,
 }
 
 /// Emit a complete C translation unit for the given module.
 pub fn emit_module(module: &Module, opts: &CodegenOptions) -> String {
     let mut out = String::new();
+    let line_map: Option<LineMap> = opts.line_directives.as_ref()
+        .map(|(filename, source)| LineMap::new(filename, source));
 
     // All-nullary enums are represented as plain int enums (not structs). The
     // function emitters need to know which, so `match`'s `.tag` read on such a
@@ -265,7 +275,7 @@ pub fn emit_module(module: &Module, opts: &CodegenOptions) -> String {
 
     // Emit lifted lambda bodies before user functions.
     for mir in &lifted_fns {
-        emit_fn_with_prefix(mir, "static ", &nullary_enums, &mut out);
+        emit_fn_with_prefix(mir, "static ", &nullary_enums, line_map.as_ref(), &mut out);
         writeln!(out).unwrap();
     }
 
@@ -278,7 +288,7 @@ pub fn emit_module(module: &Module, opts: &CodegenOptions) -> String {
             HirItem::Fn(_) => {
                 if let Some((mir, name)) = mir_iter.next() {
                     let pfx = if pub_fns.contains(name) { export(name) } else { "" };
-                    emit_fn_with_prefix(&mir, pfx, &nullary_enums, &mut out);
+                    emit_fn_with_prefix(&mir, pfx, &nullary_enums, line_map.as_ref(), &mut out);
                     writeln!(out).unwrap();
                 }
             }

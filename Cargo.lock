@@ -217,6 +217,7 @@ dependencies = [
  "certo-mir",
  "certo-parser",
  "certo-stdlib",
+ "serde_json",
  "tempfile",
 ]
 

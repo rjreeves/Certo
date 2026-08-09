@@ -68,7 +68,7 @@ fn compute_local_types(ast_fn: &FnDecl, mir_fn: &MirFn) -> HashMap<MirLocal, Str
         changed = false;
         for bb in &mir_fn.blocks {
             for stmt in &bb.stmts {
-                let MirStmt::Assign { dest, rvalue } = stmt;
+                let MirStmt::Assign { dest, rvalue, .. } = stmt;
                 if map.contains_key(dest) { continue; }
                 if let Some(t) = infer_rvalue(&map, rvalue) {
                     map.insert(*dest, t);
@@ -225,7 +225,7 @@ impl<'ctx> FnEmitter<'ctx> {
     // ── Statement emission ────────────────────────────────────────────
 
     fn emit_stmt(&mut self, stmt: MirStmt) {
-        let MirStmt::Assign { dest, rvalue } = stmt;
+        let MirStmt::Assign { dest, rvalue, .. } = stmt;
         let dest_lty = self.llty_of(dest).to_string();
         let dest_ptr = Self::local_ptr(dest);
         let _is_unit  = dest_lty == "i8" && dest == 0; // rough Unit check for ret slot

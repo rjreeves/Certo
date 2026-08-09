@@ -345,7 +345,7 @@ fn try_compile_and_run(src: &str, _colour: bool) -> EvalResult {
     let stdlib_c = certo_stdlib::full_c_runtime_with_db(false);
     let module_c = certo_codegen::emit_module(
         &module,
-        &certo_codegen::CodegenOptions { inline_runtime: false, export_public: false },
+        &certo_codegen::CodegenOptions { inline_runtime: false, export_public: false, line_directives: None },
     );
     let module_c = module_c.lines()
         .filter(|l| {

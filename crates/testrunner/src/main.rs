@@ -53,6 +53,7 @@ fn main() {
     let opts = RunOptions {
         timeout: Some(Duration::from_secs(30)),
         filter,
+        coverage_dir: None,
     };
 
     let mut all_ok = true;
