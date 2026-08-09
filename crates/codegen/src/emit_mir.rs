@@ -6,6 +6,53 @@ use certo_typeck::Ty;
 use crate::ty_to_c::{ty_to_c, ret_ty_to_c, mangle};
 
 // ------------------------------------------------------------------ //
+// Source-mapped `#line` directives for `certo test --coverage` (BACKLOG
+// item 126). Opt-in only (`Option<&LineMap>` threaded through emission) —
+// a normal `certo build`/`certo run` never constructs one, so ordinary
+// compile errors keep pointing at the *generated* C, matching every
+// existing user's expectations. Only `certo test --coverage`'s own C
+// generation (`crates/testrunner/src/harness.rs`) opts in.
+//
+// NOTE: `llvm-cov` itself completely ignores `#line` for coverage
+// attribution (confirmed by direct testing against LLVM 22 — neither
+// `llvm-cov report`'s file grouping nor `llvm-cov show`'s line numbers
+// shift for a `#line` pragma). These directives exist so
+// `crates/testrunner/src/coverage.rs` can re-derive the same mapping
+// itself, by scanning the exact compiled `c_src` text, and remap
+// `llvm-cov export`'s generated-C-line hit data back to `.cto` lines on
+// our own side. See that module's doc comment for the full picture.
+pub struct LineMap<'a> {
+    pub filename: &'a str,
+    /// `filename` with `\` and `"` escaped for embedding in a C string
+    /// literal — required on Windows, where paths contain `\` that the C
+    /// preprocessor would otherwise read as escape sequences (e.g. `\U`,
+    /// `\A`) inside the `#line "<file>"` directive.
+    filename_escaped: String,
+    /// `line_starts[i]` = byte offset of the first byte of line `i+1`
+    /// (1-based lines, so `line_starts[0]` is always `0`).
+    line_starts: Vec<u32>,
+}
+
+impl<'a> LineMap<'a> {
+    pub fn new(filename: &'a str, source: &str) -> Self {
+        let mut line_starts = vec![0u32];
+        for (i, b) in source.bytes().enumerate() {
+            if b == b'\n' { line_starts.push((i + 1) as u32); }
+        }
+        let filename_escaped = filename.replace('\\', "\\\\").replace('"', "\\\"");
+        LineMap { filename, filename_escaped, line_starts }
+    }
+
+    /// 1-based line number containing `byte_offset`.
+    pub fn line_of(&self, byte_offset: u32) -> u32 {
+        match self.line_starts.binary_search(&byte_offset) {
+            Ok(i) => (i + 1) as u32,
+            Err(i) => i.max(1) as u32,
+        }
+    }
+}
+
+// ------------------------------------------------------------------ //
 // Concurrency: per-spawn-call-site worker functions
 // ------------------------------------------------------------------ //
 
@@ -149,15 +196,17 @@ fn unbox_value(slot: &str, ty: &Ty) -> String {
 }
 
 /// Emit a single MIR function as a C function definition with an optional prefix
-/// (e.g. `"CERTO_EXPORT "` for shared library builds).
-pub fn emit_fn_with_prefix(f: &MirFn, prefix: &str, nullary_enums: &HashSet<String>, out: &mut String) {
+/// (e.g. `"CERTO_EXPORT "` for shared library builds). `line_map` is `Some`
+/// only for `certo test --coverage` builds (BACKLOG item 126) — see the
+/// `LineMap` doc comment above.
+pub fn emit_fn_with_prefix(f: &MirFn, prefix: &str, nullary_enums: &HashSet<String>, line_map: Option<&LineMap>, out: &mut String) {
     // Temporarily intercept the signature line to inject the prefix.
     let mut body = String::new();
-    emit_fn_inner(f, prefix, nullary_enums, &mut body);
+    emit_fn_inner(f, prefix, nullary_enums, line_map, &mut body);
     out.push_str(&body);
 }
 
-fn emit_fn_inner(f: &MirFn, prefix: &str, nullary_enums: &HashSet<String>, out: &mut String) {
+fn emit_fn_inner(f: &MirFn, prefix: &str, nullary_enums: &HashSet<String>, line_map: Option<&LineMap>, out: &mut String) {
     // Determine return type from the _ret local (index 0).
     let ret_ty = f.locals.first().map(|l| &l.ty).unwrap_or(&Ty::Unit);
     let ret_c  = ret_ty_to_c(ret_ty);
@@ -184,9 +233,29 @@ fn emit_fn_inner(f: &MirFn, prefix: &str, nullary_enums: &HashSet<String>, out: 
     // line up with the preamble.
     let fn_cname = c_fn_name(&f.name);
     let mut spawn_idx = 0u32;
+    // Tracks the last line a `#line` directive was emitted for, so an
+    // unbroken run of statements from the same source line doesn't repeat
+    // one before every single generated C statement.
+    let mut last_line: Option<u32> = None;
     for bb in &f.blocks {
         writeln!(out, "  bb{}:", bb.id).unwrap();
         for stmt in &bb.stmts {
+            if let Some(lm) = line_map {
+                let MirStmt::Assign { span, .. } = stmt;
+                if span.start != 0 || span.end != 0 {
+                    let line = lm.line_of(span.start);
+                    if last_line != Some(line) {
+                        writeln!(out, "#line {} \"{}\"", line, lm.filename_escaped).unwrap();
+                        last_line = Some(line);
+                    }
+                } else if last_line.is_some() {
+                    // Synthetic statement with no source correspondence
+                    // (e.g. an injected boxing/defer shim) — see the
+                    // end-of-function reset above for why this matters.
+                    writeln!(out, "#line 1 \"<generated>\"").unwrap();
+                    last_line = None;
+                }
+            }
             emit_stmt(stmt, &f.locals, &fn_cname, &mut spawn_idx, nullary_enums, out);
         }
         if let Some(term) = &bb.terminator {
@@ -194,11 +263,21 @@ fn emit_fn_inner(f: &MirFn, prefix: &str, nullary_enums: &HashSet<String>, out: 
         }
     }
 
+    // `#line` attribution otherwise persists (per real C semantics) into
+    // whatever gets emitted next — the next function's local decls, its own
+    // unspanned preamble, or (worst case) the rest of the file — silently
+    // misattributing it to this function's last source line. Reset back to
+    // an untracked state now that this function is done. `coverage.rs`'s
+    // `build_line_remap` recognizes the `<generated>` sentinel filename and
+    // treats it as "no `.cto` mapping" rather than a real target file.
+    if line_map.is_some() && last_line.is_some() {
+        writeln!(out, "#line 1 \"<generated>\"").unwrap();
+    }
     writeln!(out, "}}").unwrap();
 }
 
 fn emit_stmt(stmt: &MirStmt, locals: &[MirLocalDecl], fn_cname: &str, spawn_idx: &mut u32, nullary_enums: &HashSet<String>, out: &mut String) {
-    let MirStmt::Assign { dest, rvalue } = stmt;
+    let MirStmt::Assign { dest, rvalue, .. } = stmt;
     let lhs = local_name(*dest);
     match rvalue {
         Rvalue::Use(op) => {
@@ -565,4 +644,27 @@ fn camel_to_snake(s: &str) -> String {
 
 fn escape_str(s: &str) -> String {
     s.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n").replace('\t', "\\t")
+}
+
+#[cfg(test)]
+mod line_map_tests {
+    use super::LineMap;
+
+    #[test]
+    fn line_of_finds_correct_1_based_line() {
+        let src = "line1\nline2\nline3\n";
+        let lm = LineMap::new("f.cto", src);
+        assert_eq!(lm.line_of(0), 1);  // 'l' of line1
+        assert_eq!(lm.line_of(6), 2);  // 'l' of line2
+        assert_eq!(lm.line_of(12), 3); // 'l' of line3
+    }
+
+    #[test]
+    fn escapes_windows_path_for_c_string_literal() {
+        // Without escaping, clang reads `\U`/`\A`/etc as invalid escape
+        // sequences inside the `#line "<file>"` directive — confirmed by
+        // direct repro compiling a Windows temp path unescaped.
+        let lm = LineMap::new("C:\\Users\\bob\\a\"b.cto", "");
+        assert_eq!(lm.filename_escaped, "C:\\\\Users\\\\bob\\\\a\\\"b.cto");
+    }
 }

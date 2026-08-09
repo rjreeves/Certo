@@ -1,5 +1,6 @@
 use certo_typeck::Ty;
 use certo_hir::{HirFn, HirExpr, HirExprKind, HirStmt, HirPat, HirLitPat, LocalId};
+use certo_ast::span::Span;
 use crate::mir::*;
 
 // ------------------------------------------------------------------ //
@@ -33,6 +34,16 @@ struct Builder {
     /// item 120) — a `Ty::Var(0)` entry marks a bare type-param parameter,
     /// which needs a concrete argument heap-boxed at the call site.
     fn_param_tys: std::collections::HashMap<String, Vec<Ty>>,
+    /// The span of the Certo *statement* currently being lowered (BACKLOG
+    /// item 126) — updated only at statement boundaries (`lower_stmt`, a
+    /// block's tail expression, a function/lambda's own top-level body),
+    /// not for every sub-expression, so every `MirStmt::Assign` created
+    /// while lowering one statement's sub-expressions is tagged with that
+    /// *whole statement's* span. Coarser than expression-level, but that's
+    /// the right granularity for line-based coverage (`certo test
+    /// --coverage`) — see `crates/codegen/src/emit_mir.rs`'s `#line`
+    /// emission, the only consumer.
+    current_span: Span,
 }
 
 impl Builder {
@@ -56,6 +67,7 @@ impl Builder {
             record_field_types,
             variant_field_types,
             fn_param_tys,
+            current_span: Span::DUMMY,
         }
     }
 
@@ -95,7 +107,7 @@ impl Builder {
     }
 
     fn assign(&mut self, dest: MirLocal, rvalue: Rvalue) {
-        self.push_stmt(MirStmt::Assign { dest, rvalue });
+        self.push_stmt(MirStmt::Assign { dest, rvalue, span: self.current_span });
     }
 }
 
@@ -108,6 +120,7 @@ impl Builder {
 fn emit_defers_then_return(return_op: Operand, b: &mut Builder) {
     let defers: Vec<certo_hir::HirExpr> = b.defers.clone();
     for body in defers.iter().rev() {
+        b.current_span = body.span;
         lower_expr(body, b);
     }
     b.terminate(Terminator::Return(return_op));
@@ -138,6 +151,7 @@ pub fn lower_fn(
     }
 
     let result = if let Some(body) = &f.body {
+        b.current_span = body.span;
         lower_expr(body, &mut b)
     } else {
         Operand::Const(MirConst::Unit)
@@ -216,6 +230,7 @@ fn lower_lambda_boxed(params: &[certo_hir::HirParam], body: &HirExpr, param_ty_h
         lb.assign(real, Rvalue::Unbox { value: Operand::Local(*raw), ty: real_ty });
     }
 
+    lb.current_span = body.span;
     let lam_result = lower_expr(body, &mut lb);
     let lam_ret_ty = infer_operand_ty(&lam_result, &lb);
     if matches!(lam_ret_ty, Ty::Unit) {
@@ -1028,6 +1043,7 @@ fn lower_expr(expr: &HirExpr, b: &mut Builder) -> Operand {
             for p in params {
                 lb.map_hir_local(p.local, &p.name, p.ty.clone());
             }
+            lb.current_span = body.span;
             let lam_result = lower_expr(body, &mut lb);
             let lam_ret_ty = infer_operand_ty(&lam_result, &lb);
             lb.locals[ret_slot as usize].ty = lam_ret_ty.clone();
@@ -1281,6 +1297,7 @@ fn lower_expr(expr: &HirExpr, b: &mut Builder) -> Operand {
 fn lower_stmt(stmt: &HirStmt, b: &mut Builder) {
     match stmt {
         HirStmt::Let { local, name, ty, init } => {
+            b.current_span = init.span;
             let init_op  = lower_expr(init, b);
             // When the declared type is unknown (Ty::Error), recover it from the
             // initialiser. This preserves e.g. a `__CertoTask<R>` spawn handle so
@@ -1290,11 +1307,13 @@ fn lower_stmt(stmt: &HirStmt, b: &mut Builder) {
             b.assign(mir_local, Rvalue::Use(init_op));
         }
         HirStmt::Assign { local, value } => {
+            b.current_span = value.span;
             let val_op   = lower_expr(value, b);
             let mir_local = b.get_local(*local);
             b.assign(mir_local, Rvalue::Use(val_op));
         }
         HirStmt::Expr(e) => {
+            b.current_span = e.span;
             lower_expr(e, b);
         }
         HirStmt::Defer { body } => {

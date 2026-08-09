@@ -3,7 +3,7 @@ use certo_parser::parse;
 use crate::{emit_module, CodegenOptions, emit_validator};
 
 fn opts() -> CodegenOptions {
-    CodegenOptions { inline_runtime: false, export_public: false }
+    CodegenOptions { inline_runtime: false, export_public: false, line_directives: None }
 }
 
 fn codegen(src: &str) -> String {
@@ -35,7 +35,7 @@ fn output_includes_c_headers() {
 #[test]
 fn inline_runtime_embeds_types() {
     let module = parse("module A").expect("parse");
-    let c = emit_module(&module, &CodegenOptions { inline_runtime: true, export_public: false });
+    let c = emit_module(&module, &CodegenOptions { inline_runtime: true, export_public: false, line_directives: None });
     assert_contains(&c, "certo_decimal_t");
     assert_contains(&c, "certo_uuid_t");
     assert_contains(&c, "CERTO_UNIT");
@@ -212,7 +212,7 @@ fn export_annotation_emits_wrapper_under_custom_name() {
 fn export_annotation_wrapper_is_marked_export_public() {
     let module = parse("module A\n@export(\"my_custom_add\")\npub fn addNumbers(a: Int, b: Int): Int = a + b")
         .expect("parse error");
-    let c = emit_module(&module, &CodegenOptions { inline_runtime: false, export_public: true });
+    let c = emit_module(&module, &CodegenOptions { inline_runtime: false, export_public: true, line_directives: None });
     assert_contains(&c, "CERTO_EXPORT int64_t my_custom_add(int64_t _l1, int64_t _l2)");
 }
 
