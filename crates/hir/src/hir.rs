@@ -29,10 +29,17 @@ pub struct HirModule {
     /// `impl` methods by `Type.method`, matching `record_field_types`'
     /// per-call-site declared-vs-concrete split. Lets MIR's `lower_fn` box a
     /// concrete argument passed into a generic function's bare-`T` parameter
-    /// — BACKLOG item 120 (the call-site half; the call's own bare-`T`
-    /// *return* value still isn't recoverable to a concrete type at the call
-    /// site, so that half remains a design sketch).
+    /// — BACKLOG item 120 (the call-site half). Item 135 landed the return
+    /// side: a `val`-annotated or argument-position call site can now
+    /// recover the concrete type, see `fn_ret_tys` below.
     pub fn_param_tys: std::collections::HashMap<String, Vec<Ty>>,
+    /// Function name → *declared* return type, as written (a bare type-param
+    /// return is `Ty::Var(0)`, unsubstituted) — same naming convention as
+    /// `fn_param_tys`. Lets MIR's `lower_fn` know when a call's own
+    /// now-resolved concrete `Ty` (see `crates/hir/src/lower.rs`'s
+    /// `resolve_bare_generic_return`, BACKLOG item 135) actually needs
+    /// unboxing from the raw `void*` the C function still returns.
+    pub fn_ret_tys: std::collections::HashMap<String, Ty>,
 }
 
 #[derive(Debug, Clone)]

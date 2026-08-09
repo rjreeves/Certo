@@ -186,7 +186,7 @@ pub fn emit_module(module: &Module, opts: &CodegenOptions) -> String {
     let mut lifted_fns: Vec<certo_mir::MirFn> = Vec::new();
     let fn_mirs: Vec<(certo_mir::MirFn, &str)> = hir.items.iter()
         .filter_map(|item| if let HirItem::Fn(f) = item {
-            let (mir, lifted) = lower_fn(f, &hir.record_field_types, &hir.variant_field_types, &hir.fn_param_tys);
+            let (mir, lifted) = lower_fn(f, &hir.record_field_types, &hir.variant_field_types, &hir.fn_param_tys, &hir.fn_ret_tys);
             lifted_fns.extend(lifted);
             Some((mir, f.name.as_str()))
         } else {

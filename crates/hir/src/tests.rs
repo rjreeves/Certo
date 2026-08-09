@@ -399,3 +399,79 @@ fn lambda_referencing_own_let_binding_is_fine() {
          fn f(xs: List<Int>): List<Int> = List.map(xs, (x) => { val y = x + 1\n y })");
     assert!(result.is_ok(), "expected Ok, got {:?}", result.err());
 }
+
+// ------------------------------------------------------------------ //
+// Bare-generic-return resolution (BACKLOG item 135)
+// ------------------------------------------------------------------ //
+
+const BOX_SRC: &str = "\
+type Box<T> = priv Box(T)
+impl<T> Box {
+    fn wrap(v: T): Box<T> = Box(v)
+    fn unwrap(b: Box<T>): T = match b { Box(v) => v }
+}
+";
+
+fn first_let_ty(m: &crate::HirModule, fn_name: &str) -> Ty {
+    let f = m.items.iter().find_map(|it| match it {
+        HirItem::Fn(f) if f.name == fn_name => Some(f),
+        _ => None,
+    }).unwrap_or_else(|| panic!("expected fn `{}`", fn_name));
+    match &f.body.as_ref().unwrap().kind {
+        HirExprKind::Block { stmts, .. } => match &stmts[0] {
+            crate::hir::HirStmt::Let { ty, .. } => ty.clone(),
+            other => panic!("expected a Let statement, got {:?}", other),
+        },
+        other => panic!("expected a Block body, got {:?}", other),
+    }
+}
+
+#[test]
+fn val_annotation_resolves_bare_generic_return() {
+    // `Box.unwrap`'s declared return is bare `T` (`Ty::Var(0)`) — the `val`'s
+    // own `: Int` annotation must resolve the call's HIR type to the real
+    // `Ty::Int`, not leave it as the unresolved sentinel.
+    let src = format!("module A\n{}fn f(): Int = {{\n val x: Int = Box.unwrap(Box.wrap(42))\n x\n}}", BOX_SRC);
+    let m = lower(&src);
+    assert_eq!(first_let_ty(&m, "f"), Ty::Int);
+}
+
+#[test]
+fn unannotated_val_with_bare_generic_return_is_an_error() {
+    // No declared type anywhere to resolve `Ty::Var(0)` against — must be a
+    // hard compile error, not a silently-wrong `void*` flowing through.
+    let src = format!("module A\n{}fn f(): Int = {{\n val x = Box.unwrap(Box.wrap(42))\n x\n}}", BOX_SRC);
+    let result = try_lower(&src);
+    assert!(result.is_err(), "expected an error for an unannotated bare-generic-return val");
+}
+
+#[test]
+fn argument_position_resolves_bare_generic_return_via_concrete_param() {
+    // `addOne`'s declared param is concrete (`Int`) — a bare-generic-return
+    // call passed directly as that argument should resolve through it, same
+    // as the `val`-annotation case.
+    let src = format!(
+        "module A\n{}fn addOne(n: Int): Int = n + 1\nfn f(): Int = {{\n val x: Int = addOne(Box.unwrap(Box.wrap(42)))\n x\n}}",
+        BOX_SRC
+    );
+    let m = lower(&src);
+    // The outer `val`'s own type must be Int; if the inner call weren't
+    // resolved, typeck-independent HIR lowering would still leave it as
+    // Ty::Var, but this at least confirms the whole call lowers without
+    // erroring and produces the expected outer type.
+    assert_eq!(first_let_ty(&m, "f"), Ty::Int);
+}
+
+#[test]
+fn argument_to_another_generic_param_does_not_resolve_and_errors() {
+    // Passing a bare-generic-return call into *another* still-generic
+    // function's param (declared type is itself `Ty::Var`, not concrete)
+    // gives no usable expected type — must still error rather than silently
+    // leaving `Ty::Var(0)` to flow through unchecked.
+    let src = format!(
+        "module A\n{}fn identity<T>(v: T): T = v\nfn f(): Int = {{\n val x: Int = identity(Box.unwrap(Box.wrap(42)))\n x\n}}",
+        BOX_SRC
+    );
+    let result = try_lower(&src);
+    assert!(result.is_err(), "expected an error: identity's param is itself generic, no concrete type to resolve against");
+}
