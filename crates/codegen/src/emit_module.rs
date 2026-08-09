@@ -482,7 +482,7 @@ fn ast_ty_to_c_str(te: &certo_ast::types::TypeExpr) -> String {
                 // struct with a `createdAt: DateTime` field failing to
                 // compile (BACKLOG item 134, found while verifying the
                 // struct-boxing fix end-to-end, not caused by it).
-                "DateTime" | "Date" | "Duration" => format!("Certo{}", name),
+                "DateTime" | "Date" | "Duration" | "Timezone" => format!("Certo{}", name),
                 "JsonValue" => "CertoJsonValue*".into(),
                 other     => c_ident(other),
             }

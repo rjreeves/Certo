@@ -111,7 +111,7 @@ impl Ty {
                 // falls to `ty_to_c`'s catch-all, a real, named C struct.
                 let opaque_handle = (args.is_empty() && matches!(name.as_str(),
                     "HttpRequest" | "HttpResponse" | "Bytes" | "DbResult" | "Query" | "Mutation"
-                    | "DateTime" | "Date" | "Duration" | "JsonValue"))
+                    | "DateTime" | "Date" | "Duration" | "JsonValue" | "Timezone"))
                     || name == "__CertoTask" || name == "Channel";
                 !opaque_handle
             }

@@ -46,7 +46,9 @@ pub fn ty_to_c(ty: &Ty) -> String {
         // `Duration` annotation previously emitted an undeclared C identifier
         // (only `val`-inferred bindings worked, by defaulting to `int64_t` via
         // HIR's Ty::Error fallback, which happens to be layout-compatible).
-        Ty::Named { name, args } if args.is_empty() && matches!(name.as_str(), "DateTime" | "Date" | "Duration") => {
+        // `Timezone` (BACKLOG item 118) is `CertoTimezone` — a `certo_text_t`
+        // alias (the IANA zone name itself) — same treatment.
+        Ty::Named { name, args } if args.is_empty() && matches!(name.as_str(), "DateTime" | "Date" | "Duration" | "Timezone") => {
             format!("Certo{}", name)
         }
         // `JsonValue` is a real C pointer (`CertoJsonValue*`, see
