@@ -29,6 +29,10 @@ struct Builder {
     /// Sum variant name → ordered declared payload field types. Same
     /// purpose as `record_field_types`, for variant constructors/patterns.
     variant_field_types: std::collections::HashMap<String, Vec<Ty>>,
+    /// Function name → ordered *declared* param types, as written (BACKLOG
+    /// item 120) — a `Ty::Var(0)` entry marks a bare type-param parameter,
+    /// which needs a concrete argument heap-boxed at the call site.
+    fn_param_tys: std::collections::HashMap<String, Vec<Ty>>,
 }
 
 impl Builder {
@@ -36,6 +40,7 @@ impl Builder {
         fn_name: &str,
         record_field_types:  std::collections::HashMap<String, Vec<Ty>>,
         variant_field_types: std::collections::HashMap<String, Vec<Ty>>,
+        fn_param_tys:        std::collections::HashMap<String, Vec<Ty>>,
     ) -> Self {
         let entry = BasicBlock { id: 0, ..Default::default() };
         Builder {
@@ -50,6 +55,7 @@ impl Builder {
             defers:    Vec::new(),
             record_field_types,
             variant_field_types,
+            fn_param_tys,
         }
     }
 
@@ -114,12 +120,16 @@ fn emit_defers_then_return(return_op: Operand, b: &mut Builder) {
 /// Lower a HIR function to MIR. Returns the primary function plus any lambdas lifted to top level.
 /// `record_field_types`/`variant_field_types` come from `HirModule` (BACKLOG item 119) —
 /// used to decide when a generic type's field construction/read needs heap-boxing.
+/// `fn_param_tys` (BACKLOG item 120) is the same idea for a plain function's
+/// own declared parameter types, used to box a concrete argument passed into
+/// a generic function's bare-`T` parameter.
 pub fn lower_fn(
     f: &HirFn,
     record_field_types:  &std::collections::HashMap<String, Vec<Ty>>,
     variant_field_types: &std::collections::HashMap<String, Vec<Ty>>,
+    fn_param_tys:        &std::collections::HashMap<String, Vec<Ty>>,
 ) -> (MirFn, Vec<MirFn>) {
-    let mut b = Builder::new(&f.name, record_field_types.clone(), variant_field_types.clone());
+    let mut b = Builder::new(&f.name, record_field_types.clone(), variant_field_types.clone(), fn_param_tys.clone());
 
     // Declare params as locals (index 0 = return slot, type patched below).
     let ret_slot = b.declare_local("_ret", Ty::Error);
@@ -184,7 +194,7 @@ fn lower_lambda_boxed(params: &[certo_hir::HirParam], body: &HirExpr, param_ty_h
     b.lambda_count += 1;
     let lam_name = format!("__lam_{}_{}_boxed", b.fn_name, idx);
 
-    let mut lb = Builder::new(&lam_name, b.record_field_types.clone(), b.variant_field_types.clone());
+    let mut lb = Builder::new(&lam_name, b.record_field_types.clone(), b.variant_field_types.clone(), b.fn_param_tys.clone());
     let ret_slot = lb.declare_local("_ret", Ty::Var(0));
 
     // The C signature's params (locals 1..=param_count) are always void* —
@@ -255,7 +265,7 @@ fn lower_named_fn_boxed(name: &str, real_param_tys: &[Ty], real_ret_ty: &Ty, b: 
     b.lambda_count += 1;
     let wrap_name = format!("__fnref_{}_{}_boxed", b.fn_name, idx);
 
-    let mut lb = Builder::new(&wrap_name, b.record_field_types.clone(), b.variant_field_types.clone());
+    let mut lb = Builder::new(&wrap_name, b.record_field_types.clone(), b.variant_field_types.clone(), b.fn_param_tys.clone());
     let ret_slot = lb.declare_local("_ret", Ty::Var(0));
 
     // C signature params are always void*; unbox each into the real
@@ -534,6 +544,20 @@ fn lower_expr(expr: &HirExpr, b: &mut Builder) -> Operand {
                 HirExprKind::Global(name) => b.variant_field_types.get(name).cloned(),
                 _ => None,
             };
+            // Declared param types for a plain (non-constructor) call to a
+            // user-defined generic function/impl-method, e.g. `wrap(v: T)`
+            // — `variant_field_types` above only covers sum-type
+            // constructors. Same boxing need: a concrete argument passed
+            // into a bare-`T` parameter must be heap-boxed, since the C
+            // signature's `T` is uniformly `void*` — BACKLOG item 120
+            // (the call-site argument half; the callee's own bare-`T`
+            // *return* value isn't recoverable to a concrete type at an
+            // arbitrary call site with current inference, so that half
+            // remains a design sketch — see the BACKLOG entry).
+            let fn_param_tys: Option<Vec<Ty>> = match &func.kind {
+                HirExprKind::Global(name) => b.fn_param_tys.get(name).cloned(),
+                _ => None,
+            };
             let arg_ops: Vec<Operand> = args.iter().enumerate().map(|(i, a)| {
                 if needs_boxed_callback {
                     if let HirExprKind::Lambda { params, body } = &a.kind {
@@ -551,7 +575,18 @@ fn lower_expr(expr: &HirExpr, b: &mut Builder) -> Operand {
                     }
                 }
                 let value_op = lower_expr(a, b);
-                if matches!(variant_field_types.as_ref().and_then(|tys| tys.get(i)), Some(Ty::Var(_))) {
+                // Box only when the declared param/field is a bare type-param
+                // AND the argument's own type is a *known concrete* type —
+                // if the argument is itself `Ty::Var(_)` (e.g. `v` inside a
+                // generic `fn wrap<T>(v: T) = Secret(v)`, where `v` is
+                // already an opaque, already-boxed `void*` coming from
+                // `wrap`'s own caller), boxing it again would wrap an extra,
+                // spurious level of pointer indirection around a value MIR
+                // has no way to interpret — the same double-boxing failure
+                // class item 134 fixed for `List.first`/etc. — BACKLOG item 120.
+                let declared = variant_field_types.as_ref().and_then(|tys| tys.get(i))
+                    .or_else(|| fn_param_tys.as_ref().and_then(|tys| tys.get(i)));
+                if matches!(declared, Some(Ty::Var(_))) && !matches!(a.ty, Ty::Var(_)) {
                     let boxed = b.declare_local("_boxed_arg", Ty::Var(0));
                     b.assign(boxed, Rvalue::BoxSome { value: value_op, ty: a.ty.clone() });
                     return Operand::Local(boxed);
@@ -805,13 +840,26 @@ fn lower_expr(expr: &HirExpr, b: &mut Builder) -> Operand {
                                 // instantiation argument (single-type-param scope
                                 // — `args.first()`) and unbox the read, mirroring
                                 // `Some`/`Ok`/`Err`'s existing boxed-payload
-                                // handling — BACKLOG item 119.
+                                // handling — BACKLOG item 119. Only unbox when the
+                                // recovered argument is itself a *known concrete*
+                                // type — if `scrut_args.first()` is itself
+                                // `Ty::Var(_)` (the scrutinee's own instantiation is
+                                // still abstract, e.g. matching `s: Secret<T>` inside
+                                // a generic `fn expose<T>(s: Secret<T>): T`), the
+                                // field was never (re-)boxed on construction either
+                                // (see the Record/Call-arg guards above), so
+                                // unboxing here would strip a level of pointer
+                                // indirection that was never added — BACKLOG item 120.
                                 let scrut_args: &[Ty] = match &scrutinee.ty { Ty::Named { args, .. } => args, _ => &[] };
                                 for (i, field_pat) in fields.iter().enumerate() {
                                     if let HirPat::Bind { local, name: fname } = field_pat {
                                         let declared = &field_types[i];
                                         let (real_ty, needs_unbox) = match declared {
-                                            Ty::Var(_) => (scrut_args.first().cloned().unwrap_or(Ty::Error), true),
+                                            Ty::Var(_) => {
+                                                let concrete = scrut_args.first().cloned().unwrap_or(Ty::Error);
+                                                let needs_unbox = !matches!(concrete, Ty::Var(_));
+                                                (concrete, needs_unbox)
+                                            }
                                             other => (other.clone(), false),
                                         };
                                         let ml = b.map_hir_local(*local, fname, real_ty.clone());
@@ -916,9 +964,13 @@ fn lower_expr(expr: &HirExpr, b: &mut Builder) -> Operand {
             // (`Ty::Var(_)`) is stored as `void*` in the struct regardless of
             // its concrete instantiation, so its value must be heap-boxed
             // the same way `Some(v)` boxes an Option payload — BACKLOG item 119.
+            // Skip boxing when the value is *itself* already `Ty::Var(_)`
+            // (already opaque/boxed, e.g. inside a generic function's own
+            // body) — same double-boxing guard as the Call-args case above,
+            // BACKLOG item 120.
             let ops: Vec<Operand> = fields.iter().zip(field_types.iter()).map(|((_, v), fty)| {
                 let value_op = lower_expr(v, b);
-                if matches!(fty, Ty::Var(_)) {
+                if matches!(fty, Ty::Var(_)) && !matches!(v.ty, Ty::Var(_)) {
                     let boxed = b.declare_local("_boxed_field", Ty::Var(0));
                     b.assign(boxed, Rvalue::BoxSome { value: value_op, ty: v.ty.clone() });
                     Operand::Local(boxed)
@@ -971,7 +1023,7 @@ fn lower_expr(expr: &HirExpr, b: &mut Builder) -> Operand {
             let lam_name = format!("__lam_{}_{}", b.fn_name, idx);
 
             // Build MIR for the lambda body using a fresh builder.
-            let mut lb = Builder::new(&lam_name, b.record_field_types.clone(), b.variant_field_types.clone());
+            let mut lb = Builder::new(&lam_name, b.record_field_types.clone(), b.variant_field_types.clone(), b.fn_param_tys.clone());
             let ret_slot = lb.declare_local("_ret", Ty::Error);
             for p in params {
                 lb.map_hir_local(p.local, &p.name, p.ty.clone());
