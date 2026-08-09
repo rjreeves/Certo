@@ -18,6 +18,29 @@ fn main() {
     std::fs::write(counter_path, build_num.to_string())
         .expect("failed to write build_number.txt");
 
+    let version = std::env::var("CARGO_PKG_VERSION").unwrap();
+    let parts: Vec<u64> = version
+            .split('.')
+            .map(|part| part.parse().unwrap_or(0))
+            .collect();
+
+        let major = *parts.first().unwrap_or(&0);
+        let minor = *parts.get(1).unwrap_or(&0);
+        let patch = *parts.get(2).unwrap_or(&0);
+        let numeric_version = (major << 48) | (minor << 32) | (patch << 16);
+        let mut resource = winres::WindowsResource::new();
+        resource.set("FileVersion", &version);
+        resource.set("ProductVersion", &version);
+        resource.set_version_info(
+            winres::VersionInfo::FILEVERSION,
+            numeric_version,
+        );
+        resource.set_version_info(
+            winres::VersionInfo::PRODUCTVERSION,
+            numeric_version,
+        );
+
+
     println!("cargo:rustc-env=CERTO_BUILD_DATE={}", date);
     println!("cargo:rustc-env=CERTO_BUILD_NUM={}", build_num);
     println!("cargo:rerun-if-changed=build.rs");

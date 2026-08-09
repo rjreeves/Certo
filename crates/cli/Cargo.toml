@@ -1,6 +1,6 @@
 [package]
 name    = "certo"
-version = "1.0.52"
+version = "1.0.57"
 edition = "2024"
 
 [[bin]]
@@ -26,3 +26,6 @@ serde             = { version = "1", features = ["derive"] }
 serde_yaml        = "0.9"
 toml              = "0.8"
 toml_edit         = "0.22"
+
+[build-dependencies]
+winres = "0.1"
