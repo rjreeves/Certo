@@ -1,5 +1,6 @@
 use certo_typeck::Ty;
 use certo_hir::{BinOp, UnOp};
+use certo_ast::span::Span;
 
 /// Index into a `MirFn`'s `blocks` vec.
 pub type BlockId = usize;
@@ -46,8 +47,12 @@ pub struct BasicBlock {
 
 #[derive(Debug, Clone)]
 pub enum MirStmt {
-    /// `local = rvalue`
-    Assign { dest: MirLocal, rvalue: Rvalue },
+    /// `local = rvalue`. `span` is the *originating Certo statement's* span
+    /// (not necessarily this exact sub-expression's own span — see
+    /// `Builder::current_span` in `crates/mir/src/lower.rs`), used only to
+    /// emit `#line` directives for source-mapped test coverage (BACKLOG
+    /// item 126); codegen ignores it entirely otherwise.
+    Assign { dest: MirLocal, rvalue: Rvalue, span: Span },
 }
 
 #[derive(Debug, Clone)]

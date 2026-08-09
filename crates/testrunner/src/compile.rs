@@ -12,7 +12,18 @@ use crate::error::TestRunnerError;
 /// `out_dir` is the directory where the binary is placed.  If `None`, a
 /// temporary directory is used (caller is responsible for keeping the
 /// `TempDir` alive as long as the binary is needed).
+///
+/// `coverage`, when true, adds clang's source-based coverage instrumentation
+/// flags (`-fprofile-instr-generate -fcoverage-mapping`) — BACKLOG item 126.
+/// Requires clang specifically (the flags are clang/LLVM-only, not
+/// gcc/MSVC); `compile_c` doesn't itself enforce that, since `find_compiler`
+/// already prefers clang first and this whole toolchain already requires it
+/// (BACKLOG item 104).
 pub fn compile_c(c_src: &str, out_path: &Path) -> Result<(), TestRunnerError> {
+    compile_c_opts(c_src, out_path, false)
+}
+
+pub fn compile_c_opts(c_src: &str, out_path: &Path, coverage: bool) -> Result<(), TestRunnerError> {
     // Write source to a temp file (deleted when `_src_file` is dropped).
     let src_file = NamedTempFile::with_suffix(".c")
         .map_err(|e| TestRunnerError::Io(e.to_string()))?;
@@ -35,6 +46,9 @@ pub fn compile_c(c_src: &str, out_path: &Path) -> Result<(), TestRunnerError> {
         "-Wno-implicit-function-declaration",
         "-Wno-deprecated-declarations",
     ]);
+    if coverage {
+        cmd.args(["-fprofile-instr-generate", "-fcoverage-mapping"]);
+    }
     if cfg!(windows) {
         cmd.arg("-Xlinker").arg("/subsystem:console");
     } else {
@@ -52,6 +66,27 @@ pub fn compile_c(c_src: &str, out_path: &Path) -> Result<(), TestRunnerError> {
             exit_code: status.code().unwrap_or(-1),
         })
     }
+}
+
+/// Locate an LLVM tool (`llvm-profdata`/`llvm-cov`) that ships alongside
+/// whichever `clang` `find_compiler` resolved — these aren't reliably on
+/// `PATH` even when `clang` itself is found only via its full install path
+/// (confirmed: this is exactly the case on this project's own dev
+/// environment). Falls back to the bare tool name (relying on `PATH`) if
+/// the compiler was found via bare `PATH` lookup itself, or the sibling
+/// binary doesn't exist next to it.
+pub fn find_llvm_tool(tool: &str) -> String {
+    let compiler = find_compiler();
+    let compiler_path = Path::new(&compiler);
+    if let Some(dir) = compiler_path.parent() {
+        if compiler_path.file_name().is_some() {
+            let candidate = dir.join(if cfg!(windows) { format!("{tool}.exe") } else { tool.to_string() });
+            if candidate.exists() {
+                return candidate.to_string_lossy().into_owned();
+            }
+        }
+    }
+    tool.to_string()
 }
 
 /// Find an available C compiler.

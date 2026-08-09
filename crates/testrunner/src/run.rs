@@ -1,6 +1,6 @@
 //! Spawn one subprocess per test and collect results.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
@@ -57,6 +57,23 @@ pub struct RunOptions {
     pub timeout: Option<Duration>,
     /// Only run tests whose display name contains this string.
     pub filter:  Option<String>,
+    /// When `Some(dir)`, every test subprocess is launched with
+    /// `LLVM_PROFILE_FILE=<dir>/certo-cov-%p.profraw` (BACKLOG item 126) —
+    /// clang's runtime substitutes `%p` with each subprocess's own PID, so
+    /// concurrent/repeated runs (property tests spawn the binary many
+    /// times) never clobber each other's profile data. The binary itself
+    /// must already have been compiled with `compile_c_opts(.., coverage:
+    /// true)` for this to do anything; `None` (the default) is a complete
+    /// no-op, identical to every `certo test` run before this existed.
+    pub coverage_dir: Option<PathBuf>,
+}
+
+/// Set `LLVM_PROFILE_FILE` on `cmd` when coverage is requested, so this
+/// subprocess's execution contributes its own `.profraw` file.
+fn apply_coverage_env(cmd: &mut Command, opts: &RunOptions) {
+    if let Some(dir) = &opts.coverage_dir {
+        cmd.env("LLVM_PROFILE_FILE", dir.join("certo-cov-%p.profraw"));
+    }
 }
 
 /// Run all tests described by `entries` using `binary` as the test executable.
@@ -80,20 +97,21 @@ pub fn run_tests(
         })
         .map(|entry| {
             if entry.params.is_empty() {
-                run_one(binary, entry, timeout)
+                run_one(binary, entry, timeout, opts)
             } else {
-                run_property(binary, entry, timeout)
+                run_property(binary, entry, timeout, opts)
             }
         })
         .collect()
 }
 
-fn run_one(binary: &Path, entry: &TestEntry, _timeout: Duration) -> TestResult {
+fn run_one(binary: &Path, entry: &TestEntry, _timeout: Duration, opts: &RunOptions) -> TestResult {
     let start = Instant::now();
 
-    let result = Command::new(binary)
-        .arg(&entry.display_name)
-        .output();
+    let mut cmd = Command::new(binary);
+    cmd.arg(&entry.display_name);
+    apply_coverage_env(&mut cmd, opts);
+    let result = cmd.output();
 
     let duration = start.elapsed();
 
@@ -142,13 +160,11 @@ fn property_num_cases() -> usize {
 
 /// Spawn one case of a property test with generated args. `None` means the
 /// binary itself couldn't be launched (distinct from the test failing).
-fn spawn_property_case(binary: &Path, entry: &TestEntry, args: &[String]) -> Option<bool> {
-    Command::new(binary)
-        .arg(&entry.display_name)
-        .args(args)
-        .output()
-        .ok()
-        .map(|out| out.status.success())
+fn spawn_property_case(binary: &Path, entry: &TestEntry, args: &[String], opts: &RunOptions) -> Option<bool> {
+    let mut cmd = Command::new(binary);
+    cmd.arg(&entry.display_name).args(args);
+    apply_coverage_env(&mut cmd, opts);
+    cmd.output().ok().map(|out| out.status.success())
 }
 
 /// Run a property test: generate `CERTO_TEST_CASES` (default 100) random
@@ -159,7 +175,7 @@ fn spawn_property_case(binary: &Path, entry: &TestEntry, args: &[String]) -> Opt
 /// exit code — then report it. No changes to `certo_panic`/`abort()` are
 /// involved anywhere; a failing case is just a nonzero exit code, same as
 /// any other test.
-fn run_property(binary: &Path, entry: &TestEntry, _timeout: Duration) -> TestResult {
+fn run_property(binary: &Path, entry: &TestEntry, _timeout: Duration, opts: &RunOptions) -> TestResult {
     let start = Instant::now();
     let seed  = property_seed();
     let cases = property_num_cases();
@@ -170,7 +186,7 @@ fn run_property(binary: &Path, entry: &TestEntry, _timeout: Duration) -> TestRes
         let values = generate_case(&mut rng, &types, case_idx, cases);
         let args: Vec<String> = values.iter().flat_map(|v| v.to_args()).collect();
 
-        match spawn_property_case(binary, entry, &args) {
+        match spawn_property_case(binary, entry, &args, opts) {
             None => {
                 return TestResult {
                     entry:    entry.clone(),
@@ -186,7 +202,7 @@ fn run_property(binary: &Path, entry: &TestEntry, _timeout: Duration) -> TestRes
                     values,
                     |trial| {
                         let trial_args: Vec<String> = trial.iter().flat_map(|v| v.to_args()).collect();
-                        matches!(spawn_property_case(binary, entry, &trial_args), Some(false))
+                        matches!(spawn_property_case(binary, entry, &trial_args, opts), Some(false))
                     },
                     MAX_SHRINK_ATTEMPTS,
                 );
@@ -194,7 +210,10 @@ fn run_property(binary: &Path, entry: &TestEntry, _timeout: Duration) -> TestRes
                 // Re-run the final (shrunk) counterexample once more to
                 // capture its stdout/stderr/exit code for the report.
                 let shrunk_args: Vec<String> = shrunk.iter().flat_map(|v| v.to_args()).collect();
-                let out = Command::new(binary).arg(&entry.display_name).args(&shrunk_args).output();
+                let mut final_cmd = Command::new(binary);
+                final_cmd.arg(&entry.display_name).args(&shrunk_args);
+                apply_coverage_env(&mut final_cmd, opts);
+                let out = final_cmd.output();
                 let (stdout, stderr, exit_code) = match out {
                     Ok(o) => (
                         String::from_utf8_lossy(&o.stdout).into_owned(),
