@@ -18,28 +18,45 @@ fn main() {
     std::fs::write(counter_path, build_num.to_string())
         .expect("failed to write build_number.txt");
 
-    let version = std::env::var("CARGO_PKG_VERSION").unwrap();
-    let parts: Vec<u64> = version
+    // Embed FileVersion/ProductVersion/ProductName into the .exe's Windows
+    // Properties dialog. Must be gated to Windows only: `WindowsResource::
+    // compile()` shells out to `windres`/`rc.exe`, which don't exist on
+    // Linux/macOS — calling it unconditionally would break the build there.
+    // (`winres` itself, as a build-dependency, compiles fine cross-platform;
+    // it's only *invoking* it that's Windows-only.)
+    if cfg!(windows) {
+        let version = std::env::var("CARGO_PKG_VERSION").unwrap();
+        let parts: Vec<u64> = version
             .split('.')
             .map(|part| part.parse().unwrap_or(0))
             .collect();
-
         let major = *parts.first().unwrap_or(&0);
         let minor = *parts.get(1).unwrap_or(&0);
         let patch = *parts.get(2).unwrap_or(&0);
         let numeric_version = (major << 48) | (minor << 32) | (patch << 16);
+
         let mut resource = winres::WindowsResource::new();
+        // `WindowsResource::new()` already defaults FileVersion/
+        // ProductVersion to CARGO_PKG_VERSION and ProductName/
+        // FileDescription to CARGO_PKG_NAME ("certo") — override the two
+        // that should read as human-facing product text, not the crate's
+        // lowercase package name.
         resource.set("FileVersion", &version);
         resource.set("ProductVersion", &version);
-        resource.set_version_info(
-            winres::VersionInfo::FILEVERSION,
-            numeric_version,
-        );
-        resource.set_version_info(
-            winres::VersionInfo::PRODUCTVERSION,
-            numeric_version,
-        );
+        resource.set("ProductName", "Certo Compiler");
+        resource.set("FileDescription", "Certo Compiler");
+        resource.set_version_info(winres::VersionInfo::FILEVERSION, numeric_version);
+        resource.set_version_info(winres::VersionInfo::PRODUCTVERSION, numeric_version);
 
+        // Actually embed the resource — building it above with no `compile()`
+        // call is a no-op; every field set is silently discarded otherwise.
+        // Not `.unwrap()`: a missing `rc.exe`/Windows SDK on some contributor's
+        // machine shouldn't hard-fail the whole build over cosmetic .exe
+        // Properties metadata — warn and continue instead.
+        if let Err(e) = resource.compile() {
+            println!("cargo:warning=failed to embed Windows version info: {}", e);
+        }
+    }
 
     println!("cargo:rustc-env=CERTO_BUILD_DATE={}", date);
     println!("cargo:rustc-env=CERTO_BUILD_NUM={}", build_num);
