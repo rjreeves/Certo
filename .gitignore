@@ -13,3 +13,8 @@ obj/
 # Editor/OS cruft
 .DS_Store
 Thumbs.db
+
+# Auto-incrementing build counters (bumped by build.rs on every `cargo build`,
+# no meaningful content beyond "built N times so far" — not worth tracking).
+crates/cli/build_number.txt
+crates/xeq/build_number.txt
