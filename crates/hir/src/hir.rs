@@ -23,6 +23,16 @@ pub struct HirModule {
     /// Sum variant name → ordered declared payload field types. Same purpose
     /// as `record_field_types`, for sum-type variant constructors/patterns.
     pub variant_field_types: std::collections::HashMap<String, Vec<Ty>>,
+    /// Function name → ordered *declared* param types, as written (a bare
+    /// type-param param is `Ty::Var(0)`, unsubstituted — not the call site's
+    /// concrete argument type). Top-level `fn`s are keyed by their bare name,
+    /// `impl` methods by `Type.method`, matching `record_field_types`'
+    /// per-call-site declared-vs-concrete split. Lets MIR's `lower_fn` box a
+    /// concrete argument passed into a generic function's bare-`T` parameter
+    /// — BACKLOG item 120 (the call-site half; the call's own bare-`T`
+    /// *return* value still isn't recoverable to a concrete type at the call
+    /// site, so that half remains a design sketch).
+    pub fn_param_tys: std::collections::HashMap<String, Vec<Ty>>,
 }
 
 #[derive(Debug, Clone)]

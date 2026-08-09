@@ -30,6 +30,9 @@ struct Cx {
     sm_returns:    HashMap<String, Ty>,
     /// User-defined function names → return type (from AST annotation).
     fn_ret_types:  HashMap<String, Ty>,
+    /// User-defined function names → declared param types, as written (a
+    /// bare type-param param is `Ty::Var(0)`) — BACKLOG item 120.
+    fn_param_tys:  HashMap<String, Vec<Ty>>,
     /// Global value types — for sum variant constants like `Red`, `Green`.
     global_types:  HashMap<String, Ty>,
     /// Sum variant name → parent type name (e.g. "Red" → "Color").
@@ -70,6 +73,7 @@ impl Cx {
             stdlib_params: stdlib_param_names(),
             sm_returns:    HashMap::new(),
             fn_ret_types:  HashMap::new(),
+            fn_param_tys:  HashMap::new(),
             global_types:        HashMap::new(),
             variant_to_type:     HashMap::new(),
             variant_field_names: HashMap::new(),
@@ -361,8 +365,13 @@ pub fn lower_module(module: &Module) -> Result<HirModule, Vec<LowerError>> {
             let id = cx.fresh_fn();
             cx.globals.insert(f.name.node.clone(), id);
             cx.fn_params.insert(f.name.node.clone(), f.params.clone());
+            let tp_names: Vec<&str> = f.type_params.iter().map(|tp| tp.name.node.as_str()).collect();
+            // Declared param types (BACKLOG item 120) — needed regardless of
+            // whether a return-type annotation is present, unlike
+            // `fn_ret_types` below, so this isn't nested inside `if let Some(ret)`.
+            cx.fn_param_tys.insert(f.name.node.clone(),
+                f.params.iter().map(|p| ast_ty_to_ty_with_params(&p.ty.node, &tp_names)).collect());
             if let Some(ret) = &f.ret_ty {
-                let tp_names: Vec<&str> = f.type_params.iter().map(|tp| tp.name.node.as_str()).collect();
                 cx.fn_ret_types.insert(f.name.node.clone(), ast_ty_to_ty_with_params(&ret.node, &tp_names));
             }
         }
@@ -375,16 +384,18 @@ pub fn lower_module(module: &Module) -> Result<HirModule, Vec<LowerError>> {
                 let id = cx.fresh_fn();
                 cx.globals.insert(qname.clone(), id);
                 cx.fn_params.insert(qname.clone(), m.params.clone());
+                // Same `i.type_params.chain(m.type_params)` fix as the actual
+                // lowering pass below — this pre-registration loop is what
+                // populates `fn_ret_types`/`fn_param_tys` for *callers* (e.g.
+                // `Secret.expose`'s signature as seen from `main`), so it
+                // needs the impl block's own `<T>` in scope too, or a
+                // caller's bound local gets the literal (and undeclared)
+                // C type `T` instead of `Ty::Var(0)`/`void*` — BACKLOG item 119.
+                let tp_names: Vec<&str> = i.type_params.iter().chain(m.type_params.iter())
+                    .map(|tp| tp.name.node.as_str()).collect();
+                cx.fn_param_tys.insert(qname.clone(),
+                    m.params.iter().map(|p| ast_ty_to_ty_with_params(&p.ty.node, &tp_names)).collect());
                 if let Some(ret) = &m.ret_ty {
-                    // Same `i.type_params.chain(m.type_params)` fix as the
-                    // actual lowering pass below — this pre-registration loop
-                    // is what populates `fn_ret_types` for *callers* (e.g.
-                    // `Secret.expose`'s return type as seen from `main`), so
-                    // it needs the impl block's own `<T>` in scope too, or a
-                    // caller's bound local gets the literal (and undeclared)
-                    // C type `T` instead of `Ty::Var(0)`/`void*` — BACKLOG item 119.
-                    let tp_names: Vec<&str> = i.type_params.iter().chain(m.type_params.iter())
-                        .map(|tp| tp.name.node.as_str()).collect();
                     cx.fn_ret_types.insert(qname, ast_ty_to_ty_with_params(&ret.node, &tp_names));
                 }
             }
@@ -510,9 +521,21 @@ pub fn lower_module(module: &Module) -> Result<HirModule, Vec<LowerError>> {
                     // literal (and undeclared) C type name `T` — BACKLOG item 119.
                     let tp_names: Vec<&str> = i.type_params.iter().chain(m.type_params.iter())
                         .map(|tp| tp.name.node.as_str()).collect();
+                    // Unlike the top-level `Decl::Fn` case above, this path
+                    // previously never inserted its own params into
+                    // `cx.local_types` — so a *reference* to an impl method's
+                    // own param inside its own body (e.g. `v` in
+                    // `impl<T> Box { fn wrap(v: T): Box<T> = Wrap(v) }`)
+                    // always fell back to `Ty::Error`, not the real `Ty::Var(0)`
+                    // this method's own `HirParam.ty` (below) already
+                    // correctly computes — found while implementing BACKLOG
+                    // item 120 (needed to distinguish "already-opaque
+                    // argument, don't re-box" from "concrete argument, box
+                    // it", which requires this type to be right).
                     let params: Vec<HirParam> = m.params.iter().map(|p| {
                         let local = cx.define_local(&p.name.node);
                         let ty = ast_ty_to_ty_with_params(&p.ty.node, &tp_names);
+                        if !matches!(ty, Ty::Error) { cx.local_types.insert(local, ty.clone()); }
                         HirParam { local, name: p.name.node.clone(), ty, span: p.span }
                     }).collect();
                     let body = Some(lower_expr(body_ast, &mut cx));
@@ -541,6 +564,7 @@ pub fn lower_module(module: &Module) -> Result<HirModule, Vec<LowerError>> {
             name, items,
             record_field_types:  cx.record_field_types,
             variant_field_types: cx.variant_field_types,
+            fn_param_tys:        cx.fn_param_tys,
         })
     } else {
         Err(cx.errors)
@@ -1365,8 +1389,30 @@ fn lower_pat(pat: &S<certo_ast::pattern::Pattern>, scrut_ty: &Ty, cx: &mut Cx) -
                 _ => cx.variant_field_types.get(&variant).cloned()
                     .unwrap_or_else(|| vec![Ty::Error; fields.len()]),
             };
+            // For binding the field pattern's *local*, substitute a bare
+            // type-param field (`Ty::Var(_)`) with the scrutinee's own
+            // concrete instantiation argument — mirrors `resolve_field_ty`'s
+            // identical substitution for plain `.field` reads (BACKLOG item
+            // 119), just missing here previously. Without it, `v`'s HIR type
+            // in `Wrap(v) => v` was *always* `Ty::Var(0)` regardless of
+            // whether the scrutinee was concrete or still abstract, which
+            // fed into the whole `match` expression's own inferred type and
+            // silently made a perfectly ordinary, non-generic function like
+            // `fn unwrapAsInt(b: Box<Int>): Int = match b { Wrap(v) => v }`
+            // return `void*` instead of `Int` — found while implementing
+            // BACKLOG item 120. Deliberately keeps `field_types` itself
+            // (returned in `HirPat::Constructor` below) as the *raw*,
+            // unsubstituted declared types — MIR's own match-arm lowering
+            // needs to know a field is *declared* `Ty::Var(_)` regardless of
+            // substitution, since that's what decides whether its C storage
+            // is a heap-boxed `void*` needing an unbox at all.
+            let scrut_args: &[Ty] = match scrut_ty { Ty::Named { args, .. } => args, _ => &[] };
+            let binding_field_types: Vec<Ty> = field_types.iter().map(|fty| match fty {
+                Ty::Var(_) => scrut_args.first().cloned().unwrap_or_else(|| fty.clone()),
+                other => other.clone(),
+            }).collect();
             let lowered_fields: Vec<HirPat> = fields.iter().enumerate()
-                .map(|(i, f)| lower_pat(f, field_types.get(i).unwrap_or(&Ty::Error), cx))
+                .map(|(i, f)| lower_pat(f, binding_field_types.get(i).unwrap_or(&Ty::Error), cx))
                 .collect();
             HirPat::Constructor { name, fields: lowered_fields, field_names, field_types }
         }
@@ -1447,7 +1493,19 @@ fn resolve_field_ty(base_ty: &Ty, field: &str, cx: &Cx) -> (Ty, bool) {
     let Some(pos) = names.iter().position(|n| n == field) else { return (Ty::Error, false) };
     let Some(declared) = cx.record_field_types.get(name).and_then(|tys| tys.get(pos)) else { return (Ty::Error, false) };
     match declared {
-        Ty::Var(_) => (args.first().cloned().unwrap_or(Ty::Error), true),
+        // Only unbox when the recovered instantiation argument is itself a
+        // *known concrete* type — if `args.first()` is itself `Ty::Var(_)`
+        // (the base's own instantiation is still abstract, e.g. reading a
+        // field of `b: Box<T>` inside a generic function), the field was
+        // never (re-)boxed on construction either, so unboxing here would
+        // strip a level of pointer indirection that was never added —
+        // BACKLOG item 120 (mirrors the same guard added to MIR's Record/
+        // Call-arg boxing and variant match-arm unboxing).
+        Ty::Var(_) => {
+            let concrete = args.first().cloned().unwrap_or(Ty::Error);
+            let needs_unbox = !matches!(concrete, Ty::Var(_));
+            (concrete, needs_unbox)
+        }
         other => (other.clone(), false),
     }
 }

@@ -298,6 +298,48 @@ fn db_query_typed_return_type_is_list_of_mapper_return_type() {
     assert_eq!(f.body.as_ref().unwrap().ty, Ty::List(Box::new(widget)));
 }
 
+// ------------------------------------------------------------------ //
+// Generic function boxing prerequisites (BACKLOG item 120)
+// ------------------------------------------------------------------ //
+
+#[test]
+fn impl_method_own_param_is_locally_typed_not_error() {
+    // Unlike a top-level `fn`, an impl method's own params were never
+    // inserted into `cx.local_types` — so a *reference* to the method's own
+    // param inside its own body (`v` in `Wrap(v)`) fell back to `Ty::Error`,
+    // even though the param's own declared type (`Ty::Var(0)` for a bare
+    // type-param) was already computed correctly. This broke the "is this
+    // argument already opaque" check MIR needs to avoid double-boxing.
+    let m = lower(
+        "module A\ntype Box<T> = | Wrap(T)\nimpl<T> Box { fn wrap(v: T): Box<T> = Wrap(v) }");
+    let f = m.items.iter().find_map(|it| match it {
+        HirItem::Fn(f) if f.name == "Box.wrap" => Some(f),
+        _ => None,
+    }).expect("expected Box.wrap");
+    if let HirExprKind::Call { args, .. } = &f.body.as_ref().unwrap().kind {
+        assert_eq!(args[0].ty, Ty::Var(0), "argument `v` should be Ty::Var(0), not Ty::Error");
+    } else {
+        panic!("expected a Call (Wrap(v))");
+    }
+}
+
+#[test]
+fn match_arm_binding_substitutes_concrete_scrutinee_instantiation() {
+    // A sum-type variant pattern's field binding must substitute the
+    // scrutinee's own concrete instantiation argument for a bare-type-param
+    // declared field, not leave the local (and the whole match expression's
+    // own inferred type) as `Ty::Var(0)` — otherwise a perfectly ordinary,
+    // non-generic function's own return type is silently miscomputed as
+    // void* instead of the real concrete type.
+    let m = lower(
+        "module A\ntype Box<T> = | Wrap(T)\nfn unwrapAsInt(b: Box<Int>): Int = match b { Wrap(v) => v }");
+    let f = m.items.iter().find_map(|it| match it {
+        HirItem::Fn(f) if f.name == "unwrapAsInt" => Some(f),
+        _ => None,
+    }).expect("expected unwrapAsInt");
+    assert_eq!(f.body.as_ref().unwrap().ty, Ty::Int);
+}
+
 #[test]
 fn query_first_return_type_is_option_of_mapper_return_type() {
     // Same mechanism as `dbQueryTyped`, but `Query.first`'s stdlib shape is
