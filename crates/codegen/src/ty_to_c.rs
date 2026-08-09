@@ -62,6 +62,16 @@ pub fn ty_to_c(ty: &Ty) -> String {
         // explicitly instead of only ever using it via untyped `val`
         // bindings).
         Ty::Named { name, args } if args.is_empty() && name == "JsonValue" => "CertoJsonValue*".into(),
+        // `ProcessResult` is a real C pointer (`CertoProcessResult*`, see
+        // crates/stdlib/src/process.rs), same shape as `JsonValue` just
+        // above — was missing from every one of these tables entirely
+        // (unlike its Http/Db siblings), so *any* use of `Process.exec`'s
+        // own return value — annotated or plain `val`-inferred, both hit
+        // the same HIR path that resolves the real `Ty::Named` — emitted
+        // the literal, undeclared C identifier `ProcessResult` and failed
+        // to compile; confirmed via a direct repro before this fix (BACKLOG
+        // item 137).
+        Ty::Named { name, args } if args.is_empty() && name == "ProcessResult" => "CertoProcessResult*".into(),
         Ty::Named { name, .. } => {
             // A user-defined generic type (`Box<Int>`, `Box<Text>`, ...) isn't
             // monomorphized — there is exactly one `Box` struct, with its

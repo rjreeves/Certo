@@ -483,7 +483,7 @@ fn ast_ty_to_c_str(te: &certo_ast::types::TypeExpr) -> String {
                 // compile (BACKLOG item 134, found while verifying the
                 // struct-boxing fix end-to-end, not caused by it).
                 "DateTime" | "Date" | "Duration" | "Timezone" => format!("Certo{}", name),
-                "JsonValue" => "CertoJsonValue*".into(),
+                "JsonValue" | "ProcessResult" => format!("Certo{}*", name),
                 other     => c_ident(other),
             }
         }

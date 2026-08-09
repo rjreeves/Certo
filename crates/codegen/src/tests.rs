@@ -1118,3 +1118,29 @@ fn generated_state_machine_source_parses() {
     assert!(certo_parser::parse(&wrapped).is_ok(),
         "generated state-machine source must parse:\n{}", generated);
 }
+
+// ------------------------------------------------------------------ //
+// ProcessResult opaque-handle mapping (BACKLOG item 137)
+// ------------------------------------------------------------------ //
+
+#[test]
+fn process_exec_inferred_val_uses_real_pointer_type() {
+    // `Process.exec`'s return type was never added to `ty_to_c`'s opaque-
+    // handle table (unlike its Http/Db siblings), so *any* local bound to
+    // it — even a plain, inferred `val`, not just an explicit annotation —
+    // previously emitted the literal, undeclared C identifier
+    // `ProcessResult` and failed to compile. Confirmed via direct repro
+    // before this fix.
+    let src = "module A\nfn f(): Unit [io] = {\n    val r = Process.exec(\"echo\", [\"hi\"])\n    println(ProcessResult.stdout(r))\n}";
+    let out = codegen(src);
+    assert_contains(&out, "CertoProcessResult* _l");
+    assert_not_contains(&out, "    ProcessResult _l");
+}
+
+#[test]
+fn process_exec_explicit_annotation_uses_real_pointer_type() {
+    let src = "module A\nfn f(): Unit [io] = {\n    val r: ProcessResult = Process.exec(\"echo\", [\"hi\"])\n    println(ProcessResult.stdout(r))\n}";
+    let out = codegen(src);
+    assert_contains(&out, "CertoProcessResult* _l");
+    assert_not_contains(&out, "    ProcessResult _l");
+}
