@@ -8,6 +8,11 @@ fn lower(src: &str) -> crate::HirModule {
     lower_module(&module).expect("lower error")
 }
 
+fn try_lower(src: &str) -> Result<crate::HirModule, Vec<crate::LowerError>> {
+    let module = parse(src).expect("parse error");
+    lower_module(&module)
+}
+
 #[test]
 fn lower_empty_module() {
     let m = lower("module A");
@@ -355,4 +360,42 @@ fn query_first_return_type_is_option_of_mapper_return_type() {
     }).expect("expected fn `f`");
     let widget = Ty::Named { name: "Widget".to_string(), args: vec![] };
     assert_eq!(f.body.as_ref().unwrap().ty, Ty::Option(Box::new(widget)));
+}
+
+// ------------------------------------------------------------------ //
+// Lambda closure-capture rejection (BACKLOG item 136)
+// ------------------------------------------------------------------ //
+
+#[test]
+fn lambda_capturing_outer_local_is_rejected() {
+    // Closures were never actually implemented — a lambda body referencing an
+    // outer local previously compiled silently and read garbage memory at
+    // runtime (confirmed via direct testing: a different wrong value on every
+    // run). Must now be a real, reported HIR lowering error, not a panic or
+    // a silent Ok.
+    let result = try_lower(
+        "module A\nimport Stdlib.Collections.{ List }\n\
+         fn f(xs: List<Int>): List<Int> = { val outer = 1\n List.map(xs, (x) => x + outer) }");
+    let errs = result.expect_err("expected a lowering error for a capturing lambda");
+    assert!(errs.iter().any(|e| matches!(&e.kind, crate::LowerErrorKind::Unsupported(msg) if msg.contains("closures"))));
+}
+
+#[test]
+fn lambda_without_capture_still_compiles() {
+    // Sanity check: a lambda referencing only its own parameter (no outer
+    // scope) must still compile cleanly — this check must not be over-broad.
+    let result = try_lower(
+        "module A\nimport Stdlib.Collections.{ List }\nfn f(xs: List<Int>): List<Int> = List.map(xs, (x) => x + 1)");
+    assert!(result.is_ok(), "expected Ok, got {:?}", result.err());
+}
+
+#[test]
+fn lambda_referencing_own_let_binding_is_fine() {
+    // A `let` bound *inside* the lambda body is not a capture — must not be
+    // flagged (the LocalId threshold check must distinguish "defined inside
+    // the lambda" from "defined in an enclosing scope").
+    let result = try_lower(
+        "module A\nimport Stdlib.Collections.{ List }\n\
+         fn f(xs: List<Int>): List<Int> = List.map(xs, (x) => { val y = x + 1\n y })");
+    assert!(result.is_ok(), "expected Ok, got {:?}", result.err());
 }

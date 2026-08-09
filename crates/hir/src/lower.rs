@@ -256,6 +256,7 @@ fn binop_result_ty(op: &crate::hir::BinOp, lhs: &Ty, rhs: &Ty) -> Ty {
 /// result, or a `for` loop over it) can't tell it's ever handling a `Float`
 /// and skips unboxing it. See BACKLOG item 113.
 fn lower_lambda_with_param_hint(params: &[certo_ast::expr::LambdaParam], body: &S<Expr>, hint: &Ty, cx: &mut Cx, span: Span) -> HirExpr {
+    let capture_threshold = cx.next_local;
     cx.push_scope();
     let hir_params: Vec<HirParam> = params.iter().enumerate().map(|(i, p)| {
         let local = cx.define_local(&p.name.node);
@@ -266,6 +267,7 @@ fn lower_lambda_with_param_hint(params: &[certo_ast::expr::LambdaParam], body: &
     }).collect();
     let body = lower_expr(body, cx);
     cx.pop_scope();
+    check_no_lambda_capture(&body, capture_threshold, cx, span);
     HirExpr { kind: HirExprKind::Lambda { params: hir_params, body: Box::new(body) }, ty: Ty::Error, span }
 }
 
@@ -911,6 +913,7 @@ fn lower_expr(expr: &S<Expr>, cx: &mut Cx) -> HirExpr {
         Expr::Block { stmts, .. } => lower_block(stmts, span, cx),
 
         Expr::Lambda { params, body, .. } => {
+            let capture_threshold = cx.next_local;
             cx.push_scope();
             let hir_params: Vec<HirParam> = params.iter().map(|p| {
                 let local = cx.define_local(&p.name.node);
@@ -918,6 +921,7 @@ fn lower_expr(expr: &S<Expr>, cx: &mut Cx) -> HirExpr {
             }).collect();
             let body = lower_expr(body, cx);
             cx.pop_scope();
+            check_no_lambda_capture(&body, capture_threshold, cx, span);
             HirExpr { kind: HirExprKind::Lambda { params: hir_params, body: Box::new(body) }, ty: Ty::Error, span }
         }
 
@@ -1120,8 +1124,13 @@ fn lower_expr(expr: &S<Expr>, cx: &mut Cx) -> HirExpr {
         }
 
         Expr::Transaction { body, .. } => {
-            // db.transaction { body } — lower as a call to __db_transaction(|| body)
+            // db.transaction { body } — lower as a call to __db_transaction(|| body).
+            // No new scope is pushed here (the thunk has zero params of its own),
+            // so *any* Local reference in `body` predates it — capture_threshold
+            // is just "whatever next_local already is" going in.
+            let capture_threshold = cx.next_local;
             let inner = lower_expr(body, cx);
+            check_no_lambda_capture(&inner, capture_threshold, cx, span);
             let thunk = HirExpr { kind: HirExprKind::Lambda { params: vec![], body: Box::new(inner) }, ty: Ty::Error, span };
             let func  = HirExpr { kind: HirExprKind::Global("__db_transaction".into()), ty: Ty::Error, span };
             HirExpr { kind: HirExprKind::Call { func: Box::new(func), args: vec![thunk] }, ty: Ty::Error, span }
@@ -1477,6 +1486,116 @@ fn ast_ty_to_ty_with_params(te: &certo_ast::types::TypeExpr, type_params: &[&str
         TypeExpr::Param { .. } => Ty::Var(0),
         TypeExpr::DecimalParam { precision, scale, .. } => Ty::Decimal(Some((*precision, *scale))),
         _ => Ty::Error,
+    }
+}
+
+/// Reject a lambda body that references a variable from an enclosing scope
+/// (a real closure capture) — BACKLOG item 136. Certo's lambda
+/// lowering (both the plain `HirExprKind::Lambda` path and
+/// `lower_lambda_boxed` in `crates/mir`) builds the lambda body in a
+/// *completely fresh* `Builder`/local-numbering space with no bridge back to
+/// the enclosing function's own locals. Before this check, a lambda body
+/// referencing an outer local silently compiled: `Builder::get_local`'s
+/// fallback (`self.local_map.get(&hir).unwrap_or(&hir)`) reinterpreted the
+/// *outer* function's `LocalId` as if it were a valid index into the
+/// *lambda's own*, much smaller `locals` vec — an out-of-bounds/wrong-slot
+/// read that C reads as whatever garbage happens to occupy that stack slot.
+/// Confirmed via direct testing: `List.map(xs, (x) => x + outer)` returned a
+/// different wrong value on every single run (non-deterministic undefined
+/// behavior, not just a stable logic bug). This affects *any* lambda
+/// anywhere — including `db.transaction { ... }`'s body, which HIR wraps in
+/// an implicit zero-param lambda (see the `Expr::Transaction` case above) —
+/// so real closure support needs a genuinely new, cross-cutting mechanism
+/// (an explicit captured-environment pointer threaded through every
+/// indirect call site *and* every higher-order C runtime function like
+/// `certo_list_map`/`certo_db_query_typed`, not just compiler-internal
+/// changes) that wasn't attempted here. Turning the silent corruption into a
+/// loud, honest compile error is the safe interim fix. Uses a `LocalId`
+/// threshold rather than a full scope walk: `Cx::next_local` only ever
+/// increments, so any `Local(id)` referenced inside the lambda body with
+/// `id < threshold` (the counter's value right before the lambda's own
+/// scope was pushed) must have been bound in an enclosing scope.
+fn check_no_lambda_capture(body: &HirExpr, threshold: LocalId, cx: &mut Cx, span: Span) {
+    let mut free = Vec::new();
+    collect_free_locals(body, threshold, &mut free);
+    if !free.is_empty() {
+        cx.err(LowerErrorKind::Unsupported(
+            "lambda (or `db.transaction { ... }` block) references a variable from an \
+             enclosing scope — closures are not yet supported. Only the lambda's own \
+             parameters, literals, and global functions/constants may be used inside a \
+             lambda body; pass any needed outer value in as a parameter instead".into()
+        ), span);
+    }
+}
+
+/// Recursively collect `HirExprKind::Local(id)` references with `id < threshold`
+/// — see `check_no_lambda_capture`. Does not descend into a nested `Lambda`'s
+/// own body: a nested lambda gets its own independent capture check at its
+/// own construction site, with its own (later, so still `>= threshold`)
+/// starting point — recursing here would just duplicate that error.
+fn collect_free_locals(expr: &HirExpr, threshold: LocalId, out: &mut Vec<LocalId>) {
+    let visit_stmt = |s: &HirStmt, out: &mut Vec<LocalId>| match s {
+        HirStmt::Let { init, .. } => collect_free_locals(init, threshold, out),
+        HirStmt::Assign { value, .. } => collect_free_locals(value, threshold, out),
+        HirStmt::Expr(e) => collect_free_locals(e, threshold, out),
+        HirStmt::Defer { body } => collect_free_locals(body, threshold, out),
+    };
+    match &expr.kind {
+        HirExprKind::Int(_) | HirExprKind::Float(_) | HirExprKind::Decimal(_)
+        | HirExprKind::Bool(_) | HirExprKind::Str(_) | HirExprKind::Uuid(_)
+        | HirExprKind::Unit | HirExprKind::Global(_) => {}
+        HirExprKind::Local(id) => { if *id < threshold { out.push(*id); } }
+        HirExprKind::Call { func, args } => {
+            collect_free_locals(func, threshold, out);
+            for a in args { collect_free_locals(a, threshold, out); }
+        }
+        HirExprKind::BinOp { lhs, rhs, .. } => {
+            collect_free_locals(lhs, threshold, out);
+            collect_free_locals(rhs, threshold, out);
+        }
+        HirExprKind::UnOp { arg, .. } => collect_free_locals(arg, threshold, out),
+        HirExprKind::Field { base, .. } => collect_free_locals(base, threshold, out),
+        HirExprKind::Record { fields, .. } => {
+            for (_, v) in fields { collect_free_locals(v, threshold, out); }
+        }
+        HirExprKind::Tuple(elems) | HirExprKind::List(elems) => {
+            for e in elems { collect_free_locals(e, threshold, out); }
+        }
+        HirExprKind::If { cond, then_expr, else_expr } => {
+            collect_free_locals(cond, threshold, out);
+            collect_free_locals(then_expr, threshold, out);
+            collect_free_locals(else_expr, threshold, out);
+        }
+        HirExprKind::Block { stmts, tail } => {
+            for s in stmts { visit_stmt(s, out); }
+            collect_free_locals(tail, threshold, out);
+        }
+        HirExprKind::Lambda { .. } => {} // own independent check — see doc comment
+        HirExprKind::Match { scrutinee, arms } => {
+            collect_free_locals(scrutinee, threshold, out);
+            for arm in arms {
+                if let Some(g) = &arm.guard { collect_free_locals(g, threshold, out); }
+                collect_free_locals(&arm.body, threshold, out);
+            }
+        }
+        HirExprKind::Try(inner) | HirExprKind::Unsafe(inner) | HirExprKind::Await(inner) => {
+            collect_free_locals(inner, threshold, out);
+        }
+        HirExprKind::For { iter, body, .. } => {
+            collect_free_locals(iter, threshold, out);
+            collect_free_locals(body, threshold, out);
+        }
+        HirExprKind::While { cond, body } => {
+            collect_free_locals(cond, threshold, out);
+            collect_free_locals(body, threshold, out);
+        }
+        HirExprKind::Spawn { args, .. } => {
+            for a in args { collect_free_locals(a, threshold, out); }
+        }
+        HirExprKind::AwaitTimed { task, deadline } => {
+            collect_free_locals(task, threshold, out);
+            if *deadline < threshold { out.push(*deadline); }
+        }
     }
 }
 
