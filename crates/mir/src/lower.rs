@@ -34,6 +34,13 @@ struct Builder {
     /// item 120) — a `Ty::Var(0)` entry marks a bare type-param parameter,
     /// which needs a concrete argument heap-boxed at the call site.
     fn_param_tys: std::collections::HashMap<String, Vec<Ty>>,
+    /// Function name → *declared* return type, as written (BACKLOG item
+    /// 135) — a `Ty::Var(0)` entry marks a bare type-param return, whose C
+    /// implementation always returns a raw `void*` regardless of what
+    /// concrete type HIR resolved the call's own type to; used to decide
+    /// when a call needs its return value unboxed, generalizing the
+    /// previous `RAW_RETURN_CALLEES` stdlib-only special case below.
+    fn_ret_tys: std::collections::HashMap<String, Ty>,
     /// The span of the Certo *statement* currently being lowered (BACKLOG
     /// item 126) — updated only at statement boundaries (`lower_stmt`, a
     /// block's tail expression, a function/lambda's own top-level body),
@@ -52,6 +59,7 @@ impl Builder {
         record_field_types:  std::collections::HashMap<String, Vec<Ty>>,
         variant_field_types: std::collections::HashMap<String, Vec<Ty>>,
         fn_param_tys:        std::collections::HashMap<String, Vec<Ty>>,
+        fn_ret_tys:          std::collections::HashMap<String, Ty>,
     ) -> Self {
         let entry = BasicBlock { id: 0, ..Default::default() };
         Builder {
@@ -67,6 +75,7 @@ impl Builder {
             record_field_types,
             variant_field_types,
             fn_param_tys,
+            fn_ret_tys,
             current_span: Span::DUMMY,
         }
     }
@@ -141,8 +150,9 @@ pub fn lower_fn(
     record_field_types:  &std::collections::HashMap<String, Vec<Ty>>,
     variant_field_types: &std::collections::HashMap<String, Vec<Ty>>,
     fn_param_tys:        &std::collections::HashMap<String, Vec<Ty>>,
+    fn_ret_tys:          &std::collections::HashMap<String, Ty>,
 ) -> (MirFn, Vec<MirFn>) {
-    let mut b = Builder::new(&f.name, record_field_types.clone(), variant_field_types.clone(), fn_param_tys.clone());
+    let mut b = Builder::new(&f.name, record_field_types.clone(), variant_field_types.clone(), fn_param_tys.clone(), fn_ret_tys.clone());
 
     // Declare params as locals (index 0 = return slot, type patched below).
     let ret_slot = b.declare_local("_ret", Ty::Error);
@@ -208,7 +218,7 @@ fn lower_lambda_boxed(params: &[certo_hir::HirParam], body: &HirExpr, param_ty_h
     b.lambda_count += 1;
     let lam_name = format!("__lam_{}_{}_boxed", b.fn_name, idx);
 
-    let mut lb = Builder::new(&lam_name, b.record_field_types.clone(), b.variant_field_types.clone(), b.fn_param_tys.clone());
+    let mut lb = Builder::new(&lam_name, b.record_field_types.clone(), b.variant_field_types.clone(), b.fn_param_tys.clone(), b.fn_ret_tys.clone());
     let ret_slot = lb.declare_local("_ret", Ty::Var(0));
 
     // The C signature's params (locals 1..=param_count) are always void* —
@@ -280,7 +290,7 @@ fn lower_named_fn_boxed(name: &str, real_param_tys: &[Ty], real_ret_ty: &Ty, b: 
     b.lambda_count += 1;
     let wrap_name = format!("__fnref_{}_{}_boxed", b.fn_name, idx);
 
-    let mut lb = Builder::new(&wrap_name, b.record_field_types.clone(), b.variant_field_types.clone(), b.fn_param_tys.clone());
+    let mut lb = Builder::new(&wrap_name, b.record_field_types.clone(), b.variant_field_types.clone(), b.fn_param_tys.clone(), b.fn_ret_tys.clone());
     let ret_slot = lb.declare_local("_ret", Ty::Var(0));
 
     // C signature params are always void*; unbox each into the real
@@ -619,8 +629,23 @@ fn lower_expr(expr: &HirExpr, b: &mut Builder) -> Operand {
             // assigned directly, or the bits get numeric-converted (Float)
             // or the assignment doesn't even compile (a struct).
             const RAW_RETURN_CALLEES: &[&str] = &["List.getOrPanic"];
-            let needs_return_unbox = matches!(&func.kind, HirExprKind::Global(name) if RAW_RETURN_CALLEES.contains(&name.as_str()))
+            let stdlib_raw_return = matches!(&func.kind, HirExprKind::Global(name) if RAW_RETURN_CALLEES.contains(&name.as_str()))
                 && (matches!(expr.ty, Ty::Float) || expr.ty.needs_heap_box());
+            // Same idea, generalized to any user-defined generic function
+            // whose *declared* return is a bare type param (`Ty::Var(_)` in
+            // `fn_ret_tys`) — its C implementation always returns a raw
+            // `void*` too. Only fires once HIR has actually resolved this
+            // call's own type to something concrete (`resolve_bare_generic_
+            // return`, BACKLOG item 135); an unresolved `Ty::Var`/`Ty::Error`
+            // here means HIR already rejected the call outright, so nothing
+            // to unbox.
+            let user_generic_return = match &func.kind {
+                HirExprKind::Global(name) => b.fn_ret_tys.get(name),
+                _ => None,
+            };
+            let user_raw_return = matches!(user_generic_return, Some(Ty::Var(_)))
+                && !matches!(expr.ty, Ty::Var(_) | Ty::Error);
+            let needs_return_unbox = stdlib_raw_return || user_raw_return;
 
             // `List.first`/`.last`/`.get`/`.find`, `Map.get`, `Query.first`
             // all box their `Option<T>` payload via the C runtime's generic
@@ -643,7 +668,27 @@ fn lower_expr(expr: &HirExpr, b: &mut Builder) -> Operand {
             b.switch_to(next);
             if needs_return_unbox {
                 let real = b.declare_local("_call_unboxed", expr.ty.clone());
-                b.assign(real, Rvalue::Unbox { value: Operand::Local(dest), ty: expr.ty.clone() });
+                // `stdlib_raw_return` (List.getOrPanic) and `user_raw_return`
+                // (BACKLOG item 135) box their payload via two genuinely
+                // different, incompatible schemes: `Rvalue::Unbox`/
+                // `unbox_value` bit-packs pointer-sized scalars directly
+                // into the slot with no allocation at all (only real
+                // structs get malloc'd) — but a user-defined generic
+                // function's bare-`T` value was boxed via item 120's
+                // `Rvalue::BoxSome` at its *argument* site (or transitively
+                // carries that same already-boxed pointer through a variant
+                // payload/pattern-match, untouched), which *always* mallocs
+                // regardless of the concrete type. Confirmed by direct
+                // testing: using `Unbox`'s bit-pattern cast on a `BoxSome`'d
+                // pointer printed the heap address itself instead of the
+                // int it pointed to. `UnboxSome` always dereferences,
+                // matching `BoxSome` unconditionally — the correct pairing
+                // here.
+                if user_raw_return {
+                    b.assign(real, Rvalue::UnboxSome { opt: Operand::Local(dest), ty: expr.ty.clone() });
+                } else {
+                    b.assign(real, Rvalue::Unbox { value: Operand::Local(dest), ty: expr.ty.clone() });
+                }
                 Operand::Local(real)
             } else if needs_opt_unwrap {
                 let real = b.declare_local("_call_opt_unwrapped", expr.ty.clone());
@@ -1038,7 +1083,7 @@ fn lower_expr(expr: &HirExpr, b: &mut Builder) -> Operand {
             let lam_name = format!("__lam_{}_{}", b.fn_name, idx);
 
             // Build MIR for the lambda body using a fresh builder.
-            let mut lb = Builder::new(&lam_name, b.record_field_types.clone(), b.variant_field_types.clone(), b.fn_param_tys.clone());
+            let mut lb = Builder::new(&lam_name, b.record_field_types.clone(), b.variant_field_types.clone(), b.fn_param_tys.clone(), b.fn_ret_tys.clone());
             let ret_slot = lb.declare_local("_ret", Ty::Error);
             for p in params {
                 lb.map_hir_local(p.local, &p.name, p.ty.clone());

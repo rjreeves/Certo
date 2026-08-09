@@ -6,7 +6,7 @@ fn mir_fn(src: &str) -> crate::MirFn {
     let module = parse(src).expect("parse error");
     let hir = lower_module(&module).expect("hir error");
     let HirItem::Fn(f) = &hir.items[0] else { panic!("expected fn"); };
-    lower_fn(f, &hir.record_field_types, &hir.variant_field_types, &hir.fn_param_tys).0
+    lower_fn(f, &hir.record_field_types, &hir.variant_field_types, &hir.fn_param_tys, &hir.fn_ret_tys).0
 }
 
 fn mir_fn_named(src: &str, name: &str) -> crate::MirFn {
@@ -16,7 +16,7 @@ fn mir_fn_named(src: &str, name: &str) -> crate::MirFn {
         HirItem::Fn(f) if f.name == name => Some(f),
         _ => None,
     }).unwrap_or_else(|| panic!("expected fn named {name}"));
-    lower_fn(f, &hir.record_field_types, &hir.variant_field_types, &hir.fn_param_tys).0
+    lower_fn(f, &hir.record_field_types, &hir.variant_field_types, &hir.fn_param_tys, &hir.fn_ret_tys).0
 }
 
 #[test]
@@ -99,4 +99,28 @@ fn generic_call_does_not_double_box_already_opaque_argument() {
         crate::MirStmt::Assign { rvalue: Rvalue::BoxSome { .. }, .. }
     )));
     assert!(!has_boxsome, "wrapTwice's call to Box.wrap(v) must not re-box the already-opaque `v`");
+}
+
+#[test]
+fn generic_call_unboxes_resolved_bare_return_via_unbox_some() {
+    // BACKLOG item 135: a bare-`T`-returning generic function's payload was
+    // boxed at its *argument* site via `Rvalue::BoxSome` (see
+    // `generic_call_boxes_concrete_argument` above), which always mallocs
+    // regardless of the concrete type — so unboxing it back at the call
+    // site must use `Rvalue::UnboxSome` (always dereferences) to match, not
+    // `Rvalue::Unbox`/`unbox_value` (a *different* scheme that bit-packs
+    // pointer-sized scalars directly into the slot, no allocation at all).
+    // Confirmed by direct testing that using the wrong one prints the raw
+    // heap address instead of the value it points to.
+    let mf = mir_fn_named(
+        "module A\ntype Box<T> = priv Box(T)\nimpl<T> Box { fn wrap(v: T): Box<T> = Box(v)\n fn unwrap(b: Box<T>): T = match b { Box(v) => v } }\nfn f(): Int = {\n val x: Int = Box.unwrap(Box.wrap(42))\n x\n}",
+        "f");
+    let has_unbox_some = mf.blocks.iter().any(|bb| bb.stmts.iter().any(|s| matches!(s,
+        crate::MirStmt::Assign { rvalue: Rvalue::UnboxSome { .. }, .. }
+    )));
+    let has_unbox = mf.blocks.iter().any(|bb| bb.stmts.iter().any(|s| matches!(s,
+        crate::MirStmt::Assign { rvalue: Rvalue::Unbox { .. }, .. }
+    )));
+    assert!(has_unbox_some, "expected an UnboxSome for the resolved bare-T return value");
+    assert!(!has_unbox, "must not use the mismatched Unbox/unbox_value scheme here");
 }
