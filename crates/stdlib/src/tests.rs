@@ -869,6 +869,88 @@ fn datetime_c_contains_duration_functions() {
 }
 
 // ------------------------------------------------------------------ //
+// Timezone (BACKLOG item 118)
+// ------------------------------------------------------------------ //
+
+#[test]
+fn timezone_functions_registered() {
+    let env = seeded_env();
+    for name in &["Timezone", "Timezone.name", "DateTime.inTimezone",
+                  "DateTime.formatTz", "Date.todayIn"] {
+        assert!(env.lookup(name).is_some(), "missing: {}", name);
+    }
+}
+
+#[test]
+fn timezone_constructor_returns_option() {
+    let env = seeded_env();
+    let tz = Ty::Named { name: "Timezone".into(), args: vec![] };
+    match env.lookup("Timezone").unwrap() {
+        Ty::Fn { params, ret } => {
+            assert_eq!(params, &[Ty::Text]);
+            assert_eq!(ret.as_ref(), &Ty::Option(Box::new(tz)));
+        }
+        other => panic!("expected Fn, got {:?}", other),
+    }
+}
+
+#[test]
+fn datetime_in_timezone_type() {
+    let env = seeded_env();
+    let dt = Ty::Named { name: "DateTime".into(), args: vec![] };
+    let tz = Ty::Named { name: "Timezone".into(), args: vec![] };
+    match env.lookup("DateTime.inTimezone").unwrap() {
+        Ty::Fn { params, ret } => {
+            assert_eq!(params, &[dt, tz]);
+            assert_eq!(ret.as_ref(), &Ty::Text);
+        }
+        other => panic!("expected Fn, got {:?}", other),
+    }
+}
+
+#[test]
+fn datetime_format_tz_type() {
+    let env = seeded_env();
+    let dt = Ty::Named { name: "DateTime".into(), args: vec![] };
+    let tz = Ty::Named { name: "Timezone".into(), args: vec![] };
+    match env.lookup("DateTime.formatTz").unwrap() {
+        Ty::Fn { params, ret } => {
+            assert_eq!(params, &[dt, Ty::Text, tz]);
+            assert_eq!(ret.as_ref(), &Ty::Text);
+        }
+        other => panic!("expected Fn, got {:?}", other),
+    }
+}
+
+#[test]
+fn date_today_in_type() {
+    let env = seeded_env();
+    let date = Ty::Named { name: "Date".into(), args: vec![] };
+    let tz = Ty::Named { name: "Timezone".into(), args: vec![] };
+    match env.lookup("Date.todayIn").unwrap() {
+        Ty::Fn { params, ret } => {
+            assert_eq!(params, &[tz]);
+            assert_eq!(ret.as_ref(), &date);
+        }
+        other => panic!("expected Fn, got {:?}", other),
+    }
+}
+
+#[test]
+fn datetime_c_contains_timezone_functions() {
+    assert!(DATETIME_C.contains("certo_timezone("),              "missing timezone constructor");
+    assert!(DATETIME_C.contains("certo_timezone_name"),          "missing timezone_name");
+    assert!(DATETIME_C.contains("certo_date_time_in_timezone"),  "missing date_time_in_timezone");
+    assert!(DATETIME_C.contains("certo_date_time_format_tz"),    "missing date_time_format_tz");
+    assert!(DATETIME_C.contains("certo_date_today_in"),          "missing date_today_in");
+    // Both platform paths must be present — a regression that accidentally
+    // guards one behind the wrong #ifdef would silently drop it for that
+    // platform, confirmed as a real risk given both branches are large.
+    assert!(DATETIME_C.contains("tzalloc"),   "missing POSIX tzalloc path");
+    assert!(DATETIME_C.contains("icuin.dll"), "missing Windows ICU path");
+}
+
+// ------------------------------------------------------------------ //
 // Money / Decimal extras
 // ------------------------------------------------------------------ //
 

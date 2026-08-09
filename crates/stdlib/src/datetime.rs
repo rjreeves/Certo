@@ -128,6 +128,218 @@ CertoDateTime certo_datetime_parse_iso(certo_text_t s) {
     return (CertoDateTime)timegm(&t);
 }
 
+/* ================================================================
+   Stdlib.Timezone — real IANA timezone support (BACKLOG item 118).
+   `CertoTimezone` is just `certo_text_t` — the IANA zone name itself; no
+   wrapper struct needed since a C string pointer is already pointer-sized.
+
+   Windows: dynamically loads the OS-bundled ICU (`icuin.dll`, present
+   since Windows 10 1903) and calls its C API via `GetProcAddress` — no ICU
+   SDK/headers needed. Confirmed by direct inspection of a real Windows 11
+   install's `icuin.dll` export table (`llvm-readobj --coff-exports`) that
+   this redistributed package exports `ucal_open`/`ucal_close`/
+   `ucal_setMillis`/`ucal_get`/`ucal_getCanonicalTimeZoneID` UNVERSIONED —
+   classic ICU4C's *versioned* symbol convention (`ucal_open_70`) does not
+   apply here, so no version-suffix probing is needed. Verified end-to-end
+   with a standalone test program before wiring this in: Europe/London
+   correctly resolves to UTC+1 (BST) in July 2026 and UTC+0 (GMT) in
+   January 2026; `ucal_getCanonicalTimeZoneID` correctly distinguishes a
+   real IANA name from a bogus one (`ucal_open` itself does NOT fail on an
+   unknown zone name — it silently falls back to a default — so validation
+   must go through `getCanonicalTimeZoneID`, not `ucal_open`'s own status).
+
+   POSIX (Linux/macOS): `tzalloc`/`localtime_rz`/`tzfree` — real, per-call
+   reentrant handles into the system's own zoneinfo database (a GNU/BSD
+   extension present on both glibc and macOS/BSD libc, not strict ISO C).
+   Deliberately NOT using `tzset`+the process-global `TZ` environment
+   variable: mutating `TZ` is not thread-safe to do concurrently with
+   another thread's own `localtime`/`gmtime` calls, and this codebase's own
+   `spawn`/`parallel` make concurrent use routine.
+   ================================================================ */
+
+typedef certo_text_t CertoTimezone;
+
+#ifdef _WIN32
+
+typedef void* CertoUCal;
+typedef uint16_t CertoUChar;
+typedef int32_t CertoUErrorCode;
+typedef char CertoUBool;
+
+typedef CertoUCal (*certo_ucal_open_fn)(const CertoUChar*, int32_t, const char*, int32_t, CertoUErrorCode*);
+typedef void (*certo_ucal_close_fn)(CertoUCal);
+typedef void (*certo_ucal_setMillis_fn)(CertoUCal, double, CertoUErrorCode*);
+typedef int32_t (*certo_ucal_get_fn)(const CertoUCal, int32_t, CertoUErrorCode*);
+typedef int32_t (*certo_ucal_getCanonicalTimeZoneID_fn)(const CertoUChar*, int32_t, CertoUChar*, int32_t, CertoUBool*, CertoUErrorCode*);
+
+/* UCalendarDateFields — stable, public ICU4C enum values since its
+   earliest version; hardcoded here since we have no ICU headers. */
+#define CERTO_UCAL_ZONE_OFFSET 15
+#define CERTO_UCAL_DST_OFFSET  16
+
+static certo_ucal_open_fn __certo_ucal_open;
+static certo_ucal_close_fn __certo_ucal_close;
+static certo_ucal_setMillis_fn __certo_ucal_setMillis;
+static certo_ucal_get_fn __certo_ucal_get;
+static certo_ucal_getCanonicalTimeZoneID_fn __certo_ucal_getCanonicalTimeZoneID;
+static INIT_ONCE __certo_icu_init_once = INIT_ONCE_STATIC_INIT;
+
+static BOOL CALLBACK __certo_icu_init(PINIT_ONCE once, PVOID param, PVOID* ctx) {
+    (void)once; (void)param; (void)ctx;
+    HMODULE h = LoadLibraryA("icuin.dll");
+    if (!h) return TRUE; /* function pointers stay NULL; callers check before use */
+    __certo_ucal_open = (certo_ucal_open_fn)GetProcAddress(h, "ucal_open");
+    __certo_ucal_close = (certo_ucal_close_fn)GetProcAddress(h, "ucal_close");
+    __certo_ucal_setMillis = (certo_ucal_setMillis_fn)GetProcAddress(h, "ucal_setMillis");
+    __certo_ucal_get = (certo_ucal_get_fn)GetProcAddress(h, "ucal_get");
+    __certo_ucal_getCanonicalTimeZoneID = (certo_ucal_getCanonicalTimeZoneID_fn)GetProcAddress(h, "ucal_getCanonicalTimeZoneID");
+    return TRUE;
+}
+
+/* Thread-safe lazy init (Win32 INIT_ONCE) — ICU is loaded at most once per process. */
+static void __certo_tz_ensure_icu(void) {
+    InitOnceExecuteOnce(&__certo_icu_init_once, __certo_icu_init, NULL, NULL);
+}
+
+static void __certo_tz_utf8_to_utf16(const char* s, CertoUChar* out, int outlen) {
+    int n = MultiByteToWideChar(CP_UTF8, 0, s, -1, NULL, 0);
+    if (n <= 0 || n > outlen) n = outlen;
+    MultiByteToWideChar(CP_UTF8, 0, s, -1, (wchar_t*)out, n);
+}
+
+/* 1 = `name` is a real IANA zone, 0 = unknown or ICU unavailable. */
+static int __certo_tz_is_valid(const char* name) {
+    __certo_tz_ensure_icu();
+    if (!__certo_ucal_getCanonicalTimeZoneID) return 0;
+    CertoUChar zone[128];
+    __certo_tz_utf8_to_utf16(name, zone, 128);
+    CertoUChar result[128];
+    CertoUBool is_system = 0;
+    CertoUErrorCode status = 0;
+    __certo_ucal_getCanonicalTimeZoneID(zone, -1, result, 128, &is_system, &status);
+    return status == 0;
+}
+
+/* Total UTC offset (zone + DST) in seconds for `name` at `epoch_secs`.
+   *ok is set to 0 (offset undefined, do not use) if resolution fails. */
+static int64_t __certo_tz_offset_seconds(const char* name, int64_t epoch_secs, int* ok) {
+    __certo_tz_ensure_icu();
+    *ok = 0;
+    if (!__certo_ucal_open || !__certo_ucal_close || !__certo_ucal_setMillis || !__certo_ucal_get) return 0;
+    CertoUChar zone[128];
+    __certo_tz_utf8_to_utf16(name, zone, 128);
+    CertoUErrorCode status = 0;
+    CertoUCal cal = __certo_ucal_open(zone, -1, "en_US", 0 /* UCAL_DEFAULT */, &status);
+    if (status != 0 || !cal) return 0;
+    __certo_ucal_setMillis(cal, (double)epoch_secs * 1000.0, &status);
+    int32_t zone_off = __certo_ucal_get(cal, CERTO_UCAL_ZONE_OFFSET, &status);
+    int32_t dst_off  = __certo_ucal_get(cal, CERTO_UCAL_DST_OFFSET, &status);
+    __certo_ucal_close(cal);
+    if (status != 0) return 0;
+    *ok = 1;
+    return (int64_t)(zone_off + dst_off) / 1000;
+}
+
+#else /* POSIX */
+
+/* 1 = `name` is a real IANA zone, 0 = unknown. */
+static int __certo_tz_is_valid(const char* name) {
+    timezone_t tz = tzalloc(name);
+    if (!tz) return 0;
+    tzfree(tz);
+    return 1;
+}
+
+static int64_t __certo_tz_offset_seconds(const char* name, int64_t epoch_secs, int* ok) {
+    *ok = 0;
+    timezone_t tz = tzalloc(name);
+    if (!tz) return 0;
+    time_t t = (time_t)epoch_secs;
+    struct tm result;
+    if (!localtime_rz(tz, &t, &result)) { tzfree(tz); return 0; }
+    tzfree(tz);
+    *ok = 1;
+    return (int64_t)result.tm_gmtoff;
+}
+
+#endif
+
+/* Timezone(name: Text): Timezone? — None if `name` isn't a real IANA zone. */
+void* certo_timezone(certo_text_t name) {
+    if (!name || !__certo_tz_is_valid(name)) return NULL;
+    size_t len = strlen(name) + 1;
+    char* copy = (char*)malloc(len);
+    if (!copy) certo_panic("out of memory");
+    memcpy(copy, name, len);
+    return __certo_opt_box((int64_t)copy);   /* Some(tz) */
+}
+
+/* Timezone.name(tz: Timezone): Text */
+certo_text_t certo_timezone_name(CertoTimezone tz) { return tz; }
+
+/* DateTime.inTimezone(dt, tz): Text — ISO 8601 with the zone's own UTC
+   offset suffix (not "Z"), e.g. "2026-07-15T13:00:00+01:00". `tz` was only
+   ever constructed via `Timezone(name)`, which already validated `name`,
+   so a resolution failure here means the underlying platform timezone
+   database became unavailable after construction — panics rather than
+   silently mis-rendering the wrong instant. */
+certo_text_t certo_date_time_in_timezone(CertoDateTime dt, CertoTimezone tz) {
+    int ok = 0;
+    int64_t off = __certo_tz_offset_seconds(tz, dt, &ok);
+    if (!ok) certo_panic("inTimezone: timezone became unresolvable");
+    time_t adjusted = (time_t)(dt + off);
+    struct tm* m = gmtime(&adjusted);
+    char* buf = (char*)malloc(64);
+    if (!buf) certo_panic("out of memory");
+    int64_t abs_off = off < 0 ? -off : off;
+    snprintf(buf, 64, "%04d-%02d-%02dT%02d:%02d:%02d%c%02d:%02d",
+             m->tm_year + 1900, m->tm_mon + 1, m->tm_mday,
+             m->tm_hour, m->tm_min, m->tm_sec,
+             off < 0 ? '-' : '+', (int)(abs_off / 3600), (int)((abs_off % 3600) / 60));
+    return buf;
+}
+
+/* DateTime.formatTz(dt, fmt, tz): Text — same `strftime` pattern language
+   as the existing UTC-only `DateTime.format`, applied to `tz`'s wall clock
+   (year/month/day/hour/etc. are all correctly zone- and DST-adjusted).
+   KNOWN LIMITATION, confirmed by direct testing, not just suspected: `%Z`/
+   `%z` are NOT reliable here and must not be relied on — `strftime` reads
+   those two conversions from `struct tm`'s own zone-name/gmtoff fields
+   (or, on some platforms, falls back to the C library's *process-wide*
+   locale timezone), neither of which this function ever sets to `tz` —
+   there is no portable, standard way to hand `strftime` an arbitrary
+   zone's display name/abbreviation directly. Confirmed on a real Windows
+   machine: formatting a `Europe/London` instant with `%Z` printed the
+   *host machine's own* configured Windows timezone name (unrelated to
+   London) instead of anything London-specific. Use `DateTime.inTimezone`
+   for a numeric UTC-offset suffix (`+01:00`) computed correctly from `tz`
+   itself, or `Timezone.name(tz)` for the IANA name, instead of `%Z`/`%z`. */
+certo_text_t certo_date_time_format_tz(CertoDateTime dt, certo_text_t fmt, CertoTimezone tz) {
+    int ok = 0;
+    int64_t off = __certo_tz_offset_seconds(tz, dt, &ok);
+    if (!ok) certo_panic("formatTz: timezone became unresolvable");
+    time_t adjusted = (time_t)(dt + off);
+    struct tm* m = gmtime(&adjusted);
+    char* buf = (char*)malloc(256);
+    if (!buf) certo_panic("out of memory");
+    strftime(buf, 256, fmt ? fmt : "%Y-%m-%dT%H:%M:%S", m);
+    return buf;
+}
+
+/* Date.todayIn(tz): Date — midnight in `tz`'s own wall clock, not UTC
+   midnight, so e.g. "today" in Tokyo can legitimately differ from "today"
+   in Los Angeles at the same instant. */
+CertoDate certo_date_today_in(CertoTimezone tz) {
+    int64_t now = (int64_t)time(NULL);
+    int ok = 0;
+    int64_t off = __certo_tz_offset_seconds(tz, now, &ok);
+    if (!ok) certo_panic("todayIn: timezone became unresolvable");
+    time_t adjusted = (time_t)(now + off);
+    struct tm* m = gmtime(&adjusted);
+    m->tm_hour = 0; m->tm_min = 0; m->tm_sec = 0;
+    return (CertoDate)timegm(m);
+}
+
 /* Bridge codegen's DateTime.* names (certo_date_time_*) to the certo_datetime_*
    implementations above. Placed after all definitions so only call sites rewrite. */
 #define certo_date_time_now          certo_datetime_now

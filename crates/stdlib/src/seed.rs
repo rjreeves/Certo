@@ -555,6 +555,21 @@ pub fn seed_stdlib(env: &mut TypeEnv, counter: &mut u32) {
     def!("Date.addDuration",     fn2(date(), dur(), date()));
 
     // ---------------------------------------------------------------- //
+    // Timezone — real IANA zones (BACKLOG item 118). `Timezone(name)` is a
+    // plain, unqualified global function (like `sleep`/`getEnv`), not a sum-
+    // type variant constructor — resolved as an ordinary call, same as any
+    // other bare-name stdlib function.
+    // ---------------------------------------------------------------- //
+
+    let tz = || Ty::Named { name: "Timezone".into(), args: vec![] };
+
+    def!("Timezone",             fn1(Ty::Text, Ty::Option(Box::new(tz()))));
+    def!("Timezone.name",        fn1(tz(), Ty::Text));
+    def!("DateTime.inTimezone",  fn2(dt(), tz(), Ty::Text));
+    def!("DateTime.formatTz",    Ty::Fn { params: vec![dt(), Ty::Text, tz()], ret: Box::new(Ty::Text) });
+    def!("Date.todayIn",         fn1(tz(), date()));
+
+    // ---------------------------------------------------------------- //
     // Money / Decimal
     // ---------------------------------------------------------------- //
 
@@ -1143,6 +1158,10 @@ pub fn seed_stdlib(env: &mut TypeEnv, counter: &mut u32) {
     pm!("DateTime.addDuration",  "dt", "duration");
     pm!("DateTime.diff",         "a", "b");
     pm!("Date.addDuration",      "date", "duration");
+
+    // Timezone
+    pm!("DateTime.inTimezone",   "dt", "tz");
+    pm!("DateTime.formatTz",     "dt", "fmt", "tz");
 
     // Decimal
     pm!("Decimal.add",    "a", "b");
