@@ -67,7 +67,13 @@ pub fn sanitise_name(name: &str) -> String {
 /// Returns `(c_source, entries)` where `entries` describe each test so the
 /// caller can spawn sub-processes. Fails if a `property` block declares a
 /// parameter whose type has no value generator yet (see `gen::GenType`).
-pub fn build_harness(module: &Module) -> Result<(String, Vec<TestEntry>), crate::error::TestRunnerError> {
+///
+/// `coverage_source`, when `Some((filename, source))`, opts codegen into
+/// emitting `#line` directives mapping the generated C back to the original
+/// `.cto` file (BACKLOG item 126) — passed straight through to
+/// `CodegenOptions::line_directives`; `None` for every normal `certo test`
+/// run (unaffected, identical output to before this parameter existed).
+pub fn build_harness(module: &Module, coverage_source: Option<(String, String)>) -> Result<(String, Vec<TestEntry>), crate::error::TestRunnerError> {
     let mut augmented = module.clone();
     let mut entries: Vec<TestEntry> = Vec::new();
     let zero_span = Span { start: 0, end: 0 };
@@ -128,7 +134,7 @@ pub fn build_harness(module: &Module) -> Result<(String, Vec<TestEntry>), crate:
     // header conflict, and _USE_MATH_DEFINES to expose M_PI/M_E from
     // <math.h> on MSVC/clang-cl — without it, any test file (property tests
     // included) that pulls in Stdlib.Math failed to compile at all.
-    let opts = CodegenOptions { inline_runtime: false, export_public: false };
+    let opts = CodegenOptions { inline_runtime: false, export_public: false, line_directives: coverage_source };
     let preamble = "#ifdef _WIN32\n\
                     #  ifndef WIN32_LEAN_AND_MEAN\n\
                     #    define WIN32_LEAN_AND_MEAN\n\
@@ -405,7 +411,7 @@ mod tests {
             decls:   vec![],
             span:    Span { start: 0, end: 0 },
         };
-        let (src, entries) = build_harness(&m).unwrap();
+        let (src, entries) = build_harness(&m, None).unwrap();
         assert!(entries.is_empty());
         assert!(src.contains("int main("));
     }
@@ -415,7 +421,7 @@ mod tests {
         let m = certo_parser::parse(
             "module A\nproperty \"commutes\"(x: Int, y: Text) { true }"
         ).unwrap();
-        let (src, entries) = build_harness(&m).unwrap();
+        let (src, entries) = build_harness(&m, None).unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].params, vec![
             ("x".to_string(), GenType::Int),
@@ -433,7 +439,7 @@ mod tests {
         let m = certo_parser::parse(
             "module A\nproperty \"holds\" { true }"
         ).unwrap();
-        let (_src, entries) = build_harness(&m).unwrap();
+        let (_src, entries) = build_harness(&m, None).unwrap();
         assert_eq!(entries.len(), 1);
         assert!(entries[0].params.is_empty());
     }
@@ -445,7 +451,7 @@ mod tests {
         let m = certo_parser::parse(
             "module A\nproperty \"holds\"(items: Decimal) { true }"
         ).unwrap();
-        let err = build_harness(&m).unwrap_err();
+        let err = build_harness(&m, None).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("items"), "error should name the offending param: {msg}");
         assert!(msg.contains("holds"), "error should name the property: {msg}");
@@ -456,7 +462,7 @@ mod tests {
         let m = certo_parser::parse(
             "module A\nproperty \"sums\"(xs: List<Int>) { true }"
         ).unwrap();
-        let (src, entries) = build_harness(&m).unwrap();
+        let (src, entries) = build_harness(&m, None).unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].params, vec![("xs".to_string(), GenType::List(Box::new(GenType::Int)))]);
         assert!(src.contains("certo_list_new()"));
@@ -468,7 +474,7 @@ mod tests {
         let m = certo_parser::parse(
             "module A\ntype Point = { x: Int, y: Int }\nproperty \"holds\"(p: Point) { true }"
         ).unwrap();
-        let (src, entries) = build_harness(&m).unwrap();
+        let (src, entries) = build_harness(&m, None).unwrap();
         assert_eq!(entries.len(), 1);
         assert!(matches!(&entries[0].params[0].1, GenType::Record { type_name, .. } if type_name == "Point"));
         assert!(src.contains("(Point){"));
@@ -481,7 +487,7 @@ mod tests {
         let m = certo_parser::parse(
             "module A\ntype Shape = | Circle(radius: Float) | Empty\nproperty \"holds\"(s: Shape) { true }"
         ).unwrap();
-        let (src, entries) = build_harness(&m).unwrap();
+        let (src, entries) = build_harness(&m, None).unwrap();
         assert_eq!(entries.len(), 1);
         assert!(matches!(&entries[0].params[0].1, GenType::Sum { type_name, .. } if type_name == "Shape"));
         assert!(src.contains("certo_circle("), "should call the real generated constructor");
@@ -493,7 +499,7 @@ mod tests {
         let m = certo_parser::parse(
             "module A\ntype Tree = | Leaf | Node(Tree, Tree)\nproperty \"holds\"(t: Tree) { true }"
         ).unwrap();
-        let err = build_harness(&m).unwrap_err();
+        let err = build_harness(&m, None).unwrap_err();
         assert!(err.to_string().contains("t"));
     }
 }

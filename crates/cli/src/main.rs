@@ -504,6 +504,7 @@ fn cmd_build(args: &[String], quiet: bool) {
         &certo_codegen::CodegenOptions {
             inline_runtime: false,
             export_public:  emit_dll,
+            line_directives: None,
         },
     );
     // Strip the `#include "certo_runtime.h"` and duplicate system includes from
@@ -2134,13 +2135,14 @@ fn cmd_test(args: &[String]) {
     let mut color = stderr_is_tty();
     let mut timeout_ms: u64 = 5000;
     let mut filter: Option<String> = None;
+    let mut coverage = false;
 
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
             "--no-color" => color = false,
             "--help" | "-h" => {
-                println!("Usage: certo test <file.cto>... [--filter <substring>] [--timeout=<ms>]");
+                println!("Usage: certo test <file.cto>... [--filter <substring>] [--timeout=<ms>] [--coverage]");
                 println!();
                 println!("Compile and run all `test` blocks in the given source files.");
                 println!("Exits 0 if all tests pass, 1 otherwise.");
@@ -2148,12 +2150,15 @@ fn cmd_test(args: &[String]) {
                 println!("Options:");
                 println!("  --filter <substring>  Only run tests whose display name contains this string");
                 println!("  --timeout=<ms>         Per-test timeout in milliseconds (default 5000)");
+                println!("  --coverage             Print a per-line coverage report (clang/llvm-cov required)");
+                println!("                         mapped back to your .cto source, not the generated C");
                 return;
             }
             "--filter" => {
                 i += 1;
                 filter = Some(args.get(i).unwrap_or_else(|| die("--filter requires a substring", 2)).clone());
             }
+            "--coverage" => coverage = true,
             other if other.starts_with("--timeout=") => {
                 let v = other.trim_start_matches("--timeout=");
                 timeout_ms = v.parse().unwrap_or_else(|_| {
@@ -2178,10 +2183,11 @@ fn cmd_test(args: &[String]) {
     let opts = certo_testrunner::run::RunOptions {
         timeout: Some(std::time::Duration::from_millis(timeout_ms)),
         filter,
+        coverage_dir: None, // set internally by run_file_opts when coverage is on
     };
     let mut all_passed = true;
     for path in &files {
-        match certo_testrunner::run_file(path, &opts, color) {
+        match certo_testrunner::run_file_opts(path, &opts, color, coverage) {
             Ok(passed) => { if !passed { all_passed = false; } }
             Err(certo_testrunner::error::TestRunnerError::NoTests) => {
                 eprintln!("{}: no tests found", path.display());
@@ -2348,7 +2354,7 @@ fn run_bench_module(module: &certo_ast::module::Module, path: &Path, src: &str, 
     let stdlib_c   = certo_stdlib::full_c_runtime_with_db(false);
     let raw_module = certo_codegen::emit_module(
         module,
-        &certo_codegen::CodegenOptions { inline_runtime: false, export_public: false },
+        &certo_codegen::CodegenOptions { inline_runtime: false, export_public: false, line_directives: None },
     );
     // Strip duplicate system includes already in preamble.
     let module_c = raw_module.lines()
