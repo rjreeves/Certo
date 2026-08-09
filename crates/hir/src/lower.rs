@@ -567,6 +567,7 @@ pub fn lower_module(module: &Module) -> Result<HirModule, Vec<LowerError>> {
             record_field_types:  cx.record_field_types,
             variant_field_types: cx.variant_field_types,
             fn_param_tys:        cx.fn_param_tys,
+            fn_ret_tys:          cx.fn_ret_types,
         })
     } else {
         Err(cx.errors)
@@ -684,7 +685,7 @@ fn lower_expr(expr: &S<Expr>, cx: &mut Cx) -> HirExpr {
             let user_params: Option<Vec<FnParam>> = fn_short_name.as_ref()
                 .and_then(|s| cx.fn_params.get(s).cloned());
 
-            let lowered_args: Vec<HirExpr> = if let Some(snames) = stdlib_names {
+            let mut lowered_args: Vec<HirExpr> = if let Some(snames) = stdlib_names {
                 // Stdlib function: only labeled reordering (no defaults).
                 if has_labels {
                     let mut slots: Vec<Option<HirExpr>> = vec![None; snames.len()];
@@ -773,6 +774,23 @@ fn lower_expr(expr: &S<Expr>, cx: &mut Cx) -> HirExpr {
             // a `Type.method(...)` call's return type is silently never found and
             // defaults to Ty::Error.
             let short = fn_short_name.as_deref().unwrap_or("");
+            // Same bare-`T`-return resolution as `val`'s (BACKLOG item
+            // 135), applied at argument position: if an argument is itself
+            // an unresolved generic call (`Ty::Var(0)`) and the callee's
+            // declared param type at that position is concrete, resolve
+            // (and mark for unboxing) using it; otherwise it's the same
+            // hard error `val` gives, since nothing else here can tell what
+            // concrete type it should be.
+            let declared_params: Option<&Vec<Ty>> = fn_full_path.as_deref()
+                .and_then(|fp| cx.fn_param_tys.get(fp))
+                .or_else(|| cx.fn_param_tys.get(short));
+            if let Some(declared) = declared_params {
+                let declared = declared.clone();
+                for (i, arg) in lowered_args.iter_mut().enumerate() {
+                    let expected = declared.get(i).filter(|t| !matches!(t, Ty::Var(_)));
+                    resolve_bare_generic_return(arg, expected, cx);
+                }
+            }
             let call_ty = fn_full_path.as_deref()
                 .and_then(|fp| cx.sm_returns.get(fp).cloned())
                 .or_else(|| fn_full_path.as_deref().and_then(|fp| cx.fn_ret_types.get(fp).cloned()))
@@ -1226,8 +1244,17 @@ fn lower_block(stmts: &[Stmt], span: Span, cx: &mut Cx) -> HirExpr {
     for (i, stmt) in stmts.iter().enumerate() {
         let is_last = i == stmts.len() - 1;
         match stmt {
-            Stmt::Val { pattern, value, .. } => {
-                let init = lower_expr(value, cx);
+            Stmt::Val { pattern, ty: val_ty_ann, value, .. } => {
+                let mut init = lower_expr(value, cx);
+                // A generic function's bare-`T` return collapses to the
+                // unresolved `Ty::Var(0)` sentinel (see `ast_ty_to_ty_with_params`)
+                // — if the `val` declares a concrete type, use it to resolve
+                // (and mark for unboxing) the call's real return type;
+                // otherwise this is exactly the case codegen would silently
+                // mis-cast a raw `void*` as a concrete C type, so it's a
+                // hard error instead — BACKLOG item 135.
+                let declared = val_ty_ann.as_ref().map(|t| ast_ty_to_ty_with_params(&t.node, &[]));
+                resolve_bare_generic_return(&mut init, declared.as_ref(), cx);
                 match &pattern.node {
                     Pattern::Ident { name, .. } => {
                         let local = cx.define_local(&name.node);
@@ -1431,6 +1458,35 @@ fn lower_pat(pat: &S<certo_ast::pattern::Pattern>, scrut_ty: &Ty, cx: &mut Cx) -
         ),
         // Record / Guard / As — flatten to wildcard for now (full pattern compilation later)
         _ => HirPat::Wildcard,
+    }
+}
+
+// ------------------------------------------------------------------ //
+// Bare-generic-return resolution (BACKLOG item 135)
+// ------------------------------------------------------------------ //
+
+/// Try to resolve a call expression's unresolved bare-generic-return
+/// sentinel (`Ty::Var(0)`) to a concrete type using `expected` — the type
+/// context the call is being consumed in: a `val`'s declared annotation, or
+/// an enclosing call's declared concrete param type at this argument
+/// position. Only ever touches a `HirExprKind::Call` node whose type is
+/// still the unresolved sentinel; anything else (including a legitimate
+/// `Ty::Var(0)`-typed local/parameter reference forwarded through a still-
+/// generic context, e.g. `v` inside `fn wrap<T>(v: T) = Secret(v)`) is left
+/// untouched — those aren't a call result, so there's nothing to resolve.
+/// With no concrete `expected` available, this is exactly the case codegen
+/// would otherwise silently mis-cast a raw `void*` as a concrete C type —
+/// a hard compile error instead of shipping that.
+fn resolve_bare_generic_return(expr: &mut HirExpr, expected: Option<&Ty>, cx: &mut Cx) {
+    if !matches!(expr.kind, HirExprKind::Call { .. }) || !matches!(expr.ty, Ty::Var(_)) {
+        return;
+    }
+    match expected {
+        Some(ty) if !matches!(ty, Ty::Var(_)) => expr.ty = ty.clone(),
+        _ => cx.err(LowerErrorKind::Unsupported(
+            "cannot determine the concrete type of this generic function's return value here — \
+             add an explicit type annotation (e.g. `val x: SomeType = ...`)".into()
+        ), expr.span),
     }
 }
 

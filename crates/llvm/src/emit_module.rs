@@ -80,7 +80,7 @@ pub fn emit_module(module: &Module, opts: &LlvmOptions) -> Result<String, String
     for sdecl in &module.decls {
         if let Decl::Fn(ast_fn) = &sdecl.node {
             if let Some(hir_fn) = hir_fn_map.get(ast_fn.name.node.as_str()) {
-                let (mf, _lifted) = lower_fn(hir_fn, &hir.record_field_types, &hir.variant_field_types, &hir.fn_param_tys);
+                let (mf, _lifted) = lower_fn(hir_fn, &hir.record_field_types, &hir.variant_field_types, &hir.fn_param_tys, &hir.fn_ret_tys);
                 let body = emit_fn(ast_fn, &mf, &mut ctx);
                 fn_bodies.push(body);
             }
