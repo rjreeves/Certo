@@ -973,3 +973,61 @@ fn decimal_out_of_range_precision_is_error() {
     // Precision/scale are u8 (0-255) — 999 doesn't fit.
     err("module A\nfn f(x: Decimal(999, 4)): Unit = todo()");
 }
+
+// ------------------------------------------------------------------ //
+// `live val` inside a view (BACKLOG item 88 — parsing slice only)
+// ------------------------------------------------------------------ //
+
+fn parse_view_decl(src: &str) -> certo_ast::decl::ViewDecl {
+    let m = ok(src);
+    m.decls.iter().find_map(|d| match &d.node {
+        Decl::View(v) => Some(v.clone()),
+        _ => None,
+    }).expect("expected a view decl")
+}
+
+#[test]
+fn live_val_parses_into_view_live_field() {
+    let v = parse_view_decl(
+        "module A\nview D {\n live val count = 0\n layout = Heading(\"x\")\n}"
+    );
+    assert_eq!(v.live.len(), 1);
+    let certo_ast::pattern::Pattern::Ident { name, .. } = &v.live[0].pattern.node else {
+        panic!("expected Ident pattern, got {:?}", v.live[0].pattern.node);
+    };
+    assert_eq!(name.node, "count");
+}
+
+#[test]
+fn multiple_live_vals_all_parsed() {
+    let v = parse_view_decl(
+        "module A\nview D {\n live val a = 1\n live val b = \"x\"\n layout = Heading(\"x\")\n}"
+    );
+    assert_eq!(v.live.len(), 2);
+}
+
+#[test]
+fn view_without_live_val_has_empty_live_field() {
+    // No regression — a view with no `live val` still parses, with an
+    // empty `live` list (not an error, not a leftover from another view).
+    let v = parse_view_decl("module A\nview D {\n layout = Heading(\"x\")\n}");
+    assert!(v.live.is_empty());
+}
+
+#[test]
+fn live_as_a_plain_identifier_elsewhere_is_unaffected() {
+    // `live` is a contextual/soft keyword recognized only inside a view
+    // body immediately before `val` (same pattern as `pk`/`filter`/
+    // `layout`) — using it as an ordinary function or variable name
+    // anywhere else must keep working exactly as before.
+    ok("module A\nfn live(): Int = 42\nval live: Int = 7");
+}
+
+#[test]
+fn live_val_reuses_ordinary_val_syntax_including_type_annotation() {
+    let v = parse_view_decl(
+        "module A\nview D {\n live val n: Int = 0\n layout = Heading(\"x\")\n}"
+    );
+    assert_eq!(v.live.len(), 1);
+    assert!(v.live[0].ty.is_some());
+}

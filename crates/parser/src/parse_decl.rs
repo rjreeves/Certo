@@ -796,6 +796,7 @@ fn parse_view(cur: &mut Cursor<'_>) -> Result<ViewDecl, ParseError> {
     let mut pk: Option<String> = None;
     let mut filter_by: Option<String> = None;
     let mut layout_expr: Option<S<certo_ast::expr::Expr>> = None;
+    let mut live: Vec<certo_ast::decl::ValDecl> = Vec::new();
 
     cur.expect(&Token::LBrace)?;
     loop {
@@ -826,6 +827,23 @@ fn parse_view(cur: &mut Cursor<'_>) -> Result<ViewDecl, ParseError> {
                     cur.eat(|t| matches!(t, Token::Comma));
                     continue;
                 }
+                // `live` is a contextual keyword (same soft-keyword pattern
+                // as `pk`/`filter`/`layout` above, not a globally reserved
+                // lexer token) recognized only here, inside a view body —
+                // BACKLOG item 88. `live val x = expr` reuses the ordinary
+                // `val` parser unchanged; there is deliberately no new
+                // syntax for the binding itself, only for the `live`
+                // prefix that marks it. Real reactive wiring (a query
+                // DSL, a push/streaming transport) is a separate, much
+                // larger, unbuilt gap — this only parses the declaration
+                // into `ViewDecl.live` so codegen can at least see it and
+                // say so honestly, instead of it being a parse error.
+                "live" if cur.peek2() == Some(&Token::Val) => {
+                    cur.bump();
+                    live.push(parse_val_decl(cur, false)?);
+                    cur.eat(|t| matches!(t, Token::Comma));
+                    continue;
+                }
                 _ => {}
             }
         }
@@ -839,7 +857,7 @@ fn parse_view(cur: &mut Cursor<'_>) -> Result<ViewDecl, ParseError> {
         span: name_span,
     })?;
     let span = start.to(end);
-    Ok(ViewDecl { name: S::new(name, name_span), live: vec![], layout, pk, filter_by, span })
+    Ok(ViewDecl { name: S::new(name, name_span), live, layout, pk, filter_by, span })
 }
 
 fn parse_form(cur: &mut Cursor<'_>) -> Result<FormDecl, ParseError> {
