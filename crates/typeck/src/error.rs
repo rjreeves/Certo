@@ -47,6 +47,14 @@ pub enum TypeErrorKind {
     /// was called outside an `impl X { ... }` block for the same type.
     PrivConstructorCall { type_name: String },
 
+    /// E0215 — a value whose type structurally contains `Secret<_>` was
+    /// passed to a logging/serialization sink (`println`/`print`/`eprint`/
+    /// `Json.stringify`) — BACKLOG item 78. The spec (§13.2) suggests E0601
+    /// for this, but that code was already in use (HIR lowering errors,
+    /// item 136) before this was implemented; E0215 continues typeck's own
+    /// E02xx sequence instead of colliding with an unrelated existing code.
+    SecretInSensitiveContext { fn_name: String, ty: Ty },
+
     /// E0708 — temporal declaration body does not resolve to Duration.
     TemporalNotDuration { found: Ty },
 
@@ -83,6 +91,8 @@ impl TypeError {
                     ty.display(), missing.join(", ")),
             TypeErrorKind::PrivConstructorCall { type_name } =>
                 format!("E0214: constructor `{type_name}` is private — call it only from within `impl {type_name} {{ ... }}`, e.g. via a validating `{type_name}.new` factory"),
+            TypeErrorKind::SecretInSensitiveContext { fn_name, ty } =>
+                format!("E0215: `{}` is not Loggable/Serializable — passed to `{}`", ty.display(), fn_name),
             TypeErrorKind::TemporalNotDuration { found } =>
                 format!("E0708: temporal body must resolve to Duration, found `{}`", found.display()),
             TypeErrorKind::AgeOnNonTimestamp { found } =>

@@ -1524,6 +1524,15 @@ pub(crate) fn type_error_to_diagnostic(e: &TypeError) -> Diagnostic {
                 .with_label("not callable outside its own impl block")
                 .with_note(format!("call it only from within `impl {type_name} {{ ... }}`, e.g. a validating `{type_name}.new` factory"))
         }
+
+        TypeErrorKind::SecretInSensitiveContext { fn_name, ty } => {
+            let t = ty.display();
+            Diagnostic::error("E0215",
+                format!("`{t}` is not Loggable/Serializable"))
+                .with_span(e.span)
+                .with_label(format!("passed to `{fn_name}`, which would expose it"))
+                .with_note("call `.expose()` on the Secret first if you really need its raw value here")
+        }
     }
 }
 

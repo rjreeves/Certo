@@ -965,3 +965,63 @@ fn decimal_param_display_shows_precision_scale() {
     assert!(both.contains("Decimal(10, 2)"), "got: {both}");
 }
 
+// ------------------------------------------------------------------ //
+// Secret<T> not-Loggable/Serializable check (BACKLOG item 78)
+// ------------------------------------------------------------------ //
+
+const SECRET_SRC: &str = "\
+type Secret<T> = priv Secret(T)
+impl<T> Secret {
+    fn wrap(v: T): Secret<T> = Secret(v)
+    fn expose(s: Secret<T>): T = match s { Secret(v) => v }
+}
+";
+
+#[test]
+fn passing_secret_directly_to_println_is_rejected() {
+    let src = format!(
+        "module A\n{}fn f(): Unit [io] = {{\n val p: Secret<Text> = Secret.wrap(\"x\")\n println(p)\n}}",
+        SECRET_SRC
+    );
+    let errs = check_err(&src);
+    assert!(
+        errs.iter().any(|e| matches!(e.kind, TypeErrorKind::SecretInSensitiveContext { .. })),
+        "expected a SecretInSensitiveContext error, got: {:?}", errs
+    );
+}
+
+#[test]
+fn exposed_secret_is_allowed() {
+    // `.expose()`'s result is a plain Text, not Secret<Text> anymore —
+    // logging it is exactly the spec's own documented escape hatch and
+    // must not be rejected. Uses `check_err` like its siblings, not the
+    // strict `check()` — `crates_resolve::resolve()` doesn't know about
+    // *any* stdlib builtin (confirmed: even a bare `println("x")` with no
+    // Secret involved fails resolve() on its own, a real pre-existing gap
+    // unrelated to this item), so `check()`'s `.expect("resolve error")`
+    // would panic regardless of whether the Secret check itself is correct.
+    let src = format!(
+        "module A\n{}fn f(): Unit [io] = {{\n val p: Secret<Text> = Secret.wrap(\"x\")\n println(Secret.expose(p))\n}}",
+        SECRET_SRC
+    );
+    let errs = check_err(&src);
+    assert!(
+        !errs.iter().any(|e| matches!(e.kind, TypeErrorKind::SecretInSensitiveContext { .. })),
+        "exposing a Secret before logging must not trigger the not-Loggable check, got: {:?}", errs
+    );
+}
+
+#[test]
+fn secret_passed_to_eprint_is_also_rejected() {
+    // Same check must apply to every sensitive sink, not just println.
+    let src = format!(
+        "module A\n{}fn f(): Unit [io] = {{\n val p: Secret<Text> = Secret.wrap(\"x\")\n eprint(p)\n}}",
+        SECRET_SRC
+    );
+    let errs = check_err(&src);
+    assert!(
+        errs.iter().any(|e| matches!(e.kind, TypeErrorKind::SecretInSensitiveContext { .. })),
+        "expected a SecretInSensitiveContext error for eprint, got: {:?}", errs
+    );
+}
+
