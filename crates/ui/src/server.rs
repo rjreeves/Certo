@@ -193,6 +193,22 @@ fn emit_view_handler(v: &ViewDecl, forms: &[&FormDecl], _all_views: &[&ViewDecl]
 
     writeln!(out, "// ── {} ─────────────────────────────────────────────────────────────────────", name).unwrap();
 
+    if !v.live.is_empty() {
+        // BACKLOG item 88: `live val` parses into `ViewDecl.live` now, but
+        // there's no push/streaming transport for this codegen path to
+        // wire it to yet (see item 88's own investigation — a real SSE/
+        // WebSocket transport and a query-builder DSL are both separate,
+        // unbuilt gaps). Emit an honest comment naming what was declared
+        // rather than either silently dropping it or claiming it's live.
+        let bindings: Vec<&str> = v.live.iter()
+            .filter_map(|vd| match &vd.pattern.node {
+                certo_ast::pattern::Pattern::Ident { name, .. } => Some(name.node.as_str()),
+                _ => None,
+            })
+            .collect();
+        writeln!(out, "// live bindings declared but not yet wired to a transport: {}", bindings.join(", ")).unwrap();
+    }
+
     let for_entity = find_for_entity(&v.layout.node);
 
     if let Some(ref entity) = for_entity {
@@ -658,4 +674,45 @@ fn infer_input_type(name: &str, _ft: &Option<certo_ast::span::S<certo_ast::expr:
     if lower.contains("date")                           { return "date"; }
     if lower.contains("url") || lower.contains("website") { return "url"; }
     "text"
+}
+
+// This file had zero test coverage before item 88 (BACKLOG's own note on
+// that item flagged it explicitly) — starting real coverage here, not just
+// for the `live val` comment this item's own change touches.
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use certo_parser::parse;
+
+    fn server_source(src: &str) -> String {
+        let m = parse(src).expect("parse");
+        emit_server(&m).expect("emit_server")
+    }
+
+    #[test]
+    fn live_val_emits_honest_not_wired_comment() {
+        let out = server_source(
+            "module M\nview Home {\n live val count = 0\n layout = Text(\"Hi\")\n}"
+        );
+        assert!(
+            out.contains("// live bindings declared but not yet wired to a transport: count"),
+            "missing live-binding comment\n{}", out
+        );
+    }
+
+    #[test]
+    fn multiple_live_vals_all_named_in_comment() {
+        let out = server_source(
+            "module M\nview Home {\n live val a = 1\n live val b = \"x\"\n layout = Text(\"Hi\")\n}"
+        );
+        assert!(out.contains("a, b"), "missing both binding names\n{}", out);
+    }
+
+    #[test]
+    fn view_without_live_val_has_no_live_comment() {
+        // No regression: a view that never declares `live val` must not
+        // grow a stray comment about bindings that don't exist.
+        let out = server_source("module M\nview Home {\n layout = Text(\"Hi\")\n}");
+        assert!(!out.contains("live bindings"), "unexpected live-binding comment\n{}", out);
+    }
 }
