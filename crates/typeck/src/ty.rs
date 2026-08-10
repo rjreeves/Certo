@@ -119,6 +119,28 @@ impl Ty {
         }
     }
 
+    /// Does this type structurally contain `Secret<_>` anywhere — itself,
+    /// or nested inside an `Option`/`Result`/`List`/`Map`/`Tuple`/`Record`/
+    /// another `Named`'s own type args? Used to reject passing a secret
+    /// (however deeply wrapped) to a logging/serialization sink — BACKLOG
+    /// item 78. `Secret<T>` isn't a dedicated `Ty::` variant (no such
+    /// builtin exists — a user declares `type Secret<T> = priv Secret(T)`
+    /// themselves, the same generic-sum-type shape item 135 already proved
+    /// out via `Box<T>`), so this matches by name on `Ty::Named` rather than
+    /// a dedicated pattern.
+    pub fn contains_secret(&self) -> bool {
+        match self {
+            Ty::Named { name, args } => name == "Secret" || args.iter().any(Ty::contains_secret),
+            Ty::Option(inner) => inner.contains_secret(),
+            Ty::Result(ok, err) => ok.contains_secret() || err.contains_secret(),
+            Ty::List(inner) => inner.contains_secret(),
+            Ty::Map(k, v) => k.contains_secret() || v.contains_secret(),
+            Ty::Tuple(elems) => elems.iter().any(Ty::contains_secret),
+            Ty::Record(fields) => fields.iter().any(|(_, t)| t.contains_secret()),
+            _ => false,
+        }
+    }
+
     /// Instantiate a `Forall` by replacing each quantified var with a fresh
     /// inference variable, using the provided counter.
     pub fn instantiate(&self, counter: &mut u32) -> Ty {
@@ -300,4 +322,46 @@ pub fn assign_var_names(tys: &[&Ty]) -> HashMap<TyVar, String> {
             (v, name)
         })
         .collect()
+}
+
+#[cfg(test)]
+mod contains_secret_tests {
+    use super::Ty;
+
+    #[test]
+    fn direct_secret_is_detected() {
+        let ty = Ty::Named { name: "Secret".into(), args: vec![Ty::Text] };
+        assert!(ty.contains_secret());
+    }
+
+    #[test]
+    fn unrelated_named_type_is_not_detected() {
+        let ty = Ty::Named { name: "Box".into(), args: vec![Ty::Text] };
+        assert!(!ty.contains_secret());
+    }
+
+    #[test]
+    fn plain_scalar_is_not_detected() {
+        assert!(!Ty::Text.contains_secret());
+        assert!(!Ty::Int.contains_secret());
+    }
+
+    #[test]
+    fn nested_inside_option_list_record_is_detected() {
+        let secret = Ty::Named { name: "Secret".into(), args: vec![Ty::Text] };
+        assert!(Ty::Option(Box::new(secret.clone())).contains_secret());
+        assert!(Ty::List(Box::new(secret.clone())).contains_secret());
+        assert!(Ty::Record(vec![("password".into(), secret.clone())]).contains_secret());
+        assert!(Ty::Tuple(vec![Ty::Int, secret.clone()]).contains_secret());
+    }
+
+    #[test]
+    fn nested_inside_another_generic_wrapper_is_detected() {
+        // Secret<T> wrapped inside a second, unrelated generic wrapper
+        // (Box<Secret<Text>>) must still be caught via the wrapper's own
+        // type args, not just a top-level match.
+        let secret = Ty::Named { name: "Secret".into(), args: vec![Ty::Text] };
+        let boxed = Ty::Named { name: "Box".into(), args: vec![secret] };
+        assert!(boxed.contains_secret());
+    }
 }

@@ -240,6 +240,28 @@ pub fn infer(expr: &S<Expr>, ctx: &mut Ctx<'_>) -> Ty {
             // row-polymorphism bounds against whatever the bound type param resolved to.
             apply_row_check(&row_check, ctx, *span);
 
+            // Reject a value whose type structurally contains `Secret<_>`
+            // (however deeply wrapped) being passed to a logging/
+            // serialization sink — BACKLOG item 78. Checked last, after
+            // unification, so a variable's type is as resolved as it's
+            // going to get. `Log.info`/`Json.encode` (the spec's own
+            // names, §13.2) don't exist in this compiler — these are the
+            // real sinks that do.
+            const SENSITIVE_SINKS: &[&str] = &["println", "print", "eprint", "Json.stringify"];
+            if let Some(name) = &fn_name {
+                if SENSITIVE_SINKS.contains(&name.as_str()) {
+                    for (arg_ty, arg_span) in &arg_info {
+                        let resolved = ctx.uf.apply(arg_ty);
+                        if resolved.contains_secret() {
+                            ctx.errors.push(TypeError {
+                                kind: TypeErrorKind::SecretInSensitiveContext { fn_name: name.clone(), ty: resolved },
+                                span: *arg_span,
+                            });
+                        }
+                    }
+                }
+            }
+
             ret_ty
         }
 
