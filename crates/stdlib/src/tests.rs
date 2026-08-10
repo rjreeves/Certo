@@ -283,9 +283,22 @@ fn full_c_runtime_includes_channel() {
 fn text_functions_registered() {
     let env = seeded_env();
     for name in &["Text.len", "Text.byteLength", "Text.concat", "Text.contains", "Text.toUpper",
-                  "Text.toLower", "Text.trim", "Text.split", "Text.join",
+                  "Text.toLower", "Text.toUpperLocale", "Text.toLowerLocale", "Text.trim", "Text.split", "Text.join",
                   "Text.replace", "Text.indexOf"] {
         assert!(env.lookup(name).is_some(), "missing: {}", name);
+    }
+}
+
+#[test]
+fn text_to_upper_locale_type() {
+    // BACKLOG item 117 — takes the text plus a locale string, both Text.
+    let env = seeded_env();
+    match env.lookup("Text.toUpperLocale").unwrap() {
+        Ty::Fn { params, ret } => {
+            assert_eq!(params, &[Ty::Text, Ty::Text]);
+            assert_eq!(ret.as_ref(), &Ty::Text);
+        }
+        other => panic!("expected Fn, got {:?}", other),
     }
 }
 
@@ -392,6 +405,20 @@ fn text_c_contains_key_functions() {
     assert!(TEXT_C.contains("certo_text_split"),      "missing text_split");
     assert!(TEXT_C.contains("certo_text_replace"),    "missing text_replace");
     assert!(TEXT_C.contains("certo_text_byte_length"),"missing text_byte_length");
+}
+
+#[test]
+fn text_c_contains_locale_case_conversion() {
+    // BACKLOG item 117 — real Unicode-aware case conversion (Windows via
+    // ICU's icuuc.dll, same loading pattern as item 118's icuin.dll), plus
+    // the plain ASCII fallback used unchanged on POSIX for the no-locale
+    // functions and as a locale-error path for the new locale ones.
+    assert!(TEXT_C.contains("certo_text_to_upper_locale"), "missing certo_text_to_upper_locale");
+    assert!(TEXT_C.contains("certo_text_to_lower_locale"), "missing certo_text_to_lower_locale");
+    assert!(TEXT_C.contains("u_strToUpper"), "missing ICU u_strToUpper binding");
+    assert!(TEXT_C.contains("u_strToLower"), "missing ICU u_strToLower binding");
+    assert!(TEXT_C.contains("icuuc.dll"), "missing icuuc.dll load");
+    assert!(TEXT_C.contains("not available on this platform yet"), "missing POSIX not-available error");
 }
 
 #[test]

@@ -152,8 +152,10 @@ Text.eq(a: Text, b: Text): Bool
 Text.contains(s: Text, sub: Text): Bool
 Text.startsWith(s: Text, prefix: Text): Bool
 Text.endsWith(s: Text, suffix: Text): Bool
-Text.toUpper(s: Text): Text
-Text.toLower(s: Text): Text
+Text.toUpper(s: Text): Text                // real Unicode case conversion on Windows (e.g. "straße" -> "STRASSE"); ASCII-only on POSIX
+Text.toLower(s: Text): Text                // same platform note as toUpper
+Text.toUpperLocale(s: Text, locale: Text): Text // locale-conditional casing (e.g. "i" -> "İ" for "tr"); Windows only, panics on POSIX
+Text.toLowerLocale(s: Text, locale: Text): Text // same platform note as toUpperLocale
 Text.trim(s: Text): Text                   // both ends
 Text.trimStart(s: Text): Text              // leading whitespace
 Text.trimEnd(s: Text): Text                // trailing whitespace
@@ -631,6 +633,7 @@ Http.delete(url: Text): HttpResponse [io]
 ```
 HttpResponse.status(r: HttpResponse): Int
 HttpResponse.body(r: HttpResponse): Text
+HttpResponse.bodyLength(r: HttpResponse): Int // binary-safe response byte count
 HttpResponse.contentType(r: HttpResponse): Text
 HttpResponse.ok(r: HttpResponse): Bool       // status in 200–299
 ```

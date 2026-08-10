@@ -472,6 +472,13 @@ pub fn seed_stdlib(env: &mut TypeEnv, counter: &mut u32) {
     def!("Text.endsWith",   fn2(Ty::Text, Ty::Text, Ty::Bool));
     def!("Text.toUpper",    fn1(Ty::Text, Ty::Text));
     def!("Text.toLower",    fn1(Ty::Text, Ty::Text));
+    // Locale-aware case conversion — BACKLOG item 117. Real, ICU-backed
+    // implementation on Windows; a clear runtime error on POSIX (no
+    // OS-bundled Unicode library there, and a dlopen-based path couldn't
+    // be verified end-to-end in this dev environment — see
+    // crates/stdlib/src/text.rs's certo_text_to_upper_locale).
+    def!("Text.toUpperLocale", fn2(Ty::Text, Ty::Text, Ty::Text));
+    def!("Text.toLowerLocale", fn2(Ty::Text, Ty::Text, Ty::Text));
     def!("Text.trim",       fn1(Ty::Text, Ty::Text));
     def!("Text.trimStart",  fn1(Ty::Text, Ty::Text));
     def!("Text.trimEnd",    fn1(Ty::Text, Ty::Text));
@@ -971,6 +978,7 @@ pub fn seed_stdlib(env: &mut TypeEnv, counter: &mut u32) {
         // HttpResponse accessors
         def!("HttpResponse.status",      fn1(hr(), Ty::Int));
         def!("HttpResponse.body",        fn1(hr(), Ty::Text));
+        def!("HttpResponse.bodyLength",  fn1(hr(), Ty::Int));
         def!("HttpResponse.contentType", fn1(hr(), Ty::Text));
         def!("HttpResponse.ok",          fn1(hr(), Ty::Bool));
 
@@ -1125,6 +1133,8 @@ pub fn seed_stdlib(env: &mut TypeEnv, counter: &mut u32) {
     pm!("Channel.isClosed",    "channel");
 
     // Text
+    pm!("Text.toUpperLocale", "text", "locale");
+    pm!("Text.toLowerLocale", "text", "locale");
     pm!("Text.concat",     "a", "b");
     pm!("Text.contains",   "text", "sub");
     pm!("Text.startsWith", "text", "prefix");

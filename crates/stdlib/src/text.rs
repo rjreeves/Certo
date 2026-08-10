@@ -5,6 +5,9 @@ pub const TEXT_C: &str = r#"
    ================================================================ */
 
 #include <ctype.h>
+#ifdef _WIN32
+#include <windows.h>
+#endif
 
 int64_t certo_text_len(certo_text_t s) {
     return s ? (int64_t)strlen(s) : 0;
@@ -53,7 +56,15 @@ bool certo_text_ends_with(certo_text_t s, certo_text_t suffix) {
     return strcmp(s + sl - fl, suffix) == 0;
 }
 
-certo_text_t certo_text_to_upper(certo_text_t s) {
+/* ASCII-only case conversion — a byte-at-a-time toupper()/tolower() loop.
+   Correct only for pure-ASCII input: any other byte is passed through
+   unchanged (never *wrong*, since it's a genuine no-op on non-ASCII bytes,
+   but not real Unicode case conversion either — e.g. "straße" stays
+   "STRAßE", not the real "STRASSE"). Used as the real, unchanged POSIX
+   implementation (kept exactly as it always was — this item's own POSIX
+   gap is documented below, not silently papered over) and as a Windows
+   fallback for the vanishingly unlikely case ICU genuinely isn't present. */
+static certo_text_t certo_text_to_upper_ascii(certo_text_t s) {
     if (!s) return "";
     size_t n = strlen(s);
     char* out = (char*)malloc(n + 1);
@@ -62,13 +73,156 @@ certo_text_t certo_text_to_upper(certo_text_t s) {
     return out;
 }
 
-certo_text_t certo_text_to_lower(certo_text_t s) {
+static certo_text_t certo_text_to_lower_ascii(certo_text_t s) {
     if (!s) return "";
     size_t n = strlen(s);
     char* out = (char*)malloc(n + 1);
     if (!out) certo_panic("out of memory");
     for (size_t i = 0; i <= n; i++) out[i] = (char)tolower((unsigned char)s[i]);
     return out;
+}
+
+#ifdef _WIN32
+/* Real Unicode-aware (and, with a non-NULL locale, locale-aware) case
+   conversion via the OS-bundled ICU (`icuuc.dll`, present since Windows 10
+   1903 alongside `icuin.dll` — item 118's own Timezone work already
+   confirmed this bundling and its UNVERSIONED exported symbols, unlike
+   classic ICU4C's documented versioned convention). Loaded the same way:
+   `LoadLibraryA`+`GetProcAddress`, no ICU SDK/headers needed. Handles
+   multi-character expansions (German "ß" -> "SS") a byte-at-a-time
+   toupper()/tolower() cannot express at all — confirmed via Unicode's own
+   SpecialCasing data that this is the *unconditional default* uppercase
+   mapping, not a locale-specific exception, so even the no-locale
+   `certo_text_to_upper` needs it for real correctness — BACKLOG item 117.
+   A POSIX equivalent was investigated and deliberately not attempted: real
+   Linux ICU4C packages export *versioned* symbols (`u_strToUpper_74`, not
+   `u_strToUpper`), unlike Windows' bundle, and this couldn't be verified
+   end-to-end in this dev environment — see `certo_text_to_upper_locale`'s
+   POSIX branch below. */
+typedef uint16_t CertoUCharT;
+typedef int32_t CertoUErrorCodeT;
+typedef int32_t (*certo_u_strToUpper_fn)(CertoUCharT*, int32_t, const CertoUCharT*, int32_t, const char*, CertoUErrorCodeT*);
+typedef int32_t (*certo_u_strToLower_fn)(CertoUCharT*, int32_t, const CertoUCharT*, int32_t, const char*, CertoUErrorCodeT*);
+
+#define CERTO_U_BUFFER_OVERFLOW_ERROR 15
+
+static certo_u_strToUpper_fn __certo_u_strToUpper;
+static certo_u_strToLower_fn __certo_u_strToLower;
+static INIT_ONCE __certo_icuuc_init_once = INIT_ONCE_STATIC_INIT;
+
+static BOOL CALLBACK __certo_icuuc_init(PINIT_ONCE once, PVOID param, PVOID* ctx) {
+    (void)once; (void)param; (void)ctx;
+    HMODULE h = LoadLibraryA("icuuc.dll");
+    if (!h) return TRUE; /* function pointers stay NULL; caller falls back to ASCII */
+    __certo_u_strToUpper = (certo_u_strToUpper_fn)GetProcAddress(h, "u_strToUpper");
+    __certo_u_strToLower = (certo_u_strToLower_fn)GetProcAddress(h, "u_strToLower");
+    return TRUE;
+}
+
+static void __certo_text_ensure_icuuc(void) {
+    InitOnceExecuteOnce(&__certo_icuuc_init_once, __certo_icuuc_init, NULL, NULL);
+}
+
+/* `*out_len` excludes the null terminator (matches ICU's own explicit-
+   length string convention — the output buffer isn't guaranteed to be
+   null-terminated by u_strToUpper/u_strToLower). Returns NULL on failure. */
+static CertoUCharT* __certo_text_utf8_to_utf16_alloc(const char* s, int* out_len) {
+    int wlen = MultiByteToWideChar(CP_UTF8, 0, s, -1, NULL, 0);
+    if (wlen <= 0) { *out_len = 0; return NULL; }
+    CertoUCharT* buf = (CertoUCharT*)malloc((size_t)wlen * sizeof(CertoUCharT));
+    if (!buf) certo_panic("out of memory");
+    MultiByteToWideChar(CP_UTF8, 0, s, -1, (wchar_t*)buf, wlen);
+    *out_len = wlen - 1;
+    return buf;
+}
+
+/* `locale` may be NULL for ICU's locale-independent default mapping
+   (still real Unicode case conversion, e.g. ß -> SS — just not the
+   locale-*conditional* cases like Turkish dotless-i). */
+static certo_text_t __certo_text_case_convert(certo_text_t s, const char* locale, int to_upper) {
+    if (!s) return "";
+    __certo_text_ensure_icuuc();
+    if (to_upper ? !__certo_u_strToUpper : !__certo_u_strToLower) {
+        return to_upper ? certo_text_to_upper_ascii(s) : certo_text_to_lower_ascii(s);
+    }
+
+    int src_len = 0;
+    CertoUCharT* src = __certo_text_utf8_to_utf16_alloc(s, &src_len);
+    if (!src) return to_upper ? certo_text_to_upper_ascii(s) : certo_text_to_lower_ascii(s);
+
+    CertoUErrorCodeT status = 0;
+    int32_t need = to_upper
+        ? __certo_u_strToUpper(NULL, 0, src, src_len, locale, &status)
+        : __certo_u_strToLower(NULL, 0, src, src_len, locale, &status);
+    if (need <= 0) { free(src); return ""; }
+
+    CertoUCharT* dst = (CertoUCharT*)malloc((size_t)need * sizeof(CertoUCharT));
+    if (!dst) certo_panic("out of memory");
+    status = 0;
+    int32_t written = to_upper
+        ? __certo_u_strToUpper(dst, need, src, src_len, locale, &status)
+        : __certo_u_strToLower(dst, need, src, src_len, locale, &status);
+    free(src);
+    if (status > 0 && status != CERTO_U_BUFFER_OVERFLOW_ERROR) {
+        /* Genuine ICU error (e.g. an unrecognized locale tag) — the
+           safest fallback is the original text unchanged, not a crash. */
+        free(dst);
+        return s;
+    }
+
+    int out_len = WideCharToMultiByte(CP_UTF8, 0, (wchar_t*)dst, written, NULL, 0, NULL, NULL);
+    char* out = (char*)malloc((size_t)out_len + 1);
+    if (!out) certo_panic("out of memory");
+    WideCharToMultiByte(CP_UTF8, 0, (wchar_t*)dst, written, out, out_len, NULL, NULL);
+    out[out_len] = '\0';
+    free(dst);
+    return out;
+}
+#endif
+
+certo_text_t certo_text_to_upper(certo_text_t s) {
+#ifdef _WIN32
+    return __certo_text_case_convert(s, NULL, 1);
+#else
+    return certo_text_to_upper_ascii(s);
+#endif
+}
+
+certo_text_t certo_text_to_lower(certo_text_t s) {
+#ifdef _WIN32
+    return __certo_text_case_convert(s, NULL, 0);
+#else
+    return certo_text_to_lower_ascii(s);
+#endif
+}
+
+/* Locale-aware case conversion (BACKLOG item 117) — e.g. certo_text_to_upper_locale(s, "tr")
+   correctly maps "i" to dotless "I" for Turkish, which the locale-independent
+   certo_text_to_upper above does not (that's the whole point of a locale
+   being *conditional*, not part of Unicode's default mapping). Real,
+   ICU-backed implementation on Windows; POSIX has no OS-bundled Unicode
+   library to load and a `dlopen`-based path couldn't be verified
+   end-to-end in this dev environment (see the ICU block above) — a clear
+   runtime error, not a silent no-op or ASCII fallback that would look
+   like it worked while quietly ignoring the locale. */
+certo_text_t certo_text_to_upper_locale(certo_text_t s, certo_text_t locale) {
+#ifdef _WIN32
+    return __certo_text_case_convert(s, locale, 1);
+#else
+    (void)s; (void)locale;
+    certo_panic("locale-aware text case conversion is not available on this platform yet");
+    return "";
+#endif
+}
+
+certo_text_t certo_text_to_lower_locale(certo_text_t s, certo_text_t locale) {
+#ifdef _WIN32
+    return __certo_text_case_convert(s, locale, 0);
+#else
+    (void)s; (void)locale;
+    certo_panic("locale-aware text case conversion is not available on this platform yet");
+    return "";
+#endif
 }
 
 /* ---- Char — a single ASCII byte, same byte-oriented convention as the rest
