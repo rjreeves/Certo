@@ -475,3 +475,22 @@ fn argument_to_another_generic_param_does_not_resolve_and_errors() {
     let result = try_lower(&src);
     assert!(result.is_err(), "expected an error: identity's param is itself generic, no concrete type to resolve against");
 }
+
+#[test]
+fn argument_position_resolves_via_stdlib_param_type_not_just_user_defined() {
+    // Real bug found via end-to-end testing (BACKLOG item 78's own
+    // verification): the argument-position resolution above only checked
+    // `cx.fn_param_tys`, which is populated *exclusively* from user-defined
+    // `fn`/`impl` declarations — a stdlib callee like `println` was never in
+    // it. `println(Box.unwrap(Box.wrap(...)))` silently stayed as the raw
+    // unboxed pointer (no resolution, no error) and printed garbage at
+    // runtime instead of either resolving or failing to compile. Fixed by
+    // also consulting `stdlib_param_types()` (mirroring the existing
+    // `stdlib_ret_types()`, built from the same real `TypeEnv` seeding).
+    let src = format!(
+        "module A\n{}fn f(): Unit [io] = {{\n println(intToText(Box.unwrap(Box.wrap(42))))\n}}",
+        BOX_SRC
+    );
+    let result = try_lower(&src);
+    assert!(result.is_ok(), "expected `intToText`'s stdlib param type (Int) to resolve the bare-T return, got: {:?}", result.err());
+}
