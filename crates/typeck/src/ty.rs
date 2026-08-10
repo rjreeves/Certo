@@ -167,9 +167,29 @@ impl Ty {
     }
 
     /// Apply a substitution map (TyVar → Ty) to this type.
+    ///
+    /// A `Ty::Var(v)` entry recurses into whatever `v` maps to, rather than
+    /// stopping after one lookup — `subst` (built from the union-find's own
+    /// binding map) routinely chains a var to *another* var that only
+    /// resolves further on a second hop (e.g. a generic call's own `T`
+    /// getting unified through a synthesized "expected function type"'s
+    /// fresh return var before that var is separately bound to the real
+    /// argument type). A single-hop lookup left such a var only
+    /// half-resolved, which `TypeEnv::generalise` then misread as "still
+    /// free" and wrongly wrapped in a `Forall` — silently re-instantiating
+    /// a *fresh*, unconstrained variable on every later reference to a
+    /// `val`, discarding the real type entirely. Confirmed as a genuine,
+    /// pre-existing soundness gap by direct testing (not theorized): with
+    /// only the one-hop lookup, `Box<Text>` passed where a `Box<Int>`
+    /// parameter was declared type-checked clean with no error at all.
+    /// Occurs-check (`UnionFind::occurs_check`) already guarantees `subst`
+    /// contains no cycles, so this recursion is guaranteed to terminate.
     pub fn apply_subst(&self, subst: &HashMap<TyVar, Ty>) -> Ty {
         match self {
-            Ty::Var(v) => subst.get(v).cloned().unwrap_or(Ty::Var(*v)),
+            Ty::Var(v) => match subst.get(v) {
+                Some(next) => next.apply_subst(subst),
+                None => Ty::Var(*v),
+            },
 
             Ty::Option(t)     => Ty::Option(Box::new(t.apply_subst(subst))),
             Ty::Result(t, e)  => Ty::Result(Box::new(t.apply_subst(subst)), Box::new(e.apply_subst(subst))),
@@ -363,5 +383,68 @@ mod contains_secret_tests {
         let secret = Ty::Named { name: "Secret".into(), args: vec![Ty::Text] };
         let boxed = Ty::Named { name: "Box".into(), args: vec![secret] };
         assert!(boxed.contains_secret());
+    }
+}
+
+#[cfg(test)]
+mod apply_subst_chain_tests {
+    use super::Ty;
+    use std::collections::HashMap;
+
+    #[test]
+    fn single_hop_still_resolves() {
+        let mut subst = HashMap::new();
+        subst.insert(1u32, Ty::Text);
+        assert_eq!(Ty::Var(1).apply_subst(&subst), Ty::Text);
+    }
+
+    #[test]
+    fn two_hop_chain_resolves_to_the_concrete_type() {
+        // Var(1) -> Var(2) -> Text: a single-hop lookup would stop at
+        // Var(2), which is exactly the bug this fix closes (confirmed via
+        // direct testing: it let `Box<Text>` satisfy a `Box<Int>` parameter
+        // with no type error at all).
+        let mut subst = HashMap::new();
+        subst.insert(1u32, Ty::Var(2));
+        subst.insert(2u32, Ty::Text);
+        assert_eq!(Ty::Var(1).apply_subst(&subst), Ty::Text);
+    }
+
+    #[test]
+    fn chain_resolves_when_nested_inside_a_compound_type() {
+        // The same chain, but as a generic wrapper's own type argument
+        // (Box<Var(1)> where Var(1) -> Var(2) -> Int) — matches how this
+        // bug actually manifested: a call's synthesized return-type var
+        // chained through an intermediate fresh var before reaching the
+        // real argument type.
+        let mut subst = HashMap::new();
+        subst.insert(1u32, Ty::Var(2));
+        subst.insert(2u32, Ty::Int);
+        let boxed = Ty::Named { name: "Box".into(), args: vec![Ty::Var(1)] };
+        assert_eq!(boxed.apply_subst(&subst), Ty::Named { name: "Box".into(), args: vec![Ty::Int] });
+    }
+
+    #[test]
+    fn three_hop_chain_also_resolves() {
+        let mut subst = HashMap::new();
+        subst.insert(1u32, Ty::Var(2));
+        subst.insert(2u32, Ty::Var(3));
+        subst.insert(3u32, Ty::Bool);
+        assert_eq!(Ty::Var(1).apply_subst(&subst), Ty::Bool);
+    }
+
+    #[test]
+    fn unbound_var_stays_a_var() {
+        let subst: HashMap<u32, Ty> = HashMap::new();
+        assert_eq!(Ty::Var(1).apply_subst(&subst), Ty::Var(1));
+    }
+
+    #[test]
+    fn chain_ending_in_an_unbound_var_stays_that_var() {
+        let mut subst = HashMap::new();
+        subst.insert(1u32, Ty::Var(2));
+        // Var(2) is not in subst — the chain should stop there, not panic
+        // or loop.
+        assert_eq!(Ty::Var(1).apply_subst(&subst), Ty::Var(2));
     }
 }
