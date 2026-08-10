@@ -1025,3 +1025,81 @@ fn secret_passed_to_eprint_is_also_rejected() {
     );
 }
 
+// ------------------------------------------------------------------ //
+// Generic type-argument soundness (non-transitive substitution fix,
+// found while implementing BACKLOG item 79 / Permission<T>)
+// ------------------------------------------------------------------ //
+
+const BOX_SRC: &str = "\
+type Box<T> = priv Box(T)
+impl<T> Box {
+    fn wrap(v: T): Box<T> = Box(v)
+}
+";
+
+#[test]
+fn wrong_generic_type_argument_is_rejected() {
+    // Real, confirmed pre-existing soundness bug: a `Box<Text>` local
+    // (bound via a `val` with its own concrete annotation, so its type
+    // passes through a "let"-generalization step) satisfied a `Box<Int>`
+    // parameter with no error at all — `TypeEnv::generalise`'s free-var
+    // check relied on `apply_subst`'s single-hop substitution, which left
+    // the variable chain a generic call's own return-type unification
+    // creates only half-resolved, making a fully-concrete type look "still
+    // free" and get wrongly re-generalized. Confirmed directly: this exact
+    // program used to type-check clean (`certo check` reported `ok`).
+    let src = format!(
+        "module A\n{}fn needsIntBox(b: Box<Int>): Text = \"x\"\nfn f(): Text = {{\n val textBox: Box<Text> = Box.wrap(\"hello\")\n needsIntBox(textBox)\n}}",
+        BOX_SRC
+    );
+    let errs = check_err(&src);
+    assert!(!errs.is_empty(), "Box<Text> must not satisfy a Box<Int> parameter");
+}
+
+#[test]
+fn matching_generic_type_argument_is_still_accepted() {
+    // The fix must not become overly strict — the correct instantiation
+    // still has to type-check.
+    let src = format!(
+        "module A\n{}fn needsIntBox(b: Box<Int>): Text = \"x\"\nfn f(): Text = {{\n val intBox: Box<Int> = Box.wrap(42)\n needsIntBox(intBox)\n}}",
+        BOX_SRC
+    );
+    assert!(check(&src).is_ok(), "Box<Int> must still satisfy a Box<Int> parameter");
+}
+
+// ------------------------------------------------------------------ //
+// Permission<T> phantom-type role authorization (BACKLOG item 79)
+// ------------------------------------------------------------------ //
+
+const PERMISSION_SRC: &str = "\
+type Admin = | Admin
+type Viewer = | Viewer
+type Permission<T> = priv Permission(T)
+impl<T> Permission {
+    fn wrap(v: T): Permission<T> = Permission(v)
+    fn expose(p: Permission<T>): T = match p { Permission(v) => v }
+}
+";
+
+#[test]
+fn matching_permission_role_is_accepted() {
+    let src = format!(
+        "module A\n{}fn deleteUser(id: Int, _auth: Permission<Admin>): Text = \"deleted\"\nfn f(): Text = {{\n val adminAuth: Permission<Admin> = Permission.wrap(Admin)\n deleteUser(42, adminAuth)\n}}",
+        PERMISSION_SRC
+    );
+    assert!(check(&src).is_ok(), "Permission<Admin> must satisfy a Permission<Admin> parameter");
+}
+
+#[test]
+fn wrong_permission_role_is_rejected() {
+    // The actual point of the feature: a Permission<Viewer> must not
+    // satisfy a Permission<Admin> parameter — this is exactly the case
+    // that was silently accepted before the apply_subst chain fix above.
+    let src = format!(
+        "module A\n{}fn deleteUser(id: Int, _auth: Permission<Admin>): Text = \"deleted\"\nfn f(): Text = {{\n val viewerAuth: Permission<Viewer> = Permission.wrap(Viewer)\n deleteUser(42, viewerAuth)\n}}",
+        PERMISSION_SRC
+    );
+    let errs = check_err(&src);
+    assert!(!errs.is_empty(), "Permission<Viewer> must not satisfy a Permission<Admin> parameter");
+}
+
