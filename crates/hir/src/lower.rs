@@ -152,6 +152,31 @@ fn stdlib_ret_types() -> &'static HashMap<String, Ty> {
     })
 }
 
+/// Declared param types for stdlib functions, keyed the same way
+/// `stdlib_ret_types()` is (built from the same real `TypeEnv` seeding, not
+/// hand-maintained) — lets bare-generic-return argument-position resolution
+/// (`resolve_bare_generic_return`, BACKLOG item 135) see a *stdlib* callee's
+/// declared param type, not just a user-defined one via `cx.fn_param_tys`.
+/// Without this, `println(Secret.expose(s))` neither resolved nor errored —
+/// it silently stayed as the raw unboxed pointer and printed garbage,
+/// confirmed by direct testing; `cx.fn_param_tys` only ever covers
+/// user-defined `fn`/`impl` declarations, never stdlib signatures.
+fn stdlib_param_types() -> &'static HashMap<String, Vec<Ty>> {
+    static TABLE: OnceLock<HashMap<String, Vec<Ty>>> = OnceLock::new();
+    TABLE.get_or_init(|| {
+        let mut env = certo_typeck::TypeEnv::new();
+        let mut counter = 0u32;
+        certo_stdlib::seed_stdlib(&mut env, &mut counter);
+        env.names()
+            .into_iter()
+            .filter_map(|name| match env.lookup(&name) {
+                Some(Ty::Fn { params, .. }) => Some((name, params.clone())),
+                _ => None,
+            })
+            .collect()
+    })
+}
+
 /// Return types for generic stdlib functions whose result depends on an
 /// argument's element type (e.g. `List.get<T>(List<T>, Int): T?`). Recovering
 /// the element type lets the caller unbox the payload correctly (Float bits).
@@ -783,7 +808,9 @@ fn lower_expr(expr: &S<Expr>, cx: &mut Cx) -> HirExpr {
             // concrete type it should be.
             let declared_params: Option<&Vec<Ty>> = fn_full_path.as_deref()
                 .and_then(|fp| cx.fn_param_tys.get(fp))
-                .or_else(|| cx.fn_param_tys.get(short));
+                .or_else(|| cx.fn_param_tys.get(short))
+                .or_else(|| fn_full_path.as_deref().and_then(|fp| stdlib_param_types().get(fp)))
+                .or_else(|| stdlib_param_types().get(short));
             if let Some(declared) = declared_params {
                 let declared = declared.clone();
                 for (i, arg) in lowered_args.iter_mut().enumerate() {
