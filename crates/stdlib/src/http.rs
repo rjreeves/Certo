@@ -13,14 +13,16 @@ pub const HTTP_C: &str = r#"
 typedef struct {
     int64_t      status;
     certo_text_t body;
+    int64_t      body_length;
     certo_text_t content_type;
 } CertoHttpResponse;
 
-static CertoHttpResponse* http_response_new(int64_t status, char* body, char* ct) {
+static CertoHttpResponse* http_response_new(int64_t status, char* body, int64_t body_length, char* ct) {
     CertoHttpResponse* r = (CertoHttpResponse*)malloc(sizeof(CertoHttpResponse));
     if (!r) certo_panic("out of memory");
     r->status       = status;
     r->body         = body ? body : (char*)"";
+    r->body_length  = body_length;
     r->content_type = ct   ? ct   : (char*)"";
     return r;
 }
@@ -99,7 +101,7 @@ static CertoHttpResponse* winhttp_request(
     size_t body_len
 ) {
     ParsedUrl pu = {0};
-    if (!parse_url(url, &pu)) return http_response_new(0, NULL, NULL);
+    if (!parse_url(url, &pu)) return http_response_new(0, NULL, 0, NULL);
 
     LPWSTR w_host   = utf8_to_wide(pu.host);
     LPWSTR w_path   = utf8_to_wide(pu.path);
@@ -168,7 +170,7 @@ static CertoHttpResponse* winhttp_request(
     if (!body_out) { body_out = (char*)malloc(1); if (!body_out) certo_panic("out of memory"); }
     body_out[body_pos] = '\0';
 
-    result = http_response_new((int64_t)status_code, body_out, ct);
+    result = http_response_new((int64_t)status_code, body_out, (int64_t)body_pos, ct);
 
     WinHttpCloseHandle(hreq);
     WinHttpCloseHandle(hconn);
@@ -177,7 +179,7 @@ static CertoHttpResponse* winhttp_request(
 cleanup:
     free(w_host); free(w_path); free(w_method);
     free(pu.host); free(pu.path);
-    if (!result) result = http_response_new(0, NULL, NULL);
+    if (!result) result = http_response_new(0, NULL, 0, NULL);
     return result;
 }
 
@@ -274,6 +276,7 @@ CertoHttpResponse* certo_http_request_bytes(certo_text_t method, certo_text_t ur
 
 int64_t      certo_http_response_status      (CertoHttpResponse* r) { return r ? r->status       : 0; }
 certo_text_t certo_http_response_body        (CertoHttpResponse* r) { return r ? r->body         : ""; }
+int64_t      certo_http_response_body_length (CertoHttpResponse* r) { return r ? r->body_length  : 0; }
 certo_text_t certo_http_response_content_type(CertoHttpResponse* r) { return r ? r->content_type : ""; }
 bool         certo_http_response_ok          (CertoHttpResponse* r) { return r && r->status >= 200 && r->status < 300; }
 
@@ -310,7 +313,7 @@ CertoHttpResponse* certo_http_respond(int64_t status, certo_text_t body, certo_t
         if (!c) certo_panic("out of memory");
         memcpy(c, ct, n + 1);
     }
-    return http_response_new(status, b, c);
+    return http_response_new(status, b, body ? (int64_t)strlen(body) : 0, c);
 }
 
 CertoHttpResponse* certo_http_ok        (certo_text_t body, certo_text_t ct)  { return certo_http_respond(200, body, ct); }
