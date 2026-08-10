@@ -23,6 +23,7 @@ pub fn fmt_decl(decl: &Decl, indent: usize) -> String {
         Decl::ValidatorTest(vt) => fmt_validator_test(vt),
         Decl::View(v)           => fmt_view(v, indent),
         Decl::Form(f)           => fmt_form(f, indent),
+        Decl::UiGenerate(g)     => fmt_ui_generate(g, indent),
         Decl::Import(i)         => format!("import {}", i.path.join(".")),
     }
 }
@@ -294,4 +295,16 @@ fn fmt_view(v: &ViewDecl, indent: usize) -> String {
 
 fn fmt_form(f: &FormDecl, indent: usize) -> String {
     format!("form {} {{\n{}    // ...\n{}}}", f.name.node, ind(indent), ind(indent))
+}
+
+fn fmt_ui_generate(g: &certo_ast::decl::UiGenerateDecl, indent: usize) -> String {
+    let mut out = format!("@ui.generate({}) {{\n", g.type_name.node);
+    if let Some(title) = &g.title {
+        out.push_str(&format!("{}    title: \"{}\"\n", ind(indent), title));
+    }
+    if !g.columns.is_empty() {
+        out.push_str(&format!("{}    list: {{ columns: [{}] }}\n", ind(indent), g.columns.join(", ")));
+    }
+    out.push_str(&format!("{}}}", ind(indent)));
+    out
 }

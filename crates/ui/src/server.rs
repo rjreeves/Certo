@@ -12,13 +12,14 @@
 //! Each `form` becomes a GET route (empty form) and a POST route (INSERT to DB).
 
 use std::fmt::Write as FmtWrite;
-use certo_ast::decl::{Decl, ViewDecl, FormDecl};
+use certo_ast::decl::{Decl, ViewDecl, FormDecl, TypeBody, RecordFieldDef, UiGenerateDecl};
 use certo_ast::expr::{Expr, Stmt};
 use certo_ast::module::Module;
 use certo_ast::span::S;
 use crate::error::UiError;
 
-/// Entry point — compile all `view`/`form` decls to a single `server.cto` string.
+/// Entry point — compile all `view`/`form` decls (including any lowered
+/// from `@ui.generate`, BACKLOG item 87) to a single `server.cto` string.
 pub fn emit_server(module: &Module) -> Result<String, UiError> {
     let mod_name = module.path.segments.last()
         .map(|s| s.node.as_str())
@@ -26,8 +27,21 @@ pub fn emit_server(module: &Module) -> Result<String, UiError> {
 
     let mut views: Vec<&ViewDecl> = vec![];
     let mut forms: Vec<&FormDecl> = vec![];
+    // Owned storage for view/form decls lowered from `@ui.generate` — must
+    // outlive the loop below so `views`/`forms` can hold references into it.
+    let mut generated: Vec<S<Decl>> = vec![];
 
     for sd in &module.decls {
+        match &sd.node {
+            Decl::View(v) => views.push(v),
+            Decl::Form(f) => forms.push(f),
+            Decl::UiGenerate(g) => {
+                generated.extend(lower_ui_generate(g, module)?);
+            }
+            _ => {}
+        }
+    }
+    for sd in &generated {
         match &sd.node {
             Decl::View(v) => views.push(v),
             Decl::Form(f) => forms.push(f),
@@ -237,13 +251,13 @@ fn emit_view_handler(v: &ViewDecl, forms: &[&FormDecl], _all_views: &[&ViewDecl]
         if let Some(ref fc) = filter_col {
             writeln!(out, "    val _qry   = HttpRequest.query(req)").unwrap();
             writeln!(out, "    val _fval  = formField(_qry, \"{fc}\")").unwrap();
-            writeln!(out, "    val _p0    = List.empty").unwrap();
+            writeln!(out, "    val _p0    = List.empty()").unwrap();
             writeln!(out, "    val _p1    = List.push(_p0, _fval)").unwrap();
             writeln!(out, "    val cols   = dbColumns(conn, \"SELECT * FROM {table} ORDER BY 1\")").unwrap();
             writeln!(out, "    val rows   = dbQuery(conn, sql, _p1)").unwrap();
         } else {
             writeln!(out, "    val cols   = dbColumns(conn, sql)").unwrap();
-            writeln!(out, "    val rows   = dbQuery(conn, sql, List.empty)").unwrap();
+            writeln!(out, "    val rows   = dbQuery(conn, sql, List.empty())").unwrap();
         }
         writeln!(out, "    dbClose(conn)").unwrap();
 
@@ -399,7 +413,7 @@ fn emit_form_get_handler(f: &FormDecl, out: &mut String) {
             writeln!(out, "    val _qry  = HttpRequest.query(req)").unwrap();
             writeln!(out, "    val _id   = formField(_qry, \"id\")").unwrap();
             writeln!(out, "    val conn  = dbConnect(dbUrl())").unwrap();
-            writeln!(out, "    val _p0   = List.empty").unwrap();
+            writeln!(out, "    val _p0   = List.empty()").unwrap();
             writeln!(out, "    val _p1   = List.push(_p0, _id)").unwrap();
             writeln!(out, "    val _rows = dbQuery(conn, \"SELECT * FROM {table} WHERE {pk_col} = $1 LIMIT 1\", _p1)").unwrap();
             writeln!(out, "    val _cols = dbColumns(conn, \"SELECT * FROM {table} LIMIT 1\")").unwrap();
@@ -513,7 +527,7 @@ fn emit_form_post_handler(f: &FormDecl, out: &mut String) {
         writeln!(out, "    val {fname} = formField(body, \"{fname}\")").unwrap();
     }
 
-    writeln!(out, "    val _p0 = List.empty").unwrap();
+    writeln!(out, "    val _p0 = List.empty()").unwrap();
     for (i, field) in f.fields.iter().enumerate() {
         let fname = &field.name.node;
         writeln!(out, "    val _p{} = List.push(_p{}, {})", i + 1, i, fname).unwrap();
@@ -676,6 +690,85 @@ fn infer_input_type(name: &str, _ft: &Option<certo_ast::span::S<certo_ast::expr:
     "text"
 }
 
+// ------------------------------------------------------------------ //
+// `@ui.generate` lowering (BACKLOG item 87)
+// ------------------------------------------------------------------ //
+
+fn find_type_fields<'a>(module: &'a Module, type_name: &str) -> Option<&'a [RecordFieldDef]> {
+    module.decls.iter().find_map(|d| match &d.node {
+        Decl::Type(t) if t.name.node == type_name => match &t.body {
+            TypeBody::Record(r) => Some(r.fields.as_slice()),
+            _ => None,
+        },
+        _ => None,
+    })
+}
+
+/// Lower one `@ui.generate(Type) { title, list: { columns } }` into real
+/// `view`/`form` declarations, by generating Certo *source text* in the
+/// same shape a hand-written CRUD UI already uses (see e.g.
+/// `examples/fireworks_ui.cto`'s `view CustomerList { ... For(customers,
+/// customer) }` + `form CreateCustomer -> Customer { ... }` pair) and
+/// re-parsing it — reusing the real parser instead of hand-building AST
+/// nodes, and guaranteeing the output is exactly as valid as anything a
+/// user could type themselves.
+///
+/// Scope notes (BACKLOG item 87 — each of these is a real, currently-
+/// missing capability, not just an unwired flag):
+/// - The list view always `SELECT *`s and displays every DB column
+///   (`emit_view_handler`'s existing behavior, unchanged) — `list.columns`
+///   is honored for the *create/edit forms'* field set, not to restrict
+///   the rendered table, since no column-restriction mechanism exists in
+///   the list-view codegen at all.
+/// - An edit form is only generated when the type has a field literally
+///   named `id` (case-insensitive) — used as the primary key. There's no
+///   way to know a type's real primary key otherwise (Certo's `type X =
+///   { ... }` doesn't mark one), and guessing wrong would generate a form
+///   that edits/looks up the wrong row, a real correctness risk, not just
+///   a missing feature — so it's skipped rather than guessed.
+fn lower_ui_generate(g: &UiGenerateDecl, module: &Module) -> Result<Vec<S<Decl>>, UiError> {
+    let type_name = &g.type_name.node;
+    let fields = find_type_fields(module, type_name).ok_or_else(|| {
+        UiError::ParseError(format!(
+            "@ui.generate({type_name}): no `type {type_name} = {{ ... }}` record declaration found in this module"
+        ))
+    })?;
+
+    let all_field_names: Vec<String> = fields.iter().map(|f| f.name.node.clone()).collect();
+    let form_fields: Vec<String> = if g.columns.is_empty() { all_field_names.clone() } else { g.columns.clone() };
+    let id_field = all_field_names.iter().find(|f| f.eq_ignore_ascii_case("id")).cloned();
+
+    let title = g.title.clone().unwrap_or_else(|| format!("{type_name}s"));
+    let lower = type_name.to_lowercase();
+
+    let mut src = String::new();
+    src.push_str("module _UiGenerate\n");
+    src.push_str(&format!(
+        "view {type_name}List {{\n    layout = VStack(children: [\n        Heading(\"{title}\"),\n        HStack(children: [\n            Button(\"New {type_name}\", \"/create-{lower}\"),\n        ]),\n        For(items, {type_name}),\n    ])\n}}\n"
+    ));
+    src.push_str(&format!("form Create{type_name} -> {type_name} {{\n"));
+    for f in &form_fields {
+        src.push_str(&format!("    {f}: Text,\n"));
+    }
+    src.push_str("}\n");
+    if let Some(id) = &id_field {
+        src.push_str(&format!("form Edit{type_name} -> {type_name} {{\n    pk: {id},\n"));
+        for f in &form_fields {
+            if f != id {
+                src.push_str(&format!("    {f}: Text,\n"));
+            }
+        }
+        src.push_str("}\n");
+    }
+
+    let parsed = certo_parser::parse(&src).map_err(|errs| {
+        UiError::ParseError(format!(
+            "@ui.generate({type_name}) produced invalid internal source (this is a codegen bug, not a problem with your annotation): {errs:?}"
+        ))
+    })?;
+    Ok(parsed.decls)
+}
+
 // This file had zero test coverage before item 88 (BACKLOG's own note on
 // that item flagged it explicitly) — starting real coverage here, not just
 // for the `live val` comment this item's own change touches.
@@ -714,5 +807,89 @@ mod tests {
         // grow a stray comment about bindings that don't exist.
         let out = server_source("module M\nview Home {\n layout = Text(\"Hi\")\n}");
         assert!(!out.contains("live bindings"), "unexpected live-binding comment\n{}", out);
+    }
+
+    // ------------------------------------------------------------------ //
+    // `@ui.generate` lowering (BACKLOG item 87)
+    // ------------------------------------------------------------------ //
+
+    const PRODUCT_SRC: &str = "\
+type Product = { id: Text, name: Text, sku: Text }
+@ui.generate(Product) {
+    title: \"Products\"
+    list: { columns: [name, sku] }
+}
+";
+
+    #[test]
+    fn ui_generate_creates_list_route_and_create_form() {
+        let out = server_source(&format!("module M\n{PRODUCT_SRC}"));
+        assert!(out.contains("fn handleProductList"), "missing list handler\n{out}");
+        assert!(out.contains("/product-list"), "missing list route\n{out}");
+        assert!(out.contains("fn handleCreateProductGet"), "missing create-get handler\n{out}");
+        assert!(out.contains("fn handleCreateProductPost"), "missing create-post handler\n{out}");
+        // list.columns determines the create form's fields, not the list
+        // table's displayed columns (no such restriction mechanism exists
+        // in emit_view_handler — see lower_ui_generate's own doc comment).
+        assert!(out.contains("\"name\""), "create form missing `name` field\n{out}");
+        assert!(out.contains("\"sku\""), "create form missing `sku` field\n{out}");
+    }
+
+    #[test]
+    fn ui_generate_with_id_field_also_creates_edit_form() {
+        let out = server_source(&format!("module M\n{PRODUCT_SRC}"));
+        assert!(out.contains("fn handleEditProductGet"), "missing edit-get handler\n{out}");
+        assert!(out.contains("fn handleEditProductPost"), "missing edit-post handler\n{out}");
+        assert!(out.contains("/edit-product"), "missing edit route\n{out}");
+    }
+
+    #[test]
+    fn ui_generate_without_id_field_skips_edit_form() {
+        // No reliable way to know a type's real primary key without an
+        // `id` field — generating an edit form anyway would risk editing
+        // the wrong row, so it's skipped rather than guessed.
+        let out = server_source(
+            "module M\ntype Widget = { name: Text, color: Text }\n@ui.generate(Widget) {}"
+        );
+        assert!(out.contains("fn handleWidgetList"), "missing list handler\n{out}");
+        assert!(out.contains("fn handleCreateWidgetGet"), "missing create handler\n{out}");
+        assert!(!out.contains("handleEditWidget"), "must not fabricate an edit form with no known pk\n{out}");
+    }
+
+    #[test]
+    fn ui_generate_defaults_title_and_uses_all_fields_when_unspecified() {
+        let out = server_source(
+            "module M\ntype Widget = { id: Text, name: Text, color: Text }\n@ui.generate(Widget) {}"
+        );
+        assert!(out.contains("Widget List") || out.contains("Widgets"), "expected a default title\n{out}");
+        assert!(out.contains("\"name\"") && out.contains("\"color\""), "expected all fields used as form fields by default\n{out}");
+    }
+
+    #[test]
+    fn ui_generate_referencing_unknown_type_is_a_clear_error() {
+        let m = parse("module M\n@ui.generate(Nonexistent) {}").expect("parse");
+        let err = emit_server(&m).expect_err("expected an error for an unknown type");
+        assert!(matches!(err, UiError::ParseError(ref s) if s.contains("Nonexistent")), "got: {err:?}");
+    }
+
+    #[test]
+    fn ui_generate_output_never_calls_list_empty_as_a_bare_value() {
+        // Regression test for a real bug found via end-to-end testing
+        // (BACKLOG item 87's own verification): `List.empty` is a zero-arg
+        // *function* (`Ty::Fn { params: vec![], .. }`, `crates/stdlib/src/
+        // seed.rs`), not a value — used bare (no `()`) at 4 call sites in
+        // this file, it type-checked as "expected a function, found
+        // List<T>" and failed to compile. Pre-existing, not specific to
+        // `@ui.generate` (any hand-written view+form pair with an
+        // unfiltered list and a form hits the same code paths), but only
+        // surfaced once something actually compiled the generated output
+        // instead of just eyeballing it.
+        let out = server_source(&format!("module M\n{PRODUCT_SRC}"));
+        for line in out.lines() {
+            if let Some(idx) = line.find("List.empty") {
+                let after = &line[idx + "List.empty".len()..];
+                assert!(after.starts_with('('), "found bare `List.empty` (missing call parens): {line}");
+            }
+        }
     }
 }

@@ -10,6 +10,10 @@ use crate::parse_pattern::parse_pattern;
 
 pub fn parse_decl(cur: &mut Cursor<'_>) -> Result<S<Decl>, ParseError> {
     let span = cur.peek_span();
+    if let Some(d) = try_parse_ui_generate(cur)? {
+        let s = d.span;
+        return Ok(S::new(Decl::UiGenerate(d), s));
+    }
     let export_name = parse_export_annotation(cur)?;
     let is_pub = cur.eat(|t| matches!(t, Token::Pub)).is_some();
 
@@ -137,6 +141,106 @@ pub fn parse_decl(cur: &mut Cursor<'_>) -> Result<S<Decl>, ParseError> {
 /// for FFI interop. No general `@`-annotation system exists yet — this is
 /// parsed narrowly for just this one form, matching the spec's only
 /// documented usage (`docs/Certo_Language_Specification.md` §12.3).
+/// `@ui.generate(TypeName) { title: "...", list: { columns: [...] } }` —
+/// BACKLOG item 87. Deliberately a standalone `@`-form recognized by exact
+/// dotted name (`@` `ui` `.` `generate`), not a general annotation system —
+/// `@export("name")` (`parse_export_annotation` below) is the only other
+/// `@`-form, and it's just as narrowly hardcoded to its own exact shape.
+/// Returns `Ok(None)` without consuming anything if the tokens don't match
+/// (so `@export(...)` still parses normally afterward); only commits once
+/// `@ui.generate` is confirmed present.
+fn try_parse_ui_generate(cur: &mut Cursor<'_>) -> Result<Option<UiGenerateDecl>, ParseError> {
+    let is_ui_generate = matches!(cur.peek(), Some(Token::At))
+        && matches!(cur.peek2(), Some(Token::Ident(s)) if *s == "ui")
+        && matches!(cur.peek3(), Some(Token::Dot))
+        && matches!(cur.peek4(), Some(Token::Ident(s)) if *s == "generate");
+    if !is_ui_generate {
+        return Ok(None);
+    }
+    let (_, at_span) = cur.bump().unwrap(); // @
+    cur.bump(); // ui
+    cur.bump(); // .
+    cur.bump(); // generate
+
+    cur.expect(&Token::LParen)?;
+    let (type_name, type_name_span) = cur.expect_ident()?;
+    cur.expect(&Token::RParen)?;
+
+    let mut title: Option<String> = None;
+    let mut columns: Vec<String> = Vec::new();
+
+    cur.expect(&Token::LBrace)?;
+    loop {
+        if cur.peek() == Some(&Token::RBrace) { break; }
+        let (key, key_span) = cur.expect_ident()?;
+        match key.as_str() {
+            "title" => {
+                cur.expect(&Token::Colon)?;
+                let (tok, tok_span) = cur.bump().ok_or(ParseError { kind: ParseErrorKind::UnexpectedEof, span: key_span })?;
+                let Token::StringLit(s) = tok else {
+                    return Err(ParseError {
+                        kind: ParseErrorKind::Expected { expected: "string literal".into(), found: format!("{tok:?}") },
+                        span: tok_span,
+                    });
+                };
+                title = Some(s.to_string());
+            }
+            "list" => {
+                cur.expect(&Token::Colon)?;
+                cur.expect(&Token::LBrace)?;
+                loop {
+                    if cur.peek() == Some(&Token::RBrace) { break; }
+                    let (subkey, subkey_span) = cur.expect_ident()?;
+                    match subkey.as_str() {
+                        "columns" => {
+                            cur.expect(&Token::Colon)?;
+                            cur.expect(&Token::LBracket)?;
+                            loop {
+                                if cur.peek() == Some(&Token::RBracket) { break; }
+                                let (col, _) = cur.expect_ident()?;
+                                columns.push(col);
+                                cur.eat(|t| matches!(t, Token::Comma));
+                            }
+                            cur.expect(&Token::RBracket)?;
+                        }
+                        // `sortable`/`filterable`/`searchable` are real spec
+                        // fields, deliberately not accepted here — each needs
+                        // codegen capability that doesn't exist yet
+                        // (BACKLOG item 87), so rejecting them clearly beats
+                        // silently accepting and ignoring them.
+                        other => return Err(ParseError {
+                            kind: ParseErrorKind::Custom(format!(
+                                "`@ui.generate`'s `list` block does not support `{other}` yet — only `columns` is implemented"
+                            )),
+                            span: subkey_span,
+                        }),
+                    }
+                    cur.eat(|t| matches!(t, Token::Comma));
+                }
+                cur.expect(&Token::RBrace)?;
+            }
+            // `detail`/`form`/`permissions` are real spec fields, same
+            // reasoning as `sortable`/etc. above — not implemented, and
+            // rejected rather than silently ignored.
+            other => return Err(ParseError {
+                kind: ParseErrorKind::Custom(format!(
+                    "`@ui.generate` does not support `{other}` yet — only `title` and `list.columns` are implemented"
+                )),
+                span: key_span,
+            }),
+        }
+        cur.eat(|t| matches!(t, Token::Comma));
+    }
+    let end = cur.expect(&Token::RBrace)?;
+
+    Ok(Some(UiGenerateDecl {
+        type_name: S::new(type_name, type_name_span),
+        title,
+        columns,
+        span: at_span.to(end),
+    }))
+}
+
 fn parse_export_annotation(cur: &mut Cursor<'_>) -> Result<Option<String>, ParseError> {
     if cur.eat(|t| matches!(t, Token::At)).is_none() {
         return Ok(None);

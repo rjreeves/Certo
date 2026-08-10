@@ -54,6 +54,9 @@ pub enum Decl {
     /// `form Name { ... }`
     Form(FormDecl),
 
+    /// `@ui.generate(TypeName) { title: "...", list: { columns: [...] } }`
+    UiGenerate(UiGenerateDecl),
+
     /// `test "name" { ... }`
     Test(TestDecl),
 
@@ -412,6 +415,22 @@ pub struct ViewDecl {
     pub layout:    S<Expr>,
     pub pk:        Option<String>,   // primary key column (camelCase field name)
     pub filter_by: Option<String>,   // FK column to filter on (?field=X in URL)
+    pub span:      Span,
+}
+
+/// `@ui.generate(TypeName) { title: "...", list: { columns: [...] } }` —
+/// BACKLOG item 87, deliberately scoped to a single list view + create/edit
+/// forms lowered from the annotated type's own fields. The spec's fuller
+/// example (`sortable`/`filterable`/`searchable` columns, a `detail:`
+/// section view, separate `form.create`/`form.edit` field sets, and a
+/// `permissions:` block) each need real, currently-nonexistent capability
+/// in `crates/ui` — not attempted here, not silently accepted either (the
+/// parser rejects any key besides `title`/`list.columns`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct UiGenerateDecl {
+    pub type_name: Ident,
+    pub title:     Option<String>,
+    pub columns:   Vec<String>,
     pub span:      Span,
 }
 

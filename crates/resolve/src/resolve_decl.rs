@@ -24,6 +24,7 @@ pub fn resolve_decl(decl: &S<Decl>, scope: &mut ScopeChain) {
         Decl::Migration(_) => {}  // Migration ops resolved by the migration tool.
         Decl::View(v) => resolve_expr(&v.layout, scope),
         Decl::Form(_) => {}
+        Decl::UiGenerate(_) => {}  // No expressions to resolve — just a type name and literals.
         Decl::Test(t) => {
             scope.push();
             resolve_expr(&t.body, scope);

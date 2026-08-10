@@ -1031,3 +1031,56 @@ fn live_val_reuses_ordinary_val_syntax_including_type_annotation() {
     assert_eq!(v.live.len(), 1);
     assert!(v.live[0].ty.is_some());
 }
+
+// ------------------------------------------------------------------ //
+// `@ui.generate` (BACKLOG item 87 — parsing only, lowering is in crates/ui)
+// ------------------------------------------------------------------ //
+
+fn parse_ui_generate_decl(src: &str) -> certo_ast::decl::UiGenerateDecl {
+    let m = ok(src);
+    m.decls.iter().find_map(|d| match &d.node {
+        Decl::UiGenerate(g) => Some(g.clone()),
+        _ => None,
+    }).expect("expected a @ui.generate decl")
+}
+
+#[test]
+fn ui_generate_parses_type_name_title_and_columns() {
+    let g = parse_ui_generate_decl(
+        "module A\n@ui.generate(Product) {\n title: \"Products\"\n list: { columns: [name, sku, price] }\n}"
+    );
+    assert_eq!(g.type_name.node, "Product");
+    assert_eq!(g.title.as_deref(), Some("Products"));
+    assert_eq!(g.columns, vec!["name", "sku", "price"]);
+}
+
+#[test]
+fn ui_generate_with_empty_block_has_no_title_or_columns() {
+    let g = parse_ui_generate_decl("module A\n@ui.generate(Product) {}");
+    assert_eq!(g.type_name.node, "Product");
+    assert_eq!(g.title, None);
+    assert!(g.columns.is_empty());
+}
+
+#[test]
+fn ui_generate_rejects_unsupported_list_key() {
+    err("module A\n@ui.generate(Product) {\n list: { sortable: [name] }\n}");
+}
+
+#[test]
+fn ui_generate_rejects_unsupported_top_level_key() {
+    err("module A\n@ui.generate(Product) {\n permissions: { view: [Admin] }\n}");
+}
+
+#[test]
+fn export_annotation_still_parses_after_ui_generate_lookahead() {
+    // The new `@ui.generate` lookahead in `parse_decl` must not disturb
+    // the pre-existing `@export("name")` path for anything that isn't
+    // `@ui.generate` specifically.
+    ok("module A\n@export(\"add\")\npub fn add(a: Int, b: Int): Int = a + b");
+}
+
+#[test]
+fn unknown_at_annotation_still_errors_as_before() {
+    err("module A\n@bogus(\"x\")\npub fn f(): Int = 1");
+}
