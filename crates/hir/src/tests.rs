@@ -367,17 +367,24 @@ fn query_first_return_type_is_option_of_mapper_return_type() {
 // ------------------------------------------------------------------ //
 
 #[test]
-fn lambda_capturing_outer_local_is_rejected() {
-    // Closures were never actually implemented — a lambda body referencing an
-    // outer local previously compiled silently and read garbage memory at
-    // runtime (confirmed via direct testing: a different wrong value on every
-    // run). Must now be a real, reported HIR lowering error, not a panic or
-    // a silent Ok.
-    let result = try_lower(
+fn lambda_capturing_outer_local_is_accepted_and_recorded() {
+    // BACKLOG item 140: real closure capture superseded item 136's interim
+    // "reject any capture" compile error — a lambda referencing an outer
+    // local must now lower cleanly, with the captured local's `LocalId`
+    // recorded on the `HirExprKind::Lambda` node so MIR can box it into the
+    // lambda's own environment.
+    let m = lower(
         "module A\nimport Stdlib.Collections.{ List }\n\
          fn f(xs: List<Int>): List<Int> = { val outer = 1\n List.map(xs, (x) => x + outer) }");
-    let errs = result.expect_err("expected a lowering error for a capturing lambda");
-    assert!(errs.iter().any(|e| matches!(&e.kind, crate::LowerErrorKind::Unsupported(msg) if msg.contains("closures"))));
+    if let HirItem::Fn(f) = &m.items[0] {
+        let body = f.body.as_ref().unwrap();
+        let HirExprKind::Block { tail, .. } = &body.kind else { panic!("expected a block body") };
+        let HirExprKind::Call { args, .. } = &tail.kind else { panic!("expected a call tail") };
+        let HirExprKind::Lambda { captures, .. } = &args[1].kind else { panic!("expected a lambda argument") };
+        assert_eq!(captures.len(), 1, "expected exactly one captured local (`outer`), got {:?}", captures);
+    } else {
+        panic!("expected a fn item");
+    }
 }
 
 #[test]

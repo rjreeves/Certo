@@ -551,15 +551,17 @@ fn calling_a_function_valued_param_casts_to_its_real_signature() {
     // BACKLOG: calling a function-valued local used to always call through the
     // opaque zero-arg certo_fn_t (its static C type), so this failed to
     // compile as C ("too many arguments"). It must now cast to the callee's
-    // real, inferred signature before calling.
+    // real, inferred signature before calling — with a leading `void*` for
+    // its closure environment (BACKLOG item 140: every function value is a
+    // real `{ fn, env }` closure now, not a bare pointer).
     let c = codegen("module A\nfn apply(f: (Int, Int) => Int, a: Int, b: Int): Int = f(a, b)");
-    assert_contains(&c, "(int64_t(*)(int64_t, int64_t))");
+    assert_contains(&c, "(int64_t(*)(void*, int64_t, int64_t))");
 }
 
 #[test]
 fn calling_a_single_param_function_valued_param_casts_too() {
     let c = codegen("module A\nfn applyOne(f: Int => Int, a: Int): Int = f(a)");
-    assert_contains(&c, "(int64_t(*)(int64_t))");
+    assert_contains(&c, "(int64_t(*)(void*, int64_t))");
 }
 
 #[test]

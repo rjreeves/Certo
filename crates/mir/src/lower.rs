@@ -162,7 +162,7 @@ pub fn lower_fn(
 
     let result = if let Some(body) = &f.body {
         b.current_span = body.span;
-        lower_expr(body, &mut b)
+        lower_value_expr(body, &mut b)
     } else {
         Operand::Const(MirConst::Unit)
     };
@@ -205,6 +205,88 @@ const BOXED_ABI_CALLEES: &[&str] = &[
     "dbQueryTyped", "Query.list", "Query.first", "Query.groupedList",
 ];
 
+/// Recover the MIR types of a lambda's captured HIR locals from the
+/// *enclosing* builder — the lambda's own fresh builder has no record of
+/// them (BACKLOG item 140).
+fn capture_types(captures: &[LocalId], b: &Builder) -> Vec<Ty> {
+    captures.iter().map(|cid| {
+        let mir_id = b.get_local(*cid);
+        b.locals.iter().find(|l| l.id == mir_id).map(|l| l.ty.clone()).unwrap_or(Ty::Error)
+    }).collect()
+}
+
+/// Build a lambda's closure environment in the *enclosing* builder `b`,
+/// before the lambda's own body is lowered: a heap tuple (the same
+/// representation an ordinary Certo tuple literal already uses) holding
+/// each captured value, boxed with its own real type so bits are preserved
+/// — BACKLOG item 140. An empty capture list still produces a valid `NULL`
+/// operand (see `AggregateKind::Tuple`'s own empty-case codegen), so every
+/// lambda's closure has a uniform shape regardless of whether it actually
+/// captures anything.
+fn build_capture_env(captures: &[LocalId], capture_tys: &[Ty], b: &mut Builder) -> Operand {
+    let ops: Vec<Operand> = captures.iter().map(|cid| Operand::Local(b.get_local(*cid))).collect();
+    let dest = b.declare_local("_env", Ty::Tuple(capture_tys.to_vec()));
+    b.assign(dest, Rvalue::Aggregate(AggregateKind::Tuple, ops));
+    Operand::Local(dest)
+}
+
+/// Inside a lambda's own fresh builder `lb`, unbox each captured value out
+/// of the (already-declared) env parameter into a same-typed local mapped
+/// to its original HIR `LocalId` — so a `HirExprKind::Local` reference
+/// inside the lambda body resolves exactly as it would for an ordinary
+/// parameter. Must run *after* every other real C parameter has already
+/// been declared in `lb` (BACKLOG item 140): these are body-only
+/// temporaries, not part of the generated function's own signature.
+fn bind_captures(captures: &[LocalId], capture_tys: &[Ty], env_param: MirLocal, lb: &mut Builder) {
+    for (idx, (cid, ty)) in captures.iter().zip(capture_tys).enumerate() {
+        let real = lb.map_hir_local(*cid, "_cap", ty.clone());
+        lb.assign(real, Rvalue::Field { base: Operand::Local(env_param), field: idx.to_string() });
+    }
+}
+
+/// Lower an expression in *value position* (as opposed to the immediate
+/// callee of a `Call`, or the `Global` special-cases at the very top of the
+/// `Call` arm) — the one place a bare named-function reference needs
+/// wrapping into the uniform `certo_fn_t { fn, env: NULL }` closure shape
+/// every other function value now carries (BACKLOG item 140): a direct call
+/// keeps calling the named C function itself with no wrapping at all (the
+/// `Call` arm's own `func_op` lowering, untouched), but a function
+/// *reference* used as a value — assigned to a `val`, passed as an ordinary
+/// argument, held in a record field/list/tuple element — must carry a real
+/// closure so it's callable uniformly through `emit_callee`.
+fn lower_value_expr(e: &HirExpr, b: &mut Builder) -> Operand {
+    if let (HirExprKind::Global(fn_name), Ty::Fn { .. }) = (&e.kind, &e.ty) {
+        return make_closure(fn_name, Operand::Const(MirConst::Unit), e.ty.clone(), b);
+    }
+    lower_expr(e, b)
+}
+
+/// Wrap a lifted lambda's generated global function and its closure
+/// environment into a `certo_fn_t { fn, env }` value in the *enclosing*
+/// builder `b` — BACKLOG item 140. `ty` is the closure's own declared
+/// `Ty::Fn { params, ret }` — load-bearing whenever the resulting value
+/// might later be *called* through a local (`emit_callee` reads the real
+/// param/return types straight off the destination local's own declared
+/// type to build its cast signature); a placeholder `Ty::Fn` is harmless
+/// wherever the result is only ever consumed as an opaque argument (the
+/// `BOXED_ABI_CALLEES` callback paths, which are never themselves called
+/// via ordinary Certo call syntax).
+fn make_closure(lam_name: &str, env: Operand, ty: Ty, b: &mut Builder) -> Operand {
+    let dest = b.declare_local("_closure", ty);
+    b.assign(dest, Rvalue::Aggregate(
+        AggregateKind::Record(vec!["fn".into(), "env".into()]),
+        vec![Operand::Global(lam_name.to_string()), env],
+    ));
+    Operand::Local(dest)
+}
+
+/// Placeholder `Ty::Fn` for a closure value that will only ever be consumed
+/// as an opaque callback argument, never called directly through
+/// `emit_callee` — see `make_closure`.
+fn opaque_fn_ty() -> Ty {
+    Ty::Fn { params: Vec::new(), ret: Box::new(Ty::Error) }
+}
+
 /// Lift a lambda literal that's being passed directly as the callback
 /// argument to one of `BOXED_ABI_CALLEES`. Every param is unboxed on entry
 /// and the return value boxed on exit, so the lambda's C signature is
@@ -212,14 +294,22 @@ const BOXED_ABI_CALLEES: &[&str] = &[
 /// pointer type those C runtime functions declare, instead of the lambda's
 /// real native signature (e.g. `double(double)`), which is what caused a
 /// `Float`-returning callback to silently misread the wrong return
-/// register (BACKLOG item 112).
-fn lower_lambda_boxed(params: &[certo_hir::HirParam], body: &HirExpr, param_ty_hint: Option<&Ty>, b: &mut Builder) -> Operand {
+/// register (BACKLOG item 112). Its own closure environment (BACKLOG item
+/// 140) is always its first real parameter, ahead of the boxed callback
+/// params — a real capture, if any, is unboxed from it exactly like an
+/// ordinary parameter, just recovered from the enclosing scope instead of
+/// the call site.
+fn lower_lambda_boxed(params: &[certo_hir::HirParam], body: &HirExpr, captures: &[LocalId], param_ty_hint: Option<&Ty>, b: &mut Builder) -> Operand {
     let idx = b.lambda_count;
     b.lambda_count += 1;
     let lam_name = format!("__lam_{}_{}_boxed", b.fn_name, idx);
 
+    let capture_tys = capture_types(captures, b);
+    let env = build_capture_env(captures, &capture_tys, b);
+
     let mut lb = Builder::new(&lam_name, b.record_field_types.clone(), b.variant_field_types.clone(), b.fn_param_tys.clone(), b.fn_ret_tys.clone());
     let ret_slot = lb.declare_local("_ret", Ty::Var(0));
+    let env_param = lb.declare_local("_env", Ty::Error);
 
     // The C signature's params (locals 1..=param_count) are always void* —
     // declare all of them first, then the "real" typed locals the body
@@ -230,6 +320,7 @@ fn lower_lambda_boxed(params: &[certo_hir::HirParam], body: &HirExpr, param_ty_h
     let raw_locals: Vec<MirLocal> = params.iter()
         .map(|p| lb.declare_local(&format!("{}_boxed", p.name), Ty::Var(0)))
         .collect();
+    bind_captures(captures, &capture_tys, env_param, &mut lb);
     for (p, raw) in params.iter().zip(raw_locals.iter()) {
         let real_ty = if matches!(p.ty, Ty::Error) {
             param_ty_hint.cloned().unwrap_or(Ty::Error)
@@ -252,16 +343,14 @@ fn lower_lambda_boxed(params: &[certo_hir::HirParam], body: &HirExpr, param_ty_h
 
     let lam_fn = MirFn {
         name: lam_name.clone(),
-        param_count: params.len(),
+        param_count: params.len() + 1,
         locals: lb.locals,
         blocks: lb.blocks,
     };
     b.lifted_fns.extend(lb.lifted_fns);
     b.lifted_fns.push(lam_fn);
 
-    let dest = b.declare_local("_lam_ptr", Ty::Error);
-    b.assign(dest, Rvalue::Use(Operand::Global(lam_name)));
-    Operand::Local(dest)
+    make_closure(&lam_name, env, opaque_fn_ty(), b)
 }
 
 /// Synthesize a small wrapper function for a *named* function reference
@@ -292,6 +381,11 @@ fn lower_named_fn_boxed(name: &str, real_param_tys: &[Ty], real_ret_ty: &Ty, b: 
 
     let mut lb = Builder::new(&wrap_name, b.record_field_types.clone(), b.variant_field_types.clone(), b.fn_param_tys.clone(), b.fn_ret_tys.clone());
     let ret_slot = lb.declare_local("_ret", Ty::Var(0));
+    // A named function reference never captures anything, but the
+    // generated wrapper's own signature must still match every other
+    // BOXED_ABI_CALLEES callback's uniform `(env, ...)` shape (BACKLOG item
+    // 140) — declared and otherwise unused.
+    let _env_param = lb.declare_local("_env", Ty::Error);
 
     // C signature params are always void*; unbox each into the real
     // function's own declared param type before calling it.
@@ -325,16 +419,14 @@ fn lower_named_fn_boxed(name: &str, real_param_tys: &[Ty], real_ret_ty: &Ty, b: 
 
     let wrap_fn = MirFn {
         name: wrap_name.clone(),
-        param_count: real_param_tys.len(),
+        param_count: real_param_tys.len() + 1,
         locals: lb.locals,
         blocks: lb.blocks,
     };
     b.lifted_fns.extend(lb.lifted_fns);
     b.lifted_fns.push(wrap_fn);
 
-    let dest = b.declare_local("_fnref_ptr", Ty::Error);
-    b.assign(dest, Rvalue::Use(Operand::Global(wrap_name)));
-    Operand::Local(dest)
+    make_closure(&wrap_name, Operand::Const(MirConst::Unit), opaque_fn_ty(), b)
 }
 
 /// Derive the Certo type of a MIR operand from its constant or declared local type.
@@ -585,8 +677,8 @@ fn lower_expr(expr: &HirExpr, b: &mut Builder) -> Operand {
             };
             let arg_ops: Vec<Operand> = args.iter().enumerate().map(|(i, a)| {
                 if needs_boxed_callback {
-                    if let HirExprKind::Lambda { params, body } = &a.kind {
-                        return lower_lambda_boxed(params, body, elem_ty_hint.as_ref(), b);
+                    if let HirExprKind::Lambda { params, body, captures } = &a.kind {
+                        return lower_lambda_boxed(params, body, captures, elem_ty_hint.as_ref(), b);
                     }
                     // A named function reference (`dbQueryTyped(..., widgetsFromRow)`),
                     // as opposed to an inline lambda — its real signature is
@@ -599,7 +691,7 @@ fn lower_expr(expr: &HirExpr, b: &mut Builder) -> Operand {
                         return lower_named_fn_boxed(fn_name, params, ret, b);
                     }
                 }
-                let value_op = lower_expr(a, b);
+                let value_op = lower_value_expr(a, b);
                 // Box only when the declared param/field is a bare type-param
                 // AND the argument's own type is a *known concrete* type —
                 // if the argument is itself `Ty::Var(_)` (e.g. `v` inside a
@@ -1029,7 +1121,7 @@ fn lower_expr(expr: &HirExpr, b: &mut Builder) -> Operand {
             // body) — same double-boxing guard as the Call-args case above,
             // BACKLOG item 120.
             let ops: Vec<Operand> = fields.iter().zip(field_types.iter()).map(|((_, v), fty)| {
-                let value_op = lower_expr(v, b);
+                let value_op = lower_value_expr(v, b);
                 if matches!(fty, Ty::Var(_)) && !matches!(v.ty, Ty::Var(_)) {
                     let boxed = b.declare_local("_boxed_field", Ty::Var(0));
                     b.assign(boxed, Rvalue::BoxSome { value: value_op, ty: v.ty.clone() });
@@ -1045,14 +1137,14 @@ fn lower_expr(expr: &HirExpr, b: &mut Builder) -> Operand {
         }
 
         HirExprKind::Tuple(elems) => {
-            let ops: Vec<Operand> = elems.iter().map(|e| lower_expr(e, b)).collect();
+            let ops: Vec<Operand> = elems.iter().map(|e| lower_value_expr(e, b)).collect();
             let dest = b.declare_local("_tup", expr.ty.clone());
             b.assign(dest, Rvalue::Aggregate(AggregateKind::Tuple, ops));
             Operand::Local(dest)
         }
 
         HirExprKind::List(elems) => {
-            let ops: Vec<Operand> = elems.iter().map(|e| lower_expr(e, b)).collect();
+            let ops: Vec<Operand> = elems.iter().map(|e| lower_value_expr(e, b)).collect();
             let dest = b.declare_local("_arr", expr.ty.clone());
             b.assign(dest, Rvalue::Aggregate(AggregateKind::Array, ops));
             Operand::Local(dest)
@@ -1076,18 +1168,29 @@ fn lower_expr(expr: &HirExpr, b: &mut Builder) -> Operand {
             }
         }
 
-        HirExprKind::Lambda { params, body } => {
+        HirExprKind::Lambda { params, body, captures } => {
             // Lift the lambda to a top-level MIR function named `__lam_<parent>_N`.
             let idx = b.lambda_count;
             b.lambda_count += 1;
             let lam_name = format!("__lam_{}_{}", b.fn_name, idx);
 
+            // Build the closure environment in the *enclosing* builder,
+            // before lowering the lambda's own body — BACKLOG item 140.
+            let capture_tys = capture_types(captures, b);
+            let env = build_capture_env(captures, &capture_tys, b);
+
             // Build MIR for the lambda body using a fresh builder.
             let mut lb = Builder::new(&lam_name, b.record_field_types.clone(), b.variant_field_types.clone(), b.fn_param_tys.clone(), b.fn_ret_tys.clone());
             let ret_slot = lb.declare_local("_ret", Ty::Error);
+            // The env parameter always comes first, ahead of the lambda's
+            // own real parameters — every generated lambda function agrees
+            // on this shape uniformly, whether or not it actually captures
+            // anything (BACKLOG item 140; see `emit_callee`).
+            let env_param = lb.declare_local("_env", Ty::Error);
             for p in params {
                 lb.map_hir_local(p.local, &p.name, p.ty.clone());
             }
+            bind_captures(captures, &capture_tys, env_param, &mut lb);
             lb.current_span = body.span;
             let lam_result = lower_expr(body, &mut lb);
             let lam_ret_ty = infer_operand_ty(&lam_result, &lb);
@@ -1099,7 +1202,7 @@ fn lower_expr(expr: &HirExpr, b: &mut Builder) -> Operand {
 
             let lam_fn = MirFn {
                 name: lam_name.clone(),
-                param_count: params.len(),
+                param_count: params.len() + 1,
                 locals: lb.locals,
                 blocks: lb.blocks,
             };
@@ -1107,10 +1210,16 @@ fn lower_expr(expr: &HirExpr, b: &mut Builder) -> Operand {
             b.lifted_fns.extend(lb.lifted_fns);
             b.lifted_fns.push(lam_fn);
 
-            // Represent the lambda as a function pointer (int64_t cast of the global address).
-            let dest = b.declare_local("_lam_ptr", Ty::Error);
-            b.assign(dest, Rvalue::Use(Operand::Global(lam_name)));
-            Operand::Local(dest)
+            // The closure's own declared `Ty::Fn` must match the generated
+            // function's *real* native param/return types exactly — unlike
+            // `lower_lambda_boxed`'s result, this value may later be called
+            // directly through a local (BACKLOG item 108's `emit_callee`
+            // path), which reads its cast signature straight off this type.
+            let lam_ty = Ty::Fn {
+                params: params.iter().map(|p| p.ty.clone()).collect(),
+                ret:    Box::new(lam_ret_ty),
+            };
+            make_closure(&lam_name, env, lam_ty, b)
         }
 
         HirExprKind::Try(inner) => {
@@ -1343,7 +1452,7 @@ fn lower_stmt(stmt: &HirStmt, b: &mut Builder) {
     match stmt {
         HirStmt::Let { local, name, ty, init } => {
             b.current_span = init.span;
-            let init_op  = lower_expr(init, b);
+            let init_op  = lower_value_expr(init, b);
             // When the declared type is unknown (Ty::Error), recover it from the
             // initialiser. This preserves e.g. a `__CertoTask<R>` spawn handle so
             // a later `await` can join it with the right result type.
@@ -1353,7 +1462,7 @@ fn lower_stmt(stmt: &HirStmt, b: &mut Builder) {
         }
         HirStmt::Assign { local, value } => {
             b.current_span = value.span;
-            let val_op   = lower_expr(value, b);
+            let val_op   = lower_value_expr(value, b);
             let mir_local = b.get_local(*local);
             b.assign(mir_local, Rvalue::Use(val_op));
         }

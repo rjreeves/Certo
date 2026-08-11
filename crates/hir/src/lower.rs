@@ -292,8 +292,8 @@ fn lower_lambda_with_param_hint(params: &[certo_ast::expr::LambdaParam], body: &
     }).collect();
     let body = lower_expr(body, cx);
     cx.pop_scope();
-    check_no_lambda_capture(&body, capture_threshold, cx, span);
-    HirExpr { kind: HirExprKind::Lambda { params: hir_params, body: Box::new(body) }, ty: Ty::Error, span }
+    let captures = collect_lambda_captures(&body, capture_threshold);
+    HirExpr { kind: HirExprKind::Lambda { params: hir_params, body: Box::new(body), captures }, ty: Ty::Error, span }
 }
 
 fn stdlib_param_names() -> HashMap<&'static str, &'static [&'static str]> {
@@ -966,8 +966,8 @@ fn lower_expr(expr: &S<Expr>, cx: &mut Cx) -> HirExpr {
             }).collect();
             let body = lower_expr(body, cx);
             cx.pop_scope();
-            check_no_lambda_capture(&body, capture_threshold, cx, span);
-            HirExpr { kind: HirExprKind::Lambda { params: hir_params, body: Box::new(body) }, ty: Ty::Error, span }
+            let captures = collect_lambda_captures(&body, capture_threshold);
+            HirExpr { kind: HirExprKind::Lambda { params: hir_params, body: Box::new(body), captures }, ty: Ty::Error, span }
         }
 
         Expr::List { elements, .. } => {
@@ -1175,8 +1175,8 @@ fn lower_expr(expr: &S<Expr>, cx: &mut Cx) -> HirExpr {
             // is just "whatever next_local already is" going in.
             let capture_threshold = cx.next_local;
             let inner = lower_expr(body, cx);
-            check_no_lambda_capture(&inner, capture_threshold, cx, span);
-            let thunk = HirExpr { kind: HirExprKind::Lambda { params: vec![], body: Box::new(inner) }, ty: Ty::Error, span };
+            let captures = collect_lambda_captures(&inner, capture_threshold);
+            let thunk = HirExpr { kind: HirExprKind::Lambda { params: vec![], body: Box::new(inner), captures }, ty: Ty::Error, span };
             let func  = HirExpr { kind: HirExprKind::Global("__db_transaction".into()), ty: Ty::Error, span };
             HirExpr { kind: HirExprKind::Call { func: Box::new(func), args: vec![thunk] }, ty: Ty::Error, span }
         }
@@ -1572,43 +1572,28 @@ fn ast_ty_to_ty_with_params(te: &certo_ast::types::TypeExpr, type_params: &[&str
     }
 }
 
-/// Reject a lambda body that references a variable from an enclosing scope
-/// (a real closure capture) — BACKLOG item 136. Certo's lambda
-/// lowering (both the plain `HirExprKind::Lambda` path and
-/// `lower_lambda_boxed` in `crates/mir`) builds the lambda body in a
-/// *completely fresh* `Builder`/local-numbering space with no bridge back to
-/// the enclosing function's own locals. Before this check, a lambda body
-/// referencing an outer local silently compiled: `Builder::get_local`'s
-/// fallback (`self.local_map.get(&hir).unwrap_or(&hir)`) reinterpreted the
-/// *outer* function's `LocalId` as if it were a valid index into the
-/// *lambda's own*, much smaller `locals` vec — an out-of-bounds/wrong-slot
-/// read that C reads as whatever garbage happens to occupy that stack slot.
-/// Confirmed via direct testing: `List.map(xs, (x) => x + outer)` returned a
-/// different wrong value on every single run (non-deterministic undefined
-/// behavior, not just a stable logic bug). This affects *any* lambda
-/// anywhere — including `db.transaction { ... }`'s body, which HIR wraps in
-/// an implicit zero-param lambda (see the `Expr::Transaction` case above) —
-/// so real closure support needs a genuinely new, cross-cutting mechanism
-/// (an explicit captured-environment pointer threaded through every
-/// indirect call site *and* every higher-order C runtime function like
-/// `certo_list_map`/`certo_db_query_typed`, not just compiler-internal
-/// changes) that wasn't attempted here. Turning the silent corruption into a
-/// loud, honest compile error is the safe interim fix. Uses a `LocalId`
+/// Collect the locals a lambda body references from an enclosing scope —
+/// real closure capture (BACKLOG item 140, superseding item 136's interim
+/// "reject captures" compile error). Certo's lambda lowering (both the
+/// plain `HirExprKind::Lambda` path and `lower_lambda_boxed` in
+/// `crates/mir`) builds the lambda body in a *completely fresh*
+/// `Builder`/local-numbering space with no bridge back to the enclosing
+/// function's own locals — MIR uses this list to box each captured value
+/// into the lambda's own heap environment at the construction site, and to
+/// unbox it back into a same-named local inside the lambda's own lowered
+/// function, instead of `Builder::get_local`'s old silent-corruption
+/// fallback (reinterpreting the *outer* function's `LocalId` as an index
+/// into the *lambda's own*, much smaller `locals` vec). Uses a `LocalId`
 /// threshold rather than a full scope walk: `Cx::next_local` only ever
 /// increments, so any `Local(id)` referenced inside the lambda body with
 /// `id < threshold` (the counter's value right before the lambda's own
 /// scope was pushed) must have been bound in an enclosing scope.
-fn check_no_lambda_capture(body: &HirExpr, threshold: LocalId, cx: &mut Cx, span: Span) {
+fn collect_lambda_captures(body: &HirExpr, threshold: LocalId) -> Vec<LocalId> {
     let mut free = Vec::new();
     collect_free_locals(body, threshold, &mut free);
-    if !free.is_empty() {
-        cx.err(LowerErrorKind::Unsupported(
-            "lambda (or `db.transaction { ... }` block) references a variable from an \
-             enclosing scope — closures are not yet supported. Only the lambda's own \
-             parameters, literals, and global functions/constants may be used inside a \
-             lambda body; pass any needed outer value in as a parameter instead".into()
-        ), span);
-    }
+    free.sort_unstable();
+    free.dedup();
+    free
 }
 
 /// Recursively collect `HirExprKind::Local(id)` references with `id < threshold`
