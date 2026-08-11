@@ -304,6 +304,101 @@ fn main(): Unit = {
         errs.iter().map(|e| e.message()).collect::<Vec<_>>());
 }
 
+// ------------------------------------------------------------------ //
+// Trait-level and method-level generic type parameters
+// ------------------------------------------------------------------ //
+
+#[test]
+fn generic_trait_correctly_implemented_for_concrete_type_param() {
+    // `T` is the trait's own declared type parameter — the impl provides a
+    // concrete `Int` for it, which must be accepted for both the param and
+    // the return type.
+    ok("module A
+trait Container<T> {
+    fn get(x: T): T
+}
+
+type Box = { n: Int }
+
+impl Container for Box {
+    fn get(x: Int): Int = x
+}");
+}
+
+#[test]
+fn concrete_return_type_mismatch_via_capitalized_name_is_rejected() {
+    // Regression for the naive "any capitalized identifier is a wildcard"
+    // heuristic: `Order` and `Customer` are ordinary concrete type names,
+    // not declared type parameters on the trait or the impl, so an impl
+    // returning `Customer` where the trait requires `Order` must be
+    // rejected, not silently accepted just because both names are
+    // capitalized.
+    let errs = err("module A
+type Order = { id: Int }
+type Customer = { id: Int }
+
+trait Greet {
+    fn process(self: Order): Order
+}
+
+impl Greet for Order {
+    fn process(self: Order): Customer = self
+}");
+    assert!(has_kind(&errs, |k| matches!(k, TraitErrorKind::ReturnTypeMismatch { method, .. } if method == "process")),
+        "expected E0303 for Customer vs Order, got: {:?}", errs.iter().map(|e| e.message()).collect::<Vec<_>>());
+}
+
+#[test]
+fn concrete_param_type_mismatch_via_capitalized_name_is_rejected() {
+    // Same as above but for a parameter position instead of the return type.
+    let errs = err("module A
+type Order = { id: Int }
+type Customer = { id: Int }
+
+trait Handler {
+    fn handle(x: Order): Unit
+}
+
+impl Handler for Order {
+    fn handle(x: Customer): Unit = {}
+}");
+    assert!(has_kind(&errs, |k| matches!(k, TraitErrorKind::ParamTypeMismatch { method, .. } if method == "handle")),
+        "expected E0304 for Customer vs Order param, got: {:?}", errs.iter().map(|e| e.message()).collect::<Vec<_>>());
+}
+
+#[test]
+fn method_level_generic_type_param_still_wildcards() {
+    // `B` is declared on the method itself (not the trait), and the impl's
+    // own method redeclares the same method-level generic — this must still
+    // wildcard-match, not require literal equality.
+    ok("module A
+trait Mapper {
+    fn map<B>(x: Int): B
+}
+
+type Widget = { id: Int }
+
+impl Mapper for Widget {
+    fn map<B>(x: Int): B = panic(\"unimplemented\")
+}");
+}
+
+#[test]
+fn impl_own_type_param_wildcards_against_trait_type_param() {
+    // The impl declares its own generic `T` (`impl<T> Container for Box`),
+    // which must still wildcard-match the trait's own declared `T`.
+    ok("module A
+trait Container<T> {
+    fn get(x: T): T
+}
+
+type Box = { n: Int }
+
+impl<T> Container for Box {
+    fn get(x: T): T = x
+}");
+}
+
 #[test]
 fn generic_call_with_non_literal_argument_not_checked() {
     // Best-effort/syntactic: a variable argument's type isn't visible in the
