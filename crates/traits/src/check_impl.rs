@@ -2,6 +2,7 @@ use crate::trait_db::{TraitDb, sig_of};
 use crate::error::{TraitError, TraitErrorKind};
 use certo_ast::decl::{Decl, ImplDecl};
 use certo_ast::module::Module;
+use std::collections::HashSet;
 
 /// Check every `impl Trait for Type` in the module against the trait definition.
 pub fn check_impls(module: &Module, db: &TraitDb) -> Vec<TraitError> {
@@ -101,11 +102,24 @@ fn check_impl(
                     continue;
                 }
 
+                // Only names actually declared as type parameters (on the
+                // trait/method for the expected side, on the impl/method for
+                // the found side) may wildcard-match — an ordinary capitalized
+                // type name like `Order` must match exactly.
+                let expected_params: HashSet<&str> = trait_def.type_params.iter()
+                    .chain(tsig.type_params.iter())
+                    .map(|s| s.as_str())
+                    .collect();
+                let found_params: HashSet<&str> = i.type_params.iter()
+                    .map(|p| p.name.node.as_str())
+                    .chain(isig.type_params.iter().map(|s| s.as_str()))
+                    .collect();
+
                 // Param types (string-level comparison — full HM unification
                 // across traits and impls is the trait solver, deferred to
                 // the trait system extension in task #5b)
                 for (idx, (tpt, ipt)) in tsig.param_types.iter().zip(&isig.param_types).enumerate() {
-                    if !types_compatible(tpt, ipt) {
+                    if !types_compatible(tpt, &expected_params, ipt, &found_params) {
                         errors.push(TraitError {
                             kind: TraitErrorKind::ParamTypeMismatch {
                                 method:   name.clone(),
@@ -121,7 +135,7 @@ fn check_impl(
                 // Return type
                 if !tsig.ret_type.is_empty()
                     && !isig.ret_type.is_empty()
-                    && !types_compatible(&tsig.ret_type, &isig.ret_type)
+                    && !types_compatible(&tsig.ret_type, &expected_params, &isig.ret_type, &found_params)
                 {
                     errors.push(TraitError {
                         kind: TraitErrorKind::ReturnTypeMismatch {
@@ -137,15 +151,14 @@ fn check_impl(
     }
 }
 
-/// Two type strings are compatible if they are equal or if at least one is a
-/// generic type parameter (single uppercase-starting identifier — e.g. `T`, `E`).
-fn types_compatible(a: &str, b: &str) -> bool {
+/// Two type strings are compatible if they are equal, or if one side is a
+/// bare name that was actually declared as a generic type parameter (on the
+/// trait/method for `a`, on the impl/method for `b`) — NOT merely because it
+/// looks like a wildcard (i.e. capitalized). An ordinary concrete type name
+/// (e.g. `Order`) must match exactly, since every Certo type name is
+/// capitalized by convention and would otherwise be indistinguishable from a
+/// real type parameter.
+fn types_compatible(a: &str, a_params: &HashSet<&str>, b: &str, b_params: &HashSet<&str>) -> bool {
     if a == b { return true; }
-    is_type_param(a) || is_type_param(b)
-}
-
-fn is_type_param(s: &str) -> bool {
-    s.chars().next().map(|c| c.is_uppercase()).unwrap_or(false)
-        && s.chars().all(|c| c.is_alphanumeric() || c == '_')
-        && !matches!(s, "Int" | "Bool" | "Text" | "Float" | "Decimal" | "Unit" | "UUID")
+    a_params.contains(a) || b_params.contains(b)
 }

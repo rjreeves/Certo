@@ -17,6 +17,10 @@ pub struct MethodSig {
     /// Stringified return type (empty string = unspecified / Unit).
     pub ret_type:   String,
     pub has_default: bool,
+    /// Names of this method's own declared generic type parameters
+    /// (e.g. `B` in `fn map<B>(...)`), distinct from the enclosing
+    /// trait/impl's own type parameters.
+    pub type_params: Vec<String>,
     pub span:       Span,
 }
 
@@ -25,6 +29,9 @@ pub struct MethodSig {
 pub struct TraitDef {
     pub name:    String,
     pub methods: HashMap<String, MethodSig>,
+    /// Names of the trait's own declared generic type parameters
+    /// (e.g. `T` in `trait Container<T> { ... }`).
+    pub type_params: Vec<String>,
     pub span:    Span,
 }
 
@@ -78,6 +85,7 @@ impl TraitDb {
         self.traits.insert(t.name.node.clone(), TraitDef {
             name:    t.name.node.clone(),
             methods,
+            type_params: t.type_params.iter().map(|p| p.name.node.clone()).collect(),
             span:    t.span,
         });
     }
@@ -155,6 +163,7 @@ pub fn sig_of(f: &FnDecl) -> MethodSig {
         param_types: f.params.iter().map(|p| te_str(&p.ty.node)).collect(),
         ret_type:    f.ret_ty.as_ref().map(|t| te_str(&t.node)).unwrap_or_default(),
         has_default: f.body.is_some(),
+        type_params: f.type_params.iter().map(|p| p.name.node.clone()).collect(),
         span:        f.span,
     }
 }
