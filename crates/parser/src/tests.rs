@@ -1,6 +1,7 @@
 use super::parse;
 use certo_ast::expr::{Expr, Lit, BinOp};
 use certo_ast::decl::Decl;
+use certo_ast::span::S;
 
 fn ok(src: &str) -> certo_ast::module::Module {
     parse(src).unwrap_or_else(|errs| {
@@ -1083,4 +1084,38 @@ fn export_annotation_still_parses_after_ui_generate_lookahead() {
 #[test]
 fn unknown_at_annotation_still_errors_as_before() {
     err("module A\n@bogus(\"x\")\npub fn f(): Int = 1");
+}
+
+// ------------------------------------------------------------------ //
+// `every(interval) { body }` — BACKLOG item 122/141
+// ------------------------------------------------------------------ //
+
+fn parse_fn_body(src: &str) -> S<Expr> {
+    let m = ok(src);
+    m.decls.iter().find_map(|d| match &d.node {
+        Decl::Fn(f) => f.body.clone(),
+        _ => None,
+    }).expect("expected an fn decl with a body")
+}
+
+#[test]
+fn every_desugars_to_spawn_of_while_true() {
+    let body = parse_fn_body(
+        "module A\nasync fn f(): Unit = every(Duration.seconds(1)) {\n println(\"tick\")\n}");
+    let Expr::Spawn { expr, .. } = &body.node else { panic!("expected Expr::Spawn, got {:?}", body.node) };
+    let Expr::While { cond, body: loop_body, .. } = &expr.node else { panic!("expected Expr::While, got {:?}", expr.node) };
+    assert!(matches!(&cond.node, Expr::Lit { value: Lit::Bool(true), .. }), "expected `while true`, got {:?}", cond.node);
+    let Expr::Block { stmts, .. } = &loop_body.node else { panic!("expected a block body") };
+    // First statement is the synthesized `sleep(Duration.toSeconds(interval) * 1000)`;
+    // the user's own `println("tick")` follows it.
+    assert_eq!(stmts.len(), 2, "expected [sleep(...), println(...)], got {:?}", stmts);
+}
+
+#[test]
+fn every_as_plain_identifier_elsewhere_is_unaffected() {
+    // `every` is a contextual identifier — only special when directly
+    // followed by `(`, matching the soft-keyword pattern already
+    // established for `live`/`unsafe`/`pk`/`filter`/`layout`.
+    ok("module A\nfn f(every: Int): Int = every + 1");
+    ok("module A\nfn f(): Int = {\n val every = 5\n every\n}");
 }

@@ -208,10 +208,21 @@ pub enum HirExprKind {
         body: Box<HirExpr>,
     },
 
-    /// `spawn f(args)` — run a call in a new OS thread, return Task handle (int64_t pointer).
+    /// `spawn expr` — run `expr` in a new OS thread, return Task handle
+    /// (int64_t pointer). `args` holds the single spawned expression (kept
+    /// as a `Vec` for historical reasons — always exactly one element).
+    /// `captures` are locals `expr` references from the enclosing scope
+    /// (BACKLOG item 140/141) — only load-bearing when `expr` isn't a
+    /// direct call to a named function (MIR evaluates a direct call's own
+    /// arguments eagerly in the current thread, so no lifting/capture is
+    /// needed there); any other shape (a block, `if`, `while`, ...) must
+    /// run the *whole* body on the worker thread, so MIR lifts it into a
+    /// synthesized top-level function taking these captures as ordinary
+    /// parameters.
     Spawn {
-        fn_name: String,
-        args:    Vec<HirExpr>,
+        fn_name:  String,
+        args:     Vec<HirExpr>,
+        captures: Vec<LocalId>,
     },
 
     /// `await task` — join a spawned Task, returning its result as int64_t.

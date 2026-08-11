@@ -1,5 +1,6 @@
 use certo_ast::span::{S, Span};
 use certo_ast::expr::*;
+use certo_ast::types::ModulePath;
 
 use certo_lexer::Token;
 use crate::cursor::Cursor;
@@ -345,6 +346,20 @@ fn parse_atom(cur: &mut Cursor<'_>) -> Result<S<Expr>, ParseError> {
         let body = parse_block(cur)?;
         let full = span.to(body.span);
         return Ok(S::new(Expr::Unsafe { body: Box::new(body), span: full }, full));
+    }
+
+    // `every(interval) { body }` — a periodic background job. Contextual
+    // identifier (same soft-keyword pattern as `unsafe`/`live`/`pk`/
+    // `filter`/`layout`), recognised only when directly followed by `(`, so
+    // `every` still works as an ordinary identifier everywhere else.
+    // Pure parser sugar (BACKLOG item 122/141) — desugars immediately into
+    // `spawn { while true { sleep(Duration.toSeconds(interval) * 1000);
+    // body... } }`, a shape `resolve`/`typeck`/`hir` already fully
+    // understand, needing no new AST node or downstream support at all.
+    if matches!(cur.peek(), Some(Token::Ident(s)) if *s == "every")
+        && cur.peek2() == Some(&Token::LParen)
+    {
+        return parse_every(cur);
     }
 
     match cur.peek() {
@@ -900,6 +915,71 @@ fn parse_while(cur: &mut Cursor<'_>) -> Result<S<Expr>, ParseError> {
     let body  = parse_block(cur)?;
     let span  = start.to(body.span);
     Ok(S::new(Expr::While { cond: Box::new(cond), body: Box::new(body), span }, span))
+}
+
+/// `every(interval) { body }` → `spawn { while true { sleep(Duration.toSeconds(interval) * 1000); body... } }`
+/// — see the call site's doc comment (BACKLOG item 122/141). Every synthetic
+/// node reuses the whole construct's own span (there's no more precise
+/// source location for text the user didn't write) — same convention
+/// `crates/testrunner/src/harness.rs` already uses for its own
+/// synthesized-decl spans.
+fn parse_every(cur: &mut Cursor<'_>) -> Result<S<Expr>, ParseError> {
+    let start = cur.peek_span();
+    cur.bump(); // eat `every`
+    cur.expect(&Token::LParen)?;
+    let interval = parse_expr(cur)?;
+    cur.expect(&Token::RParen)?;
+    let user_body = parse_block(cur)?;
+    let span = start.to(user_body.span);
+
+    let ident = |s: &str| S::new(s.to_string(), span);
+    let path = |seg: &str| S::new(
+        Expr::Path { path: ModulePath { segments: vec![ident(seg)], span }, span },
+        span,
+    );
+    // A qualified stdlib call's callee is `Field(Path(module), method)`, not
+    // a flat multi-segment `Path` — `parse_module_path` itself only ever
+    // consumes further `.Segment`s while the next one starts uppercase (a
+    // nested module), stopping before a lowercase method name, so
+    // `Duration.toSeconds` really parses as `Duration` (a 1-segment path)
+    // postfixed with an ordinary `.toSeconds` field access.
+    let qualified = |module: &str, method: &str| S::new(
+        Expr::Field { expr: Box::new(path(module)), field: ident(method), span },
+        span,
+    );
+    let app = |func: S<Expr>, args: Vec<S<Expr>>| S::new(
+        Expr::App {
+            func: Box::new(func),
+            args: args.into_iter().map(|value| Arg { label: None, value, span }).collect(),
+            span,
+        },
+        span,
+    );
+
+    // `Duration.toSeconds(interval) * 1000`
+    let to_seconds = app(qualified("Duration", "toSeconds"), vec![interval]);
+    let ms = S::new(
+        Expr::BinOp {
+            op: BinOp::Mul, left: Box::new(to_seconds),
+            right: Box::new(S::new(Expr::Lit { value: Lit::Int(1000), span }, span)),
+            span,
+        },
+        span,
+    );
+    // `sleep(ms)`
+    let sleep_call = app(path("sleep"), vec![ms]);
+    let sleep_stmt = Stmt::Expr { expr: sleep_call, span };
+
+    // `while true { sleep(...); <user's own statements> }`
+    let Expr::Block { stmts: user_stmts, .. } = user_body.node else { unreachable!("parse_block always returns Expr::Block") };
+    let mut stmts = vec![sleep_stmt];
+    stmts.extend(user_stmts);
+    let loop_body = S::new(Expr::Block { stmts, span }, span);
+    let cond_true = S::new(Expr::Lit { value: Lit::Bool(true), span }, span);
+    let while_loop = S::new(Expr::While { cond: Box::new(cond_true), body: Box::new(loop_body), span }, span);
+
+    // `spawn while true { ... }`
+    Ok(S::new(Expr::Spawn { expr: Box::new(while_loop), span }, span))
 }
 
 fn unescape_str(s: &str) -> String {
