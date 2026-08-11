@@ -685,7 +685,16 @@ static inline double  __certo_i2f(int64_t i) { union { double d; int64_t i; } u;
 /* Fallback for any stray `Some(x)` not lowered to a typed box (heap-boxes bits). */
 #define certo_some(x) __certo_opt_box((int64_t)(x))
 typedef struct { void* value; } certo_tuple_t;
-typedef void (*certo_fn_t)(void);
+/* A Certo function *value* — real closure capture (BACKLOG item 140).
+ * `fn` is the lambda's own generated C function (or a plain named function
+ * wrapped with `env = NULL`), which always takes its closure environment as
+ * an explicit leading parameter, whether or not it actually captures
+ * anything — so caller and callee always agree on arity. `env` is a heap
+ * tuple (a `CertoList*`, same representation an ordinary Certo tuple/list
+ * literal already uses) holding the boxed captured values, or NULL when
+ * there are none. Passed by value (16 bytes on a 64-bit target) wherever a
+ * `Ty::Fn` value flows — see `ty_to_c`. */
+typedef struct { void* fn; void* env; } certo_fn_t;
 typedef void* certo_error_t;
 
 /* List (dynamic array) — full signatures are in the stdlib C block. */

@@ -103,6 +103,11 @@ impl Ty {
     pub fn needs_heap_box(&self) -> bool {
         match self {
             Ty::Decimal(_) | Ty::Uuid => true,
+            // A function value is a 2-word `{fn, env}` closure struct
+            // (BACKLOG item 140), not pointer-sized — must be heap-boxed
+            // like any other multi-word value flowing through a generic
+            // void* slot (list/tuple element, Option/Result payload).
+            Ty::Fn { .. } => true,
             Ty::Named { name, args } => {
                 // Mirrors `ty_to_c`'s own opaque-handle carve-outs exactly —
                 // those compile to `int64_t`/`void*` already and need no

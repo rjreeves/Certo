@@ -495,30 +495,38 @@ fn emit_operand(op: &Operand) -> String {
 /// Emit the callee of a call expression. A named function (`Operand::Global`)
 /// already has its real, correctly-typed C declaration, so it's called
 /// directly. A function *value* held in a local, though, is statically typed
-/// as the opaque zero-arg `certo_fn_t` (see `ty_to_c`) — calling it without a
-/// cast would use that 0-arg signature regardless of how many arguments the
-/// call actually passes. Cast it to the real signature first, using the
-/// local's own `Ty::Fn { params, ret }`.
+/// as the 2-word closure struct `certo_fn_t { void* fn; void* env; }` (see
+/// `ty_to_c` — BACKLOG item 140) — its `.fn` slot is the real callee, cast
+/// to the real signature with a leading `void* env` parameter (every
+/// generated lambda function uniformly takes its closure environment as its
+/// own first parameter, whether or not it actually captures anything, so
+/// caller and callee always agree on arity regardless of which specific
+/// lambda ends up there). See `emit_call_args` for the paired `.env` first
+/// argument this cast's signature expects.
 fn emit_callee(func: &Operand, locals: &[MirLocalDecl]) -> String {
     let Operand::Local(id) = func else { return emit_operand(func) };
     let Some(Ty::Fn { params, ret }) = locals.iter().find(|l| l.id == *id).map(|l| &l.ty) else {
         return emit_operand(func);
     };
-    let param_str = if params.is_empty() {
-        "void".to_string()
-    } else {
-        params.iter().map(ty_to_c).collect::<Vec<_>>().join(", ")
-    };
-    format!("(({}(*)({}))({}))", ret_ty_to_c(ret), param_str, emit_operand(func))
+    let mut param_strs: Vec<String> = vec!["void*".to_string()];
+    param_strs.extend(params.iter().map(ty_to_c));
+    format!("(({}(*)({}))(({}).fn))", ret_ty_to_c(ret), param_strs.join(", "), emit_operand(func))
+}
+
+/// The closure environment argument a call through a local `Ty::Fn` value
+/// must pass first — `None` for a direct call to a named global function,
+/// which has no closure struct at all (BACKLOG item 140; see `emit_callee`).
+fn emit_call_env_arg(func: &Operand, locals: &[MirLocalDecl]) -> Option<String> {
+    let Operand::Local(id) = func else { return None };
+    if !locals.iter().any(|l| l.id == *id && matches!(l.ty, Ty::Fn { .. })) { return None; }
+    Some(format!("({}).env", emit_operand(func)))
 }
 
 fn emit_call_args(func: &Operand, args: &[Operand], locals: &[MirLocalDecl]) -> String {
     let func_c = emit_operand(func);
-    args.iter()
-        .enumerate()
-        .map(|(idx, arg)| emit_call_arg(&func_c, idx, arg, locals))
-        .collect::<Vec<_>>()
-        .join(", ")
+    let mut parts: Vec<String> = emit_call_env_arg(func, locals).into_iter().collect();
+    parts.extend(args.iter().enumerate().map(|(idx, arg)| emit_call_arg(&func_c, idx, arg, locals)));
+    parts.join(", ")
 }
 
 fn emit_call_arg(func_c: &str, idx: usize, arg: &Operand, locals: &[MirLocalDecl]) -> String {

@@ -352,18 +352,20 @@ CertoList* certo_db_columns(int64_t handle, certo_text_t sql) {
 
 /* ---- typed query -------------------------------------------------- */
 
-/* Run a SELECT and map each row through a Certo function.
- * mapper :: List<Text> -> T  (CertoFn1 convention: void* -> void*)
- * Returns List<T>. */
-typedef void* (*CertoFn1)(void*);
+/* Run a SELECT and map each row through a Certo function value.
+ * mapper.fn :: List<Text> -> T  (CertoFn1 convention: void*, void* -> void*,
+ * a leading closure-environment parameter ahead of the real one — BACKLOG
+ * item 140). Returns List<T>. */
+typedef void* (*CertoFn1)(void*, void*);
 
 CertoList* certo_db_query_typed(int64_t handle, certo_text_t sql,
-                                CertoList* params, CertoFn1 mapper) {
+                                CertoList* params, certo_fn_t mapper) {
     CertoList* rows = certo_db_query(handle, sql, params);
-    if (!mapper) return rows;
+    if (!mapper.fn) return rows;
+    CertoFn1 fn = (CertoFn1)mapper.fn;
     CertoList* result = certo_list_new_empty();
     for (size_t i = 0; i < rows->len; i++) {
-        void* mapped = mapper(rows->data[i]);
+        void* mapped = fn(mapper.env, rows->data[i]);
         result = certo_list_push(result, mapped);
     }
     return result;
@@ -414,15 +416,15 @@ static int64_t certo_svp_seq = 0;
  * Returns the Result<T,E> from the thunk unchanged in both cases, so ?
  * propagation in Certo code works naturally at any nesting depth.
  *
- * certo_fn_t is void(*)(void) but the compiled thunk returns void*
- * (a certo_result_t*).  The cast is safe on every ABI Certo targets
- * because void* and void share the same return register (rax / r0). */
+ * `thunk.fn`'s real native signature is `void* (*)(void*)` (its closure
+ * environment, then no other params — BACKLOG item 140) returning void*
+ * (a certo_result_t*). */
 void* certo_with_transaction(int64_t handle, certo_fn_t thunk) {
-    if (handle == 0 || !thunk) {
+    if (handle == 0 || !thunk.fn) {
         return certo_err((intptr_t)(certo_text_t)"withTransaction: invalid connection");
     }
     PGconn *conn = (PGconn *)(uintptr_t)handle;
-    typedef void* (*thunk_t)(void);
+    typedef void* (*thunk_t)(void*);
 
     PGTransactionStatusType txstatus = PQtransactionStatus(conn);
 
@@ -450,7 +452,7 @@ void* certo_with_transaction(int64_t handle, certo_fn_t thunk) {
         }
         PQclear(svp);
 
-        void *result = ((thunk_t)thunk)();
+        void *result = ((thunk_t)thunk.fn)(thunk.env);
 
         if (__result_is_ok(result)) {
             snprintf(sql, sizeof(sql), "RELEASE SAVEPOINT %s", svp_name);
@@ -477,7 +479,7 @@ void* certo_with_transaction(int64_t handle, certo_fn_t thunk) {
         }
         PQclear(begin);
 
-        void *result = ((thunk_t)thunk)();
+        void *result = ((thunk_t)thunk.fn)(thunk.env);
 
         if (__result_is_ok(result)) {
             PGresult *res = PQexec(conn, "COMMIT");
@@ -504,7 +506,7 @@ void* certo_with_transaction(int64_t handle, certo_fn_t thunk) {
 static int64_t certo_stream_seq = 0;
 
 int64_t certo_db_stream(int64_t handle, certo_text_t sql, CertoList* params, certo_fn_t handler) {
-    if (handle == 0 || !handler) return -1;
+    if (handle == 0 || !handler.fn) return -1;
     PGconn *conn = (PGconn *)(uintptr_t)handle;
 
     PGTransactionStatusType txstatus = PQtransactionStatus(conn);
@@ -543,7 +545,7 @@ int64_t certo_db_stream(int64_t handle, certo_text_t sql, CertoList* params, cer
     /* FETCH loop — 100 rows per round-trip. */
     char fetch[128];
     snprintf(fetch, sizeof(fetch), "FETCH 100 FROM %s", cur);
-    typedef void (*row_handler_t)(CertoList*);
+    typedef void (*row_handler_t)(void*, CertoList*);
     int64_t total = 0;
 
     for (;;) {
@@ -561,7 +563,7 @@ int64_t certo_db_stream(int64_t handle, certo_text_t sql, CertoList* params, cer
                     : __certo_opt_box((int64_t)certo_db_strdup(PQgetvalue(res, r, c)));
                 row = certo_list_push(row, cell);
             }
-            ((row_handler_t)handler)(row);
+            ((row_handler_t)handler.fn)(handler.env, row);
             total++;
         }
         PQclear(res);
@@ -589,13 +591,10 @@ int64_t certo_db_stream(int64_t handle, certo_text_t sql, CertoList* params, cer
  * On success or failure of the body, the connection is always closed
  * before returning — no leak is possible.
  *
- * body is fn(Int): Result<T,E>.  certo_fn_t is void(*)(void) but the
- * compiled lambda actually takes int64_t and returns void*.  The cast
- * is safe: the argument goes in the first integer register (rdi / r0)
- * and the void* result comes back in rax / r0 regardless of declared
- * return type. */
+ * body.fn's real native signature is fn(void*, Int): Result<T,E> — its
+ * closure environment, then the connection handle (BACKLOG item 140). */
 void* certo_with_connection(certo_text_t connstr, certo_fn_t body) {
-    if (!body) {
+    if (!body.fn) {
         return certo_err((intptr_t)(certo_text_t)
             "withConnection: invalid body");
     }
@@ -607,8 +606,8 @@ void* certo_with_connection(certo_text_t connstr, certo_fn_t body) {
         return certo_err((intptr_t)(certo_text_t)certo_db_strdup(raw));
     }
 
-    typedef void* (*body_t)(int64_t);
-    void *result = ((body_t)body)(handle);
+    typedef void* (*body_t)(void*, int64_t);
+    void *result = ((body_t)body.fn)(body.env, handle);
 
     certo_db_close(handle);
     return result;

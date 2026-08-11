@@ -295,7 +295,7 @@ typedef struct {
     CertoList*   headers;   /* List<List<Text>>: each inner = [name, value] */
 } CertoHttpRequest;
 
-typedef CertoHttpResponse* (*CertoHttpHandler)(CertoHttpRequest*);
+typedef CertoHttpResponse* (*CertoHttpHandler)(void*, CertoHttpRequest*);
 
 /* Convenience response constructors */
 CertoHttpResponse* certo_http_respond(int64_t status, certo_text_t body, certo_text_t ct) {
@@ -547,7 +547,7 @@ static void http_srv_send(certo_socket_t sock, CertoHttpResponse* resp) {
 #ifdef _WIN32
 /* ---- public: blocking serve loop (Windows / WinSock2) ------------ */
 int64_t certo_http_serve(int64_t port, certo_fn_t raw_handler) {
-    CertoHttpHandler handler = (CertoHttpHandler)raw_handler;
+    CertoHttpHandler handler = (CertoHttpHandler)raw_handler.fn;
 
     WSADATA wsa;
     if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0)
@@ -579,7 +579,7 @@ int64_t certo_http_serve(int64_t port, certo_fn_t raw_handler) {
         CertoHttpRequest* req = http_srv_parse(raw, client);
         free(raw);
 
-        CertoHttpResponse* resp = handler(req);
+        CertoHttpResponse* resp = handler(raw_handler.env, req);
         http_srv_send(client, resp);
 
         certo_closesocket(client);
@@ -591,7 +591,7 @@ int64_t certo_http_serve(int64_t port, certo_fn_t raw_handler) {
 #else
 /* ---- public: blocking serve loop (POSIX / BSD sockets) ----------- */
 int64_t certo_http_serve(int64_t port, certo_fn_t raw_handler) {
-    CertoHttpHandler handler = (CertoHttpHandler)raw_handler;
+    CertoHttpHandler handler = (CertoHttpHandler)raw_handler.fn;
 
     int srv = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (srv == CERTO_INVALID_SOCKET) certo_panic("socket() failed");
@@ -620,7 +620,7 @@ int64_t certo_http_serve(int64_t port, certo_fn_t raw_handler) {
         CertoHttpRequest* req = http_srv_parse(raw, client);
         free(raw);
 
-        CertoHttpResponse* resp = handler(req);
+        CertoHttpResponse* resp = handler(raw_handler.env, req);
         http_srv_send(client, resp);
 
         certo_closesocket(client);

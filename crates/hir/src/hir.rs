@@ -174,6 +174,11 @@ pub enum HirExprKind {
     Lambda {
         params: Vec<HirParam>,
         body:   Box<HirExpr>,
+        /// Locals referenced from an enclosing scope (BACKLOG item 140) —
+        /// real closure capture. Each is boxed into the lambda's own heap
+        /// environment at the construction site and unboxed back into a
+        /// same-named local inside the lambda's own lowered function.
+        captures: Vec<LocalId>,
     },
 
     /// Match expression — arms have been desugared to flat patterns.

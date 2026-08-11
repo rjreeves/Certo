@@ -290,10 +290,11 @@ CertoProcessResult* certo_process_exec_with_input(certo_text_t cmd, CertoList* a
  * handler(line: Text): Unit  called once per line, without newline.
  * Returns exit code.
  * ------------------------------------------------------------------ */
-typedef void (*CertoLineHandler)(certo_text_t line, void* ctx);
+typedef void (*CertoLineHandler)(void* ctx, certo_text_t line);
 
-int64_t certo_process_lines(certo_text_t cmd, CertoList* args,
-                             CertoLineHandler handler, void* ctx) {
+int64_t certo_process_lines(certo_text_t cmd, CertoList* args, certo_fn_t handler) {
+    CertoLineHandler fn = (CertoLineHandler)handler.fn;
+    void* ctx = handler.env;
     size_t cap = 256, pos = 0;
     char* cbuf = (char*)malloc(cap);
     if (!cbuf) certo_panic("out of memory");
@@ -330,7 +331,7 @@ int64_t certo_process_lines(certo_text_t cmd, CertoList* args,
         size_t len = strlen(line_buf);
         if (len > 0 && line_buf[len-1] == '\n') line_buf[--len] = '\0';
         if (len > 0 && line_buf[len-1] == '\r') line_buf[--len] = '\0';
-        handler((certo_text_t)line_buf, ctx);
+        fn(ctx, (certo_text_t)line_buf);
     }
 
     int rc = 0;

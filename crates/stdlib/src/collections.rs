@@ -150,32 +150,40 @@ CertoList* certo_list_reverse(CertoList* l) {
     return n;
 }
 
-/* map / filter / fold take function pointers — generated code supplies them */
-typedef void* (*CertoFn1)(void*);
-typedef void* (*CertoFn2)(void*, void*);
-typedef bool  (*CertoPred)(void*);
+/* map / filter / fold take function *values* — a `certo_fn_t { fn, env }`
+ * closure (BACKLOG item 140), not a bare pointer, so a lambda literal can
+ * capture a variable from its enclosing scope. Every generated lambda
+ * function's own real native signature always takes its closure
+ * environment as an explicit leading `void*` parameter (whether or not it
+ * actually captures anything), matching these typedefs. */
+typedef void* (*CertoFn1)(void*, void*);
+typedef void* (*CertoFn2)(void*, void*, void*);
+typedef bool  (*CertoPred)(void*, void*);
 
-CertoList* certo_list_map(CertoList* l, CertoFn1 f) {
+CertoList* certo_list_map(CertoList* l, certo_fn_t f) {
     if (!l) return list_alloc(0);
+    CertoFn1 fn = (CertoFn1)f.fn;
     CertoList* n = list_alloc(l->len);
-    for (int64_t i = 0; i < l->len; i++) n->data[i] = f(l->data[i]);
+    for (int64_t i = 0; i < l->len; i++) n->data[i] = fn(f.env, l->data[i]);
     n->len = l->len;
     return n;
 }
 
-CertoList* certo_list_filter(CertoList* l, CertoPred pred) {
+CertoList* certo_list_filter(CertoList* l, certo_fn_t f) {
     if (!l) return list_alloc(0);
+    CertoPred pred = (CertoPred)f.fn;
     CertoList* n = list_alloc(l->len);
     for (int64_t i = 0; i < l->len; i++) {
-        if (pred(l->data[i])) n->data[n->len++] = l->data[i];
+        if (pred(f.env, l->data[i])) n->data[n->len++] = l->data[i];
     }
     return n;
 }
 
-void* certo_list_fold(CertoList* l, void* init, CertoFn2 f) {
+void* certo_list_fold(CertoList* l, void* init, certo_fn_t f) {
+    CertoFn2 fn = (CertoFn2)f.fn;
     void* acc = init;
     if (!l) return acc;
-    for (int64_t i = 0; i < l->len; i++) acc = f(acc, l->data[i]);
+    for (int64_t i = 0; i < l->len; i++) acc = fn(f.env, acc, l->data[i]);
     return acc;
 }
 
@@ -185,36 +193,40 @@ bool certo_list_contains_ptr(CertoList* l, void* item) {
     return false;
 }
 
-void* certo_list_find(CertoList* l, CertoPred pred) {
+void* certo_list_find(CertoList* l, certo_fn_t f) {
     if (!l) return NULL;   /* find heap-boxes its Some result just below */
+    CertoPred pred = (CertoPred)f.fn;
     for (int64_t i = 0; i < l->len; i++)
-        if (pred(l->data[i])) return __certo_opt_box((int64_t)l->data[i]);
+        if (pred(f.env, l->data[i])) return __certo_opt_box((int64_t)l->data[i]);
     return NULL;
 }
 
-bool certo_list_any(CertoList* l, CertoPred pred) {
+bool certo_list_any(CertoList* l, certo_fn_t f) {
     if (!l) return false;
+    CertoPred pred = (CertoPred)f.fn;
     for (int64_t i = 0; i < l->len; i++)
-        if (pred(l->data[i])) return true;
+        if (pred(f.env, l->data[i])) return true;
     return false;
 }
 
-bool certo_list_all(CertoList* l, CertoPred pred) {
+bool certo_list_all(CertoList* l, certo_fn_t f) {
     if (!l) return true;
+    CertoPred pred = (CertoPred)f.fn;
     for (int64_t i = 0; i < l->len; i++)
-        if (!pred(l->data[i])) return false;
+        if (!pred(f.env, l->data[i])) return false;
     return true;
 }
 
 /* ---- sort (merge sort, stable) ---- */
 
-typedef int64_t (*CertoCmp)(void*, void*);
+typedef int64_t (*CertoCmp)(void*, void*, void*);
 
-static CertoList* list_merge(CertoList* a, CertoList* b, CertoCmp cmp) {
+static CertoList* list_merge(CertoList* a, CertoList* b, certo_fn_t f) {
+    CertoCmp cmp = (CertoCmp)f.fn;
     CertoList* n = list_alloc(a->len + b->len);
     int64_t i = 0, j = 0;
     while (i < a->len && j < b->len) {
-        if (cmp(a->data[i], b->data[j]) <= 0)
+        if (cmp(f.env, a->data[i], b->data[j]) <= 0)
             n->data[n->len++] = a->data[i++];
         else
             n->data[n->len++] = b->data[j++];
@@ -224,13 +236,13 @@ static CertoList* list_merge(CertoList* a, CertoList* b, CertoCmp cmp) {
     return n;
 }
 
-CertoList* certo_list_sort(CertoList* l, CertoCmp cmp) {
+CertoList* certo_list_sort(CertoList* l, certo_fn_t f) {
     if (!l || l->len <= 1) return l ? l : list_alloc(0);
     int64_t mid = l->len / 2;
     CertoList* left  = certo_list_slice(l, 0,   mid);
     CertoList* right = certo_list_slice(l, mid, l->len);
-    return list_merge(certo_list_sort(left, cmp),
-                      certo_list_sort(right, cmp), cmp);
+    return list_merge(certo_list_sort(left, f),
+                      certo_list_sort(right, f), f);
 }
 
 /* ---- distinct / partition / chunked ---- */
@@ -256,13 +268,14 @@ CertoList* certo_list_distinct(CertoList* l) {
 /* Returns a 2-tuple (matches, non-matches) — tuples are CertoList* with
  * boxed elements (see Rvalue::Aggregate(Tuple) in emit_mir.rs); List<T>
  * values are already pointer-sized so no f2i boxing is needed here. */
-CertoList* certo_list_partition(CertoList* l, CertoPred pred) {
+CertoList* certo_list_partition(CertoList* l, certo_fn_t f) {
+    CertoPred pred = (CertoPred)f.fn;
     CertoList* yes = list_alloc(l ? l->len : 0);
     CertoList* no  = list_alloc(l ? l->len : 0);
     if (l) {
         for (int64_t i = 0; i < l->len; i++) {
-            if (pred(l->data[i])) yes->data[yes->len++] = l->data[i];
-            else                  no->data[no->len++]   = l->data[i];
+            if (pred(f.env, l->data[i])) yes->data[yes->len++] = l->data[i];
+            else                         no->data[no->len++]   = l->data[i];
         }
     }
     return certo_list_of(2, (void*)yes, (void*)no);
@@ -405,11 +418,12 @@ CertoMap* certo_map_from_list(CertoList* l) {
  * `len*2` slots (worst case: every element has a distinct key) since, unlike
  * certo_map_insert, this builds the map in place rather than growing it via
  * copy-on-write per insert. */
-CertoMap* certo_list_group_by(CertoList* l, CertoFn1 key) {
+CertoMap* certo_list_group_by(CertoList* l, certo_fn_t f) {
+    CertoFn1 key = (CertoFn1)f.fn;
     CertoMap* m = map_alloc(l && l->len > 0 ? l->len * 2 : 16);
     if (!l) return m;
     for (int64_t i = 0; i < l->len; i++) {
-        void* k = key(l->data[i]);
+        void* k = key(f.env, l->data[i]);
         int64_t h = map_probe(m, k);
         CertoList* bucket = m->entries[h].occupied
             ? (CertoList*)m->entries[h].value

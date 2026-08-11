@@ -261,7 +261,7 @@ certo_text_t certo_query_sql(CertoQuery* q) {
     return certo_query_build_sql(q);
 }
 
-CertoList* certo_query_list(CertoQuery* q, int64_t conn, CertoFn1 mapper) {
+CertoList* certo_query_list(CertoQuery* q, int64_t conn, certo_fn_t mapper) {
     char* sql = certo_query_build_sql(q);
     CertoList* result = certo_db_query_typed(conn, sql, q->params, mapper);
     free(sql);
@@ -270,7 +270,7 @@ CertoList* certo_query_list(CertoQuery* q, int64_t conn, CertoFn1 mapper) {
 
 /* Returns Some(mapped row) or None — implemented as `.limit(1).list(...)`, not
  * a separate SQL path, so it can never drift from `.list`'s query construction. */
-void* certo_query_first(CertoQuery* q, int64_t conn, CertoFn1 mapper) {
+void* certo_query_first(CertoQuery* q, int64_t conn, certo_fn_t mapper) {
     CertoQuery* limited = certo_query_limit(q, 1);
     CertoList* rows = certo_query_list(limited, conn, mapper);
     if (!rows || rows->len == 0) return NULL;
@@ -281,7 +281,7 @@ void* certo_query_first(CertoQuery* q, int64_t conn, CertoFn1 mapper) {
  * `certo_db_query_typed` path as `.list` — the only reason this is a separate C symbol
  * is that it's a separate Certo-level name (no `DbRow` bound: aggregate results are
  * synthetic shapes, not schema tables). */
-CertoList* certo_query_grouped_list(CertoQuery* q, int64_t conn, CertoFn1 mapper) {
+CertoList* certo_query_grouped_list(CertoQuery* q, int64_t conn, certo_fn_t mapper) {
     return certo_query_list(q, conn, mapper);
 }
 

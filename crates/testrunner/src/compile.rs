@@ -34,7 +34,18 @@ pub fn compile_c_opts(c_src: &str, out_path: &Path, coverage: bool) -> Result<()
     let mut cmd = Command::new(&compiler);
     cmd.args([
         "-x", "c",
-        "-std=c11",
+        // GNU dialect, not strict ISO `-std=c11` — matches `certo build`'s
+        // own invocation (crates/cli/src/main.rs), which passes no `-std`
+        // flag at all and so gets clang's GNU-by-default dialect. Codegen
+        // already relies on the GNU `typeof` extension (`emit_mir.rs`'s
+        // `AggregateKind::Record` emission, `(typeof(lhs)){ ... }`) for
+        // *any* record-type literal, not just a closure's `certo_fn_t`
+        // struct (BACKLOG item 140) — `certo test` had simply never
+        // compiled one until now. Confirmed via direct testing: strict
+        // `-std=c11` rejects `typeof` outright ("expected ';' after
+        // expression"), a real, independent, pre-existing gap between
+        // `certo test` and `certo build`'s C dialect.
+        "-std=gnu11",
         "-O0",
         "-o", out_path.to_str().unwrap_or("certo_test_bin"),
         src_file.path().to_str().unwrap_or(""),

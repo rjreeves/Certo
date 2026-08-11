@@ -11,16 +11,19 @@ pub const RESULT_C: &str = r#"
 /* ------------------------------------------------------------------ */
 
 /* flatMap(r, f) — if r is Ok(v), run f(v) (itself Result-returning);
-   if Err, short-circuit with the same error unchanged. */
-void* certo_flat_map(void* r, CertoFn1 f) {
-    if (__result_is_ok(r)) return f((void*)__result_unwrap(r));
+   if Err, short-circuit with the same error unchanged. `f` is a real
+   function *value* (`certo_fn_t { fn, env }`, BACKLOG item 140), not a bare
+   pointer, so a lambda literal can capture a variable from its enclosing
+   scope. */
+void* certo_flat_map(void* r, certo_fn_t f) {
+    if (__result_is_ok(r)) return ((CertoFn1)f.fn)(f.env, (void*)__result_unwrap(r));
     return r;
 }
 
 /* mapErr(r, f) — transform the error side, leaving Ok untouched. */
-void* certo_map_err(void* r, CertoFn1 f) {
+void* certo_map_err(void* r, certo_fn_t f) {
     if (__result_is_ok(r)) return r;
-    return certo_err((intptr_t)f((void*)__result_unwrap(r)));
+    return certo_err((intptr_t)((CertoFn1)f.fn)(f.env, (void*)__result_unwrap(r)));
 }
 
 /* getOrElse(r, default) — unwrap Ok, else the given default. */
@@ -30,9 +33,9 @@ intptr_t certo_get_or_else(void* r, intptr_t default_value) {
 }
 
 /* recover(r, f) — unwrap Ok, else compute a fallback value from the error. */
-intptr_t certo_recover(void* r, CertoFn1 f) {
+intptr_t certo_recover(void* r, certo_fn_t f) {
     if (__result_is_ok(r)) return __result_unwrap(r);
-    return (intptr_t)f((void*)__result_unwrap(r));
+    return (intptr_t)((CertoFn1)f.fn)(f.env, (void*)__result_unwrap(r));
 }
 
 /* Result.all(results) — Ok(list of every payload) if all succeeded,
