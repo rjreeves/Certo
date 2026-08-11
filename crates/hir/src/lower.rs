@@ -1074,8 +1074,10 @@ fn lower_expr(expr: &S<Expr>, cx: &mut Cx) -> HirExpr {
         // Lower `spawn f(a, b)` as a Call node wrapped in Spawn so MIR can emit the call,
         // with Spawn being transparent at HIR (the actual threading is done by codegen/runtime).
         Expr::Spawn { expr, .. } => {
+            let capture_threshold = cx.next_local;
             let inner = lower_expr(expr, cx);
-            HirExpr { kind: HirExprKind::Spawn { fn_name: String::new(), args: vec![inner] }, ty: Ty::Error, span }
+            let captures = collect_lambda_captures(&inner, capture_threshold);
+            HirExpr { kind: HirExprKind::Spawn { fn_name: String::new(), args: vec![inner], captures }, ty: Ty::Error, span }
         }
 
         // `guard cond else e` → `if !cond { e }; unit`
@@ -1147,9 +1149,11 @@ fn lower_expr(expr: &S<Expr>, cx: &mut Cx) -> HirExpr {
             });
             let mut task_locals: Vec<LocalId> = Vec::new();
             for (i, task) in tasks.iter().enumerate() {
+                let capture_threshold = cx.next_local;
                 let spawn_inner = lower_expr(task, cx);
+                let captures = collect_lambda_captures(&spawn_inner, capture_threshold);
                 let spawn_expr = HirExpr {
-                    kind: HirExprKind::Spawn { fn_name: format!("__parallel_task_{i}"), args: vec![spawn_inner] },
+                    kind: HirExprKind::Spawn { fn_name: format!("__parallel_task_{i}"), args: vec![spawn_inner], captures },
                     ty: Ty::Error, span,
                 };
                 let local = cx.fresh_local();

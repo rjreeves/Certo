@@ -429,6 +429,49 @@ fn lower_named_fn_boxed(name: &str, real_param_tys: &[Ty], real_ret_ty: &Ty, b: 
     make_closure(&wrap_name, Operand::Const(MirConst::Unit), opaque_fn_ty(), b)
 }
 
+/// Lift a `spawn` body that isn't a direct call into a synthesized
+/// top-level function taking its captured locals as ordinary real-typed
+/// parameters — BACKLOG item 141. Unlike a lambda's `certo_fn_t` closure,
+/// this needs no env/boxing indirection at all: `Rvalue::Spawn`'s own
+/// existing codegen already threads each of its `args` through its own
+/// real-typed field on the per-site context struct (`emit_spawn_support`),
+/// so treating the captures as if they were an ordinary call's arguments
+/// reuses that mechanism directly — spawning the lifted function is
+/// identical to spawning a direct call to any other named function.
+fn lift_spawn_body(body: &HirExpr, captures: &[LocalId], b: &mut Builder) -> (String, Vec<Operand>, Ty) {
+    let idx = b.lambda_count;
+    b.lambda_count += 1;
+    let fn_name = format!("__spawn_{}_{}", b.fn_name, idx);
+
+    let capture_tys = capture_types(captures, b);
+    let arg_ops: Vec<Operand> = captures.iter().map(|cid| Operand::Local(b.get_local(*cid))).collect();
+
+    let mut lb = Builder::new(&fn_name, b.record_field_types.clone(), b.variant_field_types.clone(), b.fn_param_tys.clone(), b.fn_ret_tys.clone());
+    let ret_slot = lb.declare_local("_ret", Ty::Error);
+    for (cid, ty) in captures.iter().zip(&capture_tys) {
+        lb.map_hir_local(*cid, "_cap", ty.clone());
+    }
+    lb.current_span = body.span;
+    let result = lower_expr(body, &mut lb);
+    let ret_ty = infer_operand_ty(&result, &lb);
+    lb.locals[ret_slot as usize].ty = ret_ty.clone();
+    if !matches!(ret_ty, Ty::Unit) {
+        lb.assign(ret_slot, Rvalue::Use(result));
+    }
+    emit_defers_then_return(Operand::Local(ret_slot), &mut lb);
+
+    let lifted_fn = MirFn {
+        name: fn_name.clone(),
+        param_count: captures.len(),
+        locals: lb.locals,
+        blocks: lb.blocks,
+    };
+    b.lifted_fns.extend(lb.lifted_fns);
+    b.lifted_fns.push(lifted_fn);
+
+    (fn_name, arg_ops, ret_ty)
+}
+
 /// Derive the Certo type of a MIR operand from its constant or declared local type.
 fn infer_operand_ty(op: &Operand, b: &Builder) -> Ty {
     match op {
@@ -1382,11 +1425,12 @@ fn lower_expr(expr: &HirExpr, b: &mut Builder) -> Operand {
             Operand::Const(MirConst::Unit)
         }
 
-        HirExprKind::Spawn { fn_name: _, args } => {
+        HirExprKind::Spawn { fn_name: _, args, captures } => {
             // `spawn f(a, b)` — run f on a new OS thread, evaluating the arguments
-            // eagerly in the current thread first. Only a direct call to a named
-            // function (Global) can be threaded; anything else falls back to
-            // sequential evaluation (still correct, just not concurrent).
+            // eagerly in the current thread first (a direct call to a named
+            // function needs no lifting at all: its own argument expressions
+            // already run in the *current* thread before the worker starts,
+            // exactly matching ordinary eager call-argument evaluation).
             let inner = args.first();
             if let Some(HirExpr { kind: HirExprKind::Call { func, args: call_args }, ty: ret_ty, .. }) = inner {
                 let func_op = lower_expr(func, b);
@@ -1401,10 +1445,24 @@ fn lower_expr(expr: &HirExpr, b: &mut Builder) -> Operand {
                     return Operand::Local(dest);
                 }
             }
-            // Fallback: evaluate eagerly (sequential), handle is the value itself.
-            let inner_op = inner.map(|e| lower_expr(e, b)).unwrap_or(Operand::Const(MirConst::Int(0)));
+            // Any other body shape (a block, `if`, `while`, ...) must run in
+            // full on the worker thread — lift it into a synthesized
+            // top-level function taking its captures as ordinary real-typed
+            // parameters, then spawn a call to *that* (BACKLOG item 141;
+            // this replaces the old "evaluate eagerly, not actually
+            // concurrent" fallback, which silently hung the program for any
+            // spawn body with no natural exit, e.g. `while true { ... }`).
+            if let Some(body) = inner {
+                let (lifted_name, arg_ops, ret_ty) = lift_spawn_body(body, captures, b);
+                let task_ty = certo_typeck::Ty::Named { name: "__CertoTask".into(), args: vec![ret_ty.clone()] };
+                let dest = b.declare_local("__task", task_ty);
+                b.assign(dest, Rvalue::Spawn { func: Operand::Global(lifted_name), args: arg_ops, ret_ty });
+                return Operand::Local(dest);
+            }
+            // `args` is always exactly one element in practice — no real
+            // spawn body to run.
             let dest = b.declare_local("__task", certo_typeck::Ty::Error);
-            b.assign(dest, Rvalue::Use(inner_op));
+            b.assign(dest, Rvalue::Use(Operand::Const(MirConst::Int(0))));
             Operand::Local(dest)
         }
 

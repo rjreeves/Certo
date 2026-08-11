@@ -986,6 +986,36 @@ fn spawn_emits_thread_worker_and_launch() {
 }
 
 #[test]
+fn spawn_of_non_call_body_is_lifted_not_inlined() {
+    // BACKLOG item 141: a spawn body that isn't a direct call to a named
+    // function (a `while` loop here — exactly the shape that used to hang
+    // the program, since the old fallback inlined it into the calling
+    // function's own control flow instead of running it on the worker
+    // thread) must now be lifted into its own top-level function and
+    // actually spawned like any other call.
+    let c = codegen(
+        "module A\nasync fn run(): Unit = {\n  val t = spawn { var i = 0\n while i < 3 { i = i + 1 } }\n  await t\n}");
+    assert_contains(&c, "__certo_thread_spawn");
+    assert_contains(&c, "__spawn_run_0");
+}
+
+#[test]
+fn spawn_of_non_call_body_captures_enclosing_locals() {
+    // The lifted function must receive a variable the spawn body reads from
+    // its enclosing scope as a real, typed ctx-struct argument — not lose
+    // it or silently misread garbage.
+    let c = codegen(
+        "module A\nasync fn run(limit: Int): Unit = {\n  val t = spawn { var i = 0\n while i < limit { i = i + 1 } }\n  await t\n}");
+    // The captured `limit` becomes the lifted function's own parameter,
+    // threaded through the worker's ctx struct exactly like an ordinary
+    // spawned call's argument (`_sc->a0 = <limit's local>` at the spawn
+    // site, `c->a0` read back inside the generated worker).
+    assert_contains(&c, "static int64_t __spawn_run_0(int64_t");
+    assert_contains(&c, "_sc->a0 = _l1;");
+    assert_contains(&c, "c->a0");
+}
+
+#[test]
 fn await_emits_thread_join() {
     let c = codegen(
         "module A\nfn work(n: Int): Int = n + 1\n\
