@@ -80,6 +80,34 @@ pub enum Ty {
 
     /// Placeholder for a type that failed to infer — suppresses cascading errors.
     Error,
+
+    // ---------------------------------------------------------------- //
+    // Higher-kinded types (BACKLOG item 76) — deliberately minimal: Certo
+    // has no general kind system, only enough to let a 1-ary type
+    // constructor (`Box<T>`, `List<T>`, `Option<T>`, a user's own
+    // single-param generic type) be *itself* a type parameter, e.g.
+    // `fn map<F<_>, A, B>(fa: F<A>, ...)`. A 2-ary type (`Map<K,V>`,
+    // `Result<A,E>`) can never satisfy an `F<_>` parameter — there is no
+    // partial-application/currying support, unlike a real kind system.
+    // ---------------------------------------------------------------- //
+
+    /// A bare, unapplied type constructor by name (`Box`, `List`, `Option`,
+    /// ...) — the value a constructor-kind type variable (`Ty::Var` bound
+    /// via an `F<_>` parameter) resolves to once its *identity* is known,
+    /// before its one argument is known. Purely an internal unification
+    /// intermediate — never appears in surface syntax and never survives
+    /// into a fully-resolved type (`App(Ctor(name), arg)` always collapses
+    /// to `Named { name, args: [arg] }`, or the builtin equivalent, the
+    /// moment both sides are known — see `apply_subst`).
+    Ctor(String),
+
+    /// A type constructor applied to one argument: `F<A>` where `F` is
+    /// itself potentially still an unresolved type variable. Unifies
+    /// against a concrete single-argument type (`Named{args:[_]}`,
+    /// `List(_)`, `Option(_)`) by binding the constructor position to a
+    /// `Ctor` recovered from that type's own name, exactly like any other
+    /// type-variable binding — see `unify.rs`.
+    App(Box<Ty>, Box<Ty>),
 }
 
 impl Ty {
@@ -223,6 +251,23 @@ impl Ty {
                 Ty::Forall { vars: vars.clone(), body: Box::new(body.apply_subst(&inner)) }
             }
 
+            // Once the constructor position resolves to a concrete `Ctor`,
+            // collapse into an ordinary fully-applied type — the whole
+            // point of `App` is to be a transient intermediate, never a
+            // final answer (BACKLOG item 76).
+            Ty::App(f, a) => {
+                let f = f.apply_subst(subst);
+                let a = a.apply_subst(subst);
+                match f {
+                    Ty::Ctor(name) => match name.as_str() {
+                        "List"   => Ty::List(Box::new(a)),
+                        "Option" => Ty::Option(Box::new(a)),
+                        _        => Ty::Named { name, args: vec![a] },
+                    },
+                    f => Ty::App(Box::new(f), Box::new(a)),
+                }
+            }
+
             // Ground types and Error pass through unchanged
             other => other.clone(),
         }
@@ -255,6 +300,7 @@ impl Ty {
                 body.collect_free(acc);
                 acc.retain(|v| !vars.contains(v));
             }
+            Ty::App(f, a) => { f.collect_free(acc); a.collect_free(acc); }
             _ => {}
         }
     }
@@ -313,6 +359,8 @@ impl Ty {
                 format!("∀{}. {}", vs, body.display_named(names))
             }
             Ty::Error => "<error>".into(),
+            Ty::Ctor(name) => name.clone(),
+            Ty::App(f, a) => format!("{}<{}>", f.display_named(names), a.display_named(names)),
         }
     }
 

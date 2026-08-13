@@ -255,10 +255,134 @@ fn bind_captures(captures: &[LocalId], capture_tys: &[Ty], env_param: MirLocal, 
 /// argument, held in a record field/list/tuple element — must carry a real
 /// closure so it's callable uniformly through `emit_callee`.
 fn lower_value_expr(e: &HirExpr, b: &mut Builder) -> Operand {
-    if let (HirExprKind::Global(fn_name), Ty::Fn { .. }) = (&e.kind, &e.ty) {
-        return make_closure(fn_name, Operand::Const(MirConst::Unit), e.ty.clone(), b);
+    if let (HirExprKind::Global(fn_name), Ty::Fn { params, ret }) = (&e.kind, &e.ty) {
+        return wrap_named_fn_as_closure(fn_name, params, ret, b);
     }
     lower_expr(e, b)
+}
+
+/// Wrap a bare named-function reference into a real closure whose `.fn`
+/// itself takes the uniform leading `void*` env parameter every closure
+/// caller assumes (BACKLOG item 140/76). A *named function's own compiled
+/// signature* never has that leading env parameter — only a lambda's own
+/// generated function does — so simply pointing `.fn` straight at the named
+/// function (as an earlier version of this code did) is a real calling-
+/// convention mismatch the moment anything actually calls through the
+/// closure (`emit_callee`'s cast, or a hand-written C runtime function
+/// like `certo_http_serve` that unpacks `.fn`/`.env` itself): the callee
+/// receives one argument fewer than the caller passes, corrupting the
+/// stack/registers for every argument after the phantom env. This
+/// generates a tiny env-accepting (and ignoring) wrapper function instead,
+/// mirroring `lower_named_fn_boxed`'s shape but without its
+/// BOXED_ABI_CALLEES-specific void*-param/return erasure, since this path
+/// keeps the named function's real native parameter/return types.
+fn wrap_named_fn_as_closure(name: &str, real_param_tys: &[Ty], real_ret_ty: &Ty, b: &mut Builder) -> Operand {
+    let idx = b.lambda_count;
+    b.lambda_count += 1;
+    let wrap_name = format!("__fnref_{}_{}", b.fn_name, idx);
+
+    let mut lb = Builder::new(&wrap_name, b.record_field_types.clone(), b.variant_field_types.clone(), b.fn_param_tys.clone(), b.fn_ret_tys.clone());
+    let ret_slot = lb.declare_local("_ret", real_ret_ty.clone());
+    let _env_param = lb.declare_local("_env", Ty::Error); // ignored — a named function never captures
+
+    let real_locals: Vec<MirLocal> = real_param_tys.iter()
+        .map(|ty| lb.declare_local("_p", ty.clone()))
+        .collect();
+
+    let call_dest = lb.declare_local("_inner_call", real_ret_ty.clone());
+    let next = lb.new_block();
+    lb.terminate(Terminator::Call {
+        func: Operand::Global(name.to_string()),
+        args: real_locals.into_iter().map(Operand::Local).collect(),
+        dest: call_dest,
+        next,
+    });
+    lb.switch_to(next);
+
+    if !matches!(real_ret_ty, Ty::Unit) {
+        lb.assign(ret_slot, Rvalue::Use(Operand::Local(call_dest)));
+    }
+    emit_defers_then_return(Operand::Local(ret_slot), &mut lb);
+
+    let wrap_fn = MirFn {
+        name: wrap_name.clone(),
+        param_count: real_param_tys.len() + 1,
+        locals: lb.locals,
+        blocks: lb.blocks,
+    };
+    b.lifted_fns.extend(lb.lifted_fns);
+    b.lifted_fns.push(wrap_fn);
+
+    let ty = Ty::Fn { params: real_param_tys.to_vec(), ret: Box::new(real_ret_ty.clone()) };
+    make_closure(&wrap_name, Operand::Const(MirConst::Unit), ty, b)
+}
+
+/// Same as `wrap_named_fn_as_closure`, but for a named function whose value
+/// is used where an *erased* (`Ty::Var(0)`-typed) closure signature is
+/// expected instead of its own real native one — e.g. a higher-kinded
+/// function's own `f: A => B` parameter (BACKLOG item 76): `hktMap`'s own
+/// internal call to `f` treats it as uniformly `Ty::Var(0) -> Ty::Var(0)`
+/// regardless of what's actually bound to it at any given call site, so the
+/// wrapper itself must present that same erased shape. Unboxes each
+/// incoming erased parameter into the real function's own declared type
+/// before calling it, then boxes the real result back — the same
+/// `BoxSome`/`UnboxSome` malloc-based pairing every other value crossing a
+/// `Ty::Var(0)` boundary already uses (*not* `Rvalue::Box`/`Unbox`'s
+/// bit-packing scheme, which is specifically `BOXED_ABI_CALLEES`'s own
+/// stdlib-callback convention — see `lower_named_fn_boxed` — a different,
+/// incompatible boxing scheme from the one a sum-type constructor call
+/// like `Box(v)` actually uses for its own bare-`T` payload).
+fn wrap_named_fn_as_erased_closure(name: &str, real_param_tys: &[Ty], real_ret_ty: &Ty, b: &mut Builder) -> Operand {
+    let idx = b.lambda_count;
+    b.lambda_count += 1;
+    let wrap_name = format!("__fnref_erased_{}_{}", b.fn_name, idx);
+
+    let mut lb = Builder::new(&wrap_name, b.record_field_types.clone(), b.variant_field_types.clone(), b.fn_param_tys.clone(), b.fn_ret_tys.clone());
+    let ret_slot = lb.declare_local("_ret", Ty::Var(0));
+    let _env_param = lb.declare_local("_env", Ty::Error);
+
+    let raw_locals: Vec<MirLocal> = real_param_tys.iter()
+        .map(|_| lb.declare_local("_p_erased", Ty::Var(0)))
+        .collect();
+    let real_locals: Vec<MirLocal> = real_param_tys.iter().zip(raw_locals.iter())
+        .map(|(ty, raw)| {
+            let real = lb.declare_local("_p_real", ty.clone());
+            lb.assign(real, Rvalue::UnboxSome { opt: Operand::Local(*raw), ty: ty.clone() });
+            real
+        })
+        .collect();
+
+    let call_dest = lb.declare_local("_inner_call", real_ret_ty.clone());
+    let next = lb.new_block();
+    lb.terminate(Terminator::Call {
+        func: Operand::Global(name.to_string()),
+        args: real_locals.into_iter().map(Operand::Local).collect(),
+        dest: call_dest,
+        next,
+    });
+    lb.switch_to(next);
+
+    if matches!(real_ret_ty, Ty::Unit) {
+        lb.locals[ret_slot as usize].ty = Ty::Var(0);
+    } else {
+        lb.assign(ret_slot, Rvalue::BoxSome { value: Operand::Local(call_dest), ty: real_ret_ty.clone() });
+    }
+    emit_defers_then_return(Operand::Local(ret_slot), &mut lb);
+
+    let wrap_fn = MirFn {
+        name: wrap_name.clone(),
+        param_count: real_param_tys.len() + 1,
+        locals: lb.locals,
+        blocks: lb.blocks,
+    };
+    b.lifted_fns.extend(lb.lifted_fns);
+    b.lifted_fns.push(wrap_fn);
+
+    let ty = Ty::Fn {
+        params: real_param_tys.iter().map(|_| Ty::Var(0)).collect(),
+        ret:    Box::new(Ty::Var(0)),
+    };
+    make_closure(&wrap_name, Operand::Const(MirConst::Unit), ty, b)
 }
 
 /// Wrap a lifted lambda's generated global function and its closure
@@ -720,7 +844,7 @@ fn lower_expr(expr: &HirExpr, b: &mut Builder) -> Operand {
             };
             let arg_ops: Vec<Operand> = args.iter().enumerate().map(|(i, a)| {
                 if needs_boxed_callback {
-                    if let HirExprKind::Lambda { params, body, captures } = &a.kind {
+                    if let HirExprKind::Lambda { params, body, captures, .. } = &a.kind {
                         return lower_lambda_boxed(params, body, captures, elem_ty_hint.as_ref(), b);
                     }
                     // A named function reference (`dbQueryTyped(..., widgetsFromRow)`),
@@ -734,6 +858,27 @@ fn lower_expr(expr: &HirExpr, b: &mut Builder) -> Operand {
                         return lower_named_fn_boxed(fn_name, params, ret, b);
                     }
                 }
+                let declared = variant_field_types.as_ref().and_then(|tys| tys.get(i))
+                    .or_else(|| fn_param_tys.as_ref().and_then(|tys| tys.get(i)));
+                // A bare named-function reference passed where a
+                // higher-kinded function's own declared parameter is itself
+                // an *erased* `Ty::Fn` (e.g. `f: A => B`, BACKLOG item 76) —
+                // its real native signature (`certo_double: Int -> Int`)
+                // must be wrapped to match that erased shape, unboxing/
+                // boxing at the boundary, not just wrapped 1:1 like an
+                // ordinary named-function value (`wrap_named_fn_as_closure`,
+                // which assumes the declared position wants the function's
+                // own real types, true for an *ordinary* generic function
+                // like item 108's `applyOne` but not for `F<_>`'s uniformly
+                // erased signature).
+                if let (HirExprKind::Global(fn_name), Ty::Fn { params: real_params, ret: real_ret }) = (&a.kind, &a.ty) {
+                    if let Some(Ty::Fn { params: decl_params, ret: decl_ret }) = declared {
+                        let erased = decl_params.iter().any(|t| matches!(t, Ty::Var(_))) || matches!(**decl_ret, Ty::Var(_));
+                        if erased {
+                            return wrap_named_fn_as_erased_closure(fn_name, real_params, real_ret, b);
+                        }
+                    }
+                }
                 let value_op = lower_value_expr(a, b);
                 // Box only when the declared param/field is a bare type-param
                 // AND the argument's own type is a *known concrete* type —
@@ -744,12 +889,28 @@ fn lower_expr(expr: &HirExpr, b: &mut Builder) -> Operand {
                 // spurious level of pointer indirection around a value MIR
                 // has no way to interpret — the same double-boxing failure
                 // class item 134 fixed for `List.first`/etc. — BACKLOG item 120.
-                let declared = variant_field_types.as_ref().and_then(|tys| tys.get(i))
-                    .or_else(|| fn_param_tys.as_ref().and_then(|tys| tys.get(i)));
                 if matches!(declared, Some(Ty::Var(_))) && !matches!(a.ty, Ty::Var(_)) {
                     let boxed = b.declare_local("_boxed_arg", Ty::Var(0));
                     b.assign(boxed, Rvalue::BoxSome { value: value_op, ty: a.ty.clone() });
                     return Operand::Local(boxed);
+                }
+                // The inverse direction (BACKLOG item 76): the argument is
+                // itself still an erased `Ty::Var(0)` value (e.g. a
+                // higher-kinded `F<A>` parameter, unlike an ordinary bare
+                // `T` — Certo has no monomorphization, so `F` being unknown
+                // means the *whole* value is opaque, not just one field of a
+                // known struct), but the callee's *own* declared param is a
+                // real, concrete type (`Box<T>`, passed by value as its own
+                // struct — never pointer-sized on its own). Must unbox
+                // (mirroring `BoxSome`'s own unconditional malloc-and-copy on
+                // the way in) before the value can be used as that concrete
+                // type at all.
+                if let Some(concrete) = declared {
+                    if matches!(a.ty, Ty::Var(_)) && !matches!(concrete, Ty::Var(_) | Ty::Error) {
+                        let unboxed = b.declare_local("_unboxed_arg", concrete.clone());
+                        b.assign(unboxed, Rvalue::UnboxSome { opt: value_op, ty: concrete.clone() });
+                        return Operand::Local(unboxed);
+                    }
                 }
                 value_op
             }).collect();
@@ -1211,7 +1372,7 @@ fn lower_expr(expr: &HirExpr, b: &mut Builder) -> Operand {
             }
         }
 
-        HirExprKind::Lambda { params, body, captures } => {
+        HirExprKind::Lambda { params, body, captures, ret_hint } => {
             // Lift the lambda to a top-level MIR function named `__lam_<parent>_N`.
             let idx = b.lambda_count;
             b.lambda_count += 1;
@@ -1236,9 +1397,21 @@ fn lower_expr(expr: &HirExpr, b: &mut Builder) -> Operand {
             bind_captures(captures, &capture_tys, env_param, &mut lb);
             lb.current_span = body.span;
             let lam_result = lower_expr(body, &mut lb);
-            let lam_ret_ty = infer_operand_ty(&lam_result, &lb);
+            let inferred_ret_ty = infer_operand_ty(&lam_result, &lb);
+            // The declared position this lambda was passed into expects an
+            // erased result (e.g. a higher-kinded `F<B>` return, BACKLOG
+            // item 76 — `wrap: B => F<B>`'s real body, `Box.wrap(x)`,
+            // returns the concrete `Box` struct by value, which can't
+            // possibly satisfy the closure's uniform `void*`-returning ABI
+            // without boxing first, mirroring `BoxSome`'s own unconditional
+            // malloc-and-copy already used for every other value crossing
+            // into an erased slot).
+            let needs_return_box = matches!(ret_hint, Ty::Var(_)) && !matches!(inferred_ret_ty, Ty::Var(_));
+            let lam_ret_ty = if needs_return_box { Ty::Var(0) } else { inferred_ret_ty.clone() };
             lb.locals[ret_slot as usize].ty = lam_ret_ty.clone();
-            if !matches!(lam_ret_ty, Ty::Unit) {
+            if needs_return_box {
+                lb.assign(ret_slot, Rvalue::BoxSome { value: lam_result, ty: inferred_ret_ty });
+            } else if !matches!(lam_ret_ty, Ty::Unit) {
                 lb.assign(ret_slot, Rvalue::Use(lam_result));
             }
             emit_defers_then_return(Operand::Local(ret_slot), &mut lb);

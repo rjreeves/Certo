@@ -34,6 +34,9 @@ pub fn llvm_ty(ty: &Ty) -> String {
         Ty::Var(_)     => "ptr".into(),
         Ty::Forall { body, .. } => llvm_ty(body),
         Ty::Error      => "ptr".into(),
+        // Higher-kinded type param (BACKLOG item 76) — same opaque-pointer
+        // erasure as any other still-generic type reaching this point.
+        Ty::Ctor(_) | Ty::App(_, _) => "ptr".into(),
     }
 }
 

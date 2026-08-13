@@ -85,6 +85,21 @@ pub fn type_expr_to_ty(te: &TypeExpr, ctx: &mut Ctx<'_>) -> Ty {
                         if let Some(Ty::Var(v)) = ctx.env.lookup(&name) {
                             return Ty::Var(*v);
                         }
+                    } else if targs.len() == 1 {
+                        // `F<A>` where `F` is a declared 1-ary type-constructor
+                        // parameter (`F<_>`, BACKLOG item 76) — higher-kinded
+                        // application, not an ordinary named type with args.
+                        // Anything else applying a *non*-constructor type
+                        // param to an argument (a genuine kind error, e.g. a
+                        // plain `T` written as `T<Int>`) deliberately falls
+                        // through to the `Named` catch-all below rather than
+                        // being special-cased here — unification will reject
+                        // it as an ordinary type mismatch.
+                        if let Some(Ty::Var(v)) = ctx.env.lookup(&name) {
+                            if ctx.env.constructor_vars.contains(v) {
+                                return Ty::App(Box::new(Ty::Var(*v)), Box::new(targs.into_iter().next().unwrap()));
+                            }
+                        }
                     }
                     Ty::Named { name, args: targs }
                 }
@@ -471,14 +486,30 @@ pub fn infer(expr: &S<Expr>, ctx: &mut Ctx<'_>) -> Ty {
             // When written as `TypeName { ... }`, unify each field value against
             // the declared field type so mismatches are caught at compile time.
             if let Some(name) = ty_name {
+                // A generic type's declared field types (`record_fields`)
+                // reference its own type-param vars, minted *once* at the
+                // type's own hoisting — every occurrence of `TypeName { .. }`
+                // must instantiate them fresh (mirroring `Forall::instantiate`
+                // for a generic function reference), or two occurrences with
+                // different concrete field types would be forced to unify
+                // with each other through the same shared var. Empty for a
+                // non-generic type, matching the previous (correct) behaviour
+                // exactly.
+                let type_params = ctx.env.type_param_vars.get(name.as_str()).cloned().unwrap_or_default();
+                let subst: HashMap<TyVar, Ty> = type_params.iter().map(|&v| {
+                    *ctx.counter += 1;
+                    (v, Ty::Var(*ctx.counter))
+                }).collect();
                 if let Some(declared) = ctx.env.record_fields.get(name.as_str()).cloned() {
                     for (fname, found_ty) in &field_tys {
                         if let Some((_, expected_ty)) = declared.iter().find(|(n, _)| n == fname) {
-                            ctx.unify(expected_ty.clone(), found_ty.clone(), *span);
+                            let expected_ty = expected_ty.apply_subst(&subst);
+                            ctx.unify(expected_ty, found_ty.clone(), *span);
                         }
                     }
                 }
-                Ty::Named { name: name.clone(), args: vec![] }
+                let args: Vec<Ty> = type_params.iter().map(|v| subst[v].clone()).collect();
+                Ty::Named { name: name.clone(), args }
             } else {
                 Ty::Record(field_tys)
             }

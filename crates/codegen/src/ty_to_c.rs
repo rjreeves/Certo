@@ -90,6 +90,14 @@ pub fn ty_to_c(ty: &Ty) -> String {
         Ty::Var(_)    => "void*".into(),
         Ty::Forall { body, .. } => ty_to_c(body),
         Ty::Error     => "int64_t".into(),
+
+        // A higher-kinded type param (`F<_>`, BACKLOG item 76) reaches
+        // codegen only *inside* a still-generic function's own body (any
+        // concrete call site fully resolves `App`/`Ctor` away during
+        // unification — see `Ty::apply_subst` — before HIR/MIR ever see
+        // it). Same type-erased `void*` representation as an ordinary
+        // generic type param.
+        Ty::Ctor(_) | Ty::App(_, _) => "void*".into(),
     }
 }
 

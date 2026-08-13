@@ -281,19 +281,37 @@ fn binop_result_ty(op: &crate::hir::BinOp, lhs: &Ty, rhs: &Ty) -> Ty {
 /// result, or a `for` loop over it) can't tell it's ever handling a `Float`
 /// and skips unboxing it. See BACKLOG item 113.
 fn lower_lambda_with_param_hint(params: &[certo_ast::expr::LambdaParam], body: &S<Expr>, hint: &Ty, cx: &mut Cx, span: Span) -> HirExpr {
+    lower_lambda_with_param_hints(params, body, std::slice::from_ref(hint), &Ty::Error, cx, span)
+}
+
+/// Same as `lower_lambda_with_param_hint`, but one hint per param instead of
+/// only ever hinting param 0, plus a return-type hint — needed when a
+/// lambda literal is passed directly as an argument whose *declared* type
+/// is itself a multi-param `Ty::Fn` (e.g. a user-defined higher-kinded
+/// function's own `unwrap: F<A> => A` / `wrap: B => F<B>` parameters,
+/// BACKLOG item 76): each of the lambda's own params must pick up the
+/// matching declared param type from that `Ty::Fn` (typically `Ty::Var(0)`,
+/// the same erased-generic sentinel a bare `T` already uses), or a still-
+/// erased value flowing into a concrete call inside the lambda body
+/// (`Box.unwrap(x)`) has no declared type at all to trigger unboxing from;
+/// `ret_hint` is threaded onto the resulting `HirExprKind::Lambda` node
+/// itself (see its own doc comment) so MIR can box the lambda's real
+/// concrete result (`Box.wrap(x)`'s real `Box`) if the declared return
+/// position expects an erased value instead.
+fn lower_lambda_with_param_hints(params: &[certo_ast::expr::LambdaParam], body: &S<Expr>, hints: &[Ty], ret_hint: &Ty, cx: &mut Cx, span: Span) -> HirExpr {
     let capture_threshold = cx.next_local;
     cx.push_scope();
     let hir_params: Vec<HirParam> = params.iter().enumerate().map(|(i, p)| {
         let local = cx.define_local(&p.name.node);
         let ty = p.ty.as_ref().map(|t| ast_ty_to_ty_with_params(&t.node, &[]))
-            .unwrap_or_else(|| if i == 0 { hint.clone() } else { Ty::Error });
+            .unwrap_or_else(|| hints.get(i).cloned().unwrap_or(Ty::Error));
         if !matches!(ty, Ty::Error) { cx.local_types.insert(local, ty.clone()); }
         HirParam { local, name: p.name.node.clone(), ty, span: p.span }
     }).collect();
     let body = lower_expr(body, cx);
     cx.pop_scope();
     let captures = collect_lambda_captures(&body, capture_threshold);
-    HirExpr { kind: HirExprKind::Lambda { params: hir_params, body: Box::new(body), captures }, ty: Ty::Error, span }
+    HirExpr { kind: HirExprKind::Lambda { params: hir_params, body: Box::new(body), captures, ret_hint: ret_hint.clone() }, ty: Ty::Error, span }
 }
 
 fn stdlib_param_names() -> HashMap<&'static str, &'static [&'static str]> {
@@ -785,7 +803,28 @@ fn lower_expr(expr: &S<Expr>, cx: &mut Cx) -> HirExpr {
                         })
                     }).collect()
                 } else {
-                    args.iter().map(|a| lower_expr(&a.value, cx)).collect()
+                    // A lambda literal passed directly to a user-defined
+                    // function's parameter must pick up that parameter's own
+                    // declared type per-lambda-param (BACKLOG item 76's HKT
+                    // consumer needs this: `unwrap: F<A> => A`'s own erased
+                    // `Ty::Var(0)` param/return types are the only way a
+                    // still-erased value flowing into a concrete call inside
+                    // the lambda body — `Box.unwrap(x)` — has a declared
+                    // type to trigger unboxing from at all). Falls back to
+                    // ordinary unhinted lowering (`Ty::Error` params) exactly
+                    // as before when the callee isn't a known function or
+                    // its declared type at this position isn't a `Ty::Fn`.
+                    let declared_params: Option<Vec<Ty>> = fn_full_path.as_deref()
+                        .and_then(|fp| cx.fn_param_tys.get(fp)).cloned()
+                        .or_else(|| fn_short_name.as_deref().and_then(|s| cx.fn_param_tys.get(s)).cloned());
+                    args.iter().enumerate().map(|(i, a)| {
+                        if let Expr::Lambda { params, body, .. } = &a.value.node {
+                            if let Some(Ty::Fn { params: hints, ret }) = declared_params.as_ref().and_then(|dp| dp.get(i)) {
+                                return lower_lambda_with_param_hints(params, body, hints, ret, cx, a.value.span);
+                            }
+                        }
+                        lower_expr(&a.value, cx)
+                    }).collect()
                 }
             } else {
                 args.iter().map(|a| lower_expr(&a.value, cx)).collect()
@@ -825,6 +864,18 @@ fn lower_expr(expr: &S<Expr>, cx: &mut Cx) -> HirExpr {
                 .or_else(|| fn_full_path.as_deref().and_then(|fp| stdlib_ret_types().get(fp).cloned()))
                 .or_else(|| stdlib_ret_types().get(short).cloned())
                 .or_else(|| generic_container_ret(fn_full_path.as_deref(), &lowered_args))
+                // Calling a *local* function value (a parameter/`val` typed
+                // `Ty::Fn`, not a named global — e.g. a higher-kinded
+                // function's own `wrap: B => F<B>` parameter called inside
+                // its own body, BACKLOG item 76) has no name for any of the
+                // lookups above to key on at all; fall back to the callee
+                // expression's own already-known `Ty::Fn.ret` instead of
+                // giving up to `Ty::Error`, which silently discarded the
+                // call's real declared result type.
+                .or_else(|| match &func_hir.ty {
+                    Ty::Fn { ret, .. } => Some((**ret).clone()),
+                    _ => None,
+                })
                 .unwrap_or(Ty::Error);
             // Recover a generic sum-type variant constructor's concrete
             // instantiation argument from the call's args (e.g. `Secret(42)`
@@ -967,7 +1018,7 @@ fn lower_expr(expr: &S<Expr>, cx: &mut Cx) -> HirExpr {
             let body = lower_expr(body, cx);
             cx.pop_scope();
             let captures = collect_lambda_captures(&body, capture_threshold);
-            HirExpr { kind: HirExprKind::Lambda { params: hir_params, body: Box::new(body), captures }, ty: Ty::Error, span }
+            HirExpr { kind: HirExprKind::Lambda { params: hir_params, body: Box::new(body), captures, ret_hint: Ty::Error }, ty: Ty::Error, span }
         }
 
         Expr::List { elements, .. } => {
@@ -1180,7 +1231,7 @@ fn lower_expr(expr: &S<Expr>, cx: &mut Cx) -> HirExpr {
             let capture_threshold = cx.next_local;
             let inner = lower_expr(body, cx);
             let captures = collect_lambda_captures(&inner, capture_threshold);
-            let thunk = HirExpr { kind: HirExprKind::Lambda { params: vec![], body: Box::new(inner), captures }, ty: Ty::Error, span };
+            let thunk = HirExpr { kind: HirExprKind::Lambda { params: vec![], body: Box::new(inner), captures, ret_hint: Ty::Error }, ty: Ty::Error, span };
             let func  = HirExpr { kind: HirExprKind::Global("__db_transaction".into()), ty: Ty::Error, span };
             HirExpr { kind: HirExprKind::Call { func: Box::new(func), args: vec![thunk] }, ty: Ty::Error, span }
         }
@@ -1532,6 +1583,17 @@ fn ast_ty_to_ty_with_params(te: &certo_ast::types::TypeExpr, type_params: &[&str
             let name = path.segments.last().map(|s| s.node.as_str()).unwrap_or("");
             // Single-segment name that matches a known type param → void* (opaque generic).
             if args.is_empty() && path.segments.len() == 1 && type_params.contains(&name) {
+                return Ty::Var(0);
+            }
+            // `F<A>` where `F` is itself a declared (constructor-kind)
+            // type param — higher-kinded application (BACKLOG item 76).
+            // HIR doesn't track kinds at all (unlike `crates/typeck`'s real
+            // `Ty::App`/`Ty::Ctor` — see `type_expr_to_ty`); it only ever
+            // needs to know whether the whole thing is still generic and
+            // therefore opaque, which is exactly as true for `F<A>` as for
+            // a bare `T` — same `Ty::Var(0)` erasure, not a bogus
+            // `Ty::Named { name: "F", .. }` naming an undeclared C type.
+            if args.len() == 1 && path.segments.len() == 1 && type_params.contains(&name) {
                 return Ty::Var(0);
             }
             let targs: Vec<Ty> = args.iter().map(|a| ast_ty_to_ty_with_params(&a.node, type_params)).collect();

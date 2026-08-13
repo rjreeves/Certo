@@ -356,6 +356,8 @@ fn hoist_decl(
                 *ctx.counter += 1;
                 let v = *ctx.counter;
                 ctx.env.define(tp.name.node.clone(), Ty::Var(v));
+                // `F<_>` — a 1-ary type-constructor parameter (BACKLOG item 76).
+                if tp.is_constructor { ctx.env.constructor_vars.insert(v); }
                 v
             }).collect();
 
@@ -422,6 +424,14 @@ fn hoist_decl(
                 ctx.env.define(tp.name.node.clone(), Ty::Var(v));
                 v
             }).collect();
+            // Recorded so a `TypeName { field: val }` record literal (see
+            // `Expr::Record` in `infer_expr.rs`) can instantiate these fresh
+            // per occurrence and report its own real instantiated type
+            // instead of a bare, argument-less `Named` — BACKLOG item 76's
+            // own HKT test case is what surfaced this real, independent,
+            // pre-existing gap (a generic record type had never been used
+            // together with an explicit type annotation anywhere before).
+            ctx.env.type_param_vars.insert(t.name.node.clone(), type_param_vars.clone());
             let parent_ty = Ty::Named {
                 name: t.name.node.clone(),
                 args: type_param_vars.iter().map(|&v| Ty::Var(v)).collect(),
