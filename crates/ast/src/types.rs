@@ -135,5 +135,14 @@ pub enum Bound {
 pub struct TypeParam {
     pub name:   Ident,
     pub bounds: Vec<Bound>,
+    /// `true` for `F<_>` — a higher-kinded, 1-ary type-constructor parameter
+    /// (BACKLOG item 76), e.g. `fn map<F<_>, A, B>(fa: F<A>, ...)`, distinct
+    /// from an ordinary type parameter like `T`. Certo has no kind
+    /// polymorphism beyond this: a constructor parameter is always exactly
+    /// 1-ary (matching every real single-type-argument type in the
+    /// language — `Box<T>`, `List<T>`, `Option<T>`, a user's own
+    /// single-param generic record/sum type); a 2-ary constructor like
+    /// `Map`/`Result` can never satisfy one.
+    pub is_constructor: bool,
     pub span:   Span,
 }

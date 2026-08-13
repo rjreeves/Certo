@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use crate::ty::{Ty, TyVar};
 use crate::unify::UnionFind;
 
@@ -6,11 +6,31 @@ use crate::unify::UnionFind;
 #[derive(Default, Clone)]
 pub struct TypeEnv {
     frames: Vec<HashMap<String, Ty>>,
+    /// `TyVar`s bound to a 1-ary type-constructor parameter (`F<_>`,
+    /// BACKLOG item 76) — a global set, not scope-stacked like `frames`,
+    /// since a `TyVar` id is globally unique (minted from the same counter
+    /// as every other fresh var) and remains meaningful after its
+    /// declaring scope is popped (e.g. once captured inside a `Forall`).
+    /// Consulted by `type_expr_to_ty` to tell `F<A>` (higher-kinded
+    /// application) apart from an ordinary `Named { name: "F", args }`
+    /// when it sees a type-param name applied to an argument.
+    pub constructor_vars: HashSet<TyVar>,
     /// Parameter metadata for user-defined functions: name → [(param_name, has_default)].
     /// Stored flat (not scope-stacked) since function decls are always at module level.
     pub param_meta: HashMap<String, Vec<(String, bool)>>,
     /// Record type definitions: type_name → [(field_name, field_type)].
     pub record_fields: HashMap<String, Vec<(String, Ty)>>,
+    /// A type's own declared type-parameter vars: type_name → [TyVar, ...],
+    /// in declaration order — the *same* vars `record_fields`'s stored field
+    /// types (for a generic record) reference. A `TypeName { field: val }`
+    /// literal must instantiate these fresh per occurrence (mirroring how
+    /// `Ty::Forall::instantiate` works for a generic *function* reference)
+    /// before unifying field values against them, and must report the
+    /// literal's own inferred type as `Named { name, args: <those vars> }`
+    /// — not a bare, argument-less `Named`, which silently discarded the
+    /// concrete instantiation entirely and made every generic record type
+    /// unusable together with an explicit type annotation anywhere.
+    pub type_param_vars: HashMap<String, Vec<TyVar>>,
     /// Row-polymorphism bounds on generic functions: fn_name → [(the bound type
     /// param's original quantified TyVar, its required [(field_name, field_type)])].
     /// Populated during hoisting (see `infer_decl::hoist_decl`); checked at each
@@ -26,8 +46,10 @@ impl TypeEnv {
     pub fn new() -> Self {
         TypeEnv {
             frames: vec![HashMap::new()],
+            constructor_vars: HashSet::new(),
             param_meta: HashMap::new(),
             record_fields: HashMap::new(),
+            type_param_vars: HashMap::new(),
             row_bounds: HashMap::new(),
             sum_variants: HashMap::new(),
         }

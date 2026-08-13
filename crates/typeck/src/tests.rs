@@ -1103,3 +1103,79 @@ fn wrong_permission_role_is_rejected() {
     assert!(!errs.is_empty(), "Permission<Viewer> must not satisfy a Permission<Admin> parameter");
 }
 
+// ------------------------------------------------------------------ //
+// Higher-kinded types — `F<_>` type-constructor parameters (BACKLOG item 76)
+// ------------------------------------------------------------------ //
+
+const HKT_MAP_SRC: &str = "
+type Box<T> = { value: T }
+type Pair<A, B> = { fst: A, snd: B }
+fn boxUnwrap<T>(b: Box<T>): T = b.value
+fn boxWrap<T>(v: T): Box<T> = Box { value: v }
+fn isPos(n: Int): Bool = n > 0
+fn hktMap<F<_>, A, B>(fa: F<A>, unwrap: F<A> => A, wrap: B => F<B>, f: A => B): F<B> =
+    wrap(f(unwrap(fa)))
+";
+
+#[test]
+fn hkt_generic_fn_declaration_type_checks() {
+    // Just the declaration — no call site — sanity-checks that a
+    // constructor-kind type param (`F<_>`) doesn't break ordinary
+    // generalisation/instantiation of the rest of the signature.
+    check(&format!("module A\n{}", HKT_MAP_SRC)).unwrap();
+}
+
+#[test]
+fn hkt_call_site_infers_constructor_and_result_type() {
+    // The real point: at a call site, `F` unifies with the `Box` type
+    // constructor recovered from the argument's own type (`Box<Int>`),
+    // `A`/`B` unify with the concrete element types on either side of `f`
+    // (Int, then Bool), and the call's own result type comes out as
+    // `F<B>` = `Box<Bool>` — a *different* instantiation of the same
+    // constructor, not `Box<Int>` again and not an unresolved variable.
+    let src = format!(
+        "module A\n{}fn run(): Box<Bool> = {{\n val b: Box<Int> = Box {{ value: 5 }}\n hktMap(b, boxUnwrap, boxWrap, isPos)\n}}",
+        HKT_MAP_SRC
+    );
+    assert!(check(&src).is_ok(), "expected hktMap's inferred F<B> to unify with the declared Box<Bool> return type");
+}
+
+#[test]
+fn hkt_call_site_with_wrong_return_type_is_rejected() {
+    // The inverse of the test above — pins that the inferred `F<B>` is
+    // actually checked against the declared return type, not silently
+    // accepted regardless (e.g. by falling back to an unconstrained var).
+    let src = format!(
+        "module A\n{}fn run(): Box<Int> = {{\n val b: Box<Int> = Box {{ value: 5 }}\n hktMap(b, boxUnwrap, boxWrap, isPos)\n}}",
+        HKT_MAP_SRC
+    );
+    let errs = check_err(&src);
+    assert!(!errs.is_empty(), "hktMap's real result type is Box<Bool>, not Box<Int> — must be rejected");
+}
+
+#[test]
+fn hkt_rejects_a_2ary_type_for_a_1ary_constructor_param() {
+    // `Pair<A, B>` is 2-ary — it can never satisfy `F<_>`, which only ever
+    // has one type argument. This is a real kind mismatch, not something
+    // to silently coerce or ignore.
+    let src = format!(
+        "module A\n{}fn pairUnwrap(p: Pair<Int, Int>): Int = p.fst\nfn pairWrap(n: Int): Pair<Int, Int> = Pair {{ fst: n, snd: n }}\nfn run(): Unit = {{\n val p: Pair<Int, Int> = Pair {{ fst: 1, snd: 2 }}\n hktMap(p, pairUnwrap, pairWrap, isPos)\n}}",
+        HKT_MAP_SRC
+    );
+    let errs = check_err(&src);
+    assert!(!errs.is_empty(), "Pair<Int, Int> (2-ary) must not satisfy a 1-ary F<_> parameter");
+}
+
+#[test]
+fn hkt_two_occurrences_of_same_generic_record_with_different_types_both_work() {
+    // Regression for the real, independent, pre-existing bug this item's
+    // own test surfaced: a generic record type's own type-param vars were
+    // minted once at hoisting and reused, unresolved, by every occurrence
+    // of `TypeName { .. }` — forcing two different concrete instantiations
+    // to unify with each other. Must be instantiated fresh per occurrence.
+    check("module A
+type Box<T> = { value: T }
+fn intBox(): Box<Int> = Box { value: 1 }
+fn boolBox(): Box<Bool> = Box { value: true }").unwrap();
+}
+

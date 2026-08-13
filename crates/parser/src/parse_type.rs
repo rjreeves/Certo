@@ -235,6 +235,27 @@ pub fn parse_type_params(cur: &mut Cursor<'_>) -> Result<Vec<TypeParam>, ParseEr
     let mut params = Vec::new();
     loop {
         let (name, name_span) = cur.expect_ident()?;
+
+        // `F<_>` — a 1-ary type-constructor parameter (BACKLOG item 76).
+        // Only a single literal `_` is accepted here; anything else is a
+        // real parse error rather than silently falling through to a
+        // confusing downstream type error.
+        let is_constructor = if cur.peek() == Some(&Token::Lt) {
+            cur.bump();
+            let (u, u_span) = cur.expect_ident()?;
+            if u != "_" {
+                return Err(ParseError {
+                    kind: ParseErrorKind::Custom(
+                        "expected `_` in type-constructor parameter, e.g. `F<_>`".into()),
+                    span: u_span,
+                });
+            }
+            cur.expect(&Token::Gt)?;
+            true
+        } else {
+            false
+        };
+
         let mut bounds = Vec::new();
 
         if cur.eat(|t| matches!(t, Token::Colon)).is_some() {
@@ -245,7 +266,7 @@ pub fn parse_type_params(cur: &mut Cursor<'_>) -> Result<Vec<TypeParam>, ParseEr
         }
 
         let span = name_span; // good enough for now
-        params.push(TypeParam { name: S::new(name, name_span), bounds, span });
+        params.push(TypeParam { name: S::new(name, name_span), bounds, is_constructor, span });
 
         if cur.eat(|t| matches!(t, Token::Comma)).is_none() { break; }
         if cur.peek() == Some(&Token::Gt) { break; }

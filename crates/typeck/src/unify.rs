@@ -155,6 +155,38 @@ impl UnionFind {
                 Ok(())
             }
 
+            // Higher-kinded application (BACKLOG item 76) — `F<A>` where `F`
+            // may itself still be an unresolved (constructor-kind) type
+            // variable. Two `App`s unify structurally, component-wise, just
+            // like any other 2-argument compound type.
+            (Ty::App(af, aa), Ty::App(bf, ba)) => {
+                self.unify(*af, *bf, span)?;
+                self.unify(*aa, *ba, span)
+            }
+            (Ty::Ctor(a), Ty::Ctor(b)) if a == b => Ok(()),
+
+            // `F<A>` against a concrete single-argument type: bind the
+            // constructor position to a `Ctor` recovered from that type's
+            // own name/shape, then unify the argument. Deliberately only
+            // 1-ary shapes (a user's own `Named{args:[_]}`, or the builtin
+            // `List`/`Option`) — `Map`/`Result` are 2-ary and can never
+            // satisfy an `F<_>` parameter, which is a real kind mismatch,
+            // not something to special-case away.
+            (Ty::App(f, a), Ty::Named { name, args }) | (Ty::Named { name, args }, Ty::App(f, a))
+                if args.len() == 1 =>
+            {
+                self.unify(*f, Ty::Ctor(name), span)?;
+                self.unify(*a, args.into_iter().next().unwrap(), span)
+            }
+            (Ty::App(f, a), Ty::List(elem)) | (Ty::List(elem), Ty::App(f, a)) => {
+                self.unify(*f, Ty::Ctor("List".into()), span)?;
+                self.unify(*a, *elem, span)
+            }
+            (Ty::App(f, a), Ty::Option(elem)) | (Ty::Option(elem), Ty::App(f, a)) => {
+                self.unify(*f, Ty::Ctor("Option".into()), span)?;
+                self.unify(*a, *elem, span)
+            }
+
             (Ty::Fn { params: ap, ret: ar }, Ty::Fn { params: bp, ret: br }) => {
                 if ap.len() != bp.len() {
                     return Err(TypeError {

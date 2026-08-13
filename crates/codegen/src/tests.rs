@@ -1176,3 +1176,67 @@ fn process_exec_explicit_annotation_uses_real_pointer_type() {
     assert_contains(&out, "CertoProcessResult* _l");
     assert_not_contains(&out, "    ProcessResult _l");
 }
+
+// ------------------------------------------------------------------ //
+// Higher-kinded types — `F<_>` boxing at erasure-crossing sites (BACKLOG item 76)
+// ------------------------------------------------------------------ //
+
+const HKT_SRC: &str = "module A
+type Box<T> = priv Box(T)
+impl<T> Box {
+    fn wrap(v: T): Box<T> = Box(v)
+    fn unwrap(b: Box<T>): T = match b { Box(v) => v }
+}
+fn hktMap<F<_>, A, B>(fa: F<A>, unwrap: F<A> => A, wrap: B => F<B>, f: A => B): F<B> =
+    wrap(f(unwrap(fa)))
+fn double(n: Int): Int = n * 2
+";
+
+#[test]
+fn hkt_named_function_passed_to_erased_param_gets_boxing_wrapper() {
+    // `double: Int -> Int`'s own real native signature doesn't match
+    // hktMap's uniformly-erased `f: A => B` parameter — passing it bare
+    // (as an earlier version of this fix did) is a real calling-convention
+    // mismatch once called through the closure. A dedicated wrapper must
+    // unbox the erased incoming value and box the real result back.
+    let src = format!(
+        "{}fn run(): Unit = {{\n  val b: Box<Int> = Box.wrap(41)\n  val r: Box<Int> = hktMap(b, (x) => Box.unwrap(x), (x) => Box.wrap(x), double)\n}}",
+        HKT_SRC
+    );
+    let out = codegen(&src);
+    assert_contains(&out, "__fnref_erased_");
+    // The wrapper unboxes its incoming erased param (UnboxSome's
+    // dereference-a-malloc'd-box pattern) before calling the real function.
+    assert_contains(&out, "*(int64_t*)(");
+}
+
+#[test]
+fn hkt_lambda_returning_concrete_value_boxes_result_for_erased_slot() {
+    // `(x) => Box.wrap(x)` passed as `wrap: B => F<B>` — its body's real
+    // result is a concrete `Box` struct, but the declared position expects
+    // an erased `void*`; the generated lambda function must box its own
+    // return value (malloc + copy) before returning, or the real struct
+    // can never satisfy the closure's uniform void*-returning ABI.
+    let src = format!(
+        "{}fn run(): Unit = {{\n  val b: Box<Int> = Box.wrap(41)\n  val r: Box<Int> = hktMap(b, (x) => Box.unwrap(x), (x) => Box.wrap(x), double)\n}}",
+        HKT_SRC
+    );
+    let out = codegen(&src);
+    // The wrap-lambda's body ends in a real `certo_box_wrap` call whose
+    // result is then heap-boxed (malloc'd) before being returned as void*.
+    assert_contains(&out, "certo_box_wrap(_l2);");
+    assert_contains(&out, "malloc(sizeof(Box))");
+}
+
+#[test]
+fn hkt_call_site_unboxes_erased_return_back_to_concrete_type() {
+    // hktMap's own return type (`F<B>`) is erased inside its own body, but
+    // the call site declares a concrete `Box<Int>` — the result must be
+    // unboxed (dereferenced), not left as a raw pointer bit-pattern.
+    let src = format!(
+        "{}fn run(): Box<Int> = {{\n  val b: Box<Int> = Box.wrap(41)\n  hktMap(b, (x) => Box.unwrap(x), (x) => Box.wrap(x), double)\n}}",
+        HKT_SRC
+    );
+    let out = codegen(&src);
+    assert_contains(&out, "*(Box*)(");
+}

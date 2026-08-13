@@ -179,6 +179,17 @@ pub enum HirExprKind {
         /// environment at the construction site and unboxed back into a
         /// same-named local inside the lambda's own lowered function.
         captures: Vec<LocalId>,
+        /// The declared return type of whatever `Ty::Fn` parameter position
+        /// this lambda literal was passed directly into, when known (BACKLOG
+        /// item 76) — `Ty::Error` when there's no such context (the common
+        /// case; matches every pre-existing construction site unchanged).
+        /// When it's `Ty::Var(_)` (an erased slot — e.g. a higher-kinded
+        /// `F<B>` return) but the lambda body's own inferred result is a
+        /// real concrete type, MIR must box that result before returning,
+        /// or the lambda's real native return (a struct, by value) can't
+        /// possibly satisfy the closure's uniform `void*`-returning ABI
+        /// every caller of a `Ty::Fn` value assumes.
+        ret_hint: Ty,
     },
 
     /// Match expression — arms have been desugared to flat patterns.
