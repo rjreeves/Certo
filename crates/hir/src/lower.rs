@@ -1291,8 +1291,41 @@ fn lower_expr(expr: &S<Expr>, cx: &mut Cx) -> HirExpr {
                 span,
             }
         }
-        // `.age` lowering is implemented in Phase 5; for now lower the inner expression
-        Expr::Age { expr, .. } => lower_expr(expr, cx),
+        // `e.age` → `DateTime.diff(DateTime.now(), e)` — real elapsed-time
+        // computation (BACKLOG item 164). The previous stub just lowered to
+        // the inner expression unchanged — `t.age` compiled to literally
+        // `t`, silently returning the raw Timestamp value mistyped as a
+        // Duration, never caught before because `Timestamp`'s own codegen
+        // mapping was separately broken and blocked anything using `.age`
+        // from compiling at all. `Timestamp` has no separate runtime
+        // representation from `DateTime` (identical C type, see
+        // `crates/codegen/src/ty_to_c.rs`), so the base expression is
+        // passed into `DateTime.diff` with no conversion needed.
+        Expr::Age { expr, .. } => {
+            let base = lower_expr(expr, cx);
+            let now_call = HirExpr {
+                kind: HirExprKind::Call {
+                    func: Box::new(HirExpr {
+                        kind: HirExprKind::Global("DateTime.now".into()),
+                        ty: Ty::Error, span,
+                    }),
+                    args: vec![],
+                },
+                ty: Ty::Named { name: "DateTime".into(), args: vec![] },
+                span,
+            };
+            HirExpr {
+                kind: HirExprKind::Call {
+                    func: Box::new(HirExpr {
+                        kind: HirExprKind::Global("DateTime.diff".into()),
+                        ty: Ty::Error, span,
+                    }),
+                    args: vec![now_call, base],
+                },
+                ty: Ty::Named { name: "Duration".into(), args: vec![] },
+                span,
+            }
+        }
     }
 }
 

@@ -47,9 +47,16 @@ pub fn ty_to_c(ty: &Ty) -> String {
         // (only `val`-inferred bindings worked, by defaulting to `int64_t` via
         // HIR's Ty::Error fallback, which happens to be layout-compatible).
         // `Timezone` (BACKLOG item 118) is `CertoTimezone` — a `certo_text_t`
-        // alias (the IANA zone name itself) — same treatment.
-        Ty::Named { name, args } if args.is_empty() && matches!(name.as_str(), "DateTime" | "Date" | "Duration" | "Timezone") => {
-            format!("Certo{}", name)
+        // alias (the IANA zone name itself) — same treatment. `Timestamp`
+        // (BACKLOG item 164) has no separate runtime type of its own at
+        // all — it's a reserved builtin name used only for `.age` postfix
+        // expressions (`crates/typeck/src/infer_expr.rs`'s `Expr::Age`) —
+        // so it reuses `CertoDateTime` exactly, same representation, no new
+        // C type. An explicit `Timestamp`-typed function param/return
+        // previously emitted the bare, undeclared C identifier `Timestamp`.
+        Ty::Named { name, args } if args.is_empty() && matches!(name.as_str(), "DateTime" | "Date" | "Duration" | "Timezone" | "Timestamp") => {
+            let c_name = if name == "Timestamp" { "DateTime" } else { name.as_str() };
+            format!("Certo{}", c_name)
         }
         // `JsonValue` is a real C pointer (`CertoJsonValue*`, see
         // crates/stdlib/src/json.rs), not a bare struct or an int64_t
