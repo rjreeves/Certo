@@ -1259,3 +1259,70 @@ fn intBox(): Box<Int> = Box { value: 1 }
 fn boolBox(): Box<Bool> = Box { value: true }").unwrap();
 }
 
+// ------------------------------------------------------------------ //
+// Safe field access `?.` (BACKLOG item 146)
+// ------------------------------------------------------------------ //
+
+const SAFE_FIELD_SRC: &str = "\
+type Address = { city: Text, zip: Text }
+type User = { name: Text, address: Address? }
+";
+
+#[test]
+fn safe_field_access_on_a_real_optional_field_type_checks() {
+    // This is the exact case the operator exists for and the exact case
+    // that previously always failed with a false E0205 (field resolution
+    // ran directly against the still-Option-wrapped base type, which has
+    // no fields of its own).
+    let src = format!(
+        "module A\n{}fn f(u: User): Text? = u.address?.city",
+        SAFE_FIELD_SRC
+    );
+    check(&src).expect("u.address?.city must type-check: address is Address?, city: Text");
+}
+
+#[test]
+fn safe_field_access_result_type_is_option_of_field_type() {
+    // Pins the *result* type, not just that it compiles — `?.`'s own
+    // result must be `Option<field type>`, not the field type itself.
+    let src = format!(
+        "module A\n{}fn f(u: User): Text = u.address?.city",
+        SAFE_FIELD_SRC
+    );
+    let errs = check_err(&src);
+    assert!(
+        !errs.is_empty(),
+        "u.address?.city is Text?, not Text — must be rejected against a bare Text return type"
+    );
+}
+
+#[test]
+fn safe_field_access_on_unknown_field_is_still_rejected() {
+    // Confirms the fix didn't just make the check permissive — a real
+    // typo on the unwrapped payload's own fields must still be caught.
+    let src = format!(
+        "module A\n{}fn f(u: User): Text? = u.address?.country",
+        SAFE_FIELD_SRC
+    );
+    let errs = check_err(&src);
+    assert!(
+        !errs.is_empty(),
+        "Address has no field 'country' — must be rejected even through `?.`"
+    );
+}
+
+#[test]
+fn safe_field_access_on_a_non_optional_base_is_rejected() {
+    // `?.` unifies its base against Option<fresh> — a genuinely
+    // non-Optional base must fail to unify, not be silently accepted.
+    let src = format!(
+        "module A\n{}fn f(a: Address): Text? = a?.city",
+        SAFE_FIELD_SRC
+    );
+    let errs = check_err(&src);
+    assert!(
+        !errs.is_empty(),
+        "Address is not an Option — `a?.city` must be rejected"
+    );
+}
+

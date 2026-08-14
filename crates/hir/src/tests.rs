@@ -152,6 +152,60 @@ fn lower_match_guard_no_guard_arms() {
 }
 
 // ------------------------------------------------------------------ //
+// Safe field access `?.` desugaring (BACKLOG item 146)
+// ------------------------------------------------------------------ //
+
+const SAFE_FIELD_SRC: &str = "\
+type Address = { city: Text, zip: Text }
+type User = { name: Text, address: Address? }
+";
+
+#[test]
+fn safe_field_desugars_to_a_real_some_constructor_pattern_not_a_bare_bind() {
+    // `e?.f` lowers to `match e { Some(v) => Some(v.f), None => None }`.
+    // The `Some` arm's pattern used to be a bare `HirPat::Bind`, which is
+    // irrefutable — it matched unconditionally regardless of whether the
+    // base was actually `Some` or `None`, making the `None` arm dead code
+    // and binding `v` to the whole still-wrapped Option instead of its
+    // payload. Must be a real `Constructor("Some", [Bind(..)])` pattern.
+    let src = format!(
+        "module A\n{}fn f(u: User): Text? = u.address?.city",
+        SAFE_FIELD_SRC
+    );
+    let m = lower(&src);
+    let HirItem::Fn(f) = m.items.iter().find(|it| matches!(it, HirItem::Fn(f) if f.name == "f")).unwrap() else { unreachable!() };
+    let HirExprKind::Match { arms, .. } = &f.body.as_ref().unwrap().kind else {
+        panic!("expected a Match expression");
+    };
+    assert_eq!(arms.len(), 2);
+    match &arms[0].pat {
+        crate::hir::HirPat::Constructor { name, fields, .. } => {
+            assert_eq!(name, "Some");
+            assert_eq!(fields.len(), 1, "Some arm should bind exactly one payload local");
+        }
+        other => panic!("expected Some arm to be a real Constructor pattern, got {other:?}"),
+    }
+    match &arms[1].pat {
+        crate::hir::HirPat::Constructor { name, .. } => assert_eq!(name, "None"),
+        other => panic!("expected None arm to be a Constructor pattern, got {other:?}"),
+    }
+}
+
+#[test]
+fn safe_field_result_type_is_option_of_the_field_type() {
+    // `u.address?.city` — address: Address?, city: Text — must lower with
+    // an overall HIR type of Option<Text>, not the previous unconditional
+    // Ty::Error.
+    let src = format!(
+        "module A\n{}fn f(u: User): Text? = u.address?.city",
+        SAFE_FIELD_SRC
+    );
+    let m = lower(&src);
+    let HirItem::Fn(f) = m.items.iter().find(|it| matches!(it, HirItem::Fn(f) if f.name == "f")).unwrap() else { unreachable!() };
+    assert_eq!(f.body.as_ref().unwrap().ty, Ty::Option(Box::new(Ty::Text)));
+}
+
+// ------------------------------------------------------------------ //
 // Stdlib call return-type recovery (BACKLOG item 113)
 // ------------------------------------------------------------------ //
 
