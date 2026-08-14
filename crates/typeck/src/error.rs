@@ -55,6 +55,14 @@ pub enum TypeErrorKind {
     /// E02xx sequence instead of colliding with an unrelated existing code.
     SecretInSensitiveContext { fn_name: String, ty: Ty },
 
+    /// E0216 — an f-string with live interpolation was passed directly as
+    /// the `sql` argument to a raw-SQL sink (`dbQuery`/`dbExec`/etc) —
+    /// BACKLOG item 159. The spec (§13.1) claims this is architecturally
+    /// impossible; this check is what makes that claim true for the
+    /// direct, syntactically-visible case. Parameterize with `?`/`params`
+    /// instead.
+    SqlInjectionRisk { fn_name: String },
+
     /// E0708 — temporal declaration body does not resolve to Duration.
     TemporalNotDuration { found: Ty },
 
@@ -93,6 +101,8 @@ impl TypeError {
                 format!("E0214: constructor `{type_name}` is private — call it only from within `impl {type_name} {{ ... }}`, e.g. via a validating `{type_name}.new` factory"),
             TypeErrorKind::SecretInSensitiveContext { fn_name, ty } =>
                 format!("E0215: `{}` is not Loggable/Serializable — passed to `{}`", ty.display(), fn_name),
+            TypeErrorKind::SqlInjectionRisk { fn_name } =>
+                format!("E0216: an interpolated f-string was passed directly as the `sql` argument to `{}` — use `?` placeholders and pass values via `params` instead", fn_name),
             TypeErrorKind::TemporalNotDuration { found } =>
                 format!("E0708: temporal body must resolve to Duration, found `{}`", found.display()),
             TypeErrorKind::AgeOnNonTimestamp { found } =>

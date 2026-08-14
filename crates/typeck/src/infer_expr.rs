@@ -277,6 +277,38 @@ pub fn infer(expr: &S<Expr>, ctx: &mut Ctx<'_>) -> Ty {
                 }
             }
 
+            // Reject an f-string with live interpolation passed directly as the
+            // `sql` argument to a raw-SQL sink — BACKLOG item 159. Checked
+            // syntactically against the argument expression actually written
+            // at the call site: the resolved `Text` type can't distinguish a
+            // literal from an interpolated string, so this can't be caught
+            // via unification the way SecretInSensitiveContext above is.
+            const RAW_SQL_SINKS: &[&str] = &[
+                "dbExec", "dbQuery", "dbQueryTyped", "dbQueryRow", "dbQueryOne",
+                "dbColumns", "dbStream", "dbRunScript", "dbRunScriptResult",
+            ];
+            if let Some(name) = &fn_name {
+                if RAW_SQL_SINKS.contains(&name.as_str()) {
+                    let param_names = ctx.env.get_param_meta(name).cloned();
+                    let sql_idx = param_names.as_ref()
+                        .and_then(|ps| ps.iter().position(|(n, _)| n == "sql"))
+                        .unwrap_or(1);
+                    let sql_arg = args.iter()
+                        .find(|a| a.label.as_ref().map(|l| l.node.as_str()) == Some("sql"))
+                        .or_else(|| args.get(sql_idx));
+                    if let Some(arg) = sql_arg {
+                        if let Expr::Lit { value: Lit::FString(parts), .. } = &arg.value.node {
+                            if parts.iter().any(|p| matches!(p, certo_ast::expr::FStringPart::Interpolated(_))) {
+                                ctx.errors.push(TypeError {
+                                    kind: TypeErrorKind::SqlInjectionRisk { fn_name: name.clone() },
+                                    span: arg.value.span,
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+
             ret_ty
         }
 
