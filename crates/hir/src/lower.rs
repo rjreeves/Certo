@@ -245,6 +245,63 @@ fn generic_container_ret(full: Option<&str>, args: &[HirExpr]) -> Option<Ty> {
             args.last().and_then(|a| match &a.ty { Ty::Fn { ret, .. } => Some((**ret).clone()), _ => None })
                 .map(|t| Ty::Option(Box::new(t)))
         }
+        // `compose`/`const`/`flip` (BACKLOG item 161) — registered as
+        // `Forall` generics whose return type is itself a `Ty::Fn`, so
+        // they're filtered out of `stdlib_ret_types()` (`ret.has_vars()`)
+        // and land here instead. Without this, the call's own `call_ty`
+        // falls all the way through to the final fallback (the *callee's*
+        // own uninstantiated `Ty::Fn { params: [Var], ret: Var }`, straight
+        // from `compose`'s raw stdlib signature) — `Ty::Fn` itself always
+        // maps to `certo_fn_t` regardless of its inner param/ret types
+        // (`ty_to_c.rs`), so the returned closure's *local* still gets
+        // declared correctly, but `Ty::Var` itself maps to `void*` — so a
+        // later call through it (`emit_callee`) would cast using the
+        // erased `void*`-in/`void*`-out convention instead of the real
+        // concrete types (e.g. `Int => Text`) `lower_compose_call`'s own
+        // synthesized trampoline (`crates/mir/src/lower.rs`) actually uses.
+        // For most types this "happens to" still produce the right bits
+        // (pointer/int-sized values pass through either convention
+        // identically) — but a `Float` param/return uses a genuinely
+        // different register class (XMM vs general-purpose), where the
+        // mismatch would silently corrupt the value, the same class of bug
+        // item 112 already fixed once for lambda callbacks. Recovering the
+        // real concrete types here (from `f`/`g`'s own already-known types,
+        // no unification needed) closes that gap before it can bite.
+        Some("compose") => {
+            let a_ty = args.get(1).and_then(|g| match &g.ty {
+                Ty::Fn { params, .. } if params.len() == 1 => Some(params[0].clone()),
+                _ => None,
+            })?;
+            let c_ty = args.first().and_then(|f| match &f.ty {
+                Ty::Fn { ret, .. } => Some((**ret).clone()),
+                _ => None,
+            })?;
+            Some(Ty::Fn { params: vec![a_ty], ret: Box::new(c_ty) })
+        }
+        // `const(a): B => A` — `B` is genuinely unconstrained by any
+        // argument to `const` itself, so it's left erased (`Ty::Var(0)` →
+        // `void*`) rather than guessed; must match `lower_const_call`'s own
+        // identical choice (`crates/mir/src/lower.rs`) exactly, or the call
+        // site and the synthesized trampoline would disagree on the
+        // parameter's calling convention.
+        Some("const") => {
+            let a_ty = args.first()?.ty.clone();
+            Some(Ty::Fn { params: vec![Ty::Var(0)], ret: Box::new(a_ty) })
+        }
+        // `flip(f: A => B => C): B => A => C` — A, B, C all come from `f`'s
+        // own already-known (curried) type, no unification needed. Must
+        // match `lower_flip_call`'s identical nested-closure shape exactly.
+        Some("flip") => {
+            let (a_ty, bc_ty) = match &args.first()?.ty {
+                Ty::Fn { params, ret } if params.len() == 1 => (params[0].clone(), (**ret).clone()),
+                _ => return None,
+            };
+            let (b_ty, c_ty) = match &bc_ty {
+                Ty::Fn { params, ret } if params.len() == 1 => (params[0].clone(), (**ret).clone()),
+                _ => return None,
+            };
+            Some(Ty::Fn { params: vec![b_ty], ret: Box::new(Ty::Fn { params: vec![a_ty], ret: Box::new(c_ty) }) })
+        }
         _ => None,
     }
 }
