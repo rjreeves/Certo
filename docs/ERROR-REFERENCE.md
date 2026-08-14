@@ -10,7 +10,7 @@ the fix, and a minimal reproduction.
 | Range | Category |
 |---|---|
 | [E0100–E0102](#e0100-e0102-name-resolution) | Name resolution |
-| [E0200–E0206](#e0200-e0206-type-errors) | Type errors |
+| [E0200–E0215](#e0200-e0215-type-errors) | Type errors |
 | [E0216](#e0216-sql-injection-risk) | SQL injection risk |
 | [E0300–E0306](#e0300-e0306-trait-errors) | Trait / impl errors |
 | [E0400–E0404](#e0400-e0404-effect-errors) | Effect annotations |
@@ -81,7 +81,7 @@ in the same scope.
 
 ---
 
-## E0200–E0206  Type errors
+## E0200–E0215  Type errors
 
 ### E0200  Type mismatch
 
@@ -269,6 +269,106 @@ Same message as E0100 but emitted by the type-checker rather than the
 resolver. In practice, if you see this, it is a sign that the resolver did
 not catch the undefined name first. The fix is the same as E0100: declare or
 import the name.
+
+---
+
+### E0210  `extern` call outside `unsafe`
+
+```
+error[E0210]: call to extern function `sqlite3_open` must be inside an
+`unsafe { }` block
+  --> src/ffi.cto:9:5
+```
+
+**Cause:** A call to an `extern "C"` (FFI) function appears outside an
+`unsafe { }` block.
+
+**Fix:** Wrap the call: `unsafe { sqlite3_open(...) }`.
+
+---
+
+### E0211  Non-displayable interpolation
+
+```
+error[E0211]: cannot interpolate a value of type `User` into a string
+  --> src/main.cto:12:20
+```
+
+**Cause:** An f-string interpolation (`f"... {expr} ..."`) holds a value
+whose type has no text representation.
+
+**Fix:** Only `Int`, `Float`, `Bool`, `Decimal`, and `Text` can be
+interpolated directly — convert the value first (e.g. call a function that
+produces `Text` from it).
+
+---
+
+### E0212  Missing row-polymorphism field
+
+```
+error[E0212]: `Order` does not satisfy the row bound
+  --> src/main.cto:20:10
+    = missing field `email: Text`
+```
+
+**Cause:** An argument passed for a row-polymorphism-bounded type parameter
+(`R: { name: Text }`) is missing a field the bound requires.
+
+**Fix:** Add the missing field, or pass a value of a type that already has
+it.
+
+---
+
+### E0213  Non-exhaustive match
+
+```
+error[E0213]: match on `Shape` is not exhaustive
+  --> src/main.cto:18:5
+    = missing: Triangle
+```
+
+**Cause:** A `match` does not cover every possible value of the
+scrutinee's type. Fully checked for `Bool`, `Option`, `Result`, and
+user-declared sum types — for everything else (`Int`, `Text`, records,
+etc.) a trailing `_` catch-all arm is required, since there's no finite
+set of cases to enumerate.
+
+**Fix:** Add the missing arm(s), or a trailing `_ => ...` arm to cover the
+rest.
+
+---
+
+### E0214  Private constructor called outside its `impl`
+
+```
+error[E0214]: constructor `Email` is private
+  --> src/main.cto:14:16
+```
+
+**Cause:** A `type X = priv X(...)` smart-constructor's raw constructor was
+called from outside an `impl X { ... }` block for the same type.
+
+**Fix:** Call it only from within `impl X { ... }` — typically via a
+validating factory function such as `X.new(...)`.
+
+---
+
+### E0215  Secret exposed to a sensitive sink
+
+```
+error[E0215]: `Text` is not Loggable/Serializable
+  --> src/main.cto:22:13
+    = passed to `println`, which would expose it
+```
+
+**Cause:** A value whose type structurally contains `Secret<_>` (however
+deeply wrapped — inside an `Option`, `List`, record field, etc.) was passed
+to a logging/serialization sink (`println`, `print`, `eprint`,
+`Json.stringify`).
+
+**Fix:** Call `.expose()` on the `Secret` first if you genuinely need its
+raw value at that call site — this is a deliberate, visible opt-out, not
+something to reach for by default.
 
 ---
 

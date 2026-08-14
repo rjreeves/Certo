@@ -3516,6 +3516,25 @@ mod flag_tests {
     }
 
     #[test]
+    fn explain_code_finds_e0210_through_e0215() {
+        // BACKLOG item 160: these were previously missing from the error
+        // reference entirely (a real gap in the CLI's own --explain source,
+        // found while fixing the spec's Appendix B against it).
+        for (code, needle) in [
+            ("E0210", "unsafe"),
+            ("E0211", "interpolate"),
+            ("E0212", "row bound"),
+            ("E0213", "exhaustive"),
+            ("E0214", "private"),
+            ("E0215", "Loggable"),
+        ] {
+            let text = explain_code(code).unwrap_or_else(|| panic!("{code} should be in the error reference"));
+            assert!(text.starts_with(&format!("### {code}")), "{code}: {text}");
+            assert!(text.contains(needle), "{code} should mention '{needle}': {text}");
+        }
+    }
+
+    #[test]
     fn explain_code_unknown_code_returns_none() {
         assert!(explain_code("E9999").is_none());
     }

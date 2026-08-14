@@ -777,36 +777,80 @@ certo-lang.org  |  github.com/certo-lang
 
 # **Appendix B: Error Code Reference**
 
+The codes and categories below are generated from the compiler's own diagnostics, not aspirational — every row corresponds to a real, currently-emitted error. The canonical, always-current copy of this reference lives at `docs/ERROR-REFERENCE.md` in the compiler repository (also served directly by `certo check --explain`, which prints the full write-up — cause, fix, example — for each code a given file actually triggers); this appendix is a snapshot of the same data for offline reading.
+
+Two notes on gaps in the numbering, so they aren't mistaken for omissions: parser errors (unexpected token, unclosed delimiter, and similar) don't carry a numeric code at all today, unlike every category below — the compiler reports them as plain messages. And E0207–E0209 are simply unused; the Types sequence has a real gap there, not three missing rows.
+
 | **Code** | **Category** | **Description** |
 | - | - | - |
-| E0001 | Syntax | Unexpected token |
-| E0002 | Syntax | Unclosed delimiter |
-| E0003 | Syntax | Invalid expression |
 | E0100 | Names | Undefined identifier |
-| E0101 | Names | Ambiguous import |
-| E0102 | Names | Duplicate definition in scope |
+| E0101 | Names | Ambiguous import — a name is imported more than once |
+| E0102 | Names | Duplicate definition of a name in scope |
 | E0200 | Types | Type mismatch |
-| E0201 | Types | Cannot unify types |
-| E0202 | Types | Infinite type (occurs check failed) |
-| E0203 | Types | Missing type annotation on recursive function |
-| E0300 | Patterns | Non-exhaustive match — missing variants |
-| E0301 | Patterns | Unreachable pattern arm |
-| E0302 | Patterns | Binding not used in all arms |
-| E0400 | Schema | Table not found in schema |
-| E0401 | Schema | Column not found on table |
-| E0402 | Schema | Type mismatch between Certo type and DB column type |
-| E0403 | Schema | Join condition type mismatch |
-| E0404 | Schema | Schema connection failed |
-| E0500 | Effects | DB write outside transaction |
-| E0501 | Effects | IO in pure context |
-| E0502 | Effects | Async function called without await |
-| E0600 | Safety | Unsafe code outside unsafe block |
-| E0601 | Safety | Secret type used in loggable context |
-| E0602 | Safety | SQL string interpolation — injection risk |
-| W0001 | Warning | Possible integer overflow |
-| W0002 | Warning | Float used where Decimal expected |
-| W0003 | Warning | DB write not in transaction |
-| W0004 | Warning | Large query without limit |
+| E0201 | Types | Cannot unify two named types |
+| E0202 | Types | Occurs check failed — a type variable appears in its own inferred type |
+| E0203 | Types | Recursive function requires an explicit return type annotation |
+| E0204 | Types | Wrong number of arguments |
+| E0205 | Types | Field does not exist on this type |
+| E0206 | Types | Unbound name (belt-and-suspenders check; normally caught by E0100 first) |
+| E0210 | Types | Call to an `extern "C"` function outside an `unsafe { }` block |
+| E0211 | Types | An f-string interpolation holds a value with no text representation |
+| E0212 | Types | Argument for a row-polymorphism-bounded type parameter is missing a required field |
+| E0213 | Types | `match` does not cover every possible value of the scrutinee's type |
+| E0214 | Types | A private (`priv`) constructor called outside its own type's `impl` block |
+| E0215 | Types | A value structurally containing `Secret<_>` passed to a logging/serialization sink |
+| E0216 | Types | An interpolated f-string passed directly as the `sql` argument to a raw-SQL function (`dbQuery`/`dbExec`/etc.) |
+| E0300 | Traits | `impl` declares a method the trait doesn't have |
+| E0301 | Traits | `impl` is missing a method the trait requires |
+| E0302 | Traits | `impl` method has the wrong number of parameters |
+| E0303 | Traits | `impl` method's return type doesn't match the trait signature |
+| E0304 | Traits | `impl` method's parameter type doesn't match the trait signature |
+| E0305 | Traits | No `impl` of a required trait found for a type |
+| E0306 | Traits | Duplicate `impl` of the same trait for the same type |
+| E0400 | Effects | Function uses an effect it didn't declare |
+| E0401 | Effects | A pure function calls a function that requires an undeclared effect |
+| E0402 | Effects | `await` used in a function not declared `[async]` |
+| E0403 | Effects | `db.transaction` used outside a `[db.write]` function |
+| E0404 | Effects | `unsafe` block used outside an `[unsafe]` function |
+| E0500 | Migration & schema | Migration references a table that doesn't exist in the schema |
+| E0501 | Migration & schema | Migration's column type doesn't match the type declaration |
+| E0502 | Migration & schema | Foreign key references a table not defined in the schema |
+| E0503 | Migration & schema | Duplicate migration name |
+| E0504 | Migration & schema | Migration has no `down` block |
+| E0505 | Migration & schema | `createTable` for a table not declared as a `type` |
+| E0506 | Migration & schema | Column in a migration doesn't exist on the record type |
+| E0507 | Migration & schema | `alterTable`/`dropTable` on a table that was never created |
+| E0508 | DB query DSL | `Query.from("Table")` — no matching `type` declared in this module |
+| E0509 | DB query DSL | `.filter`/`.orderBy` references a column that doesn't exist on the table |
+| E0510 | DB query DSL | A query/mutation builder argument must be a string literal |
+| E0511 | DB query DSL | `.filter`'s operator isn't a recognized comparison operator |
+| E0512 | DB query DSL | `.orderBy`'s direction isn't `"asc"` or `"desc"` |
+| E0513 | DB query DSL | `.aggregate`/`.having`'s function isn't a recognized aggregate |
+| E0514 | DB query DSL | An `.aggregate` alias, or join alias, isn't a valid/unique identifier |
+| E0515 | DB query DSL | An unqualified column name is ambiguous across joined tables |
+| E0516 | DB query DSL | `.list`/`.first`/`.count`/a scalar aggregate called on an already-grouped/aggregated query |
+| E0517 | DB query DSL | A `"Table.column"` qualifier names a table not part of this query |
+| E0518 | DB query DSL | `.join`/`.leftJoin` ON columns must be qualified as `"Table.column"` |
+| E0519 | DB query DSL | `Mutation.insertInto`/`.updateTable`/`.deleteFrom`/`.insertMany` — no matching `type` declared |
+| E0520 | DB query DSL | A `Mutation` method used on the wrong kind of mutation (e.g. `.filter` on an insert) |
+| E0521 | DB query DSL | `.addRow`'s value count doesn't match `.insertMany`'s declared columns |
+| E0522 | DB query DSL | A `type` with `impl DbRow` has no matching table in the live database (schema-sync) |
+| E0523 | DB query DSL | A `DbRow` field has no matching column in the live database |
+| E0524 | DB query DSL | A `DbRow` field's type doesn't match the live column's type |
+| E0525 | DB query DSL | A `DbRow` field's nullability doesn't match the live column's |
+| E0526 | DB query DSL | A join/self-join alias is already used in this query |
+| E0600 | HIR lowering | Unresolved name (surfaced during lowering, not caught earlier) |
+| E0601 | HIR lowering | Unsupported generic construct |
+| E0700 | Validator rules | Cycle in the `after` rule dependency graph |
+| E0701 | Validator rules | `after` references a rule that doesn't exist in this validator |
+| E0702 | Validator rules | `overrides` references a rule that doesn't exist in this validator |
+| E0708 | Temporal / `.age` | A temporal declaration's body doesn't resolve to `Duration` |
+| E0709 | Temporal / `.age` | `.age` used on a non-`Timestamp` expression |
+| L001 | Lint | Unused parameter |
+| L002 | Lint | Unused variable |
+| L003 | Lint | Value assigned but never read |
+| L004 | Lint | Unreachable statement |
+| L005 | Lint | Guard condition is a literal boolean |
 
 
 # **Appendix C: Style Guide**
