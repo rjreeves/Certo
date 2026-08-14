@@ -1026,6 +1026,86 @@ fn secret_passed_to_eprint_is_also_rejected() {
 }
 
 // ------------------------------------------------------------------ //
+// Raw-SQL interpolation rejection (BACKLOG item 159)
+// ------------------------------------------------------------------ //
+
+#[test]
+fn interpolated_fstring_sql_in_dbquery_is_rejected() {
+    let src = "module A\nfn f(): Unit [io] = {\n \
+        val conn = dbConnect(\"x\")\n \
+        val userInput = \"attacker\"\n \
+        dbQuery(conn, f\"SELECT * FROM users WHERE email = '{userInput}'\", [])\n\
+    }";
+    let errs = check_err(src);
+    assert!(
+        errs.iter().any(|e| matches!(&e.kind, TypeErrorKind::SqlInjectionRisk { fn_name } if fn_name == "dbQuery")),
+        "expected a SqlInjectionRisk error for dbQuery, got: {:?}", errs
+    );
+}
+
+#[test]
+fn interpolated_fstring_sql_in_dbexec_is_rejected() {
+    let src = "module A\nfn f(): Unit [io] = {\n \
+        val conn = dbConnect(\"x\")\n \
+        val tableName = \"sessions\"\n \
+        dbExec(conn, f\"DELETE FROM {tableName} WHERE expired = true\", [])\n\
+    }";
+    let errs = check_err(src);
+    assert!(
+        errs.iter().any(|e| matches!(&e.kind, TypeErrorKind::SqlInjectionRisk { fn_name } if fn_name == "dbExec")),
+        "expected a SqlInjectionRisk error for dbExec, got: {:?}", errs
+    );
+}
+
+#[test]
+fn parameterized_query_with_placeholders_is_allowed() {
+    // The safe alternative the error message itself recommends must not
+    // be flagged: a plain (non-interpolated) SQL literal with values
+    // passed through `params`.
+    let src = "module A\nfn f(): Unit [io] = {\n \
+        val conn = dbConnect(\"x\")\n \
+        val userInput = \"attacker\"\n \
+        dbQuery(conn, \"SELECT * FROM users WHERE email = ?\", [userInput])\n\
+    }";
+    let errs = check_err(src);
+    assert!(
+        !errs.iter().any(|e| matches!(e.kind, TypeErrorKind::SqlInjectionRisk { .. })),
+        "a parameterized, non-interpolated query must not be rejected, got: {:?}", errs
+    );
+}
+
+#[test]
+fn fstring_with_no_interpolation_passed_as_sql_is_allowed() {
+    // An f-string literal with no `{ }` holes at all carries no injection
+    // risk — only live interpolation should trip the check.
+    let src = "module A\nfn f(): Unit [io] = {\n \
+        val conn = dbConnect(\"x\")\n \
+        dbExec(conn, f\"DELETE FROM sessions WHERE expired = true\", [])\n\
+    }";
+    let errs = check_err(src);
+    assert!(
+        !errs.iter().any(|e| matches!(e.kind, TypeErrorKind::SqlInjectionRisk { .. })),
+        "a non-interpolated f-string must not be rejected, got: {:?}", errs
+    );
+}
+
+#[test]
+fn interpolated_fstring_passed_to_unrelated_function_is_allowed() {
+    // The check is scoped to the known raw-SQL sinks only — an
+    // interpolated f-string passed to an ordinary function (or println)
+    // is unrelated to SQL injection and must not be flagged.
+    let src = "module A\nfn f(): Unit [io] = {\n \
+        val userInput = \"attacker\"\n \
+        println(f\"hello {userInput}\")\n\
+    }";
+    let errs = check_err(src);
+    assert!(
+        !errs.iter().any(|e| matches!(e.kind, TypeErrorKind::SqlInjectionRisk { .. })),
+        "a non-sink call must not trigger the SQL injection check, got: {:?}", errs
+    );
+}
+
+// ------------------------------------------------------------------ //
 // Generic type-argument soundness (non-transitive substitution fix,
 // found while implementing BACKLOG item 79 / Permission<T>)
 // ------------------------------------------------------------------ //

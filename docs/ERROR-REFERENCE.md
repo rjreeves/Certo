@@ -11,6 +11,7 @@ the fix, and a minimal reproduction.
 |---|---|
 | [E0100–E0102](#e0100-e0102-name-resolution) | Name resolution |
 | [E0200–E0206](#e0200-e0206-type-errors) | Type errors |
+| [E0216](#e0216-sql-injection-risk) | SQL injection risk |
 | [E0300–E0306](#e0300-e0306-trait-errors) | Trait / impl errors |
 | [E0400–E0404](#e0400-e0404-effect-errors) | Effect annotations |
 | [E0500–E0507](#e0500-e0507-migration--schema-errors) | Migration & schema |
@@ -268,6 +269,44 @@ Same message as E0100 but emitted by the type-checker rather than the
 resolver. In practice, if you see this, it is a sign that the resolver did
 not catch the undefined name first. The fix is the same as E0100: declare or
 import the name.
+
+---
+
+## E0216  SQL injection risk
+
+### E0216  Interpolated f-string passed as raw SQL
+
+```
+error[E0216]: an interpolated f-string was passed directly as the `sql`
+argument to `dbQuery` — use `?` placeholders and pass values via `params`
+instead
+  --> src/users.cto:14:14
+```
+
+**Cause:** An f-string with a live `{ }` interpolation was passed directly
+as the `sql` argument of a raw-SQL sink (`dbQuery`, `dbExec`,
+`dbQueryTyped`, `dbQueryRow`, `dbQueryOne`, `dbColumns`, `dbStream`,
+`dbRunScript`, `dbRunScriptResult`). Interpolating untrusted or
+user-derived values straight into SQL text is a SQL-injection
+vulnerability — the whole reason these functions accept a separate
+`params` list.
+
+**Fix:** Use `?` placeholders in the SQL text and pass the values through
+`params` instead, where the underlying driver parameterizes them safely:
+
+```certo
+// Before (rejected):
+dbQuery(conn, f"SELECT * FROM users WHERE email = '{email}'", [])
+
+// After:
+dbQuery(conn, "SELECT * FROM users WHERE email = ?", [email])
+```
+
+This check is syntactic: it only catches an f-string written directly at
+the call site. Building the SQL text earlier (e.g. `let sql = f"..."`)
+and passing the variable in is not currently caught — write raw SQL
+inline, or use the parameterized fluent query builder (`db.query(...)`),
+which is safe by construction either way.
 
 ---
 

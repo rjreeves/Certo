@@ -1533,6 +1533,14 @@ pub(crate) fn type_error_to_diagnostic(e: &TypeError) -> Diagnostic {
                 .with_label(format!("passed to `{fn_name}`, which would expose it"))
                 .with_note("call `.expose()` on the Secret first if you really need its raw value here")
         }
+
+        TypeErrorKind::SqlInjectionRisk { fn_name } => {
+            Diagnostic::error("E0216",
+                format!("an interpolated f-string was passed directly as the `sql` argument to `{fn_name}`"))
+                .with_span(e.span)
+                .with_label("SQL injection risk")
+                .with_note("use `?` placeholders in the SQL text and pass values via `params` instead")
+        }
     }
 }
 
