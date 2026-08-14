@@ -130,6 +130,55 @@ pub fn type_expr_to_ty(te: &TypeExpr, ctx: &mut Ctx<'_>) -> Ty {
     }
 }
 
+/// Resolve a field access against an already-inferred object type. Shared by
+/// `Expr::Field` and `Expr::SafeField` (the latter runs this against the
+/// unwrapped Some-payload of an Option, not the Option itself).
+fn resolve_field_ty(obj_ty: Ty, field: &S<String>, span: Span, ctx: &mut Ctx<'_>) -> Ty {
+    match &obj_ty {
+        Ty::Record(fields) => {
+            match fields.iter().find(|(n, _)| n == &field.node) {
+                Some((_, ty)) => ty.clone(),
+                None => {
+                    ctx.errors.push(TypeError {
+                        kind: TypeErrorKind::UnknownField { field: field.node.clone(), on: obj_ty },
+                        span,
+                    });
+                    Ty::Error
+                }
+            }
+        }
+        Ty::Named { name, .. } => {
+            // Look up the record definition for this named type.
+            if let Some(fields) = ctx.env.record_fields.get(name.as_str()).cloned() {
+                match fields.iter().find(|(n, _)| n == &field.node) {
+                    Some((_, ty)) => ty.clone(),
+                    None => {
+                        ctx.errors.push(TypeError {
+                            kind: TypeErrorKind::UnknownField { field: field.node.clone(), on: obj_ty },
+                            span,
+                        });
+                        Ty::Error
+                    }
+                }
+            } else {
+                // Named type not registered as a record — may be a statemachine type etc.
+                ctx.fresh()
+            }
+        }
+        Ty::Var(_) => {
+            // Not yet resolved — return a fresh var; may be resolved later
+            ctx.fresh()
+        }
+        other => {
+            ctx.errors.push(TypeError {
+                kind: TypeErrorKind::UnknownField { field: field.node.clone(), on: other.clone() },
+                span,
+            });
+            Ty::Error
+        }
+    }
+}
+
 // ------------------------------------------------------------------ //
 // Infer the type of an expression.
 // ------------------------------------------------------------------ //
@@ -368,59 +417,24 @@ pub fn infer(expr: &S<Expr>, ctx: &mut Ctx<'_>) -> Ty {
 
             let obj_ty = infer(expr, ctx);
             let obj_ty = ctx.uf.apply(&obj_ty);
-            match &obj_ty {
-                Ty::Record(fields) => {
-                    match fields.iter().find(|(n, _)| n == &field.node) {
-                        Some((_, ty)) => ty.clone(),
-                        None => {
-                            ctx.errors.push(TypeError {
-                                kind: TypeErrorKind::UnknownField { field: field.node.clone(), on: obj_ty },
-                                span: *span,
-                            });
-                            Ty::Error
-                        }
-                    }
-                }
-                Ty::Named { name, .. } => {
-                    // Look up the record definition for this named type.
-                    if let Some(fields) = ctx.env.record_fields.get(name.as_str()).cloned() {
-                        match fields.iter().find(|(n, _)| n == &field.node) {
-                            Some((_, ty)) => ty.clone(),
-                            None => {
-                                ctx.errors.push(TypeError {
-                                    kind: TypeErrorKind::UnknownField { field: field.node.clone(), on: obj_ty },
-                                    span: *span,
-                                });
-                                Ty::Error
-                            }
-                        }
-                    } else {
-                        // Named type not registered as a record — may be a statemachine type etc.
-                        ctx.fresh()
-                    }
-                }
-                Ty::Var(_) => {
-                    // Not yet resolved — return a fresh var; may be resolved later
-                    ctx.fresh()
-                }
-                other => {
-                    ctx.errors.push(TypeError {
-                        kind: TypeErrorKind::UnknownField { field: field.node.clone(), on: other.clone() },
-                        span: *span,
-                    });
-                    Ty::Error
-                }
-            }
+            resolve_field_ty(obj_ty, field, *span, ctx)
         }
 
         Expr::SafeField { expr, field, span } => {
-            // expr?.field : Option<T> where expr has field : T
-            let inner = infer(&S { node: Expr::Field {
-                expr: expr.clone(),
-                field: field.clone(),
-                span: *span,
-            }, span: *span }, ctx);
-            Ty::Option(Box::new(inner))
+            // expr?.field : Option<T> where expr has field : T. Unify the
+            // base's own type against Option<fresh> first so the Some
+            // payload can be resolved through ordinary field access,
+            // regardless of whether expr's type is already known to be an
+            // Option or still an unresolved type variable — previously this
+            // ran field resolution directly against the still-Option-
+            // wrapped base type, so it could never succeed on a real
+            // Optional (BACKLOG item 146).
+            let base_ty = infer(expr, ctx);
+            let inner_var = ctx.fresh();
+            ctx.unify(base_ty, Ty::Option(Box::new(inner_var.clone())), expr.span);
+            let inner_ty = ctx.uf.apply(&inner_var);
+            let field_ty = resolve_field_ty(inner_ty, field, *span, ctx);
+            Ty::Option(Box::new(field_ty))
         }
 
         Expr::If { cond, then_expr, else_expr, .. } => {

@@ -947,38 +947,60 @@ fn lower_expr(expr: &S<Expr>, cx: &mut Cx) -> HirExpr {
             }
         }
 
-        // SafeField `e?.f` → `match e { Some(v) => Some(v.f), None => None }`
+        // SafeField `e?.f` → `match e { Some(v) => Some(v.f), None => None }`.
+        // The `Some` arm's pattern must be a real `Constructor` pattern, not
+        // a bare `Bind` — a bare `Bind` is irrefutable (matches unconditionally
+        // and binds the *whole* Option, per `Pattern::Ident`'s identical
+        // lowering above), which made the `None` arm dead code and bound
+        // `tmp` to the still-wrapped Option instead of its payload. Found
+        // while fixing BACKLOG item 146's typeck half (the base's type was
+        // never unwrapped before field resolution there either) — `?.`
+        // could never previously reach this code at all on a real Optional,
+        // since the typeck bug rejected it first, so this second, deeper
+        // bug in the desugaring itself had never been exercised end-to-end.
         Expr::SafeField { expr, field, .. } => {
             let base = lower_expr(expr, cx);
+            let inner_ty = match &base.ty {
+                Ty::Option(inner) => (**inner).clone(),
+                _ => Ty::Error,
+            };
             let tmp = cx.fresh_local();
-            let bind = HirPat::Bind { local: tmp, name: "_safe_tmp".into() };
+            if !matches!(inner_ty, Ty::Error) {
+                cx.local_types.insert(tmp, inner_ty.clone());
+            }
+            let (field_ty, boxed) = resolve_field_ty(&inner_ty, &field.node, cx);
             let field_access = HirExpr {
                 kind: HirExprKind::Field {
-                    base:  Box::new(HirExpr { kind: HirExprKind::Local(tmp), ty: Ty::Error, span }),
+                    base:  Box::new(HirExpr { kind: HirExprKind::Local(tmp), ty: inner_ty.clone(), span }),
                     field: field.node.clone(),
-                    boxed: false, // base type unknown here — see item 119's documented scope
+                    boxed,
                 },
-                ty: Ty::Error, span,
+                ty: field_ty.clone(), span,
             };
             let some_arm = HirArm {
-                pat: bind,
+                pat: HirPat::Constructor {
+                    name: "Some".into(),
+                    fields: vec![HirPat::Bind { local: tmp, name: "_safe_tmp".into() }],
+                    field_names: vec!["f0".into()],
+                    field_types: vec![inner_ty],
+                },
                 guard: None,
                 body: HirExpr {
                     kind: HirExprKind::Call {
                         func: Box::new(HirExpr { kind: HirExprKind::Global("Some".into()), ty: Ty::Error, span }),
                         args: vec![field_access],
                     },
-                    ty: Ty::Error, span,
+                    ty: Ty::Option(Box::new(field_ty.clone())), span,
                 },
             };
             let none_arm = HirArm {
                 pat:   HirPat::Constructor { name: "None".into(), fields: vec![], field_names: vec![], field_types: vec![] },
                 guard: None,
-                body:  HirExpr { kind: HirExprKind::Global("None".into()), ty: Ty::Error, span },
+                body:  HirExpr { kind: HirExprKind::Global("None".into()), ty: Ty::Option(Box::new(field_ty.clone())), span },
             };
             HirExpr {
                 kind: HirExprKind::Match { scrutinee: Box::new(base), arms: vec![some_arm, none_arm] },
-                ty: Ty::Error, span,
+                ty: Ty::Option(Box::new(field_ty)), span,
             }
         }
 
