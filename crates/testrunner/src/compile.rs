@@ -20,10 +20,20 @@ use crate::error::TestRunnerError;
 /// already prefers clang first and this whole toolchain already requires it
 /// (BACKLOG item 104).
 pub fn compile_c(c_src: &str, out_path: &Path) -> Result<(), TestRunnerError> {
-    compile_c_opts(c_src, out_path, false)
+    compile_c_opts(c_src, out_path, false, false)
 }
 
-pub fn compile_c_opts(c_src: &str, out_path: &Path, coverage: bool) -> Result<(), TestRunnerError> {
+/// `uses_db`, when true, links libpq — required whenever the harness pulled
+/// in the PostgreSQL C runtime (`harness::uses_db`, mirrored here since the
+/// linker step is a separate process invocation from the C-generation step
+/// in `harness.rs`). Previously this crate never linked libpq at all, a
+/// real, pre-existing gap surfaced by BACKLOG item 165's `dbTest`
+/// auto-rollback fix: a `dbTest`'s synthesized wrapper always calls real DB
+/// functions now, and the resulting binary failed to link with `undefined
+/// symbol: certo_db_connect` before this fix, confirmed via direct testing
+/// against a real PostgreSQL server. Mirrors `certo build`'s own
+/// already-working `uses_db` linking logic (`crates/cli/src/main.rs`).
+pub fn compile_c_opts(c_src: &str, out_path: &Path, coverage: bool, uses_db: bool) -> Result<(), TestRunnerError> {
     // Write source to a temp file (deleted when `_src_file` is dropped).
     let src_file = NamedTempFile::with_suffix(".c")
         .map_err(|e| TestRunnerError::Io(e.to_string()))?;
@@ -49,6 +59,17 @@ pub fn compile_c_opts(c_src: &str, out_path: &Path, coverage: bool) -> Result<()
         "-O0",
         "-o", out_path.to_str().unwrap_or("certo_test_bin"),
         src_file.path().to_str().unwrap_or(""),
+        // Resets clang's "treat every following file-like argument as C
+        // source" mode that `-x c` above turns on — without this, the
+        // `libpq.lib`/`-lpq` linker args added below (when `uses_db`) get
+        // misinterpreted as more C source to compile instead of a library
+        // to link, confirmed directly (clang tried to parse a `.lib`'s
+        // binary contents as C and failed with "source file is not valid
+        // UTF-8"). `certo build`'s own invocation never hits this because
+        // it never passes `-x c` at all, relying on the `.c` extension
+        // instead — this crate always writes its source to a `.c`-suffixed
+        // temp file too, so `-x c` was already redundant even before this.
+        "-x", "none",
     ]);
     cmd.args([
         "-Wno-int-to-pointer-cast",
@@ -59,6 +80,24 @@ pub fn compile_c_opts(c_src: &str, out_path: &Path, coverage: bool) -> Result<()
     ]);
     if coverage {
         cmd.args(["-fprofile-instr-generate", "-fcoverage-mapping"]);
+    }
+    if uses_db {
+        let (pg_inc, pg_lib) = resolve_pg_paths();
+        if let Some(inc) = &pg_inc {
+            cmd.arg(format!("-I{}", inc));
+        }
+        if cfg!(windows) {
+            if let Some(lib_dir) = &pg_lib {
+                cmd.arg(format!("{}/libpq.lib", lib_dir));
+            } else {
+                cmd.arg("libpq.lib");
+            }
+        } else {
+            if let Some(lib) = &pg_lib {
+                cmd.arg(format!("-L{}", lib));
+            }
+            cmd.arg("-lpq");
+        }
     }
     if cfg!(windows) {
         cmd.arg("-Xlinker").arg("/subsystem:console");
@@ -98,6 +137,49 @@ pub fn find_llvm_tool(tool: &str) -> String {
         }
     }
     tool.to_string()
+}
+
+/// Resolve PostgreSQL include/lib directories for linking `-lpq`/`libpq.lib`.
+/// Duplicated from `crates/cli/src/main.rs`'s own `resolve_pg_paths` (kept
+/// small and self-contained rather than pulled into a shared crate for one
+/// ~40-line helper) — same resolution order: `PG_INCLUDE`/`PG_LIB` env vars
+/// first, then versioned Windows install probing, then `pg_config` on Unix.
+fn resolve_pg_paths() -> (Option<String>, Option<String>) {
+    let env_inc = std::env::var("PG_INCLUDE").ok();
+    let env_lib = std::env::var("PG_LIB").ok();
+    if env_inc.is_some() || env_lib.is_some() {
+        return (env_inc, env_lib);
+    }
+
+    if cfg!(windows) {
+        for ver in (9u32..=20).rev() {
+            let base = format!(r"C:\Program Files\PostgreSQL\{}", ver);
+            let inc = format!(r"{}\include", base);
+            let lib = format!(r"{}\lib", base);
+            if std::path::Path::new(&inc).exists() {
+                return (Some(inc), Some(lib));
+            }
+        }
+    }
+
+    if !cfg!(windows) {
+        if let Ok(out) = Command::new("pg_config")
+            .args(["--includedir", "--libdir"])
+            .output()
+        {
+            if out.status.success() {
+                let lines: Vec<&str> = std::str::from_utf8(&out.stdout)
+                    .unwrap_or("")
+                    .lines()
+                    .collect();
+                let inc = lines.first().map(|s| s.trim().to_string());
+                let lib = lines.get(1).map(|s| s.trim().to_string());
+                return (inc, lib);
+            }
+        }
+    }
+
+    (None, None)
 }
 
 /// Find an available C compiler.

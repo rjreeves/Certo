@@ -93,7 +93,7 @@ pub fn run_file_opts(
         .unwrap_or("module");
     let bin = binary_path(stem, tmp.path());
 
-    compile::compile_c_opts(&c_src, &bin, coverage)?;
+    compile::compile_c_opts(&c_src, &bin, coverage, harness::uses_db(&module, &entries))?;
 
     // ── Run ────────────────────────────────────────────────────────────────
     // Coverage needs its own RunOptions with coverage_dir pointed at the
