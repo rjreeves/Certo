@@ -62,6 +62,45 @@ pub fn seed_stdlib(env: &mut TypeEnv, counter: &mut u32) {
     }
 
     // ---------------------------------------------------------------- //
+    // Core function combinators (spec §9.1, BACKLOG item 161)
+    // ---------------------------------------------------------------- //
+    // identity is an ordinary erased passthrough, no different in kind from
+    // any other stdlib ∀T function (implemented in `core.rs`'s `certo_identity`).
+    // const/compose/flip all *construct and return a new closure value* —
+    // unlike every other higher-order stdlib function (List.map, flatMap,
+    // etc), which only ever *consumes* a closure it's given — so a
+    // hand-written, type-erased C implementation isn't safe here: the
+    // returned closure's own type is fully resolved to concrete types by
+    // ordinary unification at each call site (e.g. `compose(intToText,
+    // double)` has real type `Int => Text`), so the call site expects a
+    // native calling convention, not a uniform erased one. These three are
+    // intercepted and lowered directly in `crates/mir/src/lower.rs`
+    // (`lower_core_combinator_call`), which synthesizes a real,
+    // concretely-typed trampoline function per call site — the same
+    // per-call-site-synthesis strategy `wrap_named_fn_as_closure` (item
+    // 140) and HKT's own erased-closure wrapping (item 142) already use —
+    // rather than being registered as ordinary hand-written C runtime
+    // functions here.
+    {
+        let t = fresh();
+        env.define("identity", poly1(t, fn1(Ty::Var(t), Ty::Var(t))));
+    }
+    {
+        let a = fresh(); let b = fresh();
+        env.define("const", poly2(a, b, fn1(Ty::Var(a), fn1(Ty::Var(b), Ty::Var(a)))));
+    }
+    {
+        let a = fresh(); let b = fresh(); let c = fresh();
+        env.define("compose", poly3(a, b, c,
+            fn2(fn1(Ty::Var(b), Ty::Var(c)), fn1(Ty::Var(a), Ty::Var(b)), fn1(Ty::Var(a), Ty::Var(c)))));
+    }
+    {
+        let a = fresh(); let b = fresh(); let c = fresh();
+        env.define("flip", poly3(a, b, c,
+            fn1(fn1(Ty::Var(a), fn1(Ty::Var(b), Ty::Var(c))), fn1(Ty::Var(b), fn1(Ty::Var(a), Ty::Var(c))))));
+    }
+
+    // ---------------------------------------------------------------- //
     // Result<T, E> combinators
     // ---------------------------------------------------------------- //
 
@@ -1082,6 +1121,10 @@ pub fn seed_stdlib(env: &mut TypeEnv, counter: &mut u32) {
 
     // Core
     pm!("assert",          "cond", "msg");
+    pm!("identity",        "x");
+    pm!("const",           "a");
+    pm!("compose",         "f", "g");
+    pm!("flip",            "f");
     pm!("pow",             "base", "exp");
     pm!("minInt",          "a", "b");
     pm!("maxInt",          "a", "b");

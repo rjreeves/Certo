@@ -310,4 +310,9 @@ int64_t certo_sleep(int64_t ms) {
 #endif
     return 0;
 }
+
+/* identity :: forall T. T -> T (BACKLOG item 161) — an ordinary generic
+   passthrough, same erased-value convention as any other stdlib ∀T
+   function (e.g. getOrElse's own T-typed argument/return). */
+void* certo_identity(void* x) { return x; }
 "#;

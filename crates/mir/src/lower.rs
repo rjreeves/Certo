@@ -385,6 +385,227 @@ fn wrap_named_fn_as_erased_closure(name: &str, real_param_tys: &[Ty], real_ret_t
     make_closure(&wrap_name, Operand::Const(MirConst::Unit), ty, b)
 }
 
+/// `compose(f, g)` (BACKLOG item 161, spec §9.1) constructs and returns a
+/// brand-new closure `(x) => f(g(x))` — unlike every other higher-order
+/// stdlib function (`List.map`, `flatMap`, ...), which only ever *consumes*
+/// a closure it's given. Its result's own type is fully resolved to
+/// concrete types by ordinary unification at the call site (e.g.
+/// `compose(intToText, double)` has real type `Int => Text`), so a single
+/// hand-written, type-erased C implementation can't work — the caller of
+/// the *returned* closure expects a native calling convention matching
+/// those concrete types, and that convention differs per call site. This
+/// synthesizes a real, concretely-typed trampoline function per call site
+/// instead, the same per-use-site-synthesis strategy `wrap_named_fn_as_closure`
+/// (item 140) and HKT's own closure wrapping (item 142) already use — no
+/// erasure/boxing tricks needed for the *call-through* itself, since the
+/// synthesized function's own real parameter/return types are known
+/// exactly at generation time. `f`/`g` are lowered as ordinary function
+/// *values* (`lower_value_expr` — handles a bare named-function reference,
+/// an inline lambda, or a local already holding a closure uniformly) and
+/// stored in a heap tuple env; `Ty::Fn`'s own `needs_heap_box() == true`
+/// (item 140) means the existing `AggregateKind::Tuple`/`Rvalue::Field`
+/// codegen already box/unbox each closure transparently — no manual
+/// box/unbox rvalues needed here, unlike the erased-closure case.
+fn lower_compose_call(f_expr: &HirExpr, g_expr: &HirExpr, b: &mut Builder) -> Operand {
+    let (a_ty, b_ty) = match &g_expr.ty {
+        Ty::Fn { params, ret } if params.len() == 1 => (params[0].clone(), (**ret).clone()),
+        other => (other.clone(), Ty::Error),
+    };
+    let c_ty = match &f_expr.ty {
+        Ty::Fn { ret, .. } => (**ret).clone(),
+        other => other.clone(),
+    };
+
+    let f_op = lower_value_expr(f_expr, b);
+    let g_op = lower_value_expr(g_expr, b);
+    let env_ty = Ty::Tuple(vec![f_expr.ty.clone(), g_expr.ty.clone()]);
+    let env_dest = b.declare_local("_compose_env", env_ty);
+    b.assign(env_dest, Rvalue::Aggregate(AggregateKind::Tuple, vec![f_op, g_op]));
+
+    let idx = b.lambda_count;
+    b.lambda_count += 1;
+    let wrap_name = format!("__compose_{}_{}", b.fn_name, idx);
+
+    let mut lb = Builder::new(&wrap_name, b.record_field_types.clone(), b.variant_field_types.clone(), b.fn_param_tys.clone(), b.fn_ret_tys.clone());
+    let ret_slot = lb.declare_local("_ret", c_ty.clone());
+    let env_param = lb.declare_local("_env", Ty::Error);
+    let x_param = lb.declare_local("_x", a_ty.clone());
+
+    let f_local = lb.declare_local("_f", f_expr.ty.clone());
+    lb.assign(f_local, Rvalue::Field { base: Operand::Local(env_param), field: "0".into() });
+    let g_local = lb.declare_local("_g", g_expr.ty.clone());
+    lb.assign(g_local, Rvalue::Field { base: Operand::Local(env_param), field: "1".into() });
+
+    let y_local = lb.declare_local("_y", b_ty);
+    let next1 = lb.new_block();
+    lb.terminate(Terminator::Call {
+        func: Operand::Local(g_local),
+        args: vec![Operand::Local(x_param)],
+        dest: y_local,
+        next: next1,
+    });
+    lb.switch_to(next1);
+
+    let z_local = lb.declare_local("_z", c_ty.clone());
+    let next2 = lb.new_block();
+    lb.terminate(Terminator::Call {
+        func: Operand::Local(f_local),
+        args: vec![Operand::Local(y_local)],
+        dest: z_local,
+        next: next2,
+    });
+    lb.switch_to(next2);
+
+    lb.assign(ret_slot, Rvalue::Use(Operand::Local(z_local)));
+    emit_defers_then_return(Operand::Local(ret_slot), &mut lb);
+
+    let wrap_fn = MirFn {
+        name: wrap_name.clone(),
+        param_count: 2,
+        locals: lb.locals,
+        blocks: lb.blocks,
+    };
+    b.lifted_fns.extend(lb.lifted_fns);
+    b.lifted_fns.push(wrap_fn);
+
+    let closure_ty = Ty::Fn { params: vec![a_ty], ret: Box::new(c_ty) };
+    make_closure(&wrap_name, Operand::Local(env_dest), closure_ty, b)
+}
+
+/// `const(a)` (BACKLOG item 161, spec §9.1) constructs and returns a
+/// closure that always returns `a`, ignoring whatever it's called with —
+/// same per-call-site synthesis strategy as `lower_compose_call`. Unlike
+/// `compose`, the returned closure's *parameter* type (`B`) is genuinely
+/// unconstrained by any argument to `const` itself — it's only knowable
+/// from how the result is later used, which neither this function nor
+/// `crates/hir/src/lower.rs`'s own call-type recovery (`generic_container_ret`)
+/// can see. Since the parameter is never read (the whole point of `const`),
+/// this leaves it uniformly erased (`Ty::Var(0)` → `void*`) rather than
+/// guessing — safe specifically *because* neither the trampoline's own real
+/// C signature nor whatever the call site resolves for `B` can ever
+/// disagree: with no way to learn `B`'s real type, both consistently fall
+/// back to the same erased convention (mirrored in `generic_container_ret`'s
+/// own `"const"` case, which must produce the identical `Ty::Var(0)` param
+/// position for the two to actually match at the call site).
+fn lower_const_call(a_expr: &HirExpr, b: &mut Builder) -> Operand {
+    let a_ty = a_expr.ty.clone();
+    let a_op = lower_value_expr(a_expr, b);
+    let env_ty = Ty::Tuple(vec![a_ty.clone()]);
+    let env_dest = b.declare_local("_const_env", env_ty);
+    b.assign(env_dest, Rvalue::Aggregate(AggregateKind::Tuple, vec![a_op]));
+
+    let idx = b.lambda_count;
+    b.lambda_count += 1;
+    let wrap_name = format!("__const_{}_{}", b.fn_name, idx);
+
+    let mut lb = Builder::new(&wrap_name, b.record_field_types.clone(), b.variant_field_types.clone(), b.fn_param_tys.clone(), b.fn_ret_tys.clone());
+    let ret_slot = lb.declare_local("_ret", a_ty.clone());
+    let env_param = lb.declare_local("_env", Ty::Error);
+    let _ignored_param = lb.declare_local("_ignored", Ty::Var(0));
+
+    let a_local = lb.declare_local("_a", a_ty.clone());
+    lb.assign(a_local, Rvalue::Field { base: Operand::Local(env_param), field: "0".into() });
+    lb.assign(ret_slot, Rvalue::Use(Operand::Local(a_local)));
+    emit_defers_then_return(Operand::Local(ret_slot), &mut lb);
+
+    let wrap_fn = MirFn {
+        name: wrap_name.clone(),
+        param_count: 2,
+        locals: lb.locals,
+        blocks: lb.blocks,
+    };
+    b.lifted_fns.extend(lb.lifted_fns);
+    b.lifted_fns.push(wrap_fn);
+
+    let closure_ty = Ty::Fn { params: vec![Ty::Var(0)], ret: Box::new(a_ty) };
+    make_closure(&wrap_name, Operand::Local(env_dest), closure_ty, b)
+}
+
+/// `flip(f)` (BACKLOG item 161, spec §9.1) — `f: A => B => C` is itself a
+/// *curried* function value (calling it with one `A` returns another
+/// closure `B => C`, real and working via item 140's ordinary closure
+/// support — confirmed directly: `fn add(a: Int): Int => Int = (b) => a+b`
+/// then `add(5)(3)` already compiles and runs correctly today, with no
+/// changes needed here). `flip`'s own result, `B => A => C`, is *also*
+/// curried, so this synthesizes two nested functions per call site instead
+/// of `lower_compose_call`/`lower_const_call`'s one: an outer one (`y: B`)
+/// that builds and returns a closure over `{f, y}`, and an inner one
+/// (`x: A`) that calls `f(x)` to get the intermediate `B => C` closure,
+/// then calls *that* with `y`. A, B, C are all recoverable directly from
+/// `f`'s own already-known type — no unification needed, same as `compose`.
+fn lower_flip_call(f_expr: &HirExpr, b: &mut Builder) -> Operand {
+    let (a_ty, bc_ty) = match &f_expr.ty {
+        Ty::Fn { params, ret } if params.len() == 1 => (params[0].clone(), (**ret).clone()),
+        other => (Ty::Error, other.clone()),
+    };
+    let (b_ty, c_ty) = match &bc_ty {
+        Ty::Fn { params, ret } if params.len() == 1 => (params[0].clone(), (**ret).clone()),
+        other => (Ty::Error, other.clone()),
+    };
+    let inner_closure_ty = Ty::Fn { params: vec![a_ty.clone()], ret: Box::new(c_ty.clone()) };
+
+    let f_op = lower_value_expr(f_expr, b);
+    let outer_env_ty = Ty::Tuple(vec![f_expr.ty.clone()]);
+    let outer_env_dest = b.declare_local("_flip_env", outer_env_ty);
+    b.assign(outer_env_dest, Rvalue::Aggregate(AggregateKind::Tuple, vec![f_op]));
+
+    // ---- inner: (env: {f, y}, x: A) -> C ----
+    let idx1 = b.lambda_count;
+    b.lambda_count += 1;
+    let inner_name = format!("__flip_inner_{}_{}", b.fn_name, idx1);
+    let mut ib = Builder::new(&inner_name, b.record_field_types.clone(), b.variant_field_types.clone(), b.fn_param_tys.clone(), b.fn_ret_tys.clone());
+    let inner_ret = ib.declare_local("_ret", c_ty.clone());
+    let inner_env_param = ib.declare_local("_env", Ty::Error);
+    let x_param = ib.declare_local("_x", a_ty.clone());
+
+    let f_local2 = ib.declare_local("_f", f_expr.ty.clone());
+    ib.assign(f_local2, Rvalue::Field { base: Operand::Local(inner_env_param), field: "0".into() });
+    let y_local2 = ib.declare_local("_y", b_ty.clone());
+    ib.assign(y_local2, Rvalue::Field { base: Operand::Local(inner_env_param), field: "1".into() });
+
+    let intermediate = ib.declare_local("_inter", bc_ty.clone());
+    let next1 = ib.new_block();
+    ib.terminate(Terminator::Call { func: Operand::Local(f_local2), args: vec![Operand::Local(x_param)], dest: intermediate, next: next1 });
+    ib.switch_to(next1);
+
+    let result = ib.declare_local("_result", c_ty.clone());
+    let next2 = ib.new_block();
+    ib.terminate(Terminator::Call { func: Operand::Local(intermediate), args: vec![Operand::Local(y_local2)], dest: result, next: next2 });
+    ib.switch_to(next2);
+
+    ib.assign(inner_ret, Rvalue::Use(Operand::Local(result)));
+    emit_defers_then_return(Operand::Local(inner_ret), &mut ib);
+    let inner_fn = MirFn { name: inner_name.clone(), param_count: 2, locals: ib.locals, blocks: ib.blocks };
+    b.lifted_fns.extend(ib.lifted_fns);
+    b.lifted_fns.push(inner_fn);
+
+    // ---- outer: (env: {f}, y: B) -> (A => C) closure ----
+    let idx2 = b.lambda_count;
+    b.lambda_count += 1;
+    let outer_name = format!("__flip_outer_{}_{}", b.fn_name, idx2);
+    let mut ob = Builder::new(&outer_name, b.record_field_types.clone(), b.variant_field_types.clone(), b.fn_param_tys.clone(), b.fn_ret_tys.clone());
+    let outer_ret = ob.declare_local("_ret", inner_closure_ty.clone());
+    let outer_env_param = ob.declare_local("_env", Ty::Error);
+    let y_param = ob.declare_local("_y", b_ty.clone());
+
+    let f_local1 = ob.declare_local("_f", f_expr.ty.clone());
+    ob.assign(f_local1, Rvalue::Field { base: Operand::Local(outer_env_param), field: "0".into() });
+
+    let inner_env_ty = Ty::Tuple(vec![f_expr.ty.clone(), b_ty.clone()]);
+    let inner_env_dest = ob.declare_local("_inner_env", inner_env_ty);
+    ob.assign(inner_env_dest, Rvalue::Aggregate(AggregateKind::Tuple, vec![Operand::Local(f_local1), Operand::Local(y_param)]));
+
+    let inner_closure_op = make_closure(&inner_name, Operand::Local(inner_env_dest), inner_closure_ty.clone(), &mut ob);
+    ob.assign(outer_ret, Rvalue::Use(inner_closure_op));
+    emit_defers_then_return(Operand::Local(outer_ret), &mut ob);
+    let outer_fn = MirFn { name: outer_name.clone(), param_count: 2, locals: ob.locals, blocks: ob.blocks };
+    b.lifted_fns.extend(ob.lifted_fns);
+    b.lifted_fns.push(outer_fn);
+
+    let flip_result_ty = Ty::Fn { params: vec![b_ty], ret: Box::new(inner_closure_ty) };
+    make_closure(&outer_name, Operand::Local(outer_env_dest), flip_result_ty, b)
+}
+
 /// Wrap a lifted lambda's generated global function and its closure
 /// environment into a `certo_fn_t { fn, env }` value in the *enclosing*
 /// builder `b` — BACKLOG item 140. `ty` is the closure's own declared
@@ -802,6 +1023,22 @@ fn lower_expr(expr: &HirExpr, b: &mut Builder) -> Operand {
                     });
                     b.switch_to(next);
                     return Operand::Local(dest);
+                }
+                // `compose(f, g)` — BACKLOG item 161. See `lower_compose_call`'s
+                // own doc comment for why this needs per-call-site synthesis
+                // rather than an ordinary hand-written C runtime function.
+                if name == "compose" && args.len() == 2 {
+                    return lower_compose_call(&args[0], &args[1], b);
+                }
+                // `const(a)` — BACKLOG item 161. See `lower_const_call`'s own
+                // doc comment for the erased-parameter design.
+                if name == "const" && args.len() == 1 {
+                    return lower_const_call(&args[0], b);
+                }
+                // `flip(f)` — BACKLOG item 161. See `lower_flip_call`'s own
+                // doc comment for the nested-closure design.
+                if name == "flip" && args.len() == 1 {
+                    return lower_flip_call(&args[0], b);
                 }
             }
             let func_op = lower_expr(func, b);

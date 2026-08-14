@@ -1266,3 +1266,56 @@ fn hkt_call_site_unboxes_erased_return_back_to_concrete_type() {
     let out = codegen(&src);
     assert_contains(&out, "*(Box*)(");
 }
+
+// ------------------------------------------------------------------ //
+// Core function combinators (BACKLOG item 161)
+// ------------------------------------------------------------------ //
+
+#[test]
+fn identity_call_uses_ordinary_erased_passthrough() {
+    let out = codegen("module A\nfn run(): Int = identity(5)");
+    assert_contains(&out, "certo_identity(");
+}
+
+#[test]
+fn compose_synthesizes_a_concretely_typed_trampoline() {
+    // `compose(toText, double)` must synthesize a real trampoline function
+    // returning `certo_text_t` (not void*/int64_t) that calls both real
+    // functions in the right order — pins that the call-through uses the
+    // real concrete calling convention, not an erased one (BACKLOG item
+    // 161's own core finding: a naive erased trampoline would silently
+    // corrupt a Float param/return, since it uses a different register
+    // class than void*).
+    let out = codegen(
+        "module A\nfn double(n: Int): Int = n * 2\nfn toText(n: Int): Text = intToText(n)\nfn run(): Text = {\n  val h = compose(toText, double)\n  h(5)\n}");
+    assert_contains(&out, "certo_text_t __compose_");
+    assert_contains(&out, "certo_double(");
+    assert_contains(&out, "certo_to_text(");
+}
+
+#[test]
+fn compose_call_site_local_is_declared_certo_fn_t() {
+    let out = codegen(
+        "module A\nfn double(n: Int): Int = n * 2\nfn toText(n: Int): Text = intToText(n)\nfn run(): Text = {\n  val h = compose(toText, double)\n  h(5)\n}");
+    assert_contains(&out, "certo_fn_t _l");
+}
+
+#[test]
+fn const_trampoline_ignores_its_erased_parameter() {
+    // `const(a)`'s returned closure must return the real, concrete type of
+    // `a` (not void*/int64_t erased) while its own (unconstrained, unused)
+    // parameter stays erased.
+    let out = codegen("module A\nfn run(): Text = {\n  val h = const(\"hi\")\n  h(5)\n}");
+    assert_contains(&out, "certo_text_t __const_");
+}
+
+#[test]
+fn flip_synthesizes_nested_trampolines() {
+    // `flip(f)` where `f: A => B => C` needs two synthesized functions: an
+    // outer one that builds and returns a closure, and an inner one that
+    // actually calls through `f` twice.
+    let out = codegen(
+        "module A\nfn subtract(a: Int): Int => Int = (b: Int) => a - b\nfn run(): Int = {\n  val flipped = flip(subtract)\n  flipped(3)(10)\n}");
+    assert_contains(&out, "__flip_outer_");
+    assert_contains(&out, "__flip_inner_");
+}
