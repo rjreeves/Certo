@@ -239,6 +239,32 @@ fn duration_typed_local_uses_certo_prefixed_c_type() {
 }
 
 #[test]
+fn timestamp_typed_param_and_return_use_certo_datetime_c_type() {
+    // BACKLOG item 164: `Timestamp` is a real, reserved builtin type name
+    // (used for `.age`) but previously had no entry in `ty_to_c` at all —
+    // an explicit `Timestamp`-typed function param/return emitted the bare,
+    // undeclared C identifier `Timestamp`. It has no separate runtime
+    // representation from `DateTime` (same physical layout), so it reuses
+    // `CertoDateTime` exactly rather than a new, redundant C type.
+    let c = codegen("module A\nfn ageOf(t: Timestamp): Duration = t.age");
+    assert_contains(&c, "CertoDuration certo_age_of(CertoDateTime");
+    assert_not_contains(&c, "Timestamp certo_age_of");
+    assert_not_contains(&c, "(Timestamp ");
+}
+
+#[test]
+fn age_lowers_to_a_real_datetime_diff_call_not_identity() {
+    // BACKLOG item 164: `.age` was previously a HIR-level no-op stub
+    // ("lower the inner expression") — `t.age` compiled to literally `t`,
+    // silently returning the raw base value mistyped as a Duration. Must
+    // now generate a real `DateTime.now()` / `DateTime.diff(now, t)` call
+    // chain instead.
+    let c = codegen("module A\nfn ageOf(t: Timestamp): Duration = t.age");
+    assert_contains(&c, "certo_date_time_now()");
+    assert_contains(&c, "certo_date_time_diff(");
+}
+
+#[test]
 fn option_match_derefs_decimal_payload() {
     // parseDecimal returns Option<Decimal> — a struct-shaped payload, like
     // Result's Decimal case (BACKLOG item 114). Matching Some(x) must
