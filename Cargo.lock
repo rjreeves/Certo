@@ -213,6 +213,7 @@ dependencies = [
  "certo-ast",
  "certo-codegen",
  "certo-diagnostics",
+ "certo-fmt",
  "certo-hir",
  "certo-mir",
  "certo-parser",

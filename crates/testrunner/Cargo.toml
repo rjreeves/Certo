@@ -16,5 +16,6 @@ certo-mir         = { path = "../mir" }
 certo-codegen     = { path = "../codegen" }
 certo-stdlib      = { path = "../stdlib" }
 certo-diagnostics = { path = "../diagnostics" }
+certo-fmt         = { path = "../fmt" }
 tempfile          = "3"
 serde_json        = "1"

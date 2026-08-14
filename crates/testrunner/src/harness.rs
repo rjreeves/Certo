@@ -12,11 +12,11 @@
 
 use certo_ast::{
     decl::{Decl, FnDecl},
+    expr::Expr,
     module::Module,
     span::{Span, S},
 };
 use certo_codegen::{emit_module, CodegenOptions, c_fn_name, c_ident};
-use certo_stdlib::full_c_runtime;
 
 use crate::gen::{min_argv_width, param_gen_types, GenType, TypeDecls};
 
@@ -50,6 +50,28 @@ impl TestKind {
             TestKind::Property => "property",
         }
     }
+}
+
+/// Whether the compiled test binary needs the PostgreSQL C runtime
+/// (`DB_C`/`DBQUERY_C`/`DBMUTATION_C`) linked in — mirrors `certo build`'s
+/// own `uses_db` import-based detection (`crates/cli/src/main.rs`), plus
+/// unconditionally true whenever any `dbTest` is present: a `dbTest`'s own
+/// synthesized wrapper (`build_db_test_fn`, below) always calls
+/// `dbConnect`/`dbBegin`/`dbRollback` regardless of whether the source file
+/// bothered to write `import Stdlib.Db` itself. Exposed (not private) so
+/// `lib.rs` can pass the same answer to the linker — `certo test` links a
+/// separate binary per invocation from `compile.rs`, entirely apart from
+/// `build_harness`'s own C-runtime-selection use of this same check.
+pub fn uses_db(module: &Module, entries: &[TestEntry]) -> bool {
+    if entries.iter().any(|e| e.kind == TestKind::Db) {
+        return true;
+    }
+    module.imports.iter().any(|imp| {
+        let segs: Vec<&str> = imp.path.segments.iter().map(|s| s.node.as_str()).collect();
+        segs == ["Stdlib", "Db"] || segs == ["Db"]
+            || segs == ["Stdlib", "DbQuery"] || segs == ["DbQuery"]
+            || segs == ["Stdlib", "DbMutation"] || segs == ["DbMutation"]
+    })
 }
 
 /// Sanitise a test display name into a valid C identifier fragment.
@@ -103,18 +125,22 @@ pub fn build_harness(module: &Module, coverage_source: Option<(String, String)>)
         let idx   = entries.len();
         let fn_id = format!("__test_{}_{}", idx, safe);
 
-        let fn_decl = FnDecl {
-            is_async:    false,
-            is_pub:      false,
-            name:        S::new(fn_id.clone(), zero_span),
-            type_params: vec![],
-            params,
-            ret_ty:      None,
-            effects:     None,
-            body:        Some(body),
-            is_extern:   false,
-            export_name: None,
-            span:        zero_span,
+        let fn_decl = if kind == TestKind::Db {
+            build_db_test_fn(&fn_id, &body)?
+        } else {
+            FnDecl {
+                is_async:    false,
+                is_pub:      false,
+                name:        S::new(fn_id.clone(), zero_span),
+                type_params: vec![],
+                params,
+                ret_ty:      None,
+                effects:     None,
+                body:        Some(body),
+                is_extern:   false,
+                export_name: None,
+                span:        zero_span,
+            }
         };
         augmented.decls.push(S::new(Decl::Fn(fn_decl), zero_span));
 
@@ -152,7 +178,7 @@ pub fn build_harness(module: &Module, coverage_source: Option<(String, String)>)
     let mut c_src = preamble.to_string();
     c_src.push_str(certo_codegen::RUNTIME_HEADER);
     c_src.push('\n');
-    c_src.push_str(&full_c_runtime());
+    c_src.push_str(&certo_stdlib::full_c_runtime_with_db(uses_db(module, &entries)));
     c_src.push('\n');
     // Strip the `#include "certo_runtime.h"` stub and duplicate system includes.
     let module_out = emit_module(&augmented, &opts);
@@ -230,6 +256,64 @@ pub fn build_harness(module: &Module, coverage_source: Option<(String, String)>)
     c_src.push_str("}\n");
 
     Ok((c_src, entries))
+}
+
+/// Build the synthesized wrapper function for a `dbTest` block, with a real
+/// auto-rollback transaction around the user's own body — BACKLOG item 165.
+/// Previously `dbTest` was a cosmetic label only: its body ran exactly like
+/// a plain `test` block, with zero transaction wrapping anywhere in this
+/// crate, so any DB write it performed was permanent — directly
+/// contradicting the spec's own "auto-rollback after test" claim.
+///
+/// Generates real Certo *source text* and re-parses it with the real
+/// parser, rather than hand-constructing AST nodes for the wrapper — the
+/// same approach BACKLOG item 87 (`@ui.generate`) already established for
+/// synthesizing new Certo code from a compiler pass, which guarantees the
+/// output is exactly as valid as anything a user could type. The user's
+/// own body is re-printed via `certo_fmt::fmt_expr` (not the original
+/// source slice — `build_harness` only has the parsed AST) and spliced in
+/// verbatim as a nested block statement.
+///
+/// The connection is opened from `DATABASE_URL` (env var, falling back to
+/// `.env` — the exact resolution `getEnv` already performs) and bound to
+/// `conn`, so the test body can reference `conn` directly for its own
+/// `dbQuery`/`dbExec`/query-builder calls, all running inside the same
+/// transaction that gets rolled back afterward. Rollback is only called
+/// explicitly on the *success* path — if the body panics (e.g. a failed
+/// `assert`), the whole test subprocess aborts immediately (this crate's
+/// own one-subprocess-per-test isolation model, see this module's top-level
+/// doc comment) without ever reaching the explicit `dbRollback` call; the
+/// still-open connection is then torn down at process exit, which discards
+/// any uncommitted transaction on the Postgres side just as reliably as an
+/// explicit rollback would — `dbCommit` is never called on this connection
+/// under any path, by design, since the whole point is these writes must
+/// never persist.
+fn build_db_test_fn(fn_id: &str, body: &S<Expr>) -> Result<FnDecl, crate::error::TestRunnerError> {
+    let body_src = certo_fmt::fmt_expr(&body.node, 1);
+    let wrapper_src = format!(
+        "module __DbTestWrapper\n\
+         fn {fn_id}() = {{\n    \
+             val __dbtest_dsn = match getEnv(\"DATABASE_URL\") {{\n        \
+                 Some(v) => v\n        \
+                 None => panic(\"dbTest requires DATABASE_URL to be set (env var or .env file)\")\n    \
+             }}\n    \
+             val conn = dbConnect(__dbtest_dsn)\n    \
+             dbBegin(conn)\n    \
+             {body_src}\n    \
+             dbRollback(conn)\n\
+         }}\n"
+    );
+    let parsed = certo_parser::parse(&wrapper_src).map_err(|errs| {
+        crate::error::TestRunnerError::ParseError(format!(
+            "internal error: failed to parse synthesized dbTest wrapper for \"{fn_id}\": {:?}",
+            errs
+        ))
+    })?;
+    parsed.decls.into_iter()
+        .find_map(|d| match d.node { Decl::Fn(f) => Some(f), _ => None })
+        .ok_or_else(|| crate::error::TestRunnerError::ParseError(
+            format!("internal error: synthesized dbTest wrapper for \"{fn_id}\" produced no fn decl")
+        ))
 }
 
 /// The C parameter type for a decoded value of `gt` — must match exactly
@@ -492,6 +576,50 @@ mod tests {
         assert!(matches!(&entries[0].params[0].1, GenType::Sum { type_name, .. } if type_name == "Shape"));
         assert!(src.contains("certo_circle("), "should call the real generated constructor");
         assert!(src.contains("certo_empty"), "unit variant should reference the real generated constant");
+    }
+
+    #[test]
+    fn db_test_wraps_body_in_a_real_transaction() {
+        // BACKLOG item 165: dbTest previously ran its body completely
+        // unwrapped — this pins that the generated C actually opens a
+        // transaction (via getEnv/dbConnect/dbBegin) and rolls it back
+        // (dbRollback) around the user's own body, not just labeling the
+        // test kind cosmetically.
+        let m = certo_parser::parse(
+            "module A\ndbTest \"user creation persists\" {\n    val n = dbExec(conn, \"insert into users(name) values('x')\", [])\n    assert(n == 1, \"expected one row inserted\")\n}"
+        ).unwrap();
+        let (src, entries) = build_harness(&m, None).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].kind, TestKind::Db);
+        assert!(src.contains("certo_get_env"), "should read DATABASE_URL via getEnv");
+        assert!(src.contains("certo_db_connect"), "should open a real connection");
+        assert!(src.contains("certo_db_begin"), "should begin a real transaction");
+        assert!(src.contains("certo_db_rollback"), "should roll back after the body");
+        // "certo_db_commit(" appears exactly once — the runtime's own
+        // function *definition* (always linked in once DB support is
+        // pulled in at all); a dbTest must never add a second occurrence
+        // by actually *calling* it.
+        assert_eq!(
+            src.matches("certo_db_commit(").count(), 1,
+            "a dbTest must never commit its own transaction"
+        );
+        // The user's own body (the insert + assert) must still be present,
+        // not silently dropped in favor of the wrapper.
+        assert!(src.contains("insert into users"), "the real test body must still run");
+    }
+
+    #[test]
+    fn plain_test_and_property_are_unaffected_by_db_test_wrapping() {
+        // The dbTest-specific wrapping path must not leak into ordinary
+        // test/property bodies — they should compile exactly as before,
+        // with no transaction machinery injected.
+        let m = certo_parser::parse(
+            "module A\ntest \"basic\" { assert(1 + 1 == 2, \"math broke\") }"
+        ).unwrap();
+        let (src, entries) = build_harness(&m, None).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].kind, TestKind::Unit);
+        assert!(!src.contains("certo_db_begin"), "plain test must not get transaction wrapping");
     }
 
     #[test]
