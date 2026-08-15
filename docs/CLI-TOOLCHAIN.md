@@ -237,6 +237,7 @@ Exit codes: `0` = clean, `1` = parse or type errors, `2` = bad arguments.
 ```sh
 certo fmt <file.cto>...
 certo fmt --check <file.cto>...
+certo fmt --diff <file.cto>...
 ```
 
 Formats Certo source files in place using the canonical style. The formatter
@@ -245,11 +246,13 @@ re-parses the file and rebuilds it from the AST, so it is idempotent.
 | Flag | Description |
 |---|---|
 | `--check` | Exits `1` if any file would be reformatted (no writes). |
+| `--diff` | Prints a unified diff of what would change (no writes; implies `--check`'s exit-1-on-changes behavior). |
 
 ### Usage in CI
 
 ```sh
 certo fmt --check src/*.cto    # fail the build if files are not formatted
+certo fmt --diff src/*.cto     # see exactly what would change, without writing
 ```
 
 Files that have parse errors are skipped with a warning; the formatter does

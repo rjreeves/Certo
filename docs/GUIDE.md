@@ -983,6 +983,12 @@ Use `--check` to verify formatting without writing (useful in CI):
 certo fmt --check myfile.cto   # exits 1 if the file would be reformatted
 ```
 
+Use `--diff` to see exactly what would change, without writing:
+
+```powershell
+certo fmt --diff myfile.cto
+```
+
 ---
 
 ## 13. LLVM IR & WebAssembly
