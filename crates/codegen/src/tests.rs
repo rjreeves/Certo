@@ -264,6 +264,78 @@ fn age_lowers_to_a_real_datetime_diff_call_not_identity() {
     assert_contains(&c, "certo_date_time_diff(");
 }
 
+// ------------------------------------------------------------------ //
+// Top-level `val` with a non-literal initializer (BACKLOG item 168)
+// ------------------------------------------------------------------ //
+
+#[test]
+fn literal_top_level_val_is_unaffected() {
+    // A real, valid C constant expression — must still be emitted as a
+    // plain static initializer, not routed through the new init-function
+    // machinery at all (zero behavior change for the common case).
+    let c = codegen("module A\nval pi = 3.14159\nfn main(): Unit [io] = { println(floatToText(pi)) }");
+    assert_contains(&c, "static double certo_pi = 3.14159;");
+    assert_not_contains(&c, "__certo_init_pi");
+}
+
+#[test]
+fn call_initializer_gets_a_real_init_function_not_a_placeholder_zero() {
+    // BACKLOG item 168: `val x = five()` previously compiled to
+    // `static int64_t certo_x = /* expr */0;` — the real initializer
+    // silently discarded, `x` permanently zero. Must now be declared
+    // uninitialized and assigned from a real synthesized init function.
+    let c = codegen("module A\nfn five(): Int = 5\nval x = five()\nfn main(): Unit [io] = { println(intToText(x)) }");
+    assert_not_contains(&c, "/* expr */0");
+    assert_contains(&c, "static int64_t certo_x;");
+    assert_contains(&c, "__certo_init_x");
+    assert_contains(&c, "certo_x = __certo_init_x();");
+}
+
+#[test]
+fn init_function_call_happens_before_certo_main_in_the_bootstrap() {
+    // The global must be initialized before the user's own main() body can
+    // possibly observe it — verified by checking the *textual* order of the
+    // generated bootstrap lines, not just that both lines exist somewhere.
+    let c = codegen("module A\nfn five(): Int = 5\nval x = five()\nfn main(): Unit [io] = { println(intToText(x)) }");
+    let init_pos = c.find("certo_x = __certo_init_x();").expect("init call present");
+    let main_call_pos = c.rfind("certo_main();").expect("certo_main() call present");
+    assert!(init_pos < main_call_pos, "global init must run before certo_main()");
+}
+
+#[test]
+fn non_literal_const_referencing_an_earlier_non_literal_const_compiles() {
+    // Found via direct testing while building this fix: emitting every
+    // init function body in one early batch (mirroring how lifted lambdas
+    // are handled) breaks the moment one init body references *another*
+    // module-level global — `certo_ten` wasn't declared yet at the point
+    // `__certo_init_twenty`'s body was emitted, a real "undeclared
+    // identifier" C compile error. Each init body must be emitted at the
+    // same point as its own const's declaration, so previously-declared
+    // globals are already visible — same source-order rule ordinary
+    // top-level Certo code already has.
+    let c = codegen(
+        "module A\nfn double(n: Int): Int = n * 2\nval ten = double(5)\nval twenty = double(ten)\nfn main(): Unit [io] = { println(intToText(twenty)) }"
+    );
+    assert_contains(&c, "static int64_t certo_ten;");
+    assert_contains(&c, "static int64_t certo_twenty;");
+    // certo_ten's own declaration must textually precede
+    // __certo_init_twenty's body (which references it) — not just exist
+    // somewhere in the file.
+    let ten_decl_pos = c.find("static int64_t certo_ten;").unwrap();
+    let twenty_init_body_pos = c.find("__certo_init_twenty(void) {").expect("init body present");
+    assert!(ten_decl_pos < twenty_init_body_pos, "certo_ten must be declared before __certo_init_twenty's body");
+}
+
+#[test]
+fn string_concat_initializer_also_gets_a_real_init_function() {
+    // Not just call expressions — any non-literal HIR expression kind
+    // (here a BinOp, `++`) must go through the same real-initialization
+    // path, not just Call specifically.
+    let c = codegen("module A\nval greeting = \"hello \" ++ \"world\"\nfn main(): Unit [io] = { println(greeting) }");
+    assert_contains(&c, "static certo_text_t certo_greeting;");
+    assert_contains(&c, "__certo_init_greeting");
+}
+
 #[test]
 fn option_match_derefs_decimal_payload() {
     // parseDecimal returns Option<Decimal> — a struct-shaped payload, like
