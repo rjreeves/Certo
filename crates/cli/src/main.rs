@@ -4,6 +4,7 @@ mod cmd_repl;
 mod cmd_lint;
 mod cmd_generate;
 mod certo_toml;
+mod diff;
 
 
 use std::path::{Path, PathBuf};
@@ -2086,16 +2087,20 @@ fn to_module_name(name: &str) -> String {
 fn cmd_fmt(args: &[String]) {
     let mut files: Vec<PathBuf> = vec![];
     let mut check_only = false;
+    let mut show_diff = false;
 
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
             "--check" => check_only = true,
+            "--diff" => show_diff = true,
             "--help" | "-h" => {
-                println!("Usage: certo fmt [--check] <file.cto>...");
+                println!("Usage: certo fmt [--check] [--diff] <file.cto>...");
                 println!();
                 println!("Format Certo source files in place.");
                 println!("  --check   Exit 1 if any file would be reformatted (no writes).");
+                println!("  --diff    Print a unified diff of what would change (no writes;");
+                println!("            implies --check's exit-1-on-changes behavior).");
                 return;
             }
             other if other.starts_with('-') => {
@@ -2112,6 +2117,12 @@ fn cmd_fmt(args: &[String]) {
         process::exit(2);
     }
 
+    // `--diff` is a dry run just like `--check` — it shows what would
+    // change instead of writing it, matching the common `--diff` convention
+    // (e.g. `black --diff`) rather than writing the file *and* printing a
+    // diff, which would make the diff always look like a no-op afterward.
+    let dry_run = check_only || show_diff;
+
     let mut any_changed = false;
     for path in &files {
         let src = std::fs::read_to_string(path).unwrap_or_else(|e| {
@@ -2122,7 +2133,9 @@ fn cmd_fmt(args: &[String]) {
             Ok(formatted) => {
                 if formatted != src {
                     any_changed = true;
-                    if check_only {
+                    if show_diff {
+                        print!("{}", diff::unified_diff(&src, &formatted, &path.display().to_string()));
+                    } else if dry_run {
                         eprintln!("would reformat: {}", path.display());
                     } else {
                         std::fs::write(path, &formatted).unwrap_or_else(|e| {
@@ -2138,7 +2151,7 @@ fn cmd_fmt(args: &[String]) {
             }
         }
     }
-    if check_only && any_changed {
+    if dry_run && any_changed {
         process::exit(1);
     }
 }
