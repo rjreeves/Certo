@@ -9,6 +9,8 @@ use std::process;
 pub fn cmd_doc(args: &[String]) {
     let mut input: Option<PathBuf> = None;
     let mut out_dir: Option<PathBuf> = None;
+    let mut serve = false;
+    let mut port: u16 = 4000;
 
     let mut i = 0;
     while i < args.len() {
@@ -19,11 +21,24 @@ pub fn cmd_doc(args: &[String]) {
                     args.get(i).unwrap_or_else(|| { eprintln!("error: -o requires a path"); process::exit(2); })
                 ));
             }
+            "--serve" => serve = true,
+            "--port" => {
+                i += 1;
+                let raw = args.get(i).unwrap_or_else(|| { eprintln!("error: --port requires a number"); process::exit(2); });
+                port = raw.parse().unwrap_or_else(|_| {
+                    eprintln!("error: --port must be a number between 1 and 65535, got {:?}", raw);
+                    process::exit(2);
+                });
+            }
             "--help" | "-h" => {
-                println!("Usage: certo doc <file.cto> [-o <dir>]");
+                println!("Usage: certo doc <file.cto> [-o <dir>] [--serve] [--port <n>]");
                 println!();
                 println!("Generate HTML documentation from /// doc comments.");
                 println!("Output defaults to docs/ next to the source file.");
+                println!();
+                println!("Options:");
+                println!("  --serve       Serve the generated docs over HTTP after generating them");
+                println!("  --port <n>    Port to serve on (default: 4000, requires --serve)");
                 return;
             }
             other if other.starts_with('-') => {
@@ -72,6 +87,14 @@ pub fn cmd_doc(args: &[String]) {
     });
 
     println!("docs → {}", out_path.display());
+
+    if serve {
+        println!("Serving docs at http://localhost:{}/ (Ctrl+C to stop)", port);
+        if let Err(e) = crate::static_serve::serve_dir(&out_dir, port) {
+            eprintln!("error: could not serve on port {}: {}", port, e);
+            process::exit(1);
+        }
+    }
 }
 
 // ------------------------------------------------------------------ //

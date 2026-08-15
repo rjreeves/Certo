@@ -625,7 +625,7 @@ form ProductForm {     target: Product     field name {         label:       "Pr
 | certo add <pkg> | --version 1.2.0  --dev | Add dependency |
 | certo audit | --fix  --level high | Security audit |
 | certo repl | --connect <dsn> | Interactive session |
-| certo docs | --serve  --port 4000 | Generate documentation |
+| certo doc | --serve  --port 4000 | Generate documentation |
 | certo generate | model│api│migration <name> | Code scaffolding |
 
 ## 11.3 Project Structure

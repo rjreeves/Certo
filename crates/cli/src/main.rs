@@ -5,6 +5,7 @@ mod cmd_lint;
 mod cmd_generate;
 mod certo_toml;
 mod diff;
+mod static_serve;
 
 
 use std::path::{Path, PathBuf};
