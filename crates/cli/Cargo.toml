@@ -21,6 +21,7 @@ certo-typeck      = { path = "../typeck" }
 certo-traits      = { path = "../traits" }
 certo-dbschema    = { path = "../dbschema" }
 certo-effects     = { path = "../effects" }
+certo-ui          = { path = "../ui" }
 tempfile          = "3"
 serde             = { version = "1", features = ["derive"] }
 serde_yaml        = "0.9"

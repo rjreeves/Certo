@@ -73,6 +73,7 @@ Creates a new directory `<project-name>/` with a complete project skeleton.
 | `api` | HTTP JSON API with `Stdlib.Http` and a `/health` route |
 | `lib` | Library with public exports and `--emit-dll`; no `main` |
 | `cli` | CLI tool with argument parsing via `arg(i)` |
+| `fullstack` | `@ui.generate` CRUD server (`Stdlib.Http` + `Stdlib.Db`) — see below |
 
 ### Example
 
@@ -102,6 +103,32 @@ my-api/
 
 Module name is derived from the project name by converting kebab/snake-case
 to camelCase (`my-api` → `myApi`).
+
+### `fullstack` template
+
+```sh
+certo new my-app --template fullstack
+cd my-app
+certo migrate up          # creates the `task` table
+certo run src/main.cto    # serves on :3000
+```
+
+Generates two extra files instead of a single `src/main.cto`:
+
+- `src/ui.cto` — the source of truth: a `type Task = { id: Text, title:
+  Text, done: Bool }` record plus an `@ui.generate(Task) { ... }`
+  declaration (the same syntax the standalone `certo-ui` binary consumes).
+- `src/main.cto` — the already-lowered, runnable HTTP server generated from
+  `src/ui.cto` via `certo_ui::emit_server` (item 87's CRUD generator) at
+  scaffold time. Don't hand-edit it; after changing `src/ui.cto`, regenerate
+  it with `certo-ui src/ui.cto -o src`.
+- `migrations/001_create_task.cto` — a `createTable task { ... }` migration
+  matching the `Task` record, applied with `certo migrate up`.
+
+`id` is `Text`, not `Int`: the migration DSL has no auto-increment/identity
+column support, so an integer primary key with no default would leave the
+generated Create form (which only submits the fields listed in
+`list.columns`) with nothing to supply for it.
 
 ---
 

@@ -43,6 +43,7 @@ dependencies = [
  "certo-testrunner",
  "certo-traits",
  "certo-typeck",
+ "certo-ui",
  "serde",
  "serde_yaml",
  "tempfile",
