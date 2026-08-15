@@ -1628,6 +1628,46 @@ pub(crate) fn resolve_pg_paths() -> (Option<String>, Option<String>) {
 // new
 // ------------------------------------------------------------------ //
 
+/// `src/ui.cto` for the `fullstack` template — the hand-editable source of
+/// truth (a `@ui.generate` declaration over a record type).
+///
+/// `id` is `Text` (not `Int`) and included in `list.columns` — the migrate
+/// DSL has no auto-increment/identity column support, so an `Int
+/// primaryKey` with no default would leave the generated Create form's
+/// INSERT unable to supply a value for it (it's excluded from the form
+/// whenever it isn't listed in `columns`). A user-supplied Text id matches
+/// the one other real, shipped `@ui.generate` example in this repo
+/// (`examples/fireworks_ui.cto`'s `custNo`/`productCde` Text primary keys)
+/// and needs no engine changes to actually work.
+fn fullstack_ui_source(module_name: &str) -> String {
+    format!(
+        "module {module_name}Ui\n\
+         \n\
+         type Task = {{\n\
+         \x20   id:    Text\n\
+         \x20   title: Text\n\
+         \x20   done:  Bool\n\
+         }}\n\
+         \n\
+         @ui.generate(Task) {{\n\
+         \x20   title: \"Tasks\"\n\
+         \x20   list: {{ columns: [id, title, done] }}\n\
+         }}\n"
+    )
+}
+
+/// `src/main.cto` for the `fullstack` template — the already-lowered,
+/// immediately-`certo run`-able server generated from `ui_src` via the same
+/// `certo_ui::emit_server` used by the standalone `certo-ui` binary, so
+/// scaffolding here can never drift from what that binary actually
+/// produces. `Err` only on a bug in `fullstack_ui_source` itself (its
+/// output is fixed template text, not user input).
+fn fullstack_server_source(ui_src: &str) -> Result<String, String> {
+    let ui_module = certo_parser::parse(ui_src)
+        .map_err(|errs| format!("ui.cto failed to parse: {:?}", errs))?;
+    certo_ui::emit_server(&ui_module).map_err(|e| e.to_string())
+}
+
 fn cmd_new(args: &[String]) {
     let mut name: Option<&String> = None;
     let mut template = "default";
@@ -1638,7 +1678,7 @@ fn cmd_new(args: &[String]) {
             "--template" | "-t" => {
                 i += 1;
                 template = args.get(i).map(String::as_str).unwrap_or_else(|| {
-                    eprintln!("error: --template requires a name (api, lib, cli)");
+                    eprintln!("error: --template requires a name (api, lib, cli, fullstack)");
                     process::exit(2);
                 });
             }
@@ -1646,10 +1686,11 @@ fn cmd_new(args: &[String]) {
                 println!("Usage: certo new <project-name> [--template <template>]");
                 println!();
                 println!("Templates:");
-                println!("  default   Hello-world entry point (default)");
-                println!("  api       HTTP JSON API with Stdlib.Http");
-                println!("  lib       Library with public exports, no main");
-                println!("  cli       CLI tool with argument parsing");
+                println!("  default     Hello-world entry point (default)");
+                println!("  api         HTTP JSON API with Stdlib.Http");
+                println!("  lib         Library with public exports, no main");
+                println!("  cli         CLI tool with argument parsing");
+                println!("  fullstack   @ui.generate CRUD server (Stdlib.Http + Stdlib.Db)");
                 return;
             }
             other if other.starts_with('-') => {
@@ -1687,6 +1728,14 @@ fn cmd_new(args: &[String]) {
     if template == "api" {
         dirs.push(root.join("src").join("handlers"));
     }
+    if template == "fullstack" {
+        // `certo db migrate` reads `<project_root>/migrations/`, not
+        // `db/migrations/` (the latter is scaffolded above for every
+        // template, but nothing that actually applies migrations looks
+        // there — a pre-existing inconsistency, tracked separately in
+        // BACKLOG.md rather than silently changed for every template here).
+        dirs.push(root.join("migrations"));
+    }
     for dir in &dirs {
         std::fs::create_dir_all(dir).unwrap_or_else(|e| {
             eprintln!("error: cannot create {}: {}", dir.display(), e);
@@ -1707,6 +1756,10 @@ fn cmd_new(args: &[String]) {
         "cli" =>
             "\n[dependencies]\n\
              \"Stdlib.Text\" = \"*\"\n",
+        "fullstack" =>
+            "\n[dependencies]\n\
+             \"Stdlib.Http\" = \"*\"\n\
+             \"Stdlib.Db\"   = \"*\"\n",
         "lib" =>
             "\n[dependencies]\n\
              # add stdlib modules your library uses, e.g.\n\
@@ -1740,8 +1793,19 @@ fn cmd_new(args: &[String]) {
          # applied with: certo build --release\n"
     ));
 
+    let fullstack_ui_src = fullstack_ui_source(&module_name);
+    let fullstack_main_src = if template == "fullstack" {
+        Some(fullstack_server_source(&fullstack_ui_src).unwrap_or_else(|e| {
+            eprintln!("internal error: fullstack template failed to generate src/main.cto: {}", e);
+            process::exit(1);
+        }))
+    } else {
+        None
+    };
+
     // src/main.cto — template-specific
     let main_src = match template {
+        "fullstack" => fullstack_main_src.clone().unwrap(),
         "api" => format!(
             "module {module_name}\n\
              \n\
@@ -1799,6 +1863,21 @@ fn cmd_new(args: &[String]) {
         ),
     };
     write_file(&root.join("src").join("main.cto"), &main_src);
+    if template == "fullstack" {
+        write_file(&root.join("src").join("ui.cto"), &fullstack_ui_src);
+        write_file(&root.join("migrations").join("001_create_task.cto"),
+            "module Migration\n\
+             \n\
+             migration \"create_task\" {\n\
+             \x20   up {\n\
+             \x20       createTable task { id: Text primaryKey, title: Text, done: Bool }\n\
+             \x20   }\n\
+             \x20   down {\n\
+             \x20       dropTable task\n\
+             \x20   }\n\
+             }\n"
+        );
+    }
 
     // .env.example
     write_file(&root.join(".env.example"),
@@ -1823,6 +1902,34 @@ fn cmd_new(args: &[String]) {
         "lib"  => format!("certo build src/main.cto --emit-dll -o dist/{name}.dll"),
         _      => format!("certo build src/main.cto -o dist/{name}.exe"),
     };
+    let readme_fullstack_section = if template == "fullstack" {
+        "\n\
+         ## Editing the UI\n\
+         \n\
+         `src/ui.cto` is the source of truth: a `type` record plus an\n\
+         `@ui.generate(...)` declaration describing the CRUD screen. \
+         `src/main.cto` is the already-lowered, runnable HTTP server\n\
+         generated from it — don't hand-edit it. After changing `src/ui.cto`\n\
+         (new fields, a different title, a different column list), regenerate\n\
+         `src/main.cto` with:\n\
+         \n\
+         ```\n\
+         certo-ui src/ui.cto -o src\n\
+         ```\n\
+         \n\
+         ## Database\n\
+         \n\
+         The generated server reads `DATABASE_URL` at runtime (see\n\
+         `.env.example`) and expects a `task` table matching `src/ui.cto`'s\n\
+         `Task` record. Apply the seed migration before running it:\n\
+         \n\
+         ```\n\
+         certo migrate up\n\
+         ```\n\
+         \n"
+    } else {
+        ""
+    };
     write_file(&root.join("README.md"), &format!(
         "# {name}\n\
          \n\
@@ -1839,7 +1946,7 @@ fn cmd_new(args: &[String]) {
          ```\n\
          certo run src/main.cto\n\
          ```\n\
-         \n\
+         {readme_fullstack_section}\
          ## Docs\n\
          \n\
          ```\n\
@@ -1859,8 +1966,15 @@ fn cmd_new(args: &[String]) {
     if template == "api" {
         eprintln!("  │   ├── main.cto");
         eprintln!("  │   └── handlers/");
+    } else if template == "fullstack" {
+        eprintln!("  │   ├── main.cto   (generated — don't hand-edit)");
+        eprintln!("  │   └── ui.cto     (source of truth)");
     } else {
         eprintln!("  │   └── main.cto");
+    }
+    if template == "fullstack" {
+        eprintln!("  ├── migrations/");
+        eprintln!("  │   └── 001_create_task.cto");
     }
     eprintln!("  ├── db/");
     eprintln!("  │   └── migrations/");
@@ -3408,7 +3522,7 @@ fn cmd_migrate(args: &[String]) {
             });
             let filename = migrations_dir.join(format!("{}.cto", name));
             let template = format!(
-                "migration \"{}\" {{\n    up {{\n        // TODO: add operations\n    }}\n    down {{\n        // TODO: add rollback operations\n    }}\n}}\n",
+                "module Migration\n\nmigration \"{}\" {{\n    up {{\n        // TODO: add operations\n    }}\n    down {{\n        // TODO: add rollback operations\n    }}\n}}\n",
                 name
             );
             std::fs::write(&filename, template).unwrap_or_else(|e| {
@@ -3598,6 +3712,64 @@ mod flag_tests {
         // end-to-end via `certo check --explain` on a real multi-error file).
         assert!(explain_code("E0100").is_some());
         assert!(explain_code("E0100").is_some());
+    }
+}
+
+#[cfg(test)]
+mod fullstack_template_tests {
+    use super::*;
+
+    #[test]
+    fn ui_source_parses_and_declares_task_and_ui_generate() {
+        let src = fullstack_ui_source("myApp");
+        let module = certo_parser::parse(&src).unwrap_or_else(|e| panic!("must parse: {:?}", e));
+        assert!(module.decls.iter().any(|d| matches!(&d.node, certo_ast::decl::Decl::Type(t) if t.name.node == "Task")));
+        assert!(module.decls.iter().any(|d| matches!(&d.node, certo_ast::decl::Decl::UiGenerate(g) if g.type_name.node == "Task")));
+    }
+
+    #[test]
+    fn server_source_generates_crud_routes_for_task() {
+        let ui_src = fullstack_ui_source("myApp");
+        let server_src = fullstack_server_source(&ui_src).expect("emit_server must succeed on the template's own output");
+        assert!(server_src.contains("/task-list"), "missing list route:\n{server_src}");
+        assert!(server_src.contains("/create-task"), "missing create route:\n{server_src}");
+        assert!(server_src.contains("INSERT INTO task"), "missing insert:\n{server_src}");
+        assert!(server_src.contains("import Stdlib.Db"), "missing DB import:\n{server_src}");
+    }
+
+    #[test]
+    fn server_source_is_itself_valid_certo_source() {
+        // The generated src/main.cto must parse on its own — this is what
+        // actually gets written to disk and `certo run`, not just emitted text.
+        let ui_src = fullstack_ui_source("myApp");
+        let server_src = fullstack_server_source(&ui_src).unwrap();
+        certo_parser::parse(&server_src).unwrap_or_else(|e| panic!("generated server.cto must parse: {:?}", e));
+    }
+
+    #[test]
+    fn task_id_is_text_not_int_since_migrate_dsl_has_no_auto_increment() {
+        // Regression guard for the create-form-can-never-insert-a-row bug
+        // caught during this item's own end-to-end verification: an `Int
+        // primaryKey` id with no DB default is excluded from the generated
+        // Create form (since it's not in `list.columns`), so nothing ever
+        // supplies it and every INSERT would violate the NOT NULL constraint.
+        let src = fullstack_ui_source("myApp");
+        assert!(src.contains("id:    Text"), "id must be Text, not Int:\n{src}");
+        assert!(src.contains("columns: [id, title, done]"), "id must be listed in columns so the Create form asks for it:\n{src}");
+    }
+
+    #[test]
+    fn migrate_create_template_has_a_module_header() {
+        // Regression guard: `certo db create`/`certo migrate create`'s own
+        // scaffolded file used to omit `module X`, which `certo_parser::parse`
+        // requires unconditionally — every migration file it wrote was
+        // silently unparseable by `certo db migrate`/`certo db status`.
+        let template = format!(
+            "module Migration\n\nmigration \"{}\" {{\n    up {{\n        // TODO: add operations\n    }}\n    down {{\n        // TODO: add rollback operations\n    }}\n}}\n",
+            "add_widgets"
+        );
+        let module = certo_parser::parse(&template).unwrap_or_else(|e| panic!("must parse: {:?}", e));
+        assert!(module.decls.iter().any(|d| matches!(&d.node, certo_ast::decl::Decl::Migration(m) if m.name == "add_widgets")));
     }
 }
 

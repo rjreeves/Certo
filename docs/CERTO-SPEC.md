@@ -612,7 +612,7 @@ form ProductForm {     target: Product     field name {         label:       "Pr
 
 | **Command** | **Options** | **Description** |
 | --- | --- | --- |
-| certo new <name> | --template api│fullstack│lib | Scaffold new project |
+| certo new <name> | --template default│api│lib│cli│fullstack | Scaffold new project |
 | certo build | --release  --target native│wasm│jvm | Compile project |
 | certo run | --watch  --port 8080 | Build and run, hot reload |
 | certo check | --strict  --explain E0412 | Type check only |

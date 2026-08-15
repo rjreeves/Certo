@@ -736,7 +736,7 @@ certo new my-api --template api
 certo new my-lib --template lib
 ```
 
-Available templates: `cli` (default), `api`, `lib`.
+Available templates: `default` (default), `api`, `lib`, `cli`, `fullstack`.
 
 This creates the canonical project structure:
 
