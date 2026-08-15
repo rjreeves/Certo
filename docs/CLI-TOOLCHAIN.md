@@ -549,6 +549,7 @@ certo db pull                         # writes db/schema.cto
 certo db pull -o src/schema.cto       # custom output path
 certo db pull --schema myschema       # non-default PostgreSQL schema
 certo db pull -o -                    # print to stdout
+certo db pull --url <dsn>             # connection string, overrides DATABASE_URL/.env
 ```
 
 The generated file looks like:

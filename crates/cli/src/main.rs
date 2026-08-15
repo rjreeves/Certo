@@ -2814,6 +2814,7 @@ fn types_match(code_ty: &str, live_ty: &str) -> bool {
 fn cmd_db_pull(args: &[String]) {
     let mut out_path: Option<PathBuf> = None;
     let mut schema_name = "public".to_string();
+    let mut url_override: Option<String> = None;
 
     let mut i = 0;
     while i < args.len() {
@@ -2830,8 +2831,15 @@ fn cmd_db_pull(args: &[String]) {
                     .unwrap_or_else(|| die("--schema requires a name", 2))
                     .clone();
             }
+            "--url" => {
+                i += 1;
+                url_override = Some(
+                    args.get(i).unwrap_or_else(|| die("--url requires a connection string", 2))
+                        .clone()
+                );
+            }
             "--help" | "-h" => {
-                println!("Usage: certo db pull [-o <file>] [--schema <name>]");
+                println!("Usage: certo db pull [-o <file>] [--schema <name>] [--url <dsn>]");
                 println!();
                 println!("Introspect the live PostgreSQL database and write a Certo");
                 println!("schema snapshot to db/schema.cto (default).");
@@ -2839,6 +2847,7 @@ fn cmd_db_pull(args: &[String]) {
                 println!("Options:");
                 println!("  -o <file>        Output path (default: db/schema.cto)");
                 println!("  --schema <name>  PostgreSQL schema to introspect (default: public)");
+                println!("  --url <dsn>      Connection string — overrides DATABASE_URL/.env");
                 println!();
                 println!("Reads DATABASE_URL from the environment or .env file.");
                 println!("Requires psql on PATH.");
@@ -2853,21 +2862,25 @@ fn cmd_db_pull(args: &[String]) {
         i += 1;
     }
 
-    // Resolve DATABASE_URL — env var first, then .env file.
-    let db_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| {
-        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-        if let Ok(contents) = std::fs::read_to_string(cwd.join(".env")) {
-            for line in contents.lines() {
-                let line = line.trim();
-                if let Some(val) = line.strip_prefix("DATABASE_URL=") {
-                    return val.trim().trim_matches('"').to_string();
+    // Resolve the connection string — an explicit --url always wins, then
+    // DATABASE_URL, then .env (same fallback chain resolve_database_url_for_sync
+    // uses elsewhere in this file, just with --url spliced in ahead of it).
+    let db_url = url_override.unwrap_or_else(|| {
+        std::env::var("DATABASE_URL").unwrap_or_else(|_| {
+            let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+            if let Ok(contents) = std::fs::read_to_string(cwd.join(".env")) {
+                for line in contents.lines() {
+                    let line = line.trim();
+                    if let Some(val) = line.strip_prefix("DATABASE_URL=") {
+                        return val.trim().trim_matches('"').to_string();
+                    }
                 }
             }
-        }
-        eprintln!("error: DATABASE_URL is not set");
-        eprintln!("       Set it in your environment or .env file:");
-        eprintln!("       DATABASE_URL=host=localhost dbname=mydb user=myuser password=secret");
-        process::exit(1);
+            eprintln!("error: DATABASE_URL is not set");
+            eprintln!("       Set it in your environment or .env file, or pass --url:");
+            eprintln!("       DATABASE_URL=host=localhost dbname=mydb user=myuser password=secret");
+            process::exit(1);
+        })
     });
 
     // Verify psql is available.
