@@ -371,7 +371,7 @@ eliminating benchmark loops entirely.
 ## 10. certo doc — documentation generator
 
 ```sh
-certo doc <file.cto> [-o <dir>]
+certo doc <file.cto> [-o <dir>] [--serve] [--port <n>]
 ```
 
 Generates HTML documentation from `///` doc comments. Output defaults to
@@ -386,7 +386,13 @@ pub fn hypotenuse(a: Float, b: Float): Float = sqrt(a * a + b * b)
 ```sh
 certo doc src/main.cto            # writes docs/index.html
 certo doc src/main.cto -o site/   # writes site/index.html
+certo doc src/main.cto --serve    # generate, then serve at http://localhost:4000/
+certo doc src/main.cto --serve --port 8080
 ```
+
+`--serve` starts a local, single-threaded static-file HTTP server over the
+generated output directory (Ctrl+C to stop) — useful for browsing docs
+during development without needing a separate web server.
 
 Only `pub` declarations are documented. Private functions appear in a
 collapsed "internals" section. The generated HTML is self-contained with
