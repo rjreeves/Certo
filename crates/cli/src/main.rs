@@ -97,7 +97,7 @@ fn real_main() {
             "db"      => cmd_db(&args[2..]),
             "add"     => cmd_add(&args[2..]),
             "audit"   => cmd_audit(&args[2..]),
-            "repl"    => cmd_repl::cmd_repl(),
+            "repl"    => cmd_repl::cmd_repl(&args[2..]),
             "help" | "--help" | "-h" => { print_top_help(); }
             "--version" | "-V" => { println!("certo {}", CERTO_VERSION); }
             other => {
@@ -1580,7 +1580,7 @@ pub(crate) fn probe_cc(cmd: &str) -> bool {
 /// Locate PostgreSQL include and lib directories.
 /// Returns (include_dir, lib_dir), either of which may be None if not needed
 /// (i.e. already on the system search path).
-fn resolve_pg_paths() -> (Option<String>, Option<String>) {
+pub(crate) fn resolve_pg_paths() -> (Option<String>, Option<String>) {
     // Explicit env vars always win.
     let env_inc = std::env::var("PG_INCLUDE").ok();
     let env_lib = std::env::var("PG_LIB").ok();
@@ -2573,7 +2573,7 @@ fn print_top_help() {
     eprintln!("  diff <file.cto>              Compare type declarations to live DB");
 }
 
-fn die(msg: &str, code: i32) -> ! {
+pub(crate) fn die(msg: &str, code: i32) -> ! {
     eprintln!("error: {}", msg);
     process::exit(code);
 }
