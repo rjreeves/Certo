@@ -15,6 +15,8 @@ the fix, and a minimal reproduction.
 | [E0300–E0306](#e0300-e0306-trait-errors) | Trait / impl errors |
 | [E0400–E0404](#e0400-e0404-effect-errors) | Effect annotations |
 | [E0500–E0507](#e0500-e0507-migration--schema-errors) | Migration & schema |
+| [E0508–E0526](#e0508-e0526-db-query-dsl-errors) | DB query DSL |
+| [E0600–E0601](#e0600-e0601-hir-lowering-errors) | HIR lowering |
 | [E0700–E0702](#e0700-e0702-validator-rule-errors) | Validator rules |
 | [E0708–E0709](#e0708-e0709-temporal--age-errors) | Temporal / `.age` |
 | [L001–L005](#l001-l005-lint-warnings) | Lint warnings |
@@ -783,6 +785,360 @@ are sorted).
 
 **Fix:** Ensure the `createTable` migration for this table sorts before this
 one. Use numeric filename prefixes to control order.
+
+---
+
+## E0508–E0526  DB query DSL errors
+
+### E0508  Unknown table in `Query.from`
+
+```
+error[E0508]: `Query.from("Ghost")` — no such table
+  --> src/main.cto:5:5
+   |
+   = note: add `type Ghost { ... }` to this module, or check for a typo
+```
+
+**Cause:** `Query.from("Table")` names a table with no corresponding
+`type` declaration in the module.
+
+**Fix:** Declare the type, or fix the table-name string literal.
+
+---
+
+### E0509  Unknown column in `.filter`/`.orderBy`
+
+```
+error[E0509]: column `nickname` does not exist on `Orders`
+  --> src/main.cto:6:24
+   |
+   = note: add field `nickname: <Type>` to the `type Orders` declaration, or check for a typo
+```
+
+**Cause:** `.filter`/`.orderBy` references a column name that isn't a field
+on the query's table type.
+
+**Fix:** Check the column name against the `type`'s declared fields.
+
+---
+
+### E0510  Non-literal builder argument
+
+```
+error[E0510]: `Query.filter`'s column argument must be a string literal
+  --> src/main.cto:7:20
+   |
+   = note: column/operator/table names must be literal so the compiler can verify them against the schema
+```
+
+**Cause:** A `Query`/`Mutation` builder call's table/column/operator/
+direction argument is a variable or expression, not a string literal — it
+can't be checked against the schema at compile time this way.
+
+**Fix:** Pass a literal string directly at the call site.
+
+---
+
+### E0511  Invalid query operator
+
+```
+error[E0511]: `"~="` is not a recognized query operator
+  --> src/main.cto:6:34
+   |
+   = note: valid operators: "=", "!=", "<", "<=", ">", ">=", "like"
+```
+
+**Cause:** `.filter`'s operator string isn't one of the recognized
+operators (shared between `Query` and `Mutation`).
+
+**Fix:** Use one of the operators listed in the note.
+
+---
+
+### E0512  Invalid sort direction
+
+```
+error[E0512]: `"sideways"` is not a valid sort direction
+  --> src/main.cto:8:29
+   |
+   = note: valid directions: "asc", "desc"
+```
+
+**Cause:** `.orderBy`'s direction argument isn't `"asc"` or `"desc"`.
+
+**Fix:** Use `"asc"` or `"desc"`.
+
+---
+
+### E0513  Invalid aggregate function
+
+```
+error[E0513]: `"median"` is not a recognized aggregate function
+  --> src/main.cto:9:23
+   |
+   = note: valid aggregate functions: "count", "sum", "avg", "min", "max"
+```
+
+**Cause:** `.aggregate`/`.having`'s function name isn't one of the
+recognized aggregates.
+
+**Fix:** Use one of the functions listed in the note.
+
+---
+
+### E0514  Invalid alias
+
+```
+error[E0514]: `"not valid!"` is not a valid alias
+  --> src/main.cto:9:38
+   |
+   = note: aliases must start with a letter or underscore, followed by letters, digits, or underscores
+```
+
+**Cause:** An `.aggregate` result alias, or a `.joinAs`/`.leftJoinAs`/
+`.fromAs` table alias, isn't a valid identifier.
+
+**Fix:** Use a plain identifier, per the note.
+
+---
+
+### E0515  Ambiguous column across joined tables
+
+```
+error[E0515]: column `name` is ambiguous
+  --> src/main.cto:10:20
+   |
+   = present on `Customers`, `Employees`
+   = note: qualify it, e.g. "Customers.name"
+```
+
+**Cause:** An unqualified column name (e.g. `"name"`, not `"Customers.name"`)
+matches a column on more than one table in a joined query.
+
+**Fix:** Qualify the column with its table, as the note suggests.
+
+---
+
+### E0516  Terminal call on a grouped/aggregated query
+
+```
+error[E0516]: `Query.list` cannot be used on a grouped/aggregated query
+  --> src/main.cto:11:5
+   |
+   = note: after `.groupBy`/`.aggregate`, use `.groupedList` to run the query
+```
+
+**Cause:** `.list`/`.first`/`.count`/a scalar aggregate (`.sum`/`.avg`/
+`.min`/`.max`) was called on a query that already has `.groupBy`/
+`.aggregate` applied — those change the result shape away from `SELECT *`
+or a single scalar.
+
+**Fix:** Use `.groupedList` to read a grouped/aggregated query's results
+instead.
+
+---
+
+### E0517  Column table not part of this query
+
+```
+error[E0517]: `Ghost` is not the base table or a joined table in this query
+  --> src/main.cto:12:15
+   |
+   = note: add a `.join`/`.leftJoin` on this table first, or check for a typo
+```
+
+**Cause:** A `"Table.column"` qualifier names a table that is neither the
+query's base table nor one of its joined tables.
+
+**Fix:** Fix the table name, or add the missing `.join`/`.leftJoin`.
+
+---
+
+### E0518  Unqualified join column
+
+```
+error[E0518]: join column `"customerId"` must be qualified
+  --> src/main.cto:13:29
+   |
+   = note: write it as "Table.customerId"
+```
+
+**Cause:** `.join`/`.leftJoin`'s ON columns must be written as
+`"Table.column"`, not a bare column name.
+
+**Fix:** Qualify both sides: `Query.join("Customers", "Orders.customerId",
+"Customers.id")`.
+
+---
+
+### E0519  Unknown table in a `Mutation`
+
+```
+error[E0519]: `insertInto("Ghost")` — no such table
+  --> src/main.cto:6:5
+   |
+   = note: add `type Ghost { ... }` to this module, or check for a typo
+```
+
+**Cause:** `Mutation.insertInto`/`.updateTable`/`.deleteFrom`/
+`.insertMany` references a table with no corresponding `type` declaration.
+
+**Fix:** Declare the type, or fix the table-name string literal.
+
+---
+
+### E0520  Mutation method used on the wrong kind
+
+```
+error[E0520]: `.filter` cannot be used on an insert
+  --> src/main.cto:7:5
+```
+
+**Cause:** A `Mutation` method was called on a mutation kind it doesn't
+apply to — e.g. `.filter` on an `insertInto`, or `.set` on a `deleteFrom`.
+`.set` is valid on insert/update, `.filter` on update/delete, `.onConflict`
+on insert (upsert), `.addRow` on `insertMany`.
+
+**Fix:** Remove the call, or use the mutation kind it's actually valid for.
+
+---
+
+### E0521  `.addRow` arity mismatch
+
+```
+error[E0521]: `.addRow` has 1 value(s), but `.insertMany` declared 2 column(s)
+  --> src/main.cto:8:5
+```
+
+**Cause:** `.addRow`'s value list doesn't have the same number of entries
+as `.insertMany`'s declared column list (checked only when both are
+literal lists).
+
+**Fix:** Make each `.addRow` call supply exactly one value per declared
+column, in the same order.
+
+---
+
+### E0522  Live table missing (schema-sync)
+
+```
+error[E0522]: `type Orders` has `impl DbRow`, but no matching table exists in the live database
+  --> src/main.cto:4:1
+   |
+   = note: the live schema has drifted from this declaration — update the `type` or the database
+```
+
+**Cause:** (Opt-in via `[features] schema-sync = true` in `certo.toml`.) A
+`type` with `impl DbRow for X {}` has no matching table in the live
+database `DATABASE_URL` points at.
+
+**Fix:** Create the table (e.g. via a migration), or fix the type/table
+name mismatch.
+
+---
+
+### E0523  Live column missing (schema-sync)
+
+```
+error[E0523]: `orders.discount` has no matching column in the live database
+  --> src/main.cto:6:5
+```
+
+**Cause:** A field on a `DbRow` type has no matching column in the live
+table.
+
+**Fix:** Add the column (via a migration), or remove/rename the field to
+match what's really there.
+
+---
+
+### E0524  Live column type mismatch (schema-sync)
+
+```
+error[E0524]: `orders.total` type mismatch
+  --> src/main.cto:6:12
+   |
+   = declared as `Int`, live database column is `Decimal`
+```
+
+**Cause:** A `DbRow` field's declared Certo type doesn't match the live
+column's real database type.
+
+**Fix:** Fix the field's declared type to match the live column, or alter
+the live column to match the type.
+
+---
+
+### E0525  Live nullability mismatch (schema-sync)
+
+```
+error[E0525]: `orders.total` nullability mismatch
+  --> src/main.cto:6:12
+   |
+   = declared as not nullable, live database column is nullable
+```
+
+**Cause:** A `DbRow` field's nullability (`Text` vs `Text?`) doesn't match
+whether the live column allows `NULL`.
+
+**Fix:** Add/remove the `?` on the field's type to match the live column,
+or alter the live column's nullability.
+
+---
+
+### E0526  Duplicate join alias
+
+```
+error[E0526]: alias `"e"` is already used in this query
+  --> src/main.cto:14:32
+   |
+   = note: give each occurrence of a self-joined table a distinct alias via `.fromAs`/`.joinAs`/`.leftJoinAs`
+```
+
+**Cause:** `.joinAs`/`.leftJoinAs`/`.fromAs` reuses an alias already in
+scope for this query — most commonly a self-join (the same table joined to
+itself) that forgot to give each side its own alias.
+
+**Fix:** Give each joined instance of the table a distinct alias, e.g.
+`Query.fromAs("Employees", "e") |> Query.joinAs("Employees", "m",
+"e.managerId", "m.id")`.
+
+---
+
+## E0600–E0601  HIR lowering errors
+
+### E0600  Unresolved name at lowering
+
+```
+error[E0600]: unresolved name `x`
+  --> src/main.cto:5:5
+```
+
+**Cause:** A name — most commonly an assignment target (`x = 5`) — refers
+to a local that was never declared with `val`/`var` in this scope. In
+practice this is a belt-and-suspenders check: `resolve`/`typeck` normally
+catch this first.
+
+**Fix:** Declare the variable first with `var x = ...`, or check for a
+typo.
+
+---
+
+### E0601  Unsupported generic construct
+
+```
+error[E0601]: cannot determine the concrete type of this generic
+function's return value here — add an explicit type annotation (e.g.
+`val x: SomeType = ...`)
+  --> src/main.cto:7:13
+```
+
+**Cause:** A generic function call's return value stays fully erased
+(`Ty::Var`) at the point it's used, with nothing nearby for the compiler to
+recover a concrete type from — e.g. `val x = List.empty()` with no
+annotation and no way to infer the element type from context.
+
+**Fix:** Add an explicit type annotation: `val x: List<Int> = List.empty()`.
 
 ---
 

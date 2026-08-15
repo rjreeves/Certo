@@ -3535,6 +3535,23 @@ mod flag_tests {
     }
 
     #[test]
+    fn explain_code_finds_e0508_through_e0526_and_e0600_e0601() {
+        // BACKLOG item 167: 21 real codes (all of the DB query DSL range
+        // plus both HIR-lowering codes) had zero write-up in the error
+        // reference at all — found while fixing item 160's much smaller
+        // E0210-E0215 gap in the same file.
+        for code in [
+            "E0508", "E0509", "E0510", "E0511", "E0512", "E0513", "E0514",
+            "E0515", "E0516", "E0517", "E0518", "E0519", "E0520", "E0521",
+            "E0522", "E0523", "E0524", "E0525", "E0526", "E0600", "E0601",
+        ] {
+            let text = explain_code(code).unwrap_or_else(|| panic!("{code} should be in the error reference"));
+            assert!(text.starts_with(&format!("### {code}")), "{code}: {text}");
+            assert!(text.contains("**Cause:**"), "{code} should have a Cause section: {text}");
+        }
+    }
+
+    #[test]
     fn explain_code_unknown_code_returns_none() {
         assert!(explain_code("E9999").is_none());
     }
