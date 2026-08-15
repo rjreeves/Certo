@@ -1,7 +1,7 @@
 use std::fmt::Write as FmtWrite;
 use certo_ast::decl::{Decl, TypeBody, StateMachineDecl};
 use certo_ast::module::Module;
-use certo_hir::{HirItem, lower_module};
+use certo_hir::{HirFn, HirItem, lower_module};
 use certo_mir::lower_fn;
 use crate::emit_mir::{emit_fn_with_prefix, c_fn_name, collect_spawn_sites, emit_spawn_support, LineMap};
 use crate::ty_to_c::{ty_to_c, ret_ty_to_c, c_ident};
@@ -194,6 +194,56 @@ pub fn emit_module(module: &Module, opts: &CodegenOptions) -> String {
         })
         .collect();
 
+    // A module-level `val name = <expr>` whose initializer isn't a simple
+    // compile-time-constant literal previously compiled to a bare
+    // `static T name = /* expr */0;` — `const_expr_to_c`'s fallback for
+    // anything it can't render as a literal C expression — silently
+    // discarding the real initializer entirely and leaving `name` at a
+    // placeholder zero/NULL forever. Confirmed with a direct repro
+    // (`val conn = dbConnect(...)` always NULL, `dbError` always
+    // "connection failed") while building BACKLOG item 154, then found to
+    // be fully general — `fn five(): Int = 5` / `val x = five()` prints `0`,
+    // not `5` — not specific to DB or the REPL at all (BACKLOG item 168).
+    //
+    // Fixed by reusing the existing function-lowering pipeline instead of
+    // trying to render an arbitrary expression as a single C expression (the
+    // dead-end `const_expr_to_c`/`simple_expr_to_c` were already attempting
+    // and abandoning): each such `val` gets a synthesized zero-arg
+    // `__certo_init_<name>` function whose body *is* the real initializer,
+    // lowered and emitted exactly like an ordinary function (so it gets
+    // real MIR, real boxing/unboxing, real multi-statement bodies — nothing
+    // new to prove correct). The global itself is declared uninitialized
+    // (`static T name;`, zero-init by plain C semantics) and assigned from
+    // the init function's return value in the generated bootstrap, right
+    // after `certo_main_init(...)` and before the user's own `main()` body
+    // runs — see the `has_main` block below. Literal initializers are left
+    // completely untouched (still real, valid C constant expressions,
+    // zero behavior change, zero risk).
+    let is_simple_const_literal = |value: &certo_hir::HirExpr| {
+        matches!(&value.kind,
+            certo_hir::HirExprKind::Int(_) | certo_hir::HirExprKind::Float(_) |
+            certo_hir::HirExprKind::Bool(_) | certo_hir::HirExprKind::Str(_) |
+            certo_hir::HirExprKind::Unit)
+    };
+    let mut const_init_fns: Vec<(String, certo_mir::MirFn)> = Vec::new();
+    for item in &hir.items {
+        if let HirItem::Const(c) = item {
+            if !is_simple_const_literal(&c.value) {
+                let init_fn = HirFn {
+                    id: 0,
+                    name: format!("__certo_init_{}", c.name),
+                    params: vec![],
+                    ret_ty: certo_typeck::Ty::Error,
+                    body: Some(c.value.clone()),
+                    span: c.span,
+                };
+                let (mir, lifted) = lower_fn(&init_fn, &hir.record_field_types, &hir.variant_field_types, &hir.fn_param_tys, &hir.fn_ret_tys);
+                lifted_fns.extend(lifted);
+                const_init_fns.push((c.name.clone(), mir));
+            }
+        }
+    }
+
     // Forward declarations — use MIR local[0].ty for the return type.
     // Also collect signatures for any `@export("name")` wrapper (emitted
     // below, after all forward declarations exist for it to call into).
@@ -247,6 +297,13 @@ pub fn emit_module(module: &Module, opts: &CodegenOptions) -> String {
         let param_str = if params.is_empty() { "void".into() } else { params.join(", ") };
         writeln!(out, "static {} {}({});", ret_c, c_fn_name(&mir.name), param_str).unwrap();
     }
+    // Forward-declare the synthesized `__certo_init_<name>` functions for any
+    // module-level `val` with a non-literal initializer (BACKLOG item 168).
+    for (_, mir) in &const_init_fns {
+        let ret_ty = mir.locals.first().map(|l| &l.ty).unwrap_or(&certo_typeck::Ty::Unit);
+        let ret_c  = ret_ty_to_c(ret_ty);
+        writeln!(out, "static {} {}(void);", ret_c, c_fn_name(&mir.name)).unwrap();
+    }
     writeln!(out).unwrap();
 
     // Concurrency support: per-spawn-call-site context structs + thread workers.
@@ -278,9 +335,24 @@ pub fn emit_module(module: &Module, opts: &CodegenOptions) -> String {
         emit_fn_with_prefix(mir, "static ", &nullary_enums, line_map.as_ref(), &mut out);
         writeln!(out).unwrap();
     }
+    // `__certo_init_<name>` function *bodies* are deliberately NOT emitted
+    // here alongside lifted lambdas (only forward-declared above) — unlike a
+    // lifted lambda, an init function's body can reference *other*
+    // module-level globals (`val twenty = double(ten)`), which — like any
+    // top-level Certo declaration — only exist in the generated C once their
+    // own `static T name;` line has been emitted. Emitting every init body
+    // in one early batch, before any global's declaration, produced a real,
+    // confirmed "undeclared identifier" compile error for exactly that case.
+    // Each init function's body is instead emitted below, in the interleaved
+    // Const/Fn loop, at the same point as its own const's declaration — the
+    // same source-order-dependent rule ordinary top-level Certo code already
+    // has (a `val` must be declared before something later in the file uses
+    // it), not a new limitation.
 
     // Emit function bodies from cached MIR.
     // Interleave any non-Fn HIR items (Const) at the right position.
+    let const_init_fn_by_name: std::collections::HashMap<&str, &certo_mir::MirFn> =
+        const_init_fns.iter().map(|(name, mir)| (name.as_str(), mir)).collect();
     {
         let mut mir_iter = fn_mirs.into_iter();
         for item in &hir.items {
@@ -294,14 +366,31 @@ pub fn emit_module(module: &Module, opts: &CodegenOptions) -> String {
             }
             HirItem::Const(c) => {
                 // Module-level constants become static C globals.
-                // Use the expression type when the declared type is unknown (Ty::Error).
-                let cty = if matches!(c.ty, certo_typeck::Ty::Error) {
-                    const_expr_ty(&c.value)
+                if let Some(init_mir) = const_init_fn_by_name.get(c.name.as_str()) {
+                    // Non-literal initializer (BACKLOG item 168) — declared
+                    // uninitialized (zero-init by plain C semantics) and
+                    // really assigned from `__certo_init_<name>()` in the
+                    // bootstrap below, before `main()`'s own body runs. Use
+                    // the init function's own inferred return type — more
+                    // accurate than `const_expr_ty`'s crude non-literal
+                    // fallback (`void*` for anything it doesn't recognize).
+                    let cty = init_mir.locals.first().map(|l| ty_to_c(&l.ty)).unwrap_or_else(|| "void*".into());
+                    writeln!(out, "static {} {};", cty, c_fn_name(&c.name)).unwrap();
+                    // The init function's own body, emitted here (not in one
+                    // early batch) so any *other* global it references has
+                    // already been declared, per the doc comment above.
+                    emit_fn_with_prefix(*init_mir, "static ", &nullary_enums, line_map.as_ref(), &mut out);
+                    writeln!(out).unwrap();
                 } else {
-                    ty_to_c(&c.ty)
-                };
-                writeln!(out, "static {} {} = {};", cty, c_fn_name(&c.name),
-                    const_expr_to_c(&c.value)).unwrap();
+                    // Use the expression type when the declared type is unknown (Ty::Error).
+                    let cty = if matches!(c.ty, certo_typeck::Ty::Error) {
+                        const_expr_ty(&c.value)
+                    } else {
+                        ty_to_c(&c.ty)
+                    };
+                    writeln!(out, "static {} {} = {};", cty, c_fn_name(&c.name),
+                        const_expr_to_c(&c.value)).unwrap();
+                }
             }
             }
         }
@@ -313,6 +402,14 @@ pub fn emit_module(module: &Module, opts: &CodegenOptions) -> String {
         matches!(&d.node, Decl::Fn(f) if f.name.node == "main")
     });
     if has_main {
+        // Real initialization for any module-level `val` with a non-literal
+        // initializer (BACKLOG item 168) — run once, before the user's own
+        // `main()` body, so every later reference sees the real computed
+        // value rather than the zero/NULL the global starts as.
+        let mut global_inits = String::new();
+        for (name, mir) in &const_init_fns {
+            writeln!(global_inits, "    {} = {}();", c_fn_name(name), c_fn_name(&mir.name)).unwrap();
+        }
         // On Windows emit a wmain entry point so the CRT passes wchar_t** argv,
         // which is derived directly from CommandLineToArgvW — immune to shells
         // (Git Bash, PowerShell, cmd) stripping or mangling quoted arguments.
@@ -325,6 +422,7 @@ pub fn emit_module(module: &Module, opts: &CodegenOptions) -> String {
         writeln!(out, "        WideCharToMultiByte(CP_UTF8,0,argv[i],-1,u8[i],n,NULL,NULL);").unwrap();
         writeln!(out, "    }}").unwrap();
         writeln!(out, "    certo_main_init(argc, (const char**)u8);").unwrap();
+        write!(out, "{}", global_inits).unwrap();
         writeln!(out, "    certo_main();").unwrap();
         writeln!(out, "    return 0;").unwrap();
         writeln!(out, "}}").unwrap();
@@ -336,6 +434,7 @@ pub fn emit_module(module: &Module, opts: &CodegenOptions) -> String {
         writeln!(out, "#else").unwrap();
         writeln!(out, "int main(int argc, const char** argv) {{").unwrap();
         writeln!(out, "    certo_main_init(argc, argv);").unwrap();
+        write!(out, "{}", global_inits).unwrap();
         writeln!(out, "    certo_main();").unwrap();
         writeln!(out, "    return 0;").unwrap();
         writeln!(out, "}}").unwrap();
