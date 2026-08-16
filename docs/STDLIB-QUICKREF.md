@@ -260,12 +260,16 @@ List.distinct<T>(list: List<T>): List<T>                 // dedup, pointer equal
 List.partition<T>(list: List<T>, pred: T => Bool): (List<T>, List<T>)  // (matches, non-matches)
 List.chunked<T>(list: List<T>, size: Int): List<List<T>>
 List.groupBy<T, K>(list: List<T>, key: T => K): Map<K, List<T>>  // K uses Map's pointer-equality keys — see below
+List.flatMap<A, B>(list: List<A>, f: A => List<B>): List<B>  // map then flatten one level
+List.reduce<T, A>(list: List<T>, init: A, f: (A, T) => A): A  // same as List.fold, spec's own name
 ```
 
-`sumBy`/`minBy`/`maxBy` (numeric/ordered projections) are not implemented yet —
-see BACKLOG item 112: passing a Float-returning lambda into any of these
-higher-order stdlib functions is unsound today (a deeper, pre-existing
-codegen bug, not specific to these three).
+`sortBy`/`sumBy`/`minBy`/`maxBy` (key/numeric projections) are not implemented
+yet — unlike the functions above, each needs a real comparison or addition
+over the *projected* key/numeric type, resolved fresh per call site (the
+same class of per-call-site MIR synthesis `compose`/`const`/`flip` needed —
+BACKLOG items 140-142), not just a closure-delegating C function. Split out
+as its own item (162) rather than rushed in alongside `flatMap`/`reduce`.
 
 ### Map\<K, V\>
 

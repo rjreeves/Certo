@@ -187,6 +187,27 @@ void* certo_list_fold(CertoList* l, void* init, certo_fn_t f) {
     return acc;
 }
 
+/* List.reduce (BACKLOG item 162) is spec's own name for exactly List.fold's
+ * already-shipped (list, init, combiner) signature — same real
+ * implementation, no new logic. */
+#define certo_list_reduce certo_list_fold
+
+/* List.flatMap(list, f): map each element to a sub-list via f, then
+ * concatenate all the sub-lists in order (BACKLOG item 162). Grows via
+ * certo_list_push's own functional-update copy, same unoptimized-but-
+ * correct style certo_list_distinct/certo_list_group_by already use. */
+CertoList* certo_list_flat_map(CertoList* l, certo_fn_t f) {
+    CertoList* out = list_alloc(l ? l->len : 0);
+    if (!l) return out;
+    CertoFn1 fn = (CertoFn1)f.fn;
+    for (int64_t i = 0; i < l->len; i++) {
+        CertoList* sub = (CertoList*)fn(f.env, l->data[i]);
+        int64_t sn = sub ? sub->len : 0;
+        for (int64_t j = 0; j < sn; j++) out = certo_list_push(out, sub->data[j]);
+    }
+    return out;
+}
+
 bool certo_list_contains_ptr(CertoList* l, void* item) {
     if (!l) return false;
     for (int64_t i = 0; i < l->len; i++) if (l->data[i] == item) return true;

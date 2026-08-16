@@ -421,6 +421,28 @@ fn int_callback_to_list_map_is_still_boxed_but_no_float_conversion() {
 }
 
 #[test]
+fn callback_to_list_flat_map_is_boxed() {
+    // BACKLOG item 162: List.flatMap needs the same boxed-ABI lift as
+    // List.map (added to BOXED_ABI_CALLEES) — same single-element-typed-
+    // param-returning-something-else shape.
+    let c = codegen(
+        "module A\nimport Stdlib.Collections.{ List }\n\
+         fn f(xs: List<Int>): Int = List.len(List.flatMap(xs, (x) => [x, x]))");
+    assert_contains(&c, "__lam_f_0_boxed");
+    assert_contains(&c, "certo_list_flat_map");
+}
+
+#[test]
+fn list_reduce_compiles_to_the_real_fold_call() {
+    // BACKLOG item 162: List.reduce is a pure name bridge to List.fold's
+    // own already-correct implementation, not a duplicate.
+    let c = codegen(
+        "module A\nimport Stdlib.Collections.{ List }\n\
+         fn f(xs: List<Int>): Int = List.reduce(xs, 0, (acc, x) => acc + x)");
+    assert_contains(&c, "certo_list_reduce");
+}
+
+#[test]
 fn float_callback_to_user_defined_hof_is_not_boxed() {
     // The fix is deliberately narrow (BACKLOG item 112): only the specific
     // stdlib functions with a generic void* C ABI get the boxed lift.

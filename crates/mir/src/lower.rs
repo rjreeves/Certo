@@ -202,6 +202,11 @@ pub fn lower_fn(
 /// type is a struct, not a pointer-sized value.
 const BOXED_ABI_CALLEES: &[&str] = &[
     "List.map", "List.filter", "List.find", "List.any", "List.all", "List.groupBy",
+    // `List.flatMap` (BACKLOG item 162) — single-element-typed-param closure
+    // returning something not itself derivable from the list's own element
+    // type, same shape as `List.map` immediately above; needs the identical
+    // boxed-ABI treatment for the same reason.
+    "List.flatMap",
     "dbQueryTyped", "Query.list", "Query.first", "Query.groupedList",
 ];
 
