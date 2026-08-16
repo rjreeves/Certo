@@ -961,6 +961,22 @@ fn load_certo_toml_or_die(project_root: &Path) -> Option<certo_toml::CertoToml> 
     }
 }
 
+/// Resolve the migrations directory for `project_root`: `certo.toml`'s
+/// `[database] migrations` (section 11.4's schema — parsed since item 91 but
+/// never read by anything until this) if set, else `migrations/` (this
+/// command's own working default before this field was wired up, kept as
+/// the fallback so an existing project with no `[database]` section sees no
+/// behavior change).
+fn migrations_dir(project_root: &Path) -> PathBuf {
+    let configured = load_certo_toml_or_die(project_root)
+        .and_then(|cfg| cfg.database)
+        .and_then(|db| db.migrations);
+    match configured {
+        Some(dir) => project_root.join(dir),
+        None => project_root.join("migrations"),
+    }
+}
+
 /// Resolve `DATABASE_URL` — env var first, then `.env` in the current directory. Mirrors
 /// `cmd_db_pull`'s resolution, but returns `Option` instead of exiting, since the caller
 /// wants to print its own schema-sync-specific error message.
@@ -1728,14 +1744,6 @@ fn cmd_new(args: &[String]) {
     if template == "api" {
         dirs.push(root.join("src").join("handlers"));
     }
-    if template == "fullstack" {
-        // `certo db migrate` reads `<project_root>/migrations/`, not
-        // `db/migrations/` (the latter is scaffolded above for every
-        // template, but nothing that actually applies migrations looks
-        // there — a pre-existing inconsistency, tracked separately in
-        // BACKLOG.md rather than silently changed for every template here).
-        dirs.push(root.join("migrations"));
-    }
     for dir in &dirs {
         std::fs::create_dir_all(dir).unwrap_or_else(|e| {
             eprintln!("error: cannot create {}: {}", dir.display(), e);
@@ -1780,6 +1788,9 @@ fn cmd_new(args: &[String]) {
          target = \"native\"\n\
          output = \"dist/\"\n\
          {toml_entry}{toml_deps}\n\
+         [database]\n\
+         migrations = \"db/migrations/\"   # read by `certo db migrate`/`certo db create`\n\
+         \n\
          [features]\n\
          # schema-sync = true   # `certo build`/`check` cross-checks every `impl DbRow`\n\
          #                      # type against the live DATABASE_URL schema; needs a\n\
@@ -1865,7 +1876,7 @@ fn cmd_new(args: &[String]) {
     write_file(&root.join("src").join("main.cto"), &main_src);
     if template == "fullstack" {
         write_file(&root.join("src").join("ui.cto"), &fullstack_ui_src);
-        write_file(&root.join("migrations").join("001_create_task.cto"),
+        write_file(&root.join("db").join("migrations").join("001_create_task.cto"),
             "module Migration\n\
              \n\
              migration \"create_task\" {\n\
@@ -1972,12 +1983,13 @@ fn cmd_new(args: &[String]) {
     } else {
         eprintln!("  │   └── main.cto");
     }
-    if template == "fullstack" {
-        eprintln!("  ├── migrations/");
-        eprintln!("  │   └── 001_create_task.cto");
-    }
     eprintln!("  ├── db/");
-    eprintln!("  │   └── migrations/");
+    if template == "fullstack" {
+        eprintln!("  │   └── migrations/");
+        eprintln!("  │       └── 001_create_task.cto");
+    } else {
+        eprintln!("  │   └── migrations/");
+    }
     eprintln!("  ├── tests/");
     eprintln!("  │   ├── unit/");
     eprintln!("  │   └── integration/");
@@ -3516,11 +3528,11 @@ fn cmd_migrate(args: &[String]) {
 
         "create" => {
             let name = args.get(1).map(String::as_str).unwrap_or("new_migration");
-            let migrations_dir = project_root.join("migrations");
-            std::fs::create_dir_all(&migrations_dir).unwrap_or_else(|e| {
-                eprintln!("error creating migrations/: {}", e); process::exit(1);
+            let dir = migrations_dir(&project_root);
+            std::fs::create_dir_all(&dir).unwrap_or_else(|e| {
+                eprintln!("error creating {}: {}", dir.display(), e); process::exit(1);
             });
-            let filename = migrations_dir.join(format!("{}.cto", name));
+            let filename = dir.join(format!("{}.cto", name));
             let template = format!(
                 "module Migration\n\nmigration \"{}\" {{\n    up {{\n        // TODO: add operations\n    }}\n    down {{\n        // TODO: add rollback operations\n    }}\n}}\n",
                 name
@@ -3613,11 +3625,11 @@ fn warn_if_schema_stale(project_root: &Path) {
 }
 
 fn load_migrations(project_root: &Path) -> Vec<MigrationDecl> {
-    let migrations_dir = project_root.join("migrations");
-    if !migrations_dir.exists() { return Vec::new(); }
+    let dir = migrations_dir(project_root);
+    if !dir.exists() { return Vec::new(); }
     let mut result = Vec::new();
-    let mut paths: Vec<_> = std::fs::read_dir(&migrations_dir)
-        .unwrap_or_else(|e| { eprintln!("error reading migrations/: {}", e); process::exit(1); })
+    let mut paths: Vec<_> = std::fs::read_dir(&dir)
+        .unwrap_or_else(|e| { eprintln!("error reading {}: {}", dir.display(), e); process::exit(1); })
         .filter_map(|e| e.ok())
         .map(|e| e.path())
         .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("cto"))
@@ -3770,6 +3782,40 @@ mod fullstack_template_tests {
         );
         let module = certo_parser::parse(&template).unwrap_or_else(|e| panic!("must parse: {:?}", e));
         assert!(module.decls.iter().any(|d| matches!(&d.node, certo_ast::decl::Decl::Migration(m) if m.name == "add_widgets")));
+    }
+}
+
+#[cfg(test)]
+mod migrations_dir_tests {
+    use super::*;
+
+    fn temp_project(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("certo_migrations_dir_test_{}_{}_{}", name, std::process::id(), line!()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn defaults_to_migrations_when_no_certo_toml() {
+        let dir = temp_project("no_toml");
+        assert_eq!(migrations_dir(&dir), dir.join("migrations"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn defaults_to_migrations_when_no_database_section() {
+        let dir = temp_project("no_db_section");
+        std::fs::write(dir.join("certo.toml"), "[project]\nname = \"x\"\n").unwrap();
+        assert_eq!(migrations_dir(&dir), dir.join("migrations"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn honors_configured_database_migrations_path() {
+        let dir = temp_project("configured");
+        std::fs::write(dir.join("certo.toml"), "[project]\nname = \"x\"\n\n[database]\nmigrations = \"db/migrations/\"\n").unwrap();
+        assert_eq!(migrations_dir(&dir), dir.join("db/migrations/"));
+        std::fs::remove_dir_all(&dir).ok();
     }
 }
 

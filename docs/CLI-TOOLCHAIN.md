@@ -122,8 +122,8 @@ Generates two extra files instead of a single `src/main.cto`:
   `src/ui.cto` via `certo_ui::emit_server` (item 87's CRUD generator) at
   scaffold time. Don't hand-edit it; after changing `src/ui.cto`, regenerate
   it with `certo-ui src/ui.cto -o src`.
-- `migrations/001_create_task.cto` — a `createTable task { ... }` migration
-  matching the `Task` record, applied with `certo migrate up`.
+- `db/migrations/001_create_task.cto` — a `createTable task { ... }`
+  migration matching the `Task` record, applied with `certo migrate up`.
 
 `id` is `Text`, not `Int`: the migration DSL has no auto-increment/identity
 column support, so an integer primary key with no default would leave the
@@ -561,9 +561,13 @@ migrate` above, in reverse.
 certo db create add_products_table
 ```
 
-Writes `migrations/add_products_table.cto` with an empty template:
+Writes `<migrations dir>/add_products_table.cto` with an empty template —
+the migrations directory is `certo.toml`'s `[database] migrations` if set
+(see [§15](#15-certotoml--project-manifest)), else `migrations/`:
 
 ```
+module Migration
+
 migration "add_products_table" {
     up {
         // TODO: add operations
@@ -692,14 +696,29 @@ certo migrate create <name>   # same as: certo db create <name>
 Migration state is tracked in a `.certo_migrations` manifest file in the
 project root. Each applied migration is recorded with its name and timestamp.
 
-Migration files are loaded from `migrations/*.cto` in lexicographic order.
-Name your files with a numeric prefix to control order:
+Migration files are loaded from `<migrations dir>/*.cto` in lexicographic
+order, where `<migrations dir>` is `certo.toml`'s `[database] migrations`
+if set (see [§15](#15-certotoml--project-manifest)), else `migrations/` in
+the project root. `certo new` sets it to `db/migrations/` for every
+template. Name your files with a numeric prefix to control order:
 
 ```
-migrations/
+db/migrations/
     001-create-users.cto
     002-create-orders.cto
     003-add-users-role.cto
+```
+
+Every migration file needs a `module` header, like any other `.cto` source
+file:
+
+```
+module Migration
+
+migration "create_users" {
+    up { createTable users { id: UUID primaryKey, email: Text unique } }
+    down { dropTable users }
+}
 ```
 
 ---
@@ -801,7 +820,8 @@ example in the language spec.
 | `target` | `[build]` | Always `"native"` for now |
 | `output` | `[build]` | Output directory; created automatically |
 | `entry` | `[build]` | Entry file (required for apps) |
-| `schema`, `migrations`, `seeds` | `[database]` | Parsed, not consumed anywhere yet — `certo db` subcommands still take explicit args |
+| `migrations` | `[database]` | Read by every `certo db`/`certo migrate` subcommand — the migrations directory, default `migrations/` if unset |
+| `schema`, `seeds` | `[database]` | Parsed, not consumed anywhere yet |
 | `port`, `host` | `[server]` | Parsed, not consumed anywhere yet — no `certo run --port` today; a program reads flags/env itself |
 | (any key) | `[dependencies]` | Read by `certo add`/`certo audit` — see [§16](#16-certo-add--certo-audit--dependency-bookkeeping) |
 | (any key) | `[dev-dependencies]` | Parsed, not consumed anywhere yet |
