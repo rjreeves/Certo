@@ -5,12 +5,15 @@
 //! TOML key read through `serde`/`toml`, not a brittle exact-string match.
 //!
 //! Every section is optional so a minimal `certo.toml` (just `[project]`/`[build]`)
-//! still parses. Fields that no other part of the compiler currently *acts* on
-//! (`database.migrations`/`seeds`, `server.*`, `dependencies`/`dev-dependencies`)
-//! are still parsed and validated as real TOML, but are reserved for future
-//! toolchain work (see BACKLOG items 91, `certo add`; the `[server]` section
-//! has no consumer yet since `certo run --port` was deliberately not built —
-//! see BACKLOG item 126's sibling note in item 125) — they are not silently
+//! still parses. `database.migrations` is read by `crates/cli/src/main.rs`'s
+//! `migrations_dir()` (item 169) — every `certo db`/`certo migrate` subcommand
+//! reads/writes migration files there, defaulting to `migrations/` if unset.
+//! Fields that no other part of the compiler currently *acts* on
+//! (`database.seeds`, `server.*`, `dependencies`/`dev-dependencies`) are still
+//! parsed and validated as real TOML, but are reserved for future toolchain
+//! work (see BACKLOG items 91, `certo add`; the `[server]` section has no
+//! consumer yet since `certo run --port` was deliberately not built — see
+//! BACKLOG item 126's sibling note in item 125) — they are not silently
 //! dropped, but nothing downstream reads them yet.
 #![allow(dead_code)] // reserved schema fields — see module doc above.
 
