@@ -382,6 +382,38 @@ pub fn seed_stdlib(env: &mut TypeEnv, counter: &mut u32) {
             )),
         });
     }
+    // `List.flatMap`/`List.reduce` (BACKLOG item 162, bounded half — the
+    // other four spec-listed functions, `sortBy`/`sumBy`/`minBy`/`maxBy`,
+    // all need real per-call-site MIR synthesis to compare/add a generic
+    // key type and were split out as their own item rather than rushed in
+    // here). `flatMap` is genuinely new (map then flatten one level, no
+    // existing equivalent under any name); `reduce` is spec's own name for
+    // exactly `List.fold`'s already-shipped signature — same order (list,
+    // init, combiner) — so it reuses `fold`'s real C implementation via a
+    // `#define` bridge rather than duplicating it (see `collections.rs`).
+    {
+        let a = fresh(); let b = fresh();
+        let f_ty = fn1(Ty::Var(a), Ty::List(Box::new(Ty::Var(b))));
+        env.define("List.flatMap", Ty::Forall {
+            vars: vec![a, b],
+            body: Box::new(fn2(Ty::List(Box::new(Ty::Var(a))), f_ty,
+                              Ty::List(Box::new(Ty::Var(b))))),
+        });
+    }
+    {
+        let t = fresh(); let acc = fresh();
+        env.define("List.reduce", Ty::Forall {
+            vars: vec![t, acc],
+            body: Box::new(Ty::Fn {
+                params: vec![
+                    Ty::List(Box::new(Ty::Var(t))),
+                    Ty::Var(acc),
+                    fn2(Ty::Var(acc), Ty::Var(t), Ty::Var(acc)),
+                ],
+                ret: Box::new(Ty::Var(acc)),
+            }),
+        });
+    }
 
     // ---------------------------------------------------------------- //
     // Collections — Map<K, V>
@@ -1222,6 +1254,8 @@ pub fn seed_stdlib(env: &mut TypeEnv, counter: &mut u32) {
     pm!("List.partition",  "list", "pred");
     pm!("List.chunked",    "list", "size");
     pm!("List.groupBy",    "list", "key");
+    pm!("List.flatMap",    "list", "f");
+    pm!("List.reduce",     "list", "init", "f");
 
     // Map
     pm!("Map.insert",      "map", "key", "value");

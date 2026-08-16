@@ -395,6 +395,7 @@ List.first(list): T?   List.last(list): T?
 List.slice(list, i, j) List.reverse(list)
 List.map(list, f)      List.filter(list, pred)
 List.fold(list, init, f)
+List.flatMap(list, f)  List.reduce(list, init, f)  // reduce = fold, spec's name
 List.contains(list, item): Bool
 
 // Map

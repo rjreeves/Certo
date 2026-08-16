@@ -89,6 +89,46 @@ fn list_fold_is_polymorphic() {
 }
 
 #[test]
+fn list_flat_map_and_reduce_registered() {
+    // BACKLOG item 162 (bounded half): flatMap and reduce.
+    let env = seeded_env();
+    for name in ["List.flatMap", "List.reduce"] {
+        assert!(env.lookup(name).is_some(), "{} not registered", name);
+        assert!(matches!(env.lookup(name).unwrap(), Ty::Forall { .. }), "{} should be polymorphic", name);
+    }
+}
+
+#[test]
+fn list_reduce_has_the_same_shape_as_fold() {
+    // Spec's own name for exactly fold's (list, init, combiner) signature:
+    // List<T>, an accumulator, a (acc,T)=>acc combiner, returning the acc.
+    let env = seeded_env();
+    let shape = |name: &str| match env.lookup(name).unwrap() {
+        Ty::Forall { vars, body } => match body.as_ref() {
+            Ty::Fn { params, ret } => {
+                assert_eq!(vars.len(), 2, "{name} should quantify over exactly 2 vars");
+                assert!(matches!(&params[0], Ty::List(_)), "{name}'s first param must be a List");
+                assert!(matches!(&params[2], Ty::Fn { .. }), "{name}'s third param must be a combiner fn");
+                (params.len(), ret.as_ref().clone())
+            }
+            other => panic!("{name}: expected Fn body, got {:?}", other),
+        },
+        other => panic!("{name}: expected Forall, got {:?}", other),
+    };
+    let (reduce_arity, reduce_ret) = shape("List.reduce");
+    let (fold_arity, fold_ret) = shape("List.fold");
+    assert_eq!(reduce_arity, fold_arity);
+    assert!(matches!(reduce_ret, Ty::Var(_)));
+    assert!(matches!(fold_ret, Ty::Var(_)));
+}
+
+#[test]
+fn collections_c_contains_flat_map_and_reduce_bridge() {
+    assert!(COLLECTIONS_C.contains("certo_list_flat_map"), "missing certo_list_flat_map");
+    assert!(COLLECTIONS_C.contains("#define certo_list_reduce certo_list_fold"), "missing List.reduce bridge");
+}
+
+#[test]
 fn map_empty_is_polymorphic() {
     let env = seeded_env();
     assert!(matches!(env.lookup("Map.empty").unwrap(), Ty::Forall { .. }));
