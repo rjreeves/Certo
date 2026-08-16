@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use certo_ast::decl::Decl;
-use certo_ast::expr::{Arg, Expr, Lit, Stmt};
+use certo_ast::expr::{Arg, Expr, ExpectMatcher, Lit, Stmt};
 use certo_ast::module::Module;
 use certo_ast::pattern::Pattern;
 use certo_ast::span::{S, Span};
@@ -153,6 +153,12 @@ fn check_expr(
         | Expr::Spawn { expr, .. }
         | Expr::Age { expr, .. } => {
             check_expr(&expr.node, scope, schema, errors);
+            None
+        }
+
+        Expr::ExpectAssertion { actual, matcher, .. } => {
+            check_expr(&actual.node, scope, schema, errors);
+            if let ExpectMatcher::ToBe(y) = matcher { check_expr(&y.node, scope, schema, errors); }
             None
         }
 

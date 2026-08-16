@@ -1,4 +1,4 @@
-use certo_ast::expr::{Expr, Stmt, Lit, FStringPart, UnOp, Arg, MatchArm, LambdaParam};
+use certo_ast::expr::{Expr, ExpectMatcher, Stmt, Lit, FStringPart, UnOp, Arg, MatchArm, LambdaParam};
 use certo_ast::pattern::Pattern;
 use crate::printer::{ind, group, binop_str};
 use crate::fmt_type::fmt_type;
@@ -155,6 +155,18 @@ pub fn fmt_expr(expr: &Expr, indent: usize) -> String {
         }
         Expr::Age { expr, .. } => {
             format!("{}.age", fmt_expr(&expr.node, indent))
+        }
+        Expr::ExpectAssertion { actual, matcher, .. } => {
+            let base = fmt_expr(&actual.node, indent);
+            match matcher {
+                ExpectMatcher::ToBe(y)  => format!("{}.toBe({})", base, fmt_expr(&y.node, indent)),
+                ExpectMatcher::ToBeTrue  => format!("{}.toBeTrue()", base),
+                ExpectMatcher::ToBeFalse => format!("{}.toBeFalse()", base),
+                ExpectMatcher::ToBeSome  => format!("{}.toBeSome()", base),
+                ExpectMatcher::ToBeNone  => format!("{}.toBeNone()", base),
+                ExpectMatcher::ToBeOk    => format!("{}.toBeOk()", base),
+                ExpectMatcher::ToBeErr   => format!("{}.toBeErr()", base),
+            }
         }
     }
 }

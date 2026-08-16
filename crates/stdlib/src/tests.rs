@@ -1,6 +1,6 @@
 use certo_typeck::{Ty, TypeEnv};
 use crate::seed::seed_stdlib;
-use crate::{CORE_C, BYTES_C, CREDENTIAL_C, COLLECTIONS_C, CHANNEL_C, TEXT_C, DATETIME_C, MONEY_C,
+use crate::{CORE_C, BYTES_C, CREDENTIAL_C, COLLECTIONS_C, CHANNEL_C, RESULT_C, TEXT_C, DATETIME_C, MONEY_C,
             ENV_C, FILE_C, PATH_C, PROCESS_C, JSON_C, HTTP_C, DB_C,
             full_c_runtime};
 
@@ -348,6 +348,45 @@ fn timestamp_functions_registered() {
 }
 
 #[test]
+fn expect_and_tag_predicates_registered() {
+    // BACKLOG item 165: expect(x).toBe(y) and friends.
+    let env = seeded_env();
+    for name in &["expect", "Option.isSome", "Option.isNone", "Result.isOk", "Result.isErr"] {
+        assert!(env.lookup(name).is_some(), "missing: {}", name);
+    }
+}
+
+#[test]
+fn option_is_some_type() {
+    let env = seeded_env();
+    match env.lookup("Option.isSome").unwrap() {
+        Ty::Forall { body, .. } => match body.as_ref() {
+            Ty::Fn { params, ret } => {
+                assert!(matches!(&params[0], Ty::Option(_)));
+                assert_eq!(ret.as_ref(), &Ty::Bool);
+            }
+            other => panic!("expected Fn, got {:?}", other),
+        },
+        other => panic!("expected Forall, got {:?}", other),
+    }
+}
+
+#[test]
+fn result_is_ok_type() {
+    let env = seeded_env();
+    match env.lookup("Result.isOk").unwrap() {
+        Ty::Forall { body, .. } => match body.as_ref() {
+            Ty::Fn { params, ret } => {
+                assert!(matches!(&params[0], Ty::Result(_, _)));
+                assert_eq!(ret.as_ref(), &Ty::Bool);
+            }
+            other => panic!("expected Fn, got {:?}", other),
+        },
+        other => panic!("expected Forall, got {:?}", other),
+    }
+}
+
+#[test]
 fn timestamp_of_type() {
     let env = seeded_env();
     let ts = Ty::Named { name: "Timestamp".into(), args: vec![] };
@@ -403,6 +442,19 @@ fn decimal_add_type() {
 fn core_c_contains_certo_print() {
     assert!(CORE_C.contains("certo_print"), "missing certo_print");
     assert!(CORE_C.contains("certo_pow"),   "missing certo_pow");
+}
+
+#[test]
+fn core_c_contains_expect_bridge_and_option_predicates() {
+    assert!(CORE_C.contains("#define certo_expect certo_identity"), "missing expect bridge");
+    assert!(CORE_C.contains("bool certo_option_is_some(void* o)"), "missing certo_option_is_some");
+    assert!(CORE_C.contains("bool certo_option_is_none(void* o)"), "missing certo_option_is_none");
+}
+
+#[test]
+fn result_c_contains_tag_predicates() {
+    assert!(RESULT_C.contains("bool certo_result_is_ok(void* r)"), "missing certo_result_is_ok");
+    assert!(RESULT_C.contains("bool certo_result_is_err(void* r)"), "missing certo_result_is_err");
 }
 
 #[test]

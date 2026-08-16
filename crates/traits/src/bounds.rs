@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use crate::trait_db::TraitDb;
 use crate::error::{TraitError, TraitErrorKind};
 use certo_ast::decl::{Decl, FnDecl, FnParam};
-use certo_ast::expr::{Arg, Expr, Stmt};
+use certo_ast::expr::{Arg, Expr, ExpectMatcher, Stmt};
 use certo_ast::module::Module;
 use certo_ast::span::S;
 use certo_ast::types::{TypeExpr, TypeParam};
@@ -267,6 +267,10 @@ fn for_each_call<'a>(expr: &'a S<Expr>, visit: &mut dyn FnMut(&'a S<Expr>, &'a [
             for_each_call(body, visit);
         }
         Expr::Age { expr, .. } => for_each_call(expr, visit),
+        Expr::ExpectAssertion { actual, matcher, .. } => {
+            for_each_call(actual, visit);
+            if let ExpectMatcher::ToBe(y) = matcher { for_each_call(y, visit); }
+        }
         // Terminals — nothing to recurse into
         Expr::Lit { .. } | Expr::Path { .. } => {}
     }

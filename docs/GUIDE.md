@@ -604,6 +604,18 @@ PASS  5 is prime
 `assert(cond, message)` aborts with the message if `cond` is false — the
 test runner captures the non-zero exit and marks it as `FAIL`.
 
+`expect(x).toBe(y)`/`.toBeTrue()`/`.toBeFalse()`/`.toBeSome()`/`.toBeNone()`/
+`.toBeOk()`/`.toBeErr()` are fluent assertion matchers built on top of the
+same `assert` — `expect(total).toBe(22)` reads the same as `assert(total ==
+22, ...)` but without writing the comparison and message by hand:
+
+```
+test "total includes tax" {
+    val total = calculateTotal(items, taxRate: 0.10)
+    expect(total).toBe(22)
+}
+```
+
 ### dbTest and property
 
 ```

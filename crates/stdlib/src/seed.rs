@@ -61,6 +61,30 @@ pub fn seed_stdlib(env: &mut TypeEnv, counter: &mut u32) {
         env.define("Err", poly2(a, b, fn1(Ty::Var(b), Ty::Result(Box::new(Ty::Var(a)), Box::new(Ty::Var(b))))));
     }
 
+    // Option/Result tag predicates (BACKLOG item 165) — real, independently
+    // useful stdlib functions, not just plumbing for `expect(...).toBeSome()`
+    // etc (which do call these). Thin wrappers over representations already
+    // established elsewhere (`None` is a raw NULL pointer; `__result_is_ok`
+    // is the existing runtime-header primitive every Result combinator in
+    // `crates/stdlib/src/result.rs` already uses) — see `crates/stdlib/src/
+    // core.rs`/`result.rs` for the one-line C implementations.
+    {
+        let a = fresh();
+        env.define("Option.isSome", poly1(a, fn1(Ty::Option(Box::new(Ty::Var(a))), Ty::Bool)));
+    }
+    {
+        let a = fresh();
+        env.define("Option.isNone", poly1(a, fn1(Ty::Option(Box::new(Ty::Var(a))), Ty::Bool)));
+    }
+    {
+        let a = fresh(); let b = fresh();
+        env.define("Result.isOk", poly2(a, b, fn1(Ty::Result(Box::new(Ty::Var(a)), Box::new(Ty::Var(b))), Ty::Bool)));
+    }
+    {
+        let a = fresh(); let b = fresh();
+        env.define("Result.isErr", poly2(a, b, fn1(Ty::Result(Box::new(Ty::Var(a)), Box::new(Ty::Var(b))), Ty::Bool)));
+    }
+
     // ---------------------------------------------------------------- //
     // Core function combinators (spec §9.1, BACKLOG item 161)
     // ---------------------------------------------------------------- //
@@ -84,6 +108,20 @@ pub fn seed_stdlib(env: &mut TypeEnv, counter: &mut u32) {
     {
         let t = fresh();
         env.define("identity", poly1(t, fn1(Ty::Var(t), Ty::Var(t))));
+    }
+    // `expect<T>(x: T): T` — real, honest identity (BACKLOG item 165): the
+    // spec's `expect(x).toBe(y)`/`.toBeSome()`/etc assertion matchers
+    // (`Expr::ExpectAssertion`, `crates/parser/src/parse_expr.rs`) don't
+    // require their receiver to literally be a call to `expect` — any
+    // expression's `.toBe(...)` works — so `expect` exists purely for
+    // spec-matching readability at the call site, not as a syntactic gate.
+    // Reuses `identity`'s own C implementation exactly (see the `#define`
+    // bridge in `crates/stdlib/src/core.rs`), same erased-passthrough
+    // shape, safe for the same reason `identity` is (no closure
+    // construction, unlike `const`/`compose`/`flip`).
+    {
+        let t = fresh();
+        env.define("expect", poly1(t, fn1(Ty::Var(t), Ty::Var(t))));
     }
     {
         let a = fresh(); let b = fresh();

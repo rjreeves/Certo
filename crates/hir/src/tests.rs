@@ -555,3 +555,80 @@ fn argument_position_resolves_via_stdlib_param_type_not_just_user_defined() {
     let result = try_lower(&src);
     assert!(result.is_ok(), "expected `intToText`'s stdlib param type (Int) to resolve the bare-T return, got: {:?}", result.err());
 }
+
+// `expect(x).toBeXxx(...)` desugaring — BACKLOG item 165
+
+fn lower_f_body(src: &str) -> crate::hir::HirExpr {
+    let m = lower(src);
+    match &m.items[0] {
+        HirItem::Fn(f) => f.body.as_ref().expect("fn body").clone(),
+        _ => panic!("expected Fn"),
+    }
+}
+
+#[test]
+fn to_be_desugars_to_assert_of_binop_eq() {
+    let body = lower_f_body("module A\nfn f(): Unit = (1 + 1).toBe(2)");
+    match &body.kind {
+        HirExprKind::Call { func, args } => {
+            assert!(matches!(&func.kind, HirExprKind::Global(name) if name == "assert"));
+            assert_eq!(args.len(), 2);
+            assert!(matches!(&args[0].kind, HirExprKind::BinOp { op: BinOp::Eq, .. }), "cond must be a == comparison, got {:?}", args[0].kind);
+            assert!(matches!(&args[1].kind, HirExprKind::Str(_)), "msg must be a Text literal");
+        }
+        other => panic!("expected Call to assert, got {:?}", other),
+    }
+}
+
+#[test]
+fn to_be_true_passes_the_condition_through_unwrapped() {
+    // No redundant `== true` — the already-Bool expression is the condition directly.
+    let body = lower_f_body("module A\nfn f(cond: Bool): Unit = cond.toBeTrue()");
+    match &body.kind {
+        HirExprKind::Call { args, .. } => {
+            assert!(matches!(&args[0].kind, HirExprKind::Local(_)), "expected the bare local, not a BinOp wrapper, got {:?}", args[0].kind);
+        }
+        other => panic!("expected Call, got {:?}", other),
+    }
+}
+
+#[test]
+fn to_be_false_negates_with_unop_not() {
+    let body = lower_f_body("module A\nfn f(cond: Bool): Unit = cond.toBeFalse()");
+    match &body.kind {
+        HirExprKind::Call { args, .. } => {
+            assert!(matches!(&args[0].kind, HirExprKind::UnOp { op: crate::hir::UnOp::Not, .. }));
+        }
+        other => panic!("expected Call, got {:?}", other),
+    }
+}
+
+#[test]
+fn to_be_some_calls_option_is_some() {
+    let body = lower_f_body("module A\nfn f(o: Int?): Unit = o.toBeSome()");
+    match &body.kind {
+        HirExprKind::Call { args, .. } => match &args[0].kind {
+            HirExprKind::Call { func, .. } => assert!(matches!(&func.kind, HirExprKind::Global(name) if name == "Option.isSome")),
+            other => panic!("expected a Call to Option.isSome, got {:?}", other),
+        },
+        other => panic!("expected Call, got {:?}", other),
+    }
+}
+
+#[test]
+fn to_be_err_calls_result_is_err() {
+    let body = lower_f_body("module A\nfn f(r: Result<Int, Text>): Unit = r.toBeErr()");
+    match &body.kind {
+        HirExprKind::Call { args, .. } => match &args[0].kind {
+            HirExprKind::Call { func, .. } => assert!(matches!(&func.kind, HirExprKind::Global(name) if name == "Result.isErr")),
+            other => panic!("expected a Call to Result.isErr, got {:?}", other),
+        },
+        other => panic!("expected Call, got {:?}", other),
+    }
+}
+
+#[test]
+fn expect_assertion_result_type_is_unit() {
+    let body = lower_f_body("module A\nfn f(): Unit = (1).toBe(1)");
+    assert_eq!(body.ty, Ty::Unit);
+}

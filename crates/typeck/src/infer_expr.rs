@@ -1,5 +1,5 @@
 use std::collections::{HashMap, HashSet};
-use certo_ast::expr::{Expr, Stmt, Lit, BinOp, UnOp};
+use certo_ast::expr::{Expr, ExpectMatcher, Stmt, Lit, BinOp, UnOp};
 use certo_ast::span::{S, Span};
 use certo_ast::types::TypeExpr;
 use crate::ty::{Ty, TyVar};
@@ -646,6 +646,38 @@ pub fn infer(expr: &S<Expr>, ctx: &mut Ctx<'_>) -> Ty {
                 });
                 Ty::Error
             }
+        }
+        // BACKLOG item 165 — `expect(x).toBe(y)` and friends. Every failure
+        // mode reuses the existing generic `unify` machinery (same E0200 a
+        // plain `==`/type-mismatch would produce) rather than a dedicated
+        // error kind: `.toBe` unifies exactly like `BinOp::Eq` does (so it's
+        // only as capable as `==` already is — Int/Bool/Text/Float work,
+        // Decimal/records hit the same pre-existing codegen gap `a == b`
+        // would, not a new one); `.toBeSome`/`.toBeNone`/`.toBeOk`/
+        // `.toBeErr` unify against a fresh `Option<_>`/`Result<_,_>`, so a
+        // non-Option/Result receiver is reported the same way any other
+        // shape mismatch is.
+        Expr::ExpectAssertion { actual, matcher, span } => {
+            let actual_ty = infer(actual, ctx);
+            match matcher {
+                ExpectMatcher::ToBe(y) => {
+                    let y_ty = infer(y, ctx);
+                    ctx.unify(actual_ty, y_ty, *span);
+                }
+                ExpectMatcher::ToBeTrue | ExpectMatcher::ToBeFalse => {
+                    ctx.unify(actual_ty, Ty::Bool, *span);
+                }
+                ExpectMatcher::ToBeSome | ExpectMatcher::ToBeNone => {
+                    let inner = ctx.fresh();
+                    ctx.unify(actual_ty, Ty::Option(Box::new(inner)), *span);
+                }
+                ExpectMatcher::ToBeOk | ExpectMatcher::ToBeErr => {
+                    let ok = ctx.fresh();
+                    let err = ctx.fresh();
+                    ctx.unify(actual_ty, Ty::Result(Box::new(ok), Box::new(err)), *span);
+                }
+            }
+            Ty::Unit
         }
     }
 }

@@ -107,6 +107,28 @@ assert(cond: Bool, msg: Text): Unit  // panics if cond is false
 panic(msg: Text): Nothing            // unconditional abort
 ```
 
+### Assertions — `expect(x).toBeXxx(...)`
+
+`expect<T>(x: T): T` is a real, honest identity function — it exists for
+readability at the call site, not as a syntactic gate; `x.toBe(y)` and
+`expect(x).toBe(y)` are equivalent. Every matcher desugars to the same
+`assert` above.
+
+```
+expect(x).toBe(y)       // x == y — same equality assert(a == b, ...) uses; a
+                         // Decimal/record x hits assert's own struct-compare
+                         // limitation, not a new one
+expect(x).toBeTrue()    // x
+expect(x).toBeFalse()   // !x
+expect(x).toBeSome()    // x: Option<T> — Option.isSome(x)
+expect(x).toBeNone()    // x: Option<T> — Option.isNone(x)
+expect(x).toBeOk()      // x: Result<T,E> — Result.isOk(x)
+expect(x).toBeErr()     // x: Result<T,E> — Result.isErr(x)
+```
+
+`Option.isSome`/`Option.isNone`/`Result.isOk`/`Result.isErr` are also real,
+independently callable functions, not just plumbing for `expect(...)`.
+
 ---
 
 ## Result

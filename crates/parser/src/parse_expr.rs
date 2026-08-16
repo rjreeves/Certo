@@ -180,6 +180,7 @@ fn parse_postfix(cur: &mut Cursor<'_>) -> Result<S<Expr>, ParseError> {
     loop {
         match cur.peek() {
             // `expr.age` — temporal age property (only valid on Timestamp fields; type checker enforces)
+            // `expr.toBe(y)` / `.toBeTrue()` / etc — assertion matchers (BACKLOG item 165)
             // `expr.field` — regular field access
             Some(Token::Dot) => {
                 cur.bump();
@@ -187,6 +188,34 @@ fn parse_postfix(cur: &mut Cursor<'_>) -> Result<S<Expr>, ParseError> {
                 let span = expr.span.to(field_span);
                 if field == "age" {
                     expr = S::new(Expr::Age { expr: Box::new(expr), span }, span);
+                } else if let Some(matcher_kind) = expect_matcher_kind(&field) {
+                    // `.toBe(y)` takes one argument; the rest take none —
+                    // both consume `(...)` the same way `.age`'s sibling
+                    // `expr(args)` branch below already does for ordinary
+                    // calls, just eagerly rather than on the next loop turn,
+                    // since the whole `.toBeXxx(...)` unit becomes one node.
+                    let (args, end_span) = if cur.peek() == Some(&Token::LParen) && !cur.peek_newline_before() {
+                        parse_arg_list(cur)?
+                    } else {
+                        (Vec::new(), field_span)
+                    };
+                    let matcher = match matcher_kind {
+                        ExpectMatcherKind::ToBe => {
+                            let arg = args.into_iter().next().ok_or_else(|| ParseError {
+                                kind: ParseErrorKind::Custom("toBe(...) requires exactly one argument".into()),
+                                span: field_span,
+                            })?;
+                            ExpectMatcher::ToBe(Box::new(arg.value))
+                        }
+                        ExpectMatcherKind::ToBeTrue  => ExpectMatcher::ToBeTrue,
+                        ExpectMatcherKind::ToBeFalse => ExpectMatcher::ToBeFalse,
+                        ExpectMatcherKind::ToBeSome  => ExpectMatcher::ToBeSome,
+                        ExpectMatcherKind::ToBeNone  => ExpectMatcher::ToBeNone,
+                        ExpectMatcherKind::ToBeOk    => ExpectMatcher::ToBeOk,
+                        ExpectMatcherKind::ToBeErr   => ExpectMatcher::ToBeErr,
+                    };
+                    let full_span = expr.span.to(end_span);
+                    expr = S::new(Expr::ExpectAssertion { actual: Box::new(expr), matcher, span: full_span }, full_span);
                 } else {
                     expr = S::new(Expr::Field {
                         expr:  Box::new(expr),
@@ -237,6 +266,24 @@ fn parse_postfix(cur: &mut Cursor<'_>) -> Result<S<Expr>, ParseError> {
     }
 
     Ok(expr)
+}
+
+/// Which `expr.toBeXxx` matcher a field name names, if any (BACKLOG item
+/// 165) — checked before falling back to ordinary `Expr::Field`, same
+/// unconditional-on-the-field-name precedent `.age` already established.
+enum ExpectMatcherKind { ToBe, ToBeTrue, ToBeFalse, ToBeSome, ToBeNone, ToBeOk, ToBeErr }
+
+fn expect_matcher_kind(field: &str) -> Option<ExpectMatcherKind> {
+    match field {
+        "toBe"      => Some(ExpectMatcherKind::ToBe),
+        "toBeTrue"  => Some(ExpectMatcherKind::ToBeTrue),
+        "toBeFalse" => Some(ExpectMatcherKind::ToBeFalse),
+        "toBeSome"  => Some(ExpectMatcherKind::ToBeSome),
+        "toBeNone"  => Some(ExpectMatcherKind::ToBeNone),
+        "toBeOk"    => Some(ExpectMatcherKind::ToBeOk),
+        "toBeErr"   => Some(ExpectMatcherKind::ToBeErr),
+        _ => None,
+    }
 }
 
 fn parse_arg_list(cur: &mut Cursor<'_>) -> Result<(Vec<Arg>, Span), ParseError> {

@@ -315,4 +315,15 @@ int64_t certo_sleep(int64_t ms) {
    passthrough, same erased-value convention as any other stdlib ∀T
    function (e.g. getOrElse's own T-typed argument/return). */
 void* certo_identity(void* x) { return x; }
+
+/* expect :: forall T. T -> T (BACKLOG item 165) — the `expect(x).toBe(y)`
+   assertion matchers' nominal receiver; identical, real identity, not a
+   distinct implementation. */
+#define certo_expect certo_identity
+
+/* Option.isSome/isNone (BACKLOG item 165) — NULL means None throughout
+   this runtime (see e.g. certo_text_parse_int above); a real, independently
+   useful pair of predicates, not just plumbing for expect(...).toBeSome(). */
+bool certo_option_is_some(void* o) { return o != NULL; }
+bool certo_option_is_none(void* o) { return o == NULL; }
 "#;
