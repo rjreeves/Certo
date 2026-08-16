@@ -604,6 +604,78 @@ fn dot_age_in_expression() {
     }
 }
 
+// ------------------------------------------------------------------ //
+// `expect(x).toBeXxx(...)` assertion matchers — BACKLOG item 165
+// ------------------------------------------------------------------ //
+
+fn expect_matcher(src: &str) -> certo_ast::expr::ExpectMatcher {
+    let m = ok(&format!("module A\nfn f(): Unit = {{\n    {}\n}}", src));
+    match &m.decls[0].node {
+        Decl::Fn(f) => {
+            let body = f.body.as_ref().expect("fn body");
+            match &body.node {
+                Expr::Block { stmts, .. } => match &stmts[0] {
+                    certo_ast::expr::Stmt::Expr { expr, .. } => match &expr.node {
+                        Expr::ExpectAssertion { matcher, .. } => matcher.clone(),
+                        other => panic!("expected ExpectAssertion, got {:?}", other),
+                    },
+                    other => panic!("expected Stmt::Expr, got {:?}", other),
+                },
+                Expr::ExpectAssertion { matcher, .. } => matcher.clone(),
+                other => panic!("expected ExpectAssertion, got {:?}", other),
+            }
+        }
+        _ => panic!("expected Fn decl"),
+    }
+}
+
+#[test]
+fn to_be_captures_its_argument() {
+    match expect_matcher("expect(1 + 1).toBe(2)") {
+        certo_ast::expr::ExpectMatcher::ToBe(y) => {
+            assert!(matches!(y.node, Expr::Lit { value: Lit::Int(2), .. }));
+        }
+        other => panic!("expected ToBe, got {:?}", other),
+    }
+}
+
+#[test]
+fn zero_arg_matchers_all_parse() {
+    assert!(matches!(expect_matcher("expect(true).toBeTrue()"), certo_ast::expr::ExpectMatcher::ToBeTrue));
+    assert!(matches!(expect_matcher("expect(false).toBeFalse()"), certo_ast::expr::ExpectMatcher::ToBeFalse));
+    assert!(matches!(expect_matcher("expect(x).toBeSome()"), certo_ast::expr::ExpectMatcher::ToBeSome));
+    assert!(matches!(expect_matcher("expect(x).toBeNone()"), certo_ast::expr::ExpectMatcher::ToBeNone));
+    assert!(matches!(expect_matcher("expect(x).toBeOk()"), certo_ast::expr::ExpectMatcher::ToBeOk));
+    assert!(matches!(expect_matcher("expect(x).toBeErr()"), certo_ast::expr::ExpectMatcher::ToBeErr));
+}
+
+#[test]
+fn matcher_does_not_require_a_literal_expect_receiver() {
+    // Not gated behind expect(...) specifically — matches this project's
+    // .age precedent (any base expression, checked by type not syntax).
+    let m = ok("module A\nval x = (3).toBe(3)");
+    match &m.decls[0].node {
+        Decl::Val(v) => assert!(matches!(v.value.node, Expr::ExpectAssertion { .. })),
+        _ => panic!(),
+    }
+}
+
+#[test]
+fn ordinary_field_named_to_something_but_not_a_matcher_name_is_unaffected() {
+    // No regression: a real field access whose name isn't one of the seven
+    // recognized matcher names must still parse as plain Expr::Field.
+    let m = ok("module A\nval x = user.toString");
+    match &m.decls[0].node {
+        Decl::Val(v) => assert!(matches!(v.value.node, Expr::Field { .. }), "expected Field, got {:?}", v.value.node),
+        _ => panic!(),
+    }
+}
+
+#[test]
+fn to_be_requires_exactly_one_argument() {
+    err("module A\nval x = expect(1).toBe()");
+}
+
 // Parse errors
 
 #[test]

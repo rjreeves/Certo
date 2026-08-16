@@ -209,6 +209,34 @@ pub enum Expr {
         expr: Box<S<Expr>>,
         span: Span,
     },
+
+    /// `expr.toBe(y)` / `.toBeTrue()` / `.toBeFalse()` / `.toBeSome()` /
+    /// `.toBeNone()` / `.toBeOk()` / `.toBeErr()` — spec §9.5 assertion
+    /// matchers (BACKLOG item 165). Parsed as a dedicated postfix form
+    /// (same precedent as `.age` above) rather than general dot-call, which
+    /// doesn't exist in this language for arbitrary values. Not gated to
+    /// require a literal `expect(...)` receiver — `expect<T>(x: T): T` is a
+    /// real, honest identity function (see `crates/stdlib/src/seed.rs`),
+    /// so `expect(x).toBe(y)` and `x.toBe(y)` are equivalent; `expect`
+    /// exists for readability at the call site, not as a syntactic gate.
+    /// Always produces `Unit`, same as `assert`, which it desugars to.
+    ExpectAssertion {
+        actual:  Box<S<Expr>>,
+        matcher: ExpectMatcher,
+        span:    Span,
+    },
+}
+
+/// The matcher half of an `expr.toBeXxx(...)` assertion (BACKLOG item 165).
+#[derive(Debug, Clone, PartialEq)]
+pub enum ExpectMatcher {
+    ToBe(Box<S<Expr>>),
+    ToBeTrue,
+    ToBeFalse,
+    ToBeSome,
+    ToBeNone,
+    ToBeOk,
+    ToBeErr,
 }
 
 // ------------------------------------------------------------------ //

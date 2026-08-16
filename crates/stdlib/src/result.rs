@@ -38,6 +38,13 @@ intptr_t certo_recover(void* r, certo_fn_t f) {
     return (intptr_t)((CertoFn1)f.fn)(f.env, (void*)__result_unwrap(r));
 }
 
+/* Result.isOk/isErr (BACKLOG item 165) — thin wrappers over the existing
+   __result_is_ok primitive every combinator above already uses. Real,
+   independently useful predicates, not just plumbing for
+   expect(...).toBeOk()/.toBeErr(). */
+bool certo_result_is_ok(void* r) { return __result_is_ok(r); }
+bool certo_result_is_err(void* r) { return !__result_is_ok(r); }
+
 /* Result.all(results) — Ok(list of every payload) if all succeeded,
    else the first Err encountered (short-circuits). */
 void* certo_result_all(CertoList* results) {

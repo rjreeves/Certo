@@ -1,7 +1,7 @@
 use certo_ast::module::Module;
 use certo_ast::decl::Decl;
 use certo_ast::span::S;
-use certo_ast::expr::Expr;
+use certo_ast::expr::{Expr, ExpectMatcher};
 use certo_ast::types::TypeExpr;
 use crate::ty::Ty;
 use crate::env::TypeEnv;
@@ -142,6 +142,10 @@ fn walk_ffi(
         | Expr::Ascribe { expr, .. } | Expr::Age { expr, .. } => {
             walk_ffi(expr, in_unsafe, extern_fns, errors);
         }
+        Expr::ExpectAssertion { actual, matcher, .. } => {
+            walk_ffi(actual, in_unsafe, extern_fns, errors);
+            if let ExpectMatcher::ToBe(y) = matcher { walk_ffi(y, in_unsafe, extern_fns, errors); }
+        }
         Expr::If { cond, then_expr, else_expr, .. } => {
             walk_ffi(cond, in_unsafe, extern_fns, errors);
             walk_ffi(then_expr, in_unsafe, extern_fns, errors);
@@ -277,6 +281,10 @@ fn walk_priv_ctors(
         | Expr::Try { expr, .. } | Expr::Await { expr, .. } | Expr::Spawn { expr, .. }
         | Expr::Ascribe { expr, .. } | Expr::Age { expr, .. } | Expr::Unsafe { body: expr, .. } => {
             walk_priv_ctors(expr, self_type, priv_ctors, errors);
+        }
+        Expr::ExpectAssertion { actual, matcher, .. } => {
+            walk_priv_ctors(actual, self_type, priv_ctors, errors);
+            if let ExpectMatcher::ToBe(y) = matcher { walk_priv_ctors(y, self_type, priv_ctors, errors); }
         }
         Expr::If { cond, then_expr, else_expr, .. } => {
             walk_priv_ctors(cond, self_type, priv_ctors, errors);

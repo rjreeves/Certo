@@ -1,4 +1,4 @@
-use certo_ast::expr::{Expr, Stmt};
+use certo_ast::expr::{Expr, ExpectMatcher, Stmt};
 use certo_ast::span::S;
 use crate::scope::{ScopeChain, Res};
 use crate::resolve_pattern::define_pattern_bindings;
@@ -132,6 +132,10 @@ pub fn resolve_expr(expr: &S<Expr>, scope: &mut ScopeChain) {
             resolve_expr(body, scope);
         }
         Expr::Age { expr, .. } => resolve_expr(expr, scope),
+        Expr::ExpectAssertion { actual, matcher, .. } => {
+            resolve_expr(actual, scope);
+            if let ExpectMatcher::ToBe(y) = matcher { resolve_expr(y, scope); }
+        }
     }
 }
 

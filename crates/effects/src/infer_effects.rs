@@ -1,5 +1,5 @@
 use std::collections::HashSet;
-use certo_ast::expr::{Expr, Stmt};
+use certo_ast::expr::{Expr, ExpectMatcher, Stmt};
 use certo_ast::span::{S, Span};
 use certo_ast::types::Effect;
 use crate::effect_env::EffectEnv;
@@ -126,6 +126,10 @@ pub fn infer_expr(expr: &S<Expr>, env: &EffectEnv, out: &mut InferredEffects) {
             infer_expr(body, env, out);
         }
         Expr::Age { expr, .. } => infer_expr(expr, env, out),
+        Expr::ExpectAssertion { actual, matcher, .. } => {
+            infer_expr(actual, env, out);
+            if let ExpectMatcher::ToBe(y) = matcher { infer_expr(y, env, out); }
+        }
     }
 }
 

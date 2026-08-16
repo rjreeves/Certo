@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::OnceLock;
 use certo_ast::module::Module;
 use certo_ast::decl::{Decl, FnParam};
-use certo_ast::expr::{Expr, Stmt, Lit, BinOp as AstBinOp, UnOp as AstUnOp, FStringPart};
+use certo_ast::expr::{Expr, ExpectMatcher, Stmt, Lit, BinOp as AstBinOp, UnOp as AstUnOp, FStringPart};
 use certo_ast::pattern::Pattern;
 use certo_ast::span::{S, Span};
 use certo_typeck::Ty;
@@ -1383,6 +1383,58 @@ fn lower_expr(expr: &S<Expr>, cx: &mut Cx) -> HirExpr {
                 span,
             }
         }
+        // BACKLOG item 165 — desugars to the same real `assert(cond: Bool,
+        // msg: Text): Unit` primitive every hand-written test in this
+        // codebase already uses, exactly the way `.age` above desugars to
+        // real `DateTime.*` calls rather than inventing new runtime
+        // machinery. `.toBeSome`/`.toBeNone`/`.toBeOk`/`.toBeErr` call the
+        // small new `Option.isSome`/`Option.isNone`/`Result.isOk`/
+        // `Result.isErr` predicates (BACKLOG item 165) rather than
+        // synthesizing a `match` here, since those are real, independently
+        // useful stdlib functions, not lowering-only plumbing.
+        Expr::ExpectAssertion { actual, matcher, .. } => {
+            let actual_hir = lower_expr(actual, cx);
+            let (cond, msg): (HirExpr, &str) = match matcher {
+                ExpectMatcher::ToBe(y) => {
+                    let y_hir = lower_expr(y, cx);
+                    (HirExpr {
+                        kind: HirExprKind::BinOp { op: BinOp::Eq, lhs: Box::new(actual_hir), rhs: Box::new(y_hir) },
+                        ty: Ty::Bool, span,
+                    }, "expected values to be equal")
+                }
+                ExpectMatcher::ToBeTrue => (actual_hir, "expected true"),
+                ExpectMatcher::ToBeFalse => (
+                    HirExpr { kind: HirExprKind::UnOp { op: UnOp::Not, arg: Box::new(actual_hir) }, ty: Ty::Bool, span },
+                    "expected false",
+                ),
+                ExpectMatcher::ToBeSome => (call_global1("Option.isSome", actual_hir, span), "expected Some"),
+                ExpectMatcher::ToBeNone => (call_global1("Option.isNone", actual_hir, span), "expected None"),
+                ExpectMatcher::ToBeOk   => (call_global1("Result.isOk",   actual_hir, span), "expected Ok"),
+                ExpectMatcher::ToBeErr  => (call_global1("Result.isErr",  actual_hir, span), "expected Err"),
+            };
+            let msg_hir = HirExpr { kind: HirExprKind::Str(msg.into()), ty: Ty::Text, span };
+            HirExpr {
+                kind: HirExprKind::Call {
+                    func: Box::new(HirExpr { kind: HirExprKind::Global("assert".into()), ty: Ty::Error, span }),
+                    args: vec![cond, msg_hir],
+                },
+                ty: Ty::Unit,
+                span,
+            }
+        }
+    }
+}
+
+/// `name(arg)` as a `Bool`-returning HIR call — helper for the tag-check
+/// `expect(...)` matchers (BACKLOG item 165), which all share this shape.
+fn call_global1(name: &str, arg: HirExpr, span: Span) -> HirExpr {
+    HirExpr {
+        kind: HirExprKind::Call {
+            func: Box::new(HirExpr { kind: HirExprKind::Global(name.into()), ty: Ty::Error, span }),
+            args: vec![arg],
+        },
+        ty: Ty::Bool,
+        span,
     }
 }
 

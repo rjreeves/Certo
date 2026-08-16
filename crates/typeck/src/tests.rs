@@ -192,6 +192,82 @@ fn age_in_standalone_expr_ok() {
     check_module(&module).unwrap();
 }
 
+// `expect(x).toBeXxx(...)` — BACKLOG item 165
+//
+// `certo_resolve::resolve()` (unlike the full `certo check` CLI pipeline,
+// which seeds it with the whole stdlib via `resolve_seeded` — see that
+// function's own doc comment) only knows a small hardcoded builtin list of
+// its own and has no idea `expect` is a real stdlib function; a bare
+// `expect(x)` call in one of these snippets would fail to *resolve*, not
+// fail typeck, so these tests declare a same-shaped local `expect` inside
+// the test source itself (an ordinary top-level `fn`, resolved by the
+// normal hoisting pass, no different from declaring any other local
+// helper a test needs) rather than reaching into `certo_resolve`'s builtin
+// list for something that's really a stdlib registration concern — already
+// verified for real via the actual compiled `certo.exe`, not just here.
+const EXPECT_SHIM: &str = "fn expect<T>(x: T): T = x\n";
+
+#[test]
+fn to_be_matching_scalar_types_ok() {
+    check(&format!("module A\n{EXPECT_SHIM}fn f(): Unit = expect(1 + 1).toBe(2)")).unwrap();
+}
+
+#[test]
+fn to_be_mismatched_types_is_e0200() {
+    // Same unify path plain `==` uses — a real type mismatch, not silently accepted.
+    let kind = first_error_kind(&format!("module A\n{EXPECT_SHIM}fn f(): Unit = expect(1).toBe(\"x\")"));
+    assert!(matches!(kind, TypeErrorKind::Mismatch { .. }), "expected E0200, got {kind:?}");
+}
+
+#[test]
+fn to_be_true_false_require_bool() {
+    check(&format!("module A\n{EXPECT_SHIM}fn f(): Unit = expect(1 == 1).toBeTrue()")).unwrap();
+    check(&format!("module A\n{EXPECT_SHIM}fn f(): Unit = expect(1 == 2).toBeFalse()")).unwrap();
+}
+
+#[test]
+fn to_be_true_on_non_bool_is_e0200() {
+    let kind = first_error_kind(&format!("module A\n{EXPECT_SHIM}fn f(): Unit = expect(5).toBeTrue()"));
+    assert!(matches!(kind, TypeErrorKind::Mismatch { .. }), "expected E0200, got {kind:?}");
+}
+
+#[test]
+fn to_be_some_none_require_option() {
+    check(&format!("module A\n{EXPECT_SHIM}fn f(o: Int?): Unit = expect(o).toBeSome()")).unwrap();
+    check(&format!("module A\n{EXPECT_SHIM}fn f(o: Int?): Unit = expect(o).toBeNone()")).unwrap();
+}
+
+#[test]
+fn to_be_some_on_non_option_is_e0200() {
+    let kind = first_error_kind(&format!("module A\n{EXPECT_SHIM}fn f(): Unit = expect(5).toBeSome()"));
+    assert!(matches!(kind, TypeErrorKind::Mismatch { .. }), "expected E0200, got {kind:?}");
+}
+
+#[test]
+fn to_be_ok_err_require_result() {
+    check(&format!("module A\n{EXPECT_SHIM}fn f(r: Result<Int, Text>): Unit = expect(r).toBeOk()")).unwrap();
+    check(&format!("module A\n{EXPECT_SHIM}fn f(r: Result<Int, Text>): Unit = expect(r).toBeErr()")).unwrap();
+}
+
+#[test]
+fn to_be_ok_on_non_result_is_e0200() {
+    let kind = first_error_kind(&format!("module A\n{EXPECT_SHIM}fn f(): Unit = expect(5).toBeOk()"));
+    assert!(matches!(kind, TypeErrorKind::Mismatch { .. }), "expected E0200, got {kind:?}");
+}
+
+#[test]
+fn expect_assertion_expression_type_is_unit() {
+    // Whole `expect(x).toBe(y)` expression must itself be Unit — same as `assert`.
+    check(&format!("module A\n{EXPECT_SHIM}fn f(): Unit = {{\n    val u: Unit = expect(1).toBe(1)\n}}")).unwrap();
+}
+
+#[test]
+fn matcher_works_without_a_literal_expect_receiver() {
+    // Not gated behind expect(...) specifically (see the parser's own test
+    // of the same name) — typeck only cares about the base's type.
+    check("module A\nfn f(): Unit = (3).toBe(3)").unwrap();
+}
+
 // Constraint
 
 #[test]
