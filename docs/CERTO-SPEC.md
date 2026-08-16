@@ -528,12 +528,19 @@ statemachine SubscriptionLifecycle {     states:         Trial,         Active, 
 | text.contains(sub) | Case-sensitive containment check |
 | text.startsWith(prefix) | Prefix check |
 | text.toUppercase(locale?) | Locale-aware uppercase conversion |
-| text.matches(regex) | Full regex match — returns Bool |
-| text.find(regex) | First match — returns Option<Match> |
-| text.replace(regex, replacement) | Replace all matches |
 | text.toInt() | Parse as Int — returns Result<Int, ParseError> |
 | text.toDecimal() | Parse as Decimal — returns Result<Decimal, ParseError> |
-| Text.join(sep, list) | Join list of Text with separator |
+| Text.join(list, sep) | Join list of Text with separator |
+
+Regex is a separate namespace, not a method on `Text` — pattern first, subject second, no `Match` type:
+
+| **Function** | **Description** |
+| --- | --- |
+| Regex.match(pattern, text) | Full regex match anywhere in text — returns Bool |
+| Regex.find(pattern, text) | First match substring — returns Text ("" if none) |
+| Regex.captures(pattern, text) | Capture groups of the first match — returns List\<Text\> |
+| Regex.replace(pattern, text, replacement) | Replace first match with replacement |
+| Regex.split(pattern, text) | Split text at each match of pattern — returns List\<Text\> |
 
 ## 9.4 Stdlib.DateTime
 
