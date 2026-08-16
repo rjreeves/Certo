@@ -264,6 +264,52 @@ static int64_t __certo_tz_offset_seconds(const char* name, int64_t epoch_secs, i
 
 #endif
 
+/* ---- Timestamp: component-based constructor (BACKLOG item 164b) ----
+   `Timestamp` has no runtime type of its own — same as `.age`'s existing
+   treatment (see the codegen comment on the `Timestamp` ty_to_c arm) — it
+   reuses `CertoDateTime` exactly. Everything else `Timestamp.*` needs
+   (`.now`, `.parse`, `.inTimezone`, `.formatTz`) is a real, already-
+   working `DateTime`/`Timezone` implementation under a different name, so
+   those are bridged via #define below rather than reimplemented; `.of` has
+   no `DateTime` equivalent to bridge to (component-based construction was
+   missing for both names — this is the one genuinely new function). */
+
+/* Timestamp.of(year, month, day, hour, minute, second, tz): Timestamp —
+   y/m/d/h/min/s are the WALL-CLOCK time *in* `tz`, converted to a real UTC
+   epoch by looking up `tz`'s offset at the naive (as-if-UTC) instant first.
+   Same single-lookup approximation `certo_date_today_in` above already
+   uses for its own local-to-UTC conversion — correct at almost every real
+   instant, but not provably correct in the ~1-hour window spanning a DST
+   transition (the offset can differ on either side of the transition, and
+   this uses only the "before" reading) — an existing, documented
+   limitation of this timezone code, not a new one introduced here. */
+CertoDateTime certo_timestamp_of(int64_t year, int64_t month, int64_t day,
+                                  int64_t hour, int64_t minute, int64_t second,
+                                  CertoTimezone tz) {
+    struct tm t = {0};
+    t.tm_year = (int)(year - 1900);
+    t.tm_mon  = (int)(month - 1);
+    t.tm_mday = (int)day;
+    t.tm_hour = (int)hour;
+    t.tm_min  = (int)minute;
+    t.tm_sec  = (int)second;
+    int64_t naive_utc = (int64_t)timegm(&t);
+    int ok = 0;
+    int64_t off = __certo_tz_offset_seconds(tz, naive_utc, &ok);
+    if (!ok) certo_panic("Timestamp.of: timezone became unresolvable");
+    return (CertoDateTime)(naive_utc - off);
+}
+
+/* Date.of(year, month, day): Date — calendar date at UTC midnight, the
+   same convention `Date.today()` already uses. */
+CertoDate certo_date_of(int64_t year, int64_t month, int64_t day) {
+    struct tm t = {0};
+    t.tm_year = (int)(year - 1900);
+    t.tm_mon  = (int)(month - 1);
+    t.tm_mday = (int)day;
+    return (CertoDate)timegm(&t);
+}
+
 /* Timezone(name: Text): Timezone? — None if `name` isn't a real IANA zone. */
 void* certo_timezone(certo_text_t name) {
     if (!name || !__certo_tz_is_valid(name)) return NULL;
@@ -365,4 +411,17 @@ CertoDate certo_date_today_in(CertoTimezone tz) {
 #define certo_date_time_second       certo_datetime_second
 #define certo_date_time_add_duration certo_datetime_add_duration
 #define certo_date_time_diff         certo_datetime_diff
+
+/* Bridge codegen's Timestamp.* names (certo_timestamp_*) to the real
+   DateTime/Timezone implementations above — BACKLOG item 164b. `Timestamp`
+   and `DateTime` are distinct nominal types at the Certo level (a value of
+   one cannot be passed where the other is expected — confirmed by direct
+   testing), but both compile to the identical `CertoDateTime` C
+   representation, so reusing the implementation is exact, not approximate.
+   `certo_timestamp_of` is defined directly above (no DateTime equivalent
+   to bridge to) and needs no macro here. */
+#define certo_timestamp_now         certo_datetime_now
+#define certo_timestamp_parse       certo_datetime_parse_iso
+#define certo_timestamp_in_timezone certo_date_time_in_timezone
+#define certo_timestamp_format_tz   certo_date_time_format_tz
 "#;

@@ -18,6 +18,7 @@ Signatures only — one line per function. For narrative usage see
 | [Channel\<T\>](#channelt) | `import Stdlib.Collections` |
 | [Money / Decimal](#money--decimal) | `import Stdlib.Money` |
 | [DateTime](#datetime) | `import Stdlib.DateTime` |
+| [Timestamp](#timestamp) | `import Stdlib.DateTime` |
 | [Duration](#duration) | `import Stdlib.DateTime` |
 | [Math](#math) | `import Stdlib.Math` |
 | [Json](#json) | `import Stdlib.Json` |
@@ -451,6 +452,36 @@ DateTime.hour(dt: DateTime): Int     // 0–23
 DateTime.minute(dt: DateTime): Int   // 0–59
 DateTime.second(dt: DateTime): Int   // 0–60
 ```
+
+---
+
+## Timestamp
+
+`import Stdlib.DateTime`
+
+`Timestamp` is a distinct nominal type from `DateTime` — a `DateTime` value
+does not type-check where a `Timestamp` is expected, or vice versa — but
+both compile to the identical representation (`Int` Unix seconds), so
+constructing one and reading it back is exact either way. `Timestamp` is
+also the only type `expr.age` accepts (see `docs/CERTO-SPEC.md`'s `.age`
+entry). Timezone-aware operations take a `Timezone` (see `Timezone(name:
+Text): Timezone?`, constructed elsewhere via `DateTime`'s own `Timezone(...)`
+— same type, shared across both names).
+
+```
+Timestamp.now(): Timestamp [io]
+Timestamp.of(year: Int, month: Int, day: Int, hour: Int, minute: Int, second: Int, tz: Timezone): Timestamp
+Timestamp.parse(s: Text): Timestamp [fallible]     // ISO 8601, panics if unparseable
+Timestamp.inTimezone(ts: Timestamp, tz: Timezone): Text   // e.g. "2026-07-15T13:30:00+01:00"
+Timestamp.formatTz(ts: Timestamp, fmt: Text, tz: Timezone): Text   // strftime format, tz's wall clock
+
+Date.of(year: Int, month: Int, day: Int): Date     // UTC midnight, same convention as Date.today()
+```
+
+`Timestamp.of`'s `year`/`month`/.../`second` are the wall-clock time *in*
+`tz`, not UTC — `Timestamp.of(2026, 7, 15, 13, 30, 0, london)` where
+`london` is `Europe/London` (BST, UTC+1 in July) produces the same instant
+as `13:30:00 - 01:00` UTC.
 
 ---
 

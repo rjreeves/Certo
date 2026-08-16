@@ -616,6 +616,30 @@ pub fn seed_stdlib(env: &mut TypeEnv, counter: &mut u32) {
     def!("Date.todayIn",         fn1(tz(), date()));
 
     // ---------------------------------------------------------------- //
+    // Timestamp (BACKLOG item 164b) — the spec's own name for what this
+    // codebase already ships as `DateTime`; both are distinct nominal
+    // types (confirmed: a `DateTime` value does not unify with a
+    // `Timestamp`-typed parameter) but share the identical `CertoDateTime`
+    // representation. `Timestamp.now`/`.parse`/`.inTimezone`/`.formatTz`
+    // reuse `DateTime`'s already-working C implementation (see
+    // `crates/stdlib/src/datetime.rs`'s `#define` bridge); `.of` and
+    // `Date.of` are genuinely new — no component-based constructor existed
+    // for either name before this.
+    // ---------------------------------------------------------------- //
+
+    let ts = || Ty::Named { name: "Timestamp".into(), args: vec![] };
+
+    def!("Timestamp.now",        Ty::Fn { params: vec![], ret: Box::new(ts()) });
+    def!("Timestamp.of",         Ty::Fn {
+        params: vec![Ty::Int, Ty::Int, Ty::Int, Ty::Int, Ty::Int, Ty::Int, tz()],
+        ret: Box::new(ts()),
+    });
+    def!("Timestamp.parse",      fn1(Ty::Text, ts()));
+    def!("Timestamp.inTimezone", fn2(ts(), tz(), Ty::Text));
+    def!("Timestamp.formatTz",   Ty::Fn { params: vec![ts(), Ty::Text, tz()], ret: Box::new(Ty::Text) });
+    def!("Date.of",              Ty::Fn { params: vec![Ty::Int, Ty::Int, Ty::Int], ret: Box::new(date()) });
+
+    // ---------------------------------------------------------------- //
     // Money / Decimal
     // ---------------------------------------------------------------- //
 

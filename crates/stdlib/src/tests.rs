@@ -337,6 +337,44 @@ fn datetime_functions_registered() {
 }
 
 #[test]
+fn timestamp_functions_registered() {
+    // BACKLOG item 164b: Timestamp had no constructors of its own before
+    // this — confirm the new registrations are real.
+    let env = seeded_env();
+    for name in &["Timestamp.now", "Timestamp.of", "Timestamp.parse",
+                  "Timestamp.inTimezone", "Timestamp.formatTz", "Date.of"] {
+        assert!(env.lookup(name).is_some(), "missing: {}", name);
+    }
+}
+
+#[test]
+fn timestamp_of_type() {
+    let env = seeded_env();
+    let ts = Ty::Named { name: "Timestamp".into(), args: vec![] };
+    let tz = Ty::Named { name: "Timezone".into(), args: vec![] };
+    match env.lookup("Timestamp.of").unwrap() {
+        Ty::Fn { params, ret } => {
+            assert_eq!(params, &[Ty::Int, Ty::Int, Ty::Int, Ty::Int, Ty::Int, Ty::Int, tz]);
+            assert_eq!(ret.as_ref(), &ts);
+        }
+        other => panic!("expected Fn, got {:?}", other),
+    }
+}
+
+#[test]
+fn date_of_type() {
+    let env = seeded_env();
+    let date = Ty::Named { name: "Date".into(), args: vec![] };
+    match env.lookup("Date.of").unwrap() {
+        Ty::Fn { params, ret } => {
+            assert_eq!(params, &[Ty::Int, Ty::Int, Ty::Int]);
+            assert_eq!(ret.as_ref(), &date);
+        }
+        other => panic!("expected Fn, got {:?}", other),
+    }
+}
+
+#[test]
 fn decimal_functions_registered() {
     let env = seeded_env();
     for name in &["Decimal.add", "Decimal.sub", "Decimal.mul", "Decimal.div",
@@ -431,6 +469,23 @@ fn datetime_c_contains_key_functions() {
     assert!(DATETIME_C.contains("certo_datetime_now"),    "missing datetime_now");
     assert!(DATETIME_C.contains("certo_datetime_format"), "missing datetime_format");
     assert!(DATETIME_C.contains("certo_datetime_add_days"),"missing datetime_add_days");
+}
+
+#[test]
+fn datetime_c_contains_timestamp_bridge_and_constructors() {
+    // BACKLOG item 164b: Timestamp.now/.parse/.inTimezone/.formatTz reuse
+    // DateTime's real implementation via a #define bridge; .of and Date.of
+    // are genuinely new functions.
+    assert!(DATETIME_C.contains("certo_timestamp_of"),          "missing certo_timestamp_of");
+    assert!(DATETIME_C.contains("certo_date_of"),                "missing certo_date_of");
+    assert!(DATETIME_C.contains("#define certo_timestamp_now         certo_datetime_now"),
+        "missing Timestamp.now bridge");
+    assert!(DATETIME_C.contains("#define certo_timestamp_parse       certo_datetime_parse_iso"),
+        "missing Timestamp.parse bridge");
+    assert!(DATETIME_C.contains("#define certo_timestamp_in_timezone certo_date_time_in_timezone"),
+        "missing Timestamp.inTimezone bridge");
+    assert!(DATETIME_C.contains("#define certo_timestamp_format_tz   certo_date_time_format_tz"),
+        "missing Timestamp.formatTz bridge");
 }
 
 #[test]

@@ -424,6 +424,17 @@ DateTime.before(a, b): Bool  DateTime.after(a, b): Bool
 DateTime.year(dt) / month / day / hour / minute / second
 ```
 
+`Timestamp` is a distinct nominal type from `DateTime` (same underlying
+representation, not interchangeable) with its own constructors:
+
+```
+Timestamp.now(): Timestamp [io]
+Timestamp.of(year, month, day, hour, minute, second, tz: Timezone): Timestamp
+Timestamp.parse(s): Timestamp [fallible]
+Timestamp.inTimezone(ts, tz): Text   Timestamp.formatTz(ts, fmt, tz): Text
+Date.of(year, month, day): Date
+```
+
 ### Stdlib.Money
 
 ```
