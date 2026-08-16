@@ -310,67 +310,259 @@ certo-lang.org  |  github.com/certo-lang
 
 # **6. Database Integration**
 
-***Database integration is a first-class language feature, not a library. The compiler maintains a live connection to your database schema during compilation and verifies all queries, column references, join conditions, and type mappings statically.**
+***Database integration is a first-class language feature, not a library. Table and column names are verified against your own type declarations at compile time — no live database connection is required to catch a typo. An optional, separate check can additionally verify those declarations still match a live database, for CI or pre-deploy use.**
 
+> **Note on this section:** the syntax below is the real, shipped API — every example is drawn directly from this compiler's own test suite and is guaranteed to compile. It intentionally does not use a `db.<table>` namespace or leading-dot field predicates (`.status == Pending`); those are not implemented. Table, column, operator, and direction arguments are string literals, verified against your `type`/`impl DbRow` declarations at compile time.
 
-## **6.1 Schema Connection and Verification**
+## **6.1 Schema-Backed Types and Compile-Time Verification**
 
-| \# certo.toml — database configuration \[database\] schema     = "postgresql://localhost/myapp\_dev" migrations = "db/migrations/" schema-sync = true   \# Fail compile if schema out of sync  \# What happens at compile time: \# 1. Compiler connects to the schema URL \# 2. Reads all table definitions from information\_schema \# 3. Infers Certo types for every column \# 4. Validates every db.\* reference in your code \# 5. Reports mismatches as compile errors — not runtime errors |
-| - |
+A table is represented by an ordinary `type` declaration plus an empty `impl DbRow for TypeName {}`. `certo db pull` generates both automatically by introspecting a live PostgreSQL database once; from then on, your compiler never needs a network connection to verify queries against that shape — it checks against the `type` declaration already in your source.
 
+```certo
+// Generated once by `certo db pull` — commit this file, then edit by hand as needed.
+module DbSchema
 
-| **Compile-Time Schema Error Example** // Developer writes: // db.users.where(.emal == "alice@example.com")  // Compiler reports: // error\[E0412\]: field \`emal\` does not exist on type \`users\` //    → src/api/users.cto:42:23 //    | //    42 |     db.users.where(.emal == email) //    |                       ^^^^ not found //    | //    = help: did you mean \`email\`? |
-| - |
+type User {
+    id:    UUID   // PK
+    name:  Text
+    email: Text?
+}
 
+fn userFromRow(row: List<Text?>): User = ...
+
+impl DbRow for User {}
+```
+
+Every `Query.from("Table")` / `Mutation.insertInto("Table")` call is checked against these declarations: an unknown table name, an unknown column name, or an unrecognized operator/direction literal is a compile error, not a runtime one.
+
+```certo
+// Developer writes:
+Query.from("Users") |> Query.filter("emal", "=", "alice@example.com") |> Query.count(conn)
+
+// Compiler reports:
+// error[E0509]: column `emal` does not exist on `Users`
+//   --> src/api/users.cto:12:34
+//    |
+// 12 | Query.from("Users") |> Query.filter("emal", "=", "alice@example.com") |> Query.count(conn)
+//    |                                     ^^^^^^ not found on Users
+```
+
+**Keeping declarations honest against a live database is a separate, opt-in step** — `certo build`/`check` never touch the network by default:
+
+```toml
+# certo.toml
+[database]
+url = "postgres://localhost/myapp_dev"
+
+[features]
+schema-sync = true   # opt-in: cross-check every `impl DbRow` type against
+                      # information_schema on every build; requires DATABASE_URL
+```
+
+With `schema-sync` enabled, a `type`/`impl DbRow` pair that's drifted from the live schema is a compile error (E0522 missing table, E0523 missing column, E0524 type mismatch, E0525 nullability mismatch). Without it, `certo db diff schema.cto` runs the identical check on demand — in CI or before a deploy — without slowing down every local build:
+
+```powershell
+certo db diff schema.cto
+```
+```
+schema drift detected:
+
+  TABLE  users
+    MISSING COLUMN  users.email: Text
+    TYPE MISMATCH   users.age — code: `Int`, db: `Text`
+
+1 issue(s) found, 4 table(s) ok
+```
 
 ## **6.2 Query DSL — Full Reference**
 
+Every query is a pipeline of `Query.*` calls threaded with `|>`, ending in a terminal call that actually runs it (`.list`, `.first`, `.count`, or a scalar aggregate). Nothing executes until the terminal call.
+
 ### **Filtering**
 
-| db.orders     |\> where(.status == Pending)     |\> where(.total \> Money(100))     |\> where(.createdAt \> Timestamp.now() - Duration.days(7))     |\> where(.customerId.in(\[id1, id2, id3\]))     |\> where(.notes.isNotNull())     |\> where(.email.like("%@company.com"))     |\> where(.tags.contains("premium"))       // Array contains     |\> where(.deliverySlot.overlaps(range))   // Range overlap |
-| - |
-
+```certo
+Query.from("Orders")
+    |> Query.filter("status", "=", "pending")
+    |> Query.filter("total", ">", "100")
+    |> Query.list(conn, OrderFromRow)
+```
 
 ### **Sorting and Pagination**
 
-| db.products     |\> orderBy(.price, Asc)     |\> orderBy(.name, Desc)      // Secondary sort     |\> limit(20)     |\> offset(page \* 20)     // Or use built-in pagination:     |\> paginate(page: 2, size: 20)  // Returns Page\<Product\> |
-| - |
-
+```certo
+Query.from("Products")
+    |> Query.orderBy("price", "asc")
+    |> Query.limit(20)
+    |> Query.offset(page * 20)
+    |> Query.list(conn, ProductFromRow)
+```
 
 ### **Joins**
 
-| // Inner join db.orders     |\> join db.customers on (.customerId == .id)     |\> select(.orderNumber, .customerName, .total)  // Left join db.users     |\> leftJoin db.subscriptions on (.id == .userId)     |\> select(.name, .email, subscriptionTier: .tier ?? "free")  // Self join db.employees as e     |\> leftJoin db.employees as m on (e.managerId == m.id)     |\> select(name: e.name, managerName: m.name) |
-| - |
+```certo
+// Inner join
+Query.from("Orders")
+    |> Query.join("Customers", "Orders.customerId", "Customers.id")
+    |> Query.filter("Customers.name", "=", "Alice")
+    |> Query.list(conn, OrderCustomerFromRow)
 
+// Left join
+Query.from("Users")
+    |> Query.leftJoin("Subscriptions", "Users.id", "Subscriptions.userId")
+    |> Query.list(conn, UserSubscriptionFromRow)
+
+// Self join — needs an explicit alias on both sides via *As variants
+Query.fromAs("Employees", "e")
+    |> Query.leftJoinAs("Employees", "m", "e.managerId", "m.id")
+    |> Query.orderBy("m.name", "asc")
+    |> Query.list(conn, EmployeeManagerFromRow)
+```
+
+Join columns must always be written table-qualified (`"Orders.customerId"`, not bare `"customerId"`) — required so a column name ambiguous across joined tables is caught at compile time (E0515) rather than producing an ambiguous-column SQL error at runtime.
 
 ### **Aggregations**
 
-| db.orders     |\> where(.status == Fulfilled)     |\> groupBy(.customerId)     |\> select(\{         customerId: .customerId,         orderCount: count(),         totalSpend: sum(.total),         avgOrder:   avg(.total),         firstOrder: min(.createdAt),         lastOrder:  max(.createdAt)     \})     |\> having(.totalSpend \> Money(1000))     |\> orderBy(.totalSpend, Desc) |
-| - |
+```certo
+Query.from("Orders")
+    |> Query.filter("status", "=", "fulfilled")
+    |> Query.groupBy("customerId")
+    |> Query.aggregate("count", "*", "orderCount")
+    |> Query.aggregate("sum", "total", "totalSpend")
+    |> Query.having("count", "*", ">", "0")
+    |> Query.groupedList(conn, CustomerSummaryFromRow)
 
+// Ungrouped scalar aggregates — .sum/.avg/.min/.max return Text? (None if there
+// were no matching rows); parse the result yourself with parseInt/parseDecimal:
+Query.from("Orders") |> Query.filter("status", "=", "fulfilled") |> Query.sum("total", conn)
+```
+
+A query that's been grouped/aggregated can no longer call `.list`/`.first`/`.count`/a scalar aggregate — both assume different result shapes, and mixing them is a compile error (E0516), not a runtime surprise.
 
 ### **Mutations**
 
-| // Insert — returns inserted record db.users.insert(User \{     id:        UUID.new(),     name:      "Alice",     email:     Email("alice@example.com"),     createdAt: Timestamp.now() \})  // Insert many — single round trip db.products.insertMany(newProducts)  // Update — returns updated record db.orders.update(orderId, \{ status: Shipped, shippedAt: Timestamp.now() \})  // Upsert — insert or update on conflict db.prices.upsert(newPrice, conflictOn: .productId)  // Delete db.sessions.deleteWhere(.expiresAt \< Timestamp.now()) |
-| - |
+```certo
+// Insert
+Mutation.insertInto("Users")
+    |> Mutation.set("name", "Alice")
+    |> Mutation.set("email", "alice@example.com")
+    |> Mutation.run(conn)
 
+// Insert many — single round trip
+Mutation.insertMany("Products", ["name", "price"])
+    |> Mutation.addRow(["Widget", "19.99"])
+    |> Mutation.addRow(["Gadget", "42.00"])
+    |> Mutation.run(conn)
+
+// Update
+Mutation.updateTable("Orders")
+    |> Mutation.set("status", "shipped")
+    |> Mutation.filter("id", "=", orderId)
+    |> Mutation.run(conn)
+
+// Upsert — insert or update on conflict
+Mutation.insertInto("Prices")
+    |> Mutation.set("productId", productId)
+    |> Mutation.set("amount", "9.99")
+    |> Mutation.onConflict("productId")
+    |> Mutation.run(conn)
+
+// Delete
+Mutation.deleteFrom("Sessions")
+    |> Mutation.filter("expiresAt", "<", now)
+    |> Mutation.run(conn)
+```
+
+Each `Mutation.*` method is restricted to the mutation kinds it's actually valid for — `.set` on insert/update, `.filter` on update/delete, `.onConflict` on insert, `.addRow` on insertMany — calling one on the wrong kind is a compile error (E0520), not a database error.
 
 ## **6.3 Transactions**
 
-| // Transactions are first-class — composable and typed async fn transferStock(     from: WarehouseId,     to:   WarehouseId,     sku:  SKU,     qty:  Int ): Result\<StockTransfer, InventoryError\> =     db.transaction \{         val source = db.inventory                      .where(.warehouse == from)                      .where(.sku == sku)                      .first()                      |\> require(InventoryError.NotFound(sku))          guard source.quantity \>= qty else             Err(InventoryError.InsufficientStock(source.quantity, qty))          db.inventory.update(source.id, \{ quantity: source.quantity - qty \})         db.inventory.upsert(             \{ warehouse: to, sku: sku, quantity: qty \},             conflictOn: (.warehouse, .sku),             onConflict: \{ quantity: .quantity + qty \}         )          val transfer = StockTransfer \{ from, to, sku, qty, at: Timestamp.now() \}         db.stockTransfers.insert(transfer)         Ok(transfer)     \}     // Automatically rolls back on any Err result     // Automatically commits on Ok result |
-| - |
+`withTransaction` wraps a body that returns a `Result`: commits on `Ok`, rolls back on `Err`.
 
+```certo
+// Simplified for illustration — a real transfer would parseInt both
+// quantities, subtract, and re-encode with string interpolation before
+// calling .set, since every Query/Mutation value is Text-encoded.
+fn transferStock(conn: Int, from: Text, to: Text, sku: Text, qty: Text): Result<Text, Text> [io] =
+    withTransaction(conn, fn(): Result<Text, Text> = {
+        val source = Query.from("Inventory")
+            |> Query.filter("warehouse", "=", from)
+            |> Query.filter("sku", "=", sku)
+            |> Query.first(conn, InventoryFromRow)
+
+        match source {
+            None    => Err("source warehouse has no stock for this SKU")
+            Some(s) => {
+                Mutation.updateTable("Inventory")
+                    |> Mutation.set("quantity", qty)
+                    |> Mutation.filter("id", "=", s.id)
+                    |> Mutation.run(conn)
+                Ok("transferred")
+            }
+        }
+    })
+    // Rolls back automatically on any Err result inside the body.
+    // Commits automatically once the body returns Ok.
+```
 
 ## **6.4 Raw SQL Escape Hatch**
 
-| // When the query DSL is insufficient — use raw SQL // Parameters are always sanitized — no SQL injection possible val results = db.raw\<Order\>(     sql: """         SELECT o.\*, c.name as customer\_name         FROM orders o         JOIN customers c ON c.id = o.customer\_id         WHERE o.created\_at \> $1         AND c.region = ANY($2)     """,     params: \[cutoffDate, regions\] ) // Return type must be specified — compiler cannot verify raw SQL |
-| - |
+When the query/mutation builders are insufficient, drop to `Stdlib.Db`'s parameterized functions directly — parameters are always positional (`$1`, `$2`, …) and bound separately from the SQL text, so raw SQL is never string-interpolated and is not a SQL-injection vector.
 
+```certo
+uses Stdlib.Db
+
+val rows = dbQueryTyped(
+    conn,
+    "SELECT o.*, c.name AS customer_name FROM orders o \
+     JOIN customers c ON c.id = o.customer_id \
+     WHERE o.created_at > $1",
+    [cutoffDate],
+    orderWithCustomerFromRow
+)
+```
+
+`dbQuery`/`dbQueryRow`/`dbQueryOne` return untyped `List<Text?>`-shaped rows when there's no `DbRow` type to map into; `dbExec` runs a statement and returns the affected-row count. See `docs/STDLIB-QUICKREF.md`'s `Db` section for the complete function list.
 
 ## **6.5 Migrations — Full Reference**
 
-| migration "add\_product\_categories" \{     description = "Add category hierarchy to products"      up \{         // Create new table         Table.create("categories") \{             column("id",        UUID,            primaryKey: true)             column("name",      BoundedText(100), nullable: false, unique: true)             column("parentId",  UUID,            nullable: true)             column("sortOrder", Int32,           default: 0)             foreignKey("parentId", references: "categories.id", onDelete: SetNull)         \}          // Alter existing table         Table.alter("products") \{             addColumn("categoryId", UUID, nullable: true)             foreignKey("categoryId", references: "categories.id", onDelete: SetNull)         \}          // Add indexes         Index.create("products\_category\_idx", on: "products", columns: \["category\_id"\])     \}      down \{         Table.alter("products") \{ dropColumn("categoryId") \}         Table.drop("categories")     \} \} |
-| - |
+Migrations are keyword-led DDL blocks, not a fluent builder — this reads closer to a schema-diff DSL than method chaining, and is checked against your `type` declarations at compile time (E0500-E0507: unknown table, column-type mismatch, dangling foreign key, duplicate name, missing `down` block, and so on).
+
+```certo
+migration "add_product_categories" {
+    up {
+        createTable categories {
+            id: UUID primaryKey,
+            name: Text unique,
+            parentId: UUID nullable,
+            sortOrder: Int default 0
+        }
+
+        alterTable products {
+            addColumn categoryId: UUID nullable,
+            foreignKey categoryId references categories onDelete setNull
+        }
+
+        createIndex products_category_idx on products [categoryId]
+    }
+
+    down {
+        alterTable products { dropColumn categoryId }
+        dropTable categories
+    }
+}
+```
+
+Column modifiers (any combination, in any order): `primaryKey`, `unique`, `nullable`, `default EXPR`. `foreignKey COL references TABLE` optionally takes `onDelete cascade|setNull|restrict|noAction`. A `rawSql "..."` op is available inside `up`/`down` for anything the structured ops don't cover.
+
+```powershell
+certo db migrate                    # apply all pending migrations
+certo db migrate --dry-run          # preview SQL without executing
+certo db rollback                   # roll back the most recent migration
+certo db status                     # show applied vs pending migrations
+certo db create add_users_table     # scaffold a new migration file
+```
+
+`certo migrate` is accepted as an alias for `certo db` and takes the same subcommands.
 
 
 # **7. Concurrency and Async**
