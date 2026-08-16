@@ -144,7 +144,14 @@ impl Ty {
                 // falls to `ty_to_c`'s catch-all, a real, named C struct.
                 let opaque_handle = (args.is_empty() && matches!(name.as_str(),
                     "HttpRequest" | "HttpResponse" | "Bytes" | "DbResult" | "Query" | "Mutation"
-                    | "DateTime" | "Date" | "Duration" | "JsonValue" | "Timezone" | "ProcessResult"))
+                    | "DateTime" | "Date" | "Duration" | "JsonValue" | "Timezone" | "ProcessResult"
+                    // `Timestamp` has no runtime type of its own — `ty_to_c`
+                    // already gives it the identical int64_t representation
+                    // as `DateTime` (BACKLOG item 164a/164b) — this was the
+                    // one opaque name missing from this list, a latent bug
+                    // (unreachable before item 164b, since nothing could
+                    // construct a `Timestamp` value; live now that it can).
+                    | "Timestamp"))
                     || name == "__CertoTask" || name == "Channel";
                 !opaque_handle
             }
@@ -436,6 +443,33 @@ mod contains_secret_tests {
         let secret = Ty::Named { name: "Secret".into(), args: vec![Ty::Text] };
         let boxed = Ty::Named { name: "Box".into(), args: vec![secret] };
         assert!(boxed.contains_secret());
+    }
+}
+
+#[cfg(test)]
+mod needs_heap_box_tests {
+    use super::Ty;
+
+    #[test]
+    fn timestamp_is_an_opaque_handle_like_datetime() {
+        // Regression guard for BACKLOG item 164b: `Timestamp` compiles to
+        // the identical int64_t representation as `DateTime` (ty_to_c.rs),
+        // so it must not be heap-boxed either — omitting it here was a
+        // real, latent bug (unreachable before 164b added real Timestamp
+        // constructors) that would have corrupted a List<Timestamp>/Tuple/
+        // Option<Timestamp> value.
+        let ts = Ty::Named { name: "Timestamp".into(), args: vec![] };
+        let dt = Ty::Named { name: "DateTime".into(), args: vec![] };
+        assert!(!ts.needs_heap_box());
+        assert_eq!(ts.needs_heap_box(), dt.needs_heap_box());
+    }
+
+    #[test]
+    fn a_users_own_record_type_still_needs_boxing() {
+        // No regression: this fix must not accidentally widen the opaque
+        // list to cover ordinary user types.
+        let user_type = Ty::Named { name: "Order".into(), args: vec![] };
+        assert!(user_type.needs_heap_box());
     }
 }
 
