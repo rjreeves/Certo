@@ -626,24 +626,46 @@ pub fn infer(expr: &S<Expr>, ctx: &mut Ctx<'_>) -> Ty {
                     });
                 }
             }
-            // Reject setting a `computed` property directly (BACKLOG item
-            // 143), for both a direct literal (`ty_name` present) and a
-            // `.with(...)` copy-update (`ty_name: None`, but `base` is
-            // nominal) — checked against whichever of the two actually
-            // names the type here, since exactly one is ever present.
-            let computed_check_name = ty_name.clone()
-                .or_else(|| match &base_named {
-                    Some(Ty::Named { name, .. }) => Some(name.clone()),
-                    _ => None,
-                });
-            if let Some(tn) = &computed_check_name {
-                if let Some(computed_names) = ctx.env.computed_fields.get(tn.as_str()) {
+            // Reject a field name in construction that isn't real — either
+            // a `computed` property (BACKLOG item 143 — derived, never
+            // settable) or not a field of the type at all (BACKLOG item
+            // 174: previously neither a direct literal nor `.with(...)`
+            // (item 151) validated this at all — an unknown/typo'd name
+            // was silently accepted by typeck, then either surfaced two
+            // stages later as a confusing raw C error `field designator
+            // does not refer to any field` (a direct literal) or, for
+            // `.with(...)`, silently dropped with no error anywhere,
+            // confirmed directly). Checked uniformly for both a direct
+            // literal (`ty_name` present) and a `.with(...)` copy-update
+            // (`ty_name: None`, but `base` resolved to a nominal type) —
+            // whichever of the two actually names the type here, since
+            // exactly one is ever present. Skipped entirely when the type
+            // isn't a known record at all (`record_fields.get` misses) —
+            // matching `resolve_field_ty`'s own conservative fallback for
+            // e.g. a statemachine type, not a real record.
+            let construct_on_ty: Option<Ty> = base_named.clone()
+                .or_else(|| ty_name.clone().map(|n| Ty::Named { name: n, args: vec![] }));
+            if let Some(Ty::Named { name: tn, .. }) = &construct_on_ty {
+                if let Some(declared) = ctx.env.record_fields.get(tn.as_str()) {
+                    let declared_names: Vec<&str> = declared.iter().map(|(n, _)| n.as_str()).collect();
+                    let computed_names: Vec<&str> = ctx.env.computed_fields.get(tn.as_str())
+                        .map(|cs| cs.iter().map(|(n, _)| n.as_str()).collect())
+                        .unwrap_or_default();
                     for f in fields.iter() {
-                        if computed_names.iter().any(|(n, _)| n == &f.name.node) {
+                        let fname = f.name.node.as_str();
+                        if computed_names.contains(&fname) {
                             ctx.errors.push(TypeError {
                                 kind: TypeErrorKind::ComputedFieldNotSettable {
                                     field: f.name.node.clone(),
                                     type_name: tn.clone(),
+                                },
+                                span: f.span,
+                            });
+                        } else if !declared_names.contains(&fname) {
+                            ctx.errors.push(TypeError {
+                                kind: TypeErrorKind::UnknownField {
+                                    field: f.name.node.clone(),
+                                    on: construct_on_ty.clone().unwrap(),
                                 },
                                 span: f.span,
                             });

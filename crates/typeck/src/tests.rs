@@ -489,6 +489,53 @@ fn accessing_a_genuinely_unknown_field_on_a_type_with_computed_fields_is_still_e
     assert!(matches!(kind, TypeErrorKind::UnknownField { .. }), "expected E0205, got {kind:?}");
 }
 
+// Unknown field names in construction (BACKLOG item 174) — a direct
+// literal or `.with(...)` (item 151) setting a name that isn't a real
+// field of the type at all (not even a `computed` one) must be a real
+// E0205, not silently accepted.
+
+#[test]
+fn unknown_field_in_a_literal_is_e0205() {
+    let kind = first_error_kind(
+        "module A\n\
+         type Order = { total: Int }\n\
+         fn f(): Order = Order { total: 5, totall: 10 }"
+    );
+    assert!(matches!(kind, TypeErrorKind::UnknownField { .. }), "expected E0205, got {kind:?}");
+}
+
+#[test]
+fn unknown_field_via_with_is_e0205() {
+    // Previously this didn't error at all — `.with(...)`'s own field-name
+    // validation silently dropped any name it didn't recognize.
+    let kind = first_error_kind(
+        "module A\n\
+         type Order = { total: Int }\n\
+         fn f(o: Order): Order = o.with(totall: 10)"
+    );
+    assert!(matches!(kind, TypeErrorKind::UnknownField { .. }), "expected E0205, got {kind:?}");
+}
+
+#[test]
+fn partial_with_update_of_real_fields_is_still_ok() {
+    // Regression: the new check must not require every field to be
+    // present — `.with(...)`'s whole point is a partial update.
+    check(
+        "module A\n\
+         type Order = { total: Int, status: Text }\n\
+         fn f(o: Order): Order = o.with(status: \"closed\")"
+    ).unwrap();
+}
+
+#[test]
+fn full_literal_construction_with_only_real_fields_is_still_ok() {
+    check(
+        "module A\n\
+         type Order = { total: Int, status: Text }\n\
+         fn f(): Order = Order { total: 5, status: \"open\" }"
+    ).unwrap();
+}
+
 // Constraint
 
 #[test]
