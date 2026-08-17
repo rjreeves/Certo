@@ -99,7 +99,16 @@ fn fmt_type_decl(t: &TypeDecl, indent: usize) -> String {
                 format!("{}    computed {}: {} = {}", ind(indent), c.name.node,
                     fmt_type(&c.ty.node, indent + 1), fmt_expr(&c.body.node, indent + 1))
             }).collect();
-            let all: Vec<String> = fields.into_iter().chain(computed).collect();
+            // In-body `fn` methods (BACKLOG item 150) — printed from
+            // `rec.methods`'s own retained, un-desugared originals (BACKLOG
+            // item 175), not from the synthesized trailing `ImplDecl`
+            // (`fmt_module` skips that entirely), so a method stays inside
+            // the `type { ... }` body it was written in instead of
+            // reappearing as a separate top-level `impl` block.
+            let methods: Vec<String> = rec.methods.iter().map(|m| {
+                format!("{}    {}", ind(indent), fmt_fn(m, indent + 1))
+            }).collect();
+            let all: Vec<String> = fields.into_iter().chain(computed).chain(methods).collect();
             format!("{}type {}{} = {{\n{}\n{}}}", pub_str, t.name.node, params, all.join("\n"), ind(indent))
         }
 

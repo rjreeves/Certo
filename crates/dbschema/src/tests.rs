@@ -34,6 +34,7 @@ fn record_type(name: &str, fields: &[(&str, &str)]) -> Decl {
                 span:     DUMMY,
             }).collect(),
             computed: vec![],
+            methods: vec![],
             span: DUMMY,
         }),
         span: DUMMY,

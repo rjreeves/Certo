@@ -8,6 +8,10 @@ fn assert_contains(out: &str, needle: &str) {
     assert!(out.contains(needle), "expected {:?} in:\n{}", needle, out);
 }
 
+fn assert_not_contains(out: &str, needle: &str) {
+    assert!(!out.contains(needle), "did not expect {:?} in:\n{}", needle, out);
+}
+
 // ------------------------------------------------------------------ //
 // Module header
 // ------------------------------------------------------------------ //
@@ -85,6 +89,60 @@ fn value_object_annotation_round_trips() {
     let out = fmt("module A\n@valueObject\ntype Money = { amount: Int }");
     assert_contains(&out, "@valueObject");
     assert_contains(&out, "type Money = {");
+}
+
+// BACKLOG item 175 — `certo fmt` previously printed the parser's
+// synthesized trailing `impl` block (BACKLOG items 143/150) as a second,
+// literal top-level declaration, duplicating in-body `fn` methods and
+// `computed` properties instead of round-tripping them from inside the
+// `type { ... }` body they were written in.
+
+#[test]
+fn in_body_fn_method_round_trips_inside_type_body_no_duplicate_impl() {
+    let out = fmt(
+        "module A\ntype Cart = {\n    total: Int\n    fn addTotal(c: Cart, amount: Int): Int = c.total + amount\n}"
+    );
+    assert_contains(&out, "type Cart = {");
+    assert_contains(&out, "fn addTotal(c: Cart, amount: Int): Int");
+    // The synthesized trailing `impl Cart { ... }` must not also be printed
+    // as a separate top-level declaration.
+    assert_not_contains(&out, "impl Cart {");
+}
+
+#[test]
+fn computed_property_round_trips_without_duplicate_impl_block() {
+    let out = fmt(
+        "module A\ntype Invoice = {\n    paidAt: Text?\n    computed isPaid: Bool = Option.isSome(paidAt)\n}"
+    );
+    assert_contains(&out, "type Invoice = {");
+    assert_contains(&out, "computed isPaid: Bool = Option.isSome(paidAt)");
+    // No synthesized `impl Invoice { ... isPaid ... }` block duplicating
+    // the accessor — the original bug would have re-printed it there too,
+    // producing output that fails to recompile (two `isPaid` definitions).
+    assert_not_contains(&out, "impl Invoice {");
+}
+
+#[test]
+fn type_with_both_in_body_fn_and_computed_round_trips_without_duplicate_impl() {
+    let out = fmt(
+        "module A\ntype Cart = {\n    total: Int\n    computed isEmpty: Bool = total == 0\n    fn addTotal(c: Cart, amount: Int): Int = c.total + amount\n}"
+    );
+    assert_contains(&out, "type Cart = {");
+    assert_contains(&out, "fn addTotal(c: Cart, amount: Int): Int");
+    assert_contains(&out, "computed isEmpty: Bool = total == 0");
+    assert_not_contains(&out, "impl Cart {");
+}
+
+#[test]
+fn hand_written_standalone_impl_block_still_prints_normally() {
+    // Regression: only the *synthesized* trailing impl is skipped — a real,
+    // hand-written `impl X { ... }` block (not attached to any `type`'s
+    // in-body methods) must still round-trip as its own declaration.
+    let out = fmt(
+        "module A\ntype Box = { value: Int }\n\nimpl Box {\n    fn get(b: Box): Int = b.value\n}"
+    );
+    assert_contains(&out, "impl Box {");
+    assert_contains(&out, "fn get(b: Box): Int");
 }
 
 #[test]

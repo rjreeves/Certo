@@ -142,6 +142,15 @@ pub enum TypeBody {
 pub struct RecordTypeDef {
     pub fields:   Vec<RecordFieldDef>,
     pub computed: Vec<ComputedFieldDef>,
+    /// In-body `fn`/`pub fn`/`async fn` methods (spec §8.5, BACKLOG item
+    /// 150), retained here in their original, un-desugared form purely for
+    /// `certo fmt` to round-trip from (BACKLOG item 175) — every other
+    /// compiler stage (resolve/typeck/hir/mir/codegen) ignores this field
+    /// entirely and instead consumes the equivalent, semantically identical
+    /// copies the parser also pushes onto the synthesized trailing
+    /// `ImplDecl` (see `ImplDecl::is_synthesized`), which is what those
+    /// stages have always looked at.
+    pub methods:  Vec<FnDecl>,
     pub span:     Span,
 }
 
@@ -217,6 +226,18 @@ pub struct ImplDecl {
     pub type_path:   ModulePath,
     pub type_params: Vec<TypeParam>,
     pub methods:     Vec<FnDecl>,
+    /// `true` for the trailing `impl` block the parser itself synthesizes
+    /// from a `type`'s in-body `fn` methods (BACKLOG item 150) and/or
+    /// `computed` properties (BACKLOG item 143) — never for a hand-written
+    /// `impl X { ... }` block, which always has `false` here. Exists so
+    /// `certo fmt` can skip printing a synthesized impl as a second, bogus
+    /// top-level declaration (BACKLOG item 175): its content is already
+    /// fully represented by the origin `type`'s own body (`RecordTypeDef`'s
+    /// `fields`/`computed`/`methods`), which is what `fmt` prints from
+    /// instead. No other compiler stage reads this flag — resolve/typeck/
+    /// hir/mir/codegen treat a synthesized impl exactly like a hand-written
+    /// one, which is the entire point of the item 150/143 desugaring.
+    pub is_synthesized: bool,
     pub span:        Span,
 }
 
