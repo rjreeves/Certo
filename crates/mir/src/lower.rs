@@ -1758,6 +1758,43 @@ fn lower_expr(expr: &HirExpr, b: &mut Builder) -> Operand {
                             }
                         }
                     }
+                    HirPat::Record { fields, field_names, field_types } => {
+                        // A record has exactly one shape — always matches,
+                        // no tag check needed (unlike `Constructor`'s
+                        // sum-type tag comparison above). Each bound field
+                        // is read directly off the scrutinee's own real C
+                        // struct member (`Rvalue::Field`), with the same
+                        // BACKLOG item 119/120 generic-unboxing guard
+                        // `Constructor`'s own variant-field extraction uses:
+                        // a field declared as a bare type param (`Ty::Var`)
+                        // only gets unboxed when the scrutinee's own
+                        // instantiation argument is itself concrete.
+                        let scrut_args: &[Ty] = match &scrutinee.ty { Ty::Named { args, .. } => args, _ => &[] };
+                        for (i, field_pat) in fields.iter().enumerate() {
+                            if let HirPat::Bind { local, name: fname } = field_pat {
+                                let declared = &field_types[i];
+                                let (real_ty, needs_unbox) = match declared {
+                                    Ty::Var(_) => {
+                                        let concrete = scrut_args.first().cloned().unwrap_or(Ty::Error);
+                                        let needs_unbox = !matches!(concrete, Ty::Var(_));
+                                        (concrete, needs_unbox)
+                                    }
+                                    other => (other.clone(), false),
+                                };
+                                let ml = b.map_hir_local(*local, fname, real_ty.clone());
+                                if needs_unbox {
+                                    let raw = b.declare_local(&format!("_field_{}", field_names[i]), Ty::Var(0));
+                                    b.assign(raw, Rvalue::Field { base: scrut_op.clone(), field: field_names[i].clone() });
+                                    b.assign(ml, Rvalue::UnboxSome { opt: Operand::Local(raw), ty: real_ty });
+                                } else {
+                                    b.assign(ml, Rvalue::Field { base: scrut_op.clone(), field: field_names[i].clone() });
+                                }
+                            }
+                        }
+                        let after_pat = if arm.guard.is_some() { b.new_block() } else { arm_bb };
+                        b.terminate(Terminator::Goto(after_pat));
+                        if arm.guard.is_some() { b.switch_to(after_pat); }
+                    }
                     HirPat::Tuple(fields) => {
                         // Tuple is stored as a CertoList*. Extract each field by index.
                         for (i, field_pat) in fields.iter().enumerate() {

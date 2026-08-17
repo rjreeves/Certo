@@ -292,6 +292,23 @@ pub enum HirPat {
     /// `Ty::Error` (which codegen maps to `int64_t`, silently truncating
     /// e.g. `Float` payloads on read).
     Constructor { name: String, fields: Vec<HirPat>, field_names: Vec<String>, field_types: Vec<Ty> },
+    /// `TypeName { name: n, age }` / bare `{ name: n, age }` (BACKLOG item
+    /// 145) — a plain record's own pattern. Always matches (a record type
+    /// has exactly one shape, unlike a sum-type `Constructor`, so there's no
+    /// runtime tag check) — MIR just extracts each bound field directly.
+    /// `field_names[i]` is `fields[i]`'s real C struct member name (records
+    /// have no positional `f{i}` fallback the way sum-type variants do —
+    /// it's always the pattern's own declared field name). `field_types[i]`
+    /// is that field's *raw*, unsubstituted declared type on the record —
+    /// deliberately mirrors `Constructor`'s own deferred-substitution design
+    /// (`Ty::Var` left as-is here; MIR resolves it against the scrutinee's
+    /// own real instantiation args at match-lowering time, the same BACKLOG
+    /// item 119/120 guard `Constructor`'s variant-field extraction and
+    /// ordinary `.field` reads already use) rather than resolving it eagerly
+    /// here, since the scrutinee's own recorded HIR type isn't guaranteed to
+    /// carry concrete args at this point (e.g. inside a still-generic
+    /// function body).
+    Record { fields: Vec<HirPat>, field_names: Vec<String>, field_types: Vec<Ty> },
     Or(Box<HirPat>, Box<HirPat>),
 }
 

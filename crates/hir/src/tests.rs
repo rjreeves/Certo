@@ -809,3 +809,97 @@ fn ordinary_field_access_on_a_type_with_computed_fields_is_still_a_field_read() 
     assert!(matches!(&body.kind, HirExprKind::Field { field, .. } if field == "total"),
         "expected a Field read of `total`, got {:?}", body.kind);
 }
+
+// ------------------------------------------------------------------ //
+// Record patterns (BACKLOG item 145) — both the type-prefixed
+// (`TypeName { ... }`) and bare (`{ ... }`) forms share this lowering.
+// ------------------------------------------------------------------ //
+
+#[test]
+fn val_record_destructure_gives_each_field_its_real_declared_type() {
+    // Regression for the confirmed silent-truncation bug: field bindings
+    // used to always get `Ty::Error`, which codegen maps to `int64_t`,
+    // reinterpreting a `Float` field's raw bits as an integer.
+    let m = lower(
+        "module A\n\
+         type Product = { name: Text, price: Float }\n\
+         fn f(p: Product): Float = {\n\
+         \x20   val { name, price } = p\n\
+         \x20   price\n\
+         }"
+    );
+    let HirItem::Fn(f) = m.items.iter().find(|it| matches!(it, HirItem::Fn(f) if f.name == "f")).unwrap() else { unreachable!() };
+    let HirExprKind::Block { stmts, .. } = &f.body.as_ref().unwrap().kind else { panic!("expected a block body") };
+    // stmts[0] = `_rec` temp, stmts[1] = `name`, stmts[2] = `price`.
+    let price_ty = stmts.iter().find_map(|s| match s {
+        crate::hir::HirStmt::Let { name, ty, .. } if name == "price" => Some(ty.clone()),
+        _ => None,
+    }).expect("expected a `price` binding");
+    assert_eq!(price_ty, Ty::Float);
+}
+
+#[test]
+fn type_prefixed_record_pattern_in_match_arm_lowers_to_hirpat_record() {
+    let m = lower(
+        "module A\n\
+         type User = { name: Text, age: Int }\n\
+         fn f(u: User): Text = match u {\n\
+         \x20   User { name: n, age: a } => n,\n\
+         \x20   _ => \"?\"\n\
+         }"
+    );
+    let HirItem::Fn(f) = m.items.iter().find(|it| matches!(it, HirItem::Fn(f) if f.name == "f")).unwrap() else { unreachable!() };
+    let HirExprKind::Match { arms, .. } = &f.body.as_ref().unwrap().kind else { panic!("expected a match expr") };
+    match &arms[0].pat {
+        crate::hir::HirPat::Record { fields, field_names, field_types } => {
+            assert_eq!(field_names, &vec!["name".to_string(), "age".to_string()]);
+            assert_eq!(field_types, &vec![Ty::Text, Ty::Int]);
+            assert_eq!(fields.len(), 2);
+        }
+        other => panic!("expected HirPat::Record (not Wildcard), got {other:?}"),
+    }
+}
+
+#[test]
+fn bare_record_pattern_in_match_arm_resolves_type_structurally() {
+    // No leading type name — must resolve the same `field_names`/
+    // `field_types` as the prefixed form, using the scrutinee's own type.
+    let m = lower(
+        "module A\n\
+         type User = { name: Text, age: Int }\n\
+         fn f(u: User): Text = match u {\n\
+         \x20   { name: n, age: a } => n,\n\
+         \x20   _ => \"?\"\n\
+         }"
+    );
+    let HirItem::Fn(f) = m.items.iter().find(|it| matches!(it, HirItem::Fn(f) if f.name == "f")).unwrap() else { unreachable!() };
+    let HirExprKind::Match { arms, .. } = &f.body.as_ref().unwrap().kind else { panic!("expected a match expr") };
+    match &arms[0].pat {
+        crate::hir::HirPat::Record { field_names, field_types, .. } => {
+            assert_eq!(field_names, &vec!["name".to_string(), "age".to_string()]);
+            assert_eq!(field_types, &vec![Ty::Text, Ty::Int]);
+        }
+        other => panic!("expected HirPat::Record (not Wildcard), got {other:?}"),
+    }
+}
+
+#[test]
+fn bare_record_pattern_shorthand_field_binds_a_local() {
+    let m = lower(
+        "module A\n\
+         type User = { name: Text, age: Int }\n\
+         fn f(u: User): Text = match u {\n\
+         \x20   { name, age } => name,\n\
+         \x20   _ => \"?\"\n\
+         }"
+    );
+    let HirItem::Fn(f) = m.items.iter().find(|it| matches!(it, HirItem::Fn(f) if f.name == "f")).unwrap() else { unreachable!() };
+    let HirExprKind::Match { arms, .. } = &f.body.as_ref().unwrap().kind else { panic!("expected a match expr") };
+    match &arms[0].pat {
+        crate::hir::HirPat::Record { fields, .. } => {
+            assert!(matches!(&fields[0], crate::hir::HirPat::Bind { name, .. } if name == "name"));
+            assert!(matches!(&fields[1], crate::hir::HirPat::Bind { name, .. } if name == "age"));
+        }
+        other => panic!("expected HirPat::Record, got {other:?}"),
+    }
+}

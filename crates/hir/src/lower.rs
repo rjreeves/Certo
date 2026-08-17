@@ -1759,21 +1759,34 @@ fn lower_block(stmts: &[Stmt], span: Span, cx: &mut Cx) -> HirExpr {
                         }
                     }
                     Pattern::Record { fields, .. } => {
+                        // Field types come from the record's own declared
+                        // shape via `resolve_field_ty` — the same lookup an
+                        // ordinary `expr.field` read already uses — rather
+                        // than the `Ty::Error` this used to hardcode, which
+                        // silently truncated any boxed field on read (BACKLOG
+                        // item 145: confirmed via a real repro that a `Float`
+                        // field destructured this way came back as its raw
+                        // bit pattern reinterpreted as `Int` — `19.99`
+                        // printed as `19`).
+                        let rec_ty = init.ty.clone();
                         let tmp = cx.fresh_local();
-                        hir_stmts.push(HirStmt::Let { local: tmp, name: "_rec".into(), ty: Ty::Error, init });
+                        if !matches!(rec_ty, Ty::Error) { cx.local_types.insert(tmp, rec_ty.clone()); }
+                        hir_stmts.push(HirStmt::Let { local: tmp, name: "_rec".into(), ty: rec_ty.clone(), init });
                         for pf in fields {
                             let binding_name = if let Some(sub) = &pf.pattern {
                                 if let Pattern::Ident { name, .. } = &sub.node { name.node.clone() } else { continue }
                             } else {
                                 pf.name.node.clone()
                             };
+                            let (field_ty, boxed) = resolve_field_ty(&rec_ty, &pf.name.node, cx);
                             let local = cx.define_local(&binding_name);
-                            let base = HirExpr { kind: HirExprKind::Local(tmp), ty: Ty::Error, span };
+                            if !matches!(field_ty, Ty::Error) { cx.local_types.insert(local, field_ty.clone()); }
+                            let base = HirExpr { kind: HirExprKind::Local(tmp), ty: rec_ty.clone(), span };
                             let field_expr = HirExpr {
-                                kind: HirExprKind::Field { base: Box::new(base), field: pf.name.node.clone(), boxed: false },
-                                ty: Ty::Error, span,
+                                kind: HirExprKind::Field { base: Box::new(base), field: pf.name.node.clone(), boxed },
+                                ty: field_ty.clone(), span,
                             };
-                            hir_stmts.push(HirStmt::Let { local, name: binding_name, ty: Ty::Error, init: field_expr });
+                            hir_stmts.push(HirStmt::Let { local, name: binding_name, ty: field_ty, init: field_expr });
                         }
                     }
                     _ => {
@@ -1919,9 +1932,56 @@ fn lower_pat(pat: &S<certo_ast::pattern::Pattern>, scrut_ty: &Ty, cx: &mut Cx) -
             Box::new(lower_pat(left, scrut_ty, cx)),
             Box::new(lower_pat(right, scrut_ty, cx)),
         ),
-        // Record / Guard / As — flatten to wildcard for now (full pattern compilation later)
+        Pattern::Record { path, fields, .. } => {
+            // Bare (path-less) record patterns resolve structurally against
+            // the scrutinee's own already-known type (BACKLOG item 145) —
+            // mirrors typeck's own identical fallback in `check_pattern`.
+            // Prefer `scrut_ty` itself whenever it's already a concrete
+            // `Ty::Named` (carrying real instantiation args for a generic
+            // record), falling back to a bare, arg-less `Ty::Named` built
+            // from the pattern's own written type name only when `scrut_ty`
+            // isn't concrete yet (defensive — typeck's own unification
+            // already guarantees the two agree by the time HIR runs).
+            let named_ty: Ty = match scrut_ty {
+                Ty::Named { .. } => scrut_ty.clone(),
+                _ => match path.as_ref().and_then(|p| p.segments.last()) {
+                    Some(s) => Ty::Named { name: s.node.clone(), args: vec![] },
+                    None => Ty::Error,
+                },
+            };
+            let lowered_fields: Vec<HirPat> = fields.iter().map(|pf| {
+                let field_ty = record_field_declared_ty(&named_ty, &pf.name.node, cx);
+                match &pf.pattern {
+                    Some(sub) => lower_pat(sub, &field_ty, cx),
+                    None => {
+                        // shorthand `{ x }` = `{ x: x }`
+                        let local = cx.define_local(&pf.name.node);
+                        if !matches!(field_ty, Ty::Error) { cx.local_types.insert(local, field_ty.clone()); }
+                        HirPat::Bind { local, name: pf.name.node.clone() }
+                    }
+                }
+            }).collect();
+            let field_names: Vec<String> = fields.iter().map(|pf| pf.name.node.clone()).collect();
+            let field_types: Vec<Ty> = fields.iter()
+                .map(|pf| record_field_declared_ty(&named_ty, &pf.name.node, cx))
+                .collect();
+            HirPat::Record { fields: lowered_fields, field_names, field_types }
+        }
+        // Guard / As — flatten to wildcard for now (full pattern compilation later)
         _ => HirPat::Wildcard,
     }
+}
+
+/// A record pattern field's *raw*, unsubstituted declared type (BACKLOG
+/// item 145) — the first half of `resolve_field_ty` without its own
+/// `Ty::Var` substitution, since `HirPat::Record`'s own `field_types`
+/// deliberately stays raw for MIR to substitute later against the real
+/// scrutinee (see `HirPat::Record`'s own doc comment).
+fn record_field_declared_ty(named_ty: &Ty, field: &str, cx: &Cx) -> Ty {
+    let Ty::Named { name, .. } = named_ty else { return Ty::Error };
+    let Some(names) = cx.record_field_names.get(name) else { return Ty::Error };
+    let Some(pos) = names.iter().position(|n| n == field) else { return Ty::Error };
+    cx.record_field_types.get(name).and_then(|tys| tys.get(pos)).cloned().unwrap_or(Ty::Error)
 }
 
 // ------------------------------------------------------------------ //

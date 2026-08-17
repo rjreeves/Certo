@@ -36,6 +36,13 @@ fn parse_pattern_atom(cur: &mut Cursor<'_>) -> Result<S<Pattern>, ParseError> {
         // Constructor or plain ident
         Some(Token::Ident(_)) => parse_ident_or_constructor(cur),
 
+        // Bare record pattern `{ name, email: e }` — no leading type name
+        // (BACKLOG item 145); resolved structurally against whatever the
+        // scrutinee/RHS's own type turns out to be, the same "structural,
+        // not nominal" resolution `check_pattern`'s own `path: None`
+        // fallback already implements.
+        Some(Token::LBrace) => parse_record_pattern(cur, None, span),
+
         // Tuple pattern `(p, q)`
         Some(Token::LParen) => parse_tuple_pattern(cur),
 
