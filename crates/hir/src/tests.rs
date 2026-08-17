@@ -332,6 +332,60 @@ fn sortby_struct_float_field_key_lowers_ok() {
     );
 }
 
+// BACKLOG item 172 — the per-call-site lambda hint above only ever applied
+// on the *positional* argument-lowering branch; a labeled call's inline
+// lambda stayed `Ty::Error` regardless of how useful its body's own
+// inferred type would otherwise have been. These mirror the tests above,
+// just with the arguments labeled and written out of declared order.
+
+#[test]
+fn labeled_groupby_call_with_key_before_list_gets_lambda_hint() {
+    let m = lower(
+        "module A\nimport Stdlib.Collections.{ List }\n\
+         fn f(xs: List<Float>): Map<Int, List<Float>> = List.groupBy(key: (x) => 1, list: xs)");
+    if let HirItem::Fn(f) = &m.items[0] {
+        assert_eq!(f.body.as_ref().unwrap().ty, Ty::Map(Box::new(Ty::Int), Box::new(Ty::List(Box::new(Ty::Float)))));
+    } else {
+        panic!("expected Fn");
+    }
+}
+
+#[test]
+fn labeled_sortby_call_with_struct_float_key_before_list_lowers_ok() {
+    // The E0601 struct-field-key check only ever fires against the
+    // correctly-hinted lambda body — before the fix, a labeled call's
+    // lambda body stayed `Ty::Error`, so this legitimate case and the
+    // genuinely-unsupported case below were indistinguishable.
+    lower(
+        "module A\nimport Stdlib.Collections.{ List }\ntype Product = { name: Text, price: Float }\n\
+         fn f(ps: List<Product>): List<Product> = List.sortBy(key: (p) => p.price, list: ps)"
+    );
+}
+
+#[test]
+fn labeled_sortby_call_with_struct_text_key_before_list_is_e0601() {
+    let err = try_lower(
+        "module A\nimport Stdlib.Collections.{ List }\ntype Product = { name: Text, price: Float }\n\
+         fn f(ps: List<Product>): List<Product> = List.sortBy(key: (p) => p.name, list: ps)"
+    ).unwrap_err();
+    let msg = match &err[0].kind {
+        crate::error::LowerErrorKind::Unsupported(m) => m.clone(),
+        other => panic!("expected LowerErrorKind::Unsupported (E0601), got {other:?}"),
+    };
+    assert!(msg.contains("List.sortBy") && msg.contains("Text"), "unexpected message: {msg}");
+}
+
+#[test]
+fn labeled_map_call_with_f_before_list_gets_lambda_hint() {
+    let m = lower(
+        "module A\nimport Stdlib.Collections.{ List }\nfn f(xs: List<Float>): List<Float> = List.map(f: (x) => x * 2.0, list: xs)");
+    if let HirItem::Fn(f) = &m.items[0] {
+        assert_eq!(f.body.as_ref().unwrap().ty, Ty::List(Box::new(Ty::Float)));
+    } else {
+        panic!("expected Fn");
+    }
+}
+
 #[test]
 fn map_get_return_type_is_option_of_value_type() {
     let m = lower("module A\nimport Stdlib.Collections.{ Map }\nfn f(m: Map<Text, Float>): Float? = Map.get(m, \"k\")");

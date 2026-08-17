@@ -1503,6 +1503,26 @@ fn groupby_labeled_args_reorder_to_match_positional_call() {
     assert!(list_pos < closure_pos, "expected list operand before closure operand in: {group_by_call}");
 }
 
+// BACKLOG item 172 — the exact narrow repro flagged (not fixed) while
+// verifying item 170/171 above: a labeled `List.groupBy` call, with its
+// inline lambda argument, returned directly as a function's own declared-
+// type tail expression (no intermediate `val` to hang a type on). Before
+// this fix, the labeled-arg lowering branch never applied the per-call-site
+// lambda hint, so the callback stayed `Ty::Error` and `generic_container_ret`
+// couldn't recover `run`'s own return type from it — producing a C return
+// type that didn't match the positional call's own (correct) signature.
+#[test]
+fn groupby_labeled_call_as_direct_tail_expression_matches_positional_return_type() {
+    let labeled = codegen(
+        "module A\nimport Stdlib.Collections.{ List }\nfn run(xs: List<Int>): Map<Int, List<Int>> = List.groupBy(key: (x) => x, list: xs)");
+    let positional = codegen(
+        "module A\nimport Stdlib.Collections.{ List }\nfn run(xs: List<Int>): Map<Int, List<Int>> = List.groupBy(xs, (x) => x)");
+    let labeled_sig = labeled.lines().find(|l| l.contains("certo_run(")).expect("expected a certo_run() signature");
+    let positional_sig = positional.lines().find(|l| l.contains("certo_run(")).expect("expected a certo_run() signature");
+    assert_eq!(labeled_sig, positional_sig,
+        "labeled call's return type declaration should match the positional call's, got:\nlabeled:    {labeled_sig}\npositional: {positional_sig}");
+}
+
 // ------------------------------------------------------------------ //
 // `computed` record properties (BACKLOG item 143)
 // ------------------------------------------------------------------ //
