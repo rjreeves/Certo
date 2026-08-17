@@ -175,6 +175,33 @@ impl Ty {
         }
     }
 
+    /// The stdlib/user-defined qualifying name a dot-call receiver of this
+    /// type resolves against — `xs.map(f)` on an `xs: List<Int>` looks up
+    /// `"List.map"` via this name, exactly the same lookup key
+    /// `List.map(xs, f)`'s own module-qualified path already produces
+    /// (BACKLOG item 162). `None` for types with no sensible qualifying
+    /// name (unresolved inference machinery, function/tuple/record types,
+    /// primitives with no stdlib namespace of their own like `Int`/`Bool`).
+    /// Reused by both `crates/typeck` and `crates/hir` — HIR imports this
+    /// same `Ty` directly rather than keeping its own copy.
+    pub fn qualifying_name(&self) -> Option<String> {
+        match self {
+            Ty::List(_) => Some("List".to_string()),
+            Ty::Option(_) => Some("Option".to_string()),
+            Ty::Result(_, _) => Some("Result".to_string()),
+            Ty::Map(_, _) => Some("Map".to_string()),
+            // `BoundedText(n)` unifies freely with bare `Text` in both
+            // directions (see `Ty::BoundedText`'s own doc comment) — a
+            // dot-call on either resolves against the same `Text.*` stdlib
+            // namespace, there's no separate `BoundedText.*` one.
+            Ty::Text | Ty::BoundedText(_) => Some("Text".to_string()),
+            Ty::Decimal(_) => Some("Decimal".to_string()),
+            Ty::Uuid => Some("UUID".to_string()),
+            Ty::Named { name, .. } => Some(name.clone()),
+            _ => None,
+        }
+    }
+
     /// Does this type structurally contain `Secret<_>` anywhere — itself,
     /// or nested inside an `Option`/`Result`/`List`/`Map`/`Tuple`/`Record`/
     /// another `Named`'s own type args? Used to reject passing a secret

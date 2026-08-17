@@ -163,6 +163,25 @@ fn stdlib_ret_types() -> &'static HashMap<String, Ty> {
     })
 }
 
+/// Every registered stdlib function name, generic or not (unlike
+/// `stdlib_ret_types()` above, which only covers the narrower subset whose
+/// *return type* happens to have no leftover type vars — `Option.isSome<T>`,
+/// `Result.isOk<T,E>`, etc. are `Ty::Forall`-wrapped and never match that
+/// table's `Ty::Fn` filter even though their concrete `Bool` return has no
+/// vars at all once instantiated). Used only to answer "does a stdlib
+/// function with this exact qualified name exist" (the dot-call UFCS
+/// rewrite, BACKLOG item 162) — a yes/no membership check, not a source of
+/// type information, so `Ty::Forall` bodies don't need to be unwrapped here.
+fn stdlib_fn_names() -> &'static std::collections::HashSet<String> {
+    static TABLE: OnceLock<std::collections::HashSet<String>> = OnceLock::new();
+    TABLE.get_or_init(|| {
+        let mut env = certo_typeck::TypeEnv::new();
+        let mut counter = 0u32;
+        certo_stdlib::seed_stdlib(&mut env, &mut counter);
+        env.names().into_iter().collect()
+    })
+}
+
 /// Declared param types for stdlib functions, keyed the same way
 /// `stdlib_ret_types()` is (built from the same real `TypeEnv` seeding, not
 /// hand-maintained) — lets bare-generic-return argument-position resolution
@@ -838,6 +857,84 @@ fn lower_expr(expr: &S<Expr>, cx: &mut Cx) -> HirExpr {
         }
 
         Expr::App { func, args, .. } => {
+            // Dot-call UFCS (BACKLOG item 162) — HIR does its own, entirely
+            // independent lowering pass over the original AST (it never
+            // reuses typeck's substitution), so it needs the identical
+            // detect-and-rewrite this arm's typeck counterpart already does
+            // (`crates/typeck/src/infer_expr.rs`'s `Expr::App` arm). When
+            // `func` is `Expr::Field{expr, field}` and `expr` isn't an
+            // uppercase module/type `Path` (the already-handled
+            // `List.map(...)` form, detected the same way the plain
+            // `Expr::Field` arm below does via `is_module_path`), lower the
+            // receiver once just to read its type, and if a real function
+            // named `"<TypeName>.<field>"` is registered anywhere HIR looks
+            // up callees (stdlib param names, a user `impl` method, or the
+            // full stdlib name table — `stdlib_fn_names()`, which unlike
+            // `stdlib_ret_types()` also covers generic stdlib functions),
+            // rewrite this call *locally* into a
+            // synthetic `Expr::Field{Path(TypeName), field}` callee with the
+            // receiver spliced in as a cloned, leading `Arg` — the exact
+            // same AST shape a real `List.map(xs, f)` call already produces
+            // — before any of the rest of this arm's logic (labeled-arg
+            // reordering, default-param insertion, lambda-hinting) runs.
+            // That logic is then unchanged and unaware anything special
+            // happened. The receiver's first, type-probing lowering is
+            // discarded, not reused, exactly like typeck's own version:
+            // `lower_expr` only builds a tree (it never executes anything),
+            // so the discarded pass can't double-evaluate a side effect at
+            // runtime — the sole cost is a wasted, unused local id and a
+            // possible duplicate diagnostic if the receiver itself contains
+            // a nested lowering error, an accepted narrow blemish matching
+            // typeck's own documented tradeoff for the identical rewrite.
+            let ufcs_rewrite: Option<(S<Expr>, Vec<certo_ast::expr::Arg>)> =
+                if let Expr::Field { expr, field, .. } = &func.node {
+                    let is_module_path = match &expr.node {
+                        Expr::Path { path, .. } => {
+                            let first = path.segments.first().map(|s| s.node.as_str()).unwrap_or("");
+                            let is_upper = first.chars().next().map(|c| c.is_uppercase()).unwrap_or(false);
+                            let last = path.segments.last().map(|s| s.node.as_str()).unwrap_or("");
+                            is_upper && cx.lookup_local(last).is_none()
+                        }
+                        _ => false,
+                    };
+                    if is_module_path {
+                        None
+                    } else {
+                        let base = lower_expr(expr, cx);
+                        base.ty.qualifying_name().and_then(|type_name| {
+                            let qualified = format!("{type_name}.{}", field.node);
+                            let exists = cx.stdlib_params.contains_key(qualified.as_str())
+                                || cx.fn_ret_types.contains_key(&qualified)
+                                || stdlib_fn_names().contains(&qualified);
+                            if exists {
+                                let type_path = certo_ast::types::ModulePath {
+                                    segments: vec![S::new(type_name, field.span)],
+                                    span: field.span,
+                                };
+                                let type_expr = Box::new(S::new(Expr::Path { path: type_path, span: field.span }, field.span));
+                                let synthetic_func = S::new(
+                                    Expr::Field { expr: type_expr, field: field.clone(), span: field.span },
+                                    field.span,
+                                );
+                                let receiver_arg = certo_ast::expr::Arg { label: None, value: (**expr).clone(), span: expr.span };
+                                let mut new_args = vec![receiver_arg];
+                                new_args.extend(args.iter().cloned());
+                                Some((synthetic_func, new_args))
+                            } else {
+                                None
+                            }
+                        })
+                    }
+                } else {
+                    None
+                };
+            let args_owned;
+            let func_owned;
+            let (func, args): (&S<Expr>, &[certo_ast::expr::Arg]) = match ufcs_rewrite {
+                Some((f, a)) => { func_owned = f; args_owned = a; (&func_owned, &args_owned) }
+                None => (func, args.as_slice()),
+            };
+
             let func_hir = lower_expr(func, cx);
 
             // Extract the call target name(s) for param-reordering and return-type

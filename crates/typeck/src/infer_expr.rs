@@ -1,5 +1,5 @@
 use std::collections::{HashMap, HashSet};
-use certo_ast::expr::{Expr, ExpectMatcher, Stmt, Lit, BinOp, UnOp};
+use certo_ast::expr::{Expr, ExpectMatcher, Stmt, Lit, BinOp, UnOp, Arg};
 use certo_ast::span::{S, Span};
 use certo_ast::types::TypeExpr;
 use crate::ty::{Ty, TyVar};
@@ -235,6 +235,73 @@ pub fn infer(expr: &S<Expr>, ctx: &mut Ctx<'_>) -> Ty {
         }
 
         Expr::App { func, args, span } => {
+            // Dot-call UFCS (BACKLOG item 162): `xs.map(f)` parses to the
+            // exact same `App{ func: Field{expr, field}, args }` shape as
+            // the already-working module-qualified form `List.map(xs, f)`
+            // (confirmed directly — the parser has no case-analysis on the
+            // base at all). The only difference is whether `expr` is an
+            // uppercase-`Path` (handled below by `qualified_call_name`) or
+            // an arbitrary/lowercase value. When it's the latter, and a
+            // real function named `"<TypeName>.<field>"` exists — where
+            // `TypeName` comes from `expr`'s own resolved type via
+            // `Ty::qualifying_name` — rewrite this call *locally* (for
+            // inference purposes only, the real AST is untouched) into
+            // that already-working shape, with `expr` spliced in as the
+            // qualified function's first argument, before any of the rest
+            // of this arm's logic runs. That logic (labeled-arg
+            // reordering, default-param insertion, the SQL/secret-sink
+            // checks, the `List.sortBy`-family key-projection check) is
+            // then unchanged and unaware anything special happened — it
+            // just sees an ordinary qualified call with one extra leading
+            // argument, exactly as if the user had written the qualified
+            // form directly.
+            let ufcs_rewrite: Option<(S<Expr>, Vec<Arg>)> = if let Expr::Field { expr, field, .. } = &func.node {
+                if qualified_call_name(expr, field).is_none() {
+                    let base_ty = infer(expr, ctx);
+                    let resolved = ctx.uf.apply(&base_ty);
+                    resolved.qualifying_name().and_then(|type_name| {
+                        let qualified = format!("{type_name}.{}", field.node);
+                        if ctx.env.lookup(&qualified).is_some() {
+                            // Mirror the exact shape a real qualified call
+                            // (`List.map(xs, f)`) parses to —
+                            // `Expr::Field{ expr: Path("List"), field: "map" }`
+                            // — NOT a 2-segment `Expr::Path`. `resolve_callee`'s
+                            // `Expr::Path` arm only reads `segments.last()`
+                            // (it's built for single-segment local names), so a
+                            // synthetic multi-segment `Path` here silently
+                            // resolved to the bare field name and produced a
+                            // spurious `UnboundName` — confirmed by the first
+                            // run of `dot_call_ufcs_smoke_test`.
+                            let type_path = certo_ast::types::ModulePath {
+                                segments: vec![S::new(type_name, field.span)],
+                                span: field.span,
+                            };
+                            let type_expr = Box::new(S::new(Expr::Path { path: type_path, span: field.span }, field.span));
+                            let synthetic_func = S::new(
+                                Expr::Field { expr: type_expr, field: field.clone(), span: field.span },
+                                field.span,
+                            );
+                            let receiver_arg = Arg { label: None, value: (**expr).clone(), span: expr.span };
+                            let mut new_args = vec![receiver_arg];
+                            new_args.extend(args.iter().cloned());
+                            Some((synthetic_func, new_args))
+                        } else {
+                            None
+                        }
+                    })
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+            let args_owned;
+            let func_owned;
+            let (func, args): (&S<Expr>, &[Arg]) = match ufcs_rewrite {
+                Some((f, a)) => { func_owned = f; args_owned = a; (&func_owned, &args_owned) }
+                None => (func, args.as_slice()),
+            };
+
             let has_labels = args.iter().any(|a| a.label.is_some());
             // Build both a full-qualified path (for stdlib) and a short name (for user-defined).
             //
