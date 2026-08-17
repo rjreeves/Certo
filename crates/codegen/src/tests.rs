@@ -1199,6 +1199,58 @@ fn parallel_spawns_all_before_joining() {
 }
 
 // ------------------------------------------------------------------ //
+// `withTimeout(duration) { body }` — BACKLOG item 122
+// ------------------------------------------------------------------ //
+
+#[test]
+fn with_timeout_never_panics_uses_cancel_protocol_instead() {
+    // Unlike `parallel(timeout: ...)`, withTimeout must never panic on
+    // timeout — it uses the safe-abandonment CAS protocol instead.
+    let c = codegen(
+        "module A\nasync fn work(): Int = 1\n\
+         async fn run(): Int? = withTimeout(Duration.seconds(5)) { work() }");
+    assert_contains(&c, "__certo_thread_join_timed");
+    assert_contains(&c, "__certo_task_hdr_try_abandon");
+    assert_not_contains(&c, "block exceeded its timeout");
+}
+
+#[test]
+fn with_timeout_worker_uses_try_finish_protocol_not_unconditional_signal() {
+    // Every spawn worker (not just withTimeout's own) must go through the
+    // CAS-based try_finish/abandon_cleanup handoff, not the old unconditional
+    // signal-done — this is what makes an abandoned task's eventual, safe
+    // self-cleanup possible without a separate "cancellable" worker variant.
+    let c = codegen(
+        "module A\nasync fn work(): Int = 1\n\
+         async fn run(): Int? = withTimeout(Duration.seconds(5)) { work() }");
+    assert_contains(&c, "__certo_task_hdr_try_finish");
+    assert_contains(&c, "__certo_task_hdr_abandon_cleanup");
+}
+
+#[test]
+fn with_timeout_result_is_boxed_as_option() {
+    // Success must produce a heap-boxed `Some`-shaped pointer (same
+    // convention `BoxSome` uses), not the raw unboxed result.
+    let c = codegen(
+        "module A\nasync fn work(): Int = 1\n\
+         async fn run(): Int? = withTimeout(Duration.seconds(5)) { work() }");
+    assert_contains(&c, "malloc(sizeof(");
+    assert_contains(&c, "= NULL;"); // the None-on-abandon branch
+}
+
+#[test]
+fn with_timeout_ordinary_spawn_await_unaffected() {
+    // Plain spawn/await (no withTimeout involved at all) must not reference
+    // the abandon-specific call at all — only the shared, always-safe
+    // try_finish/abandon_cleanup worker protocol both paths go through.
+    let c = codegen(
+        "module A\nfn work(n: Int): Int = n + 1\n\
+         fn run(a: Int): Int = {\n  val t = spawn work(a)\n  await t\n}");
+    assert_not_contains(&c, "__certo_task_hdr_try_abandon");
+    assert_contains(&c, "__certo_task_hdr_try_finish");
+}
+
+// ------------------------------------------------------------------ //
 // State machines
 // ------------------------------------------------------------------ //
 

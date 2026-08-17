@@ -79,6 +79,15 @@ pub enum Rvalue {
     /// ...) { ... }`, BACKLOG item 81. Panics at runtime if the deadline
     /// passes before the task finishes.
     JoinTimed { task: Operand, deadline: Operand, ret_ty: Ty },
+    /// Join a task handle with a shared deadline, like `JoinTimed`, but for
+    /// `withTimeout(...) { ... }` (BACKLOG item 122) instead of
+    /// `parallel(timeout: ...)`: never panics. Yields a heap-boxed `Option`
+    /// pointer (same representation as `BoxSome`/`None`'s null convention)
+    /// — non-null with the task's result if it finished in time, null if
+    /// the deadline passed first, in which case the task is safely
+    /// abandoned (never joined, never freed here) rather than leaked — see
+    /// `crates/codegen/src/emit_module.rs`'s `__certo_task_hdr_try_abandon`.
+    JoinTimedCancel { task: Operand, deadline: Operand, ret_ty: Ty },
     /// Heap-box a value into an `Option` (`Some(v)`): allocate a slot, store
     /// `value` with its own type (bit-preserving), yield the pointer. `ty` is
     /// the payload type. `None` is a null pointer.

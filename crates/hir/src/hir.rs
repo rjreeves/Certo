@@ -248,6 +248,19 @@ pub enum HirExprKind {
         task:     Box<HirExpr>,
         deadline: LocalId,
     },
+
+    /// `withTimeout(d) { body }` (BACKLOG item 122) — like `AwaitTimed`, but
+    /// never panics: if the deadline passes before the task finishes, the
+    /// task is safely abandoned (its context is freed by the worker itself
+    /// once it eventually completes, never by this join) and this evaluates
+    /// to `None`; otherwise it evaluates to `Some(value)`. See
+    /// `crates/codegen/src/emit_module.rs`'s `__certo_task_hdr_try_abandon`/
+    /// `__certo_task_hdr_try_finish` for the safe-ownership-handoff protocol
+    /// this compiles down to.
+    JoinTimedCancel {
+        task:     Box<HirExpr>,
+        deadline: LocalId,
+    },
 }
 
 // ------------------------------------------------------------------ //

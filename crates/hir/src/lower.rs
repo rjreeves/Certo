@@ -1559,38 +1559,8 @@ fn lower_expr(expr: &S<Expr>, cx: &mut Cx) -> HirExpr {
             // correctly deducted rather than each task getting its own full
             // `timeout`.
             let mut stmts: Vec<HirStmt> = Vec::new();
-            let deadline_local = timeout.as_ref().map(|t| {
-                let timeout_hir = lower_expr(t, cx);
-                let to_seconds = HirExpr {
-                    kind: HirExprKind::Call {
-                        func: Box::new(HirExpr { kind: HirExprKind::Global("Duration.toSeconds".into()), ty: Ty::Error, span }),
-                        args: vec![timeout_hir],
-                    },
-                    ty: Ty::Int, span,
-                };
-                let to_ms = HirExpr {
-                    kind: HirExprKind::BinOp {
-                        op: BinOp::Mul,
-                        lhs: Box::new(to_seconds),
-                        rhs: Box::new(HirExpr { kind: HirExprKind::Int(1000), ty: Ty::Int, span }),
-                    },
-                    ty: Ty::Int, span,
-                };
-                let now_ms = HirExpr {
-                    kind: HirExprKind::Call {
-                        func: Box::new(HirExpr { kind: HirExprKind::Global("monotonicMillis".into()), ty: Ty::Error, span }),
-                        args: vec![],
-                    },
-                    ty: Ty::Int, span,
-                };
-                let deadline_expr = HirExpr {
-                    kind: HirExprKind::BinOp { op: BinOp::Add, lhs: Box::new(now_ms), rhs: Box::new(to_ms) },
-                    ty: Ty::Int, span,
-                };
-                let local = cx.fresh_local();
-                stmts.push(HirStmt::Let { local, name: "__parallel_deadline".into(), ty: Ty::Int, init: deadline_expr });
-                local
-            });
+            let deadline_local = timeout.as_ref()
+                .map(|t| lower_deadline(t, "__parallel_deadline", &mut stmts, cx, span));
             let mut task_locals: Vec<LocalId> = Vec::new();
             for (i, task) in tasks.iter().enumerate() {
                 let capture_threshold = cx.next_local;
@@ -1614,6 +1584,53 @@ fn lower_expr(expr: &S<Expr>, cx: &mut Cx) -> HirExpr {
             }).collect();
             let tail = HirExpr { kind: HirExprKind::Tuple(awaited), ty: Ty::Error, span };
             HirExpr { kind: HirExprKind::Block { stmts, tail: Box::new(tail) }, ty: Ty::Error, span }
+        }
+
+        Expr::WithTimeout { duration, body, .. } => {
+            // withTimeout(d) { body } (BACKLOG item 122) — spawn `body` as a
+            // background task (the identical machinery a single-task
+            // `parallel` already uses), then join it with a cancel-capable
+            // timed join instead of `parallel`'s own panic-on-timeout
+            // `AwaitTimed`: `JoinTimedCancel` yields `Some(v)` if the task
+            // finishes in time, `None` (task safely abandoned, never
+            // panicking, never blocking the caller past the deadline) if
+            // the deadline passes first.
+            let mut stmts: Vec<HirStmt> = Vec::new();
+            let deadline_local = lower_deadline(duration, "__with_timeout_deadline", &mut stmts, cx, span);
+
+            let capture_threshold = cx.next_local;
+            let spawn_inner = lower_expr(body, cx);
+            // Captured *before* `spawn_inner` moves into `Spawn`'s args below —
+            // `withTimeout`'s own result type is knowable right now (`body`'s
+            // own type, Option-wrapped), unlike `parallel`'s `Ty::Error`
+            // placeholder above (whose element types only ever needed to
+            // survive as far as the immediately-following `Tuple`). Setting
+            // this for real (not `Ty::Error`) matters here specifically
+            // because `withTimeout`'s result commonly gets bound to a `val`
+            // and pattern-matched afterward (`match result { Some(v) => ... }`)
+            // — `Ty::Error` would skip `cx.local_types` registration entirely
+            // (`lower_block`'s `Stmt::Val` handling only registers a non-Error
+            // type), leaving `v`'s bound type unresolved and downstream code
+            // (e.g. an f-string interpolating `v`) unable to tell it's an
+            // `Int` that needs `certo_int_to_text`, not raw text — confirmed
+            // by direct testing: it read the boxed `int64_t` as a `Text`
+            // pointer and segfaulted.
+            let body_ty = spawn_inner.ty.clone();
+            let captures = collect_lambda_captures(&spawn_inner, capture_threshold);
+            let spawn_expr = HirExpr {
+                kind: HirExprKind::Spawn { fn_name: "__with_timeout_task".into(), args: vec![spawn_inner], captures },
+                ty: Ty::Error, span,
+            };
+            let task_local = cx.fresh_local();
+            stmts.push(HirStmt::Let { local: task_local, name: "__with_timeout_task".into(), ty: Ty::Error, init: spawn_expr });
+
+            let task_ref = HirExpr { kind: HirExprKind::Local(task_local), ty: Ty::Error, span };
+            let opt_ty = Ty::Option(Box::new(body_ty));
+            let tail = HirExpr {
+                kind: HirExprKind::JoinTimedCancel { task: Box::new(task_ref), deadline: deadline_local },
+                ty: opt_ty.clone(), span,
+            };
+            HirExpr { kind: HirExprKind::Block { stmts, tail: Box::new(tail) }, ty: opt_ty, span }
         }
 
         Expr::Transaction { body, .. } => {
@@ -2213,6 +2230,45 @@ fn ast_ty_to_ty_with_params(te: &certo_ast::types::TypeExpr, type_params: &[&str
 /// increments, so any `Local(id)` referenced inside the lambda body with
 /// `id < threshold` (the counter's value right before the lambda's own
 /// scope was pushed) must have been bound in an enclosing scope.
+/// Compute an absolute monotonic-clock millisecond deadline from a
+/// `Duration` expression (`now() + duration.toSeconds() * 1000`) and push
+/// its `let` binding into `stmts`, returning the bound local — shared by
+/// `parallel(timeout: ...) { ... }` (BACKLOG item 81) and
+/// `withTimeout(...) { ... }` (BACKLOG item 122), which both need the
+/// identical deadline math.
+fn lower_deadline(duration: &S<Expr>, name: &str, stmts: &mut Vec<HirStmt>, cx: &mut Cx, span: Span) -> LocalId {
+    let timeout_hir = lower_expr(duration, cx);
+    let to_seconds = HirExpr {
+        kind: HirExprKind::Call {
+            func: Box::new(HirExpr { kind: HirExprKind::Global("Duration.toSeconds".into()), ty: Ty::Error, span }),
+            args: vec![timeout_hir],
+        },
+        ty: Ty::Int, span,
+    };
+    let to_ms = HirExpr {
+        kind: HirExprKind::BinOp {
+            op: BinOp::Mul,
+            lhs: Box::new(to_seconds),
+            rhs: Box::new(HirExpr { kind: HirExprKind::Int(1000), ty: Ty::Int, span }),
+        },
+        ty: Ty::Int, span,
+    };
+    let now_ms = HirExpr {
+        kind: HirExprKind::Call {
+            func: Box::new(HirExpr { kind: HirExprKind::Global("monotonicMillis".into()), ty: Ty::Error, span }),
+            args: vec![],
+        },
+        ty: Ty::Int, span,
+    };
+    let deadline_expr = HirExpr {
+        kind: HirExprKind::BinOp { op: BinOp::Add, lhs: Box::new(now_ms), rhs: Box::new(to_ms) },
+        ty: Ty::Int, span,
+    };
+    let local = cx.fresh_local();
+    stmts.push(HirStmt::Let { local, name: name.into(), ty: Ty::Int, init: deadline_expr });
+    local
+}
+
 fn collect_lambda_captures(body: &HirExpr, threshold: LocalId) -> Vec<LocalId> {
     let mut free = Vec::new();
     collect_free_locals(body, threshold, &mut free);
@@ -2285,7 +2341,8 @@ fn collect_free_locals(expr: &HirExpr, threshold: LocalId, out: &mut Vec<LocalId
         HirExprKind::Spawn { args, .. } => {
             for a in args { collect_free_locals(a, threshold, out); }
         }
-        HirExprKind::AwaitTimed { task, deadline } => {
+        HirExprKind::AwaitTimed { task, deadline }
+        | HirExprKind::JoinTimedCancel { task, deadline } => {
             collect_free_locals(task, threshold, out);
             if *deadline < threshold { out.push(*deadline); }
         }

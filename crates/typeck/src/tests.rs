@@ -1266,6 +1266,43 @@ fn run(): (Int, Int) = await parallel(timeout: 5) { work(), work() }";
     );
 }
 
+// `withTimeout(d) { body }` (BACKLOG item 122) — cooperative-cancellation
+// timeout: type-checks like `parallel(timeout:)`'s own duration clause, but
+// the whole expression's type is `Option<T>` (`T` being `body`'s own type),
+// not `body`'s type directly — `Some` on completion, `None` on timeout.
+
+#[test]
+fn with_timeout_result_is_option_of_body_type() {
+    let src = "module A
+fn work(): Int = 1
+fn run(): Int? = withTimeout(Duration.seconds(5)) { work() }";
+    assert!(check(src).is_ok(), "{:?}", check(src).err());
+}
+
+#[test]
+fn with_timeout_rejects_non_duration() {
+    let src = "module A
+fn run(): Int? = withTimeout(5) { 1 }";
+    let kind = first_error_kind(src);
+    assert!(
+        matches!(kind, TypeErrorKind::Mismatch { .. } | TypeErrorKind::CannotUnify { .. }),
+        "expected a type mismatch for a non-Duration duration, got: {:?}", kind
+    );
+}
+
+#[test]
+fn with_timeout_body_type_mismatch_is_rejected() {
+    // The declared return type must be `Option<Int>`, not bare `Int` —
+    // confirms `withTimeout` really does wrap in `Option`, not pass through.
+    let src = "module A
+fn run(): Int = withTimeout(Duration.seconds(5)) { 1 }";
+    let kind = first_error_kind(src);
+    assert!(
+        matches!(kind, TypeErrorKind::Mismatch { .. } | TypeErrorKind::CannotUnify { .. }),
+        "expected a type mismatch (Option<Int> vs Int), got: {:?}", kind
+    );
+}
+
 // ------------------------------------------------------------------ //
 // Float32 / Char — BACKLOG item 75
 // ------------------------------------------------------------------ //

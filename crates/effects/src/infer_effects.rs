@@ -116,6 +116,13 @@ pub fn infer_expr(expr: &S<Expr>, env: &EffectEnv, out: &mut InferredEffects) {
             out.add(Effect::Async, expr.span, None);
         }
 
+        Expr::WithTimeout { duration, body, .. } => {
+            infer_expr(duration, env, out);
+            infer_expr(body, env, out);
+            // withTimeout spawns a background task, same as parallel/spawn.
+            out.add(Effect::Async, expr.span, None);
+        }
+
         Expr::For { iter, body, .. } => {
             infer_expr(iter, env, out);
             infer_expr(body, env, out);

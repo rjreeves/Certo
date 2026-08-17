@@ -893,9 +893,10 @@ typedef void* (*__certo_worker_fn)(void*);
   }
   /* Fixed-layout task header — the common prefix of every spawn context struct.
      WaitForSingleObject already natively supports a millisecond timeout on
-     the thread handle itself, so no extra completion signal is needed here. */
-  typedef struct { __certo_thread_t thread; } __certo_task_hdr_t;
-  static inline void __certo_task_hdr_init(__certo_task_hdr_t* hdr) { (void)hdr; }
+     the thread handle itself, so no extra completion signal is needed here.
+     `state` backs `withTimeout`'s safe-abandonment protocol below. */
+  typedef struct { __certo_thread_t thread; volatile int state; } __certo_task_hdr_t;
+  static inline void __certo_task_hdr_init(__certo_task_hdr_t* hdr) { hdr->state = 0; }
   static inline void __certo_task_signal_done(__certo_task_hdr_t* hdr) { (void)hdr; }
   /* `parallel(timeout: ...) { ... }` — BACKLOG item 81. Returns true if the
      thread finished within `timeout_ms` (clamped to >= 0), false on timeout.
@@ -907,6 +908,16 @@ typedef void* (*__certo_worker_fn)(void*);
       DWORD r = WaitForSingleObject(hdr->thread, (DWORD)timeout_ms);
       if (r == WAIT_OBJECT_0) { CloseHandle(hdr->thread); return true; }
       return false;
+  }
+  /* `withTimeout(d) { ... }` (BACKLOG item 122) — unlike `parallel(timeout:
+     ...)` above, the caller must be able to continue past the deadline
+     instead of panicking, so the worker thread can't just be leaked: it may
+     go on running for an arbitrary time after the joiner gives up on it.
+     Called by the worker's own trampoline once it loses the race (see
+     `__certo_task_hdr_try_finish` below) to release the now-unjoinable
+     thread handle itself. */
+  static inline void __certo_task_hdr_abandon_cleanup(__certo_task_hdr_t* hdr) {
+      CloseHandle(hdr->thread);
   }
 #else
   #include <pthread.h>
@@ -920,9 +931,10 @@ typedef void* (*__certo_worker_fn)(void*);
   /* Fixed-layout task header — the common prefix of every spawn context struct.
      `pthread_join` has no portable timeout (`pthread_timedjoin_np` is a
      Linux-only glibc extension), so a semaphore the worker posts on
-     completion backs the portable timed wait below. */
-  typedef struct { __certo_thread_t thread; sem_t done; } __certo_task_hdr_t;
-  static inline void __certo_task_hdr_init(__certo_task_hdr_t* hdr) { sem_init(&hdr->done, 0, 0); }
+     completion backs the portable timed wait below. `state` backs
+     `withTimeout`'s safe-abandonment protocol below. */
+  typedef struct { __certo_thread_t thread; sem_t done; volatile int state; } __certo_task_hdr_t;
+  static inline void __certo_task_hdr_init(__certo_task_hdr_t* hdr) { sem_init(&hdr->done, 0, 0); hdr->state = 0; }
   static inline void __certo_task_signal_done(__certo_task_hdr_t* hdr) { sem_post(&hdr->done); }
   /* `parallel(timeout: ...) { ... }` — BACKLOG item 81. Returns true if the
      thread finished within `timeout_ms` (clamped to >= 0), false on timeout.
@@ -939,6 +951,32 @@ typedef void* (*__certo_worker_fn)(void*);
       if (sem_timedwait(&hdr->done, &ts) == 0) { pthread_join(hdr->thread, NULL); return true; }
       return false;
   }
+  /* `withTimeout(d) { ... }` (BACKLOG item 122) — see the Win32 branch's own
+     comment above for why leaking (item 81's approach) isn't safe here. A
+     pthread can't be joined by the thread it belongs to, but it *can*
+     detach itself — after which the OS reclaims its resources on exit with
+     no join required from anyone. */
+  static inline void __certo_task_hdr_abandon_cleanup(__certo_task_hdr_t* hdr) {
+      (void)hdr;
+      pthread_detach(pthread_self());
+  }
 #endif
+/* `withTimeout`'s safe-abandonment protocol (BACKLOG item 122): a task's
+   `hdr.state` transitions exactly once, from 0 ("running") to either 1
+   ("abandoned by a timed-out joiner — the worker frees the context itself
+   once it finishes instead of signaling completion") or 2 ("finished
+   normally by the worker — the joiner's usual read-then-free path
+   applies"). Both transitions are attempted via the same atomic
+   compare-and-swap, so exactly one side ever wins regardless of whether the
+   joiner's deadline or the worker's own completion comes first — the loser
+   simply takes the other branch instead of touching the context again. This
+   needs no platform split: `__sync_bool_compare_and_swap` is a compiler
+   (not OS) intrinsic, available identically under both branches above. */
+static inline bool __certo_task_hdr_try_abandon(__certo_task_hdr_t* hdr) {
+    return __sync_bool_compare_and_swap(&hdr->state, 0, 1);
+}
+static inline bool __certo_task_hdr_try_finish(__certo_task_hdr_t* hdr) {
+    return __sync_bool_compare_and_swap(&hdr->state, 0, 2);
+}
 /* ---- end Certo runtime ---- */
 "#;

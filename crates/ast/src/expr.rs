@@ -169,6 +169,23 @@ pub enum Expr {
         span:    Span,
     },
 
+    /// `withTimeout(duration) { body }` — BACKLOG item 122. Runs `body` as a
+    /// background task; if it finishes before `duration` elapses, evaluates
+    /// to `Some(value)`. If the deadline passes first, evaluates to `None`
+    /// immediately (the caller is never blocked past the deadline) and the
+    /// task is abandoned rather than joined — cooperatively, not
+    /// preemptively: a loop inside `body` checks for cancellation at each
+    /// iteration and exits early, but a single long-running non-looping
+    /// call inside `body` runs to completion regardless. Resource cleanup
+    /// (thread handle, heap context) is always safe either way — whichever
+    /// side (the timing-out joiner or the eventually-finishing task) is
+    /// last to touch the task owns freeing it.
+    WithTimeout {
+        duration: Box<S<Expr>>,
+        body:     Box<S<Expr>>,
+        span:     Span,
+    },
+
     /// `db.transaction { ... }` — database transaction block
     Transaction {
         body: Box<S<Expr>>,

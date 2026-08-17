@@ -990,3 +990,37 @@ fn generic_record_match_arm_binding_gets_the_real_substituted_type_not_ty_var() 
     let HirExprKind::Match { arms, .. } = &f.body.as_ref().unwrap().kind else { panic!("expected a match expr") };
     assert_eq!(arms[0].body.ty, Ty::Float, "arm body (the bound `v`) must resolve to Float, not {:?}", arms[0].body.ty);
 }
+
+// ------------------------------------------------------------------ //
+// `withTimeout(duration) { body }` — BACKLOG item 122
+// ------------------------------------------------------------------ //
+
+#[test]
+fn with_timeout_desugars_to_deadline_spawn_and_join_timed_cancel() {
+    use crate::hir::HirStmt;
+    let m = lower(
+        "module A\nfn work(): Int = 1\nasync fn f(): Int? = withTimeout(Duration.seconds(5)) { work() }");
+    let HirItem::Fn(f) = m.items.iter().find(|it| matches!(it, HirItem::Fn(f) if f.name == "f")).unwrap() else { unreachable!() };
+    let HirExprKind::Block { stmts, tail } = &f.body.as_ref().unwrap().kind else {
+        panic!("expected a Block, got {:?}", f.body.as_ref().unwrap().kind)
+    };
+    assert_eq!(stmts.len(), 2, "expected [let deadline = ..., let task = spawn ...], got {:?}", stmts);
+    let HirStmt::Let { init, .. } = &stmts[0] else { panic!("expected a Let stmt") };
+    assert!(matches!(&init.kind, HirExprKind::BinOp { .. }), "expected the deadline math, got {:?}", init.kind);
+    let HirStmt::Let { init, .. } = &stmts[1] else { panic!("expected a Let stmt") };
+    assert!(matches!(&init.kind, HirExprKind::Spawn { .. }), "expected a Spawn, got {:?}", init.kind);
+    assert!(matches!(&tail.kind, HirExprKind::JoinTimedCancel { .. }), "expected JoinTimedCancel, got {:?}", tail.kind);
+}
+
+#[test]
+fn with_timeout_task_references_the_spawned_local() {
+    use crate::hir::HirStmt;
+    let m = lower(
+        "module A\nfn work(): Int = 1\nasync fn f(): Int? = withTimeout(Duration.seconds(5)) { work() }");
+    let HirItem::Fn(f) = m.items.iter().find(|it| matches!(it, HirItem::Fn(f) if f.name == "f")).unwrap() else { unreachable!() };
+    let HirExprKind::Block { stmts, tail } = &f.body.as_ref().unwrap().kind else { panic!("expected a Block") };
+    let HirStmt::Let { local: task_local, .. } = &stmts[1] else { panic!("expected the task Let stmt") };
+    let HirExprKind::JoinTimedCancel { task, .. } = &tail.kind else { panic!("expected JoinTimedCancel") };
+    assert!(matches!(&task.kind, HirExprKind::Local(id) if id == task_local),
+        "JoinTimedCancel's task must reference the spawned local, got {:?}", task.kind);
+}

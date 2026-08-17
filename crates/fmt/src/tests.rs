@@ -286,3 +286,22 @@ fn match_idempotent() {
     let out2 = fmt(&out1);
     assert_eq!(out1, out2, "match formatting not idempotent");
 }
+
+// ------------------------------------------------------------------ //
+// `withTimeout(duration) { body }` — BACKLOG item 122
+// ------------------------------------------------------------------ //
+
+#[test]
+fn with_timeout_round_trips() {
+    let out = fmt("module A\nasync fn f(): Int? = withTimeout(Duration.seconds(5)) {\n  work()\n}");
+    assert_contains(&out, "withTimeout(Duration.seconds(5)) {");
+    assert_contains(&out, "work()");
+}
+
+#[test]
+fn with_timeout_idempotent() {
+    let src  = "module A\nasync fn f(): Int? = withTimeout(Duration.seconds(5)) {\n  work()\n}";
+    let out1 = fmt(src);
+    let out2 = fmt(&out1);
+    assert_eq!(out1, out2, "withTimeout formatting not idempotent");
+}

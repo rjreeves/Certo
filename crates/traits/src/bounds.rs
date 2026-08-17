@@ -263,6 +263,10 @@ fn for_each_call<'a>(expr: &'a S<Expr>, visit: &mut dyn FnMut(&'a S<Expr>, &'a [
             for t in tasks { for_each_call(t, visit); }
             if let Some(to) = timeout { for_each_call(to, visit); }
         }
+        Expr::WithTimeout { duration, body, .. } => {
+            for_each_call(duration, visit);
+            for_each_call(body, visit);
+        }
         Expr::Transaction { body, .. } | Expr::Unsafe { body, .. } => {
             for_each_call(body, visit);
         }
