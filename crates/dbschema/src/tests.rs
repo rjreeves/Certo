@@ -23,6 +23,7 @@ fn record_type(name: &str, fields: &[(&str, &str)]) -> Decl {
     Decl::Type(TypeDecl {
         is_pub:      false,
         is_priv_ctor: false,
+        annotations: vec![],
         name:        ident(name),
         type_params: vec![],
         body:        TypeBody::Record(RecordTypeDef {

@@ -8,14 +8,35 @@ use crate::parse_type::{parse_type, parse_type_params, parse_module_path, parse_
 use crate::parse_expr::{parse_expr, parse_block};
 use crate::parse_pattern::parse_pattern;
 
-pub fn parse_decl(cur: &mut Cursor<'_>) -> Result<S<Decl>, ParseError> {
+/// Returns more than one declaration only for `extern` blocks (handled
+/// separately in `parse_module.rs`, before this function is ever called)
+/// and for a `type` declaration whose record body contains in-body `fn`
+/// methods (BACKLOG item 150) — desugared here into the original `TypeDecl`
+/// plus a synthesized `ImplDecl` carrying those methods, so every later
+/// compiler stage (resolve/typeck/hir/mir/codegen) sees exactly the same
+/// AST shape a hand-written `impl X { ... }` block already produces, with
+/// zero changes needed anywhere downstream of the parser.
+pub fn parse_decl(cur: &mut Cursor<'_>) -> Result<Vec<S<Decl>>, ParseError> {
     let span = cur.peek_span();
     if let Some(d) = try_parse_ui_generate(cur)? {
         let s = d.span;
-        return Ok(S::new(Decl::UiGenerate(d), s));
+        return Ok(vec![S::new(Decl::UiGenerate(d), s)]);
     }
+    let type_annotations = parse_type_marker_annotations(cur)?;
     let export_name = parse_export_annotation(cur)?;
     let is_pub = cur.eat(|t| matches!(t, Token::Pub)).is_some();
+
+    // Checked before the match below (rather than as a match guard) since
+    // `Some(Token::Fn)`'s own arm has no guard and would otherwise
+    // unconditionally win over a guarded catch-all for the same pattern,
+    // silently discarding a `@valueObject`/`@aggregate` written before a
+    // `fn` instead of rejecting it.
+    if !type_annotations.is_empty() && cur.peek() != Some(&Token::Type) {
+        return Err(ParseError {
+            kind: ParseErrorKind::Custom("`@valueObject`/`@aggregate` may only be used before `type`".into()),
+            span,
+        });
+    }
 
     match cur.peek() {
         Some(Token::Async) | Some(Token::Fn) => {
@@ -30,101 +51,115 @@ pub fn parse_decl(cur: &mut Cursor<'_>) -> Result<S<Decl>, ParseError> {
                 d.export_name = Some(name);
             }
             let s = d.span;
-            Ok(S::new(Decl::Fn(d), s))
+            Ok(vec![S::new(Decl::Fn(d), s)])
         }
         _ if export_name.is_some() => Err(ParseError {
             kind: ParseErrorKind::Custom("`@export(...)` may only be used before `pub fn`".into()),
             span,
         }),
         Some(Token::Type) => {
-            let d = parse_type_decl(cur, is_pub)?;
+            let (d, methods) = parse_type_decl(cur, is_pub, type_annotations)?;
             let s = d.span;
-            Ok(S::new(Decl::Type(d), s))
+            let mut decls = vec![S::new(Decl::Type(d.clone()), s)];
+            if !methods.is_empty() {
+                let impl_decl = ImplDecl {
+                    trait_path: None,
+                    type_path: certo_ast::types::ModulePath {
+                        segments: vec![d.name.clone()],
+                        span: d.name.span,
+                    },
+                    type_params: d.type_params.clone(),
+                    methods,
+                    span: s,
+                };
+                decls.push(S::new(Decl::Impl(impl_decl), s));
+            }
+            Ok(decls)
         }
         Some(Token::Val) => {
             let d = parse_val_decl(cur, is_pub)?;
             let s = d.span;
-            Ok(S::new(Decl::Val(d), s))
+            Ok(vec![S::new(Decl::Val(d), s)])
         }
         Some(Token::Var) => {
             let d = parse_var_decl(cur, is_pub)?;
             let s = d.span;
-            Ok(S::new(Decl::Var(d), s))
+            Ok(vec![S::new(Decl::Var(d), s)])
         }
         Some(Token::Trait) => {
             let d = parse_trait_decl(cur, is_pub)?;
             let s = d.span;
-            Ok(S::new(Decl::Trait(d), s))
+            Ok(vec![S::new(Decl::Trait(d), s)])
         }
         Some(Token::Impl) => {
             let d = parse_impl_decl(cur)?;
             let s = d.span;
-            Ok(S::new(Decl::Impl(d), s))
+            Ok(vec![S::new(Decl::Impl(d), s)])
         }
         Some(Token::StateMachine) => {
             let d = parse_statemachine(cur)?;
             let s = d.span;
-            Ok(S::new(Decl::StateMachine(d), s))
+            Ok(vec![S::new(Decl::StateMachine(d), s)])
         }
         Some(Token::Migration) => {
             let d = parse_migration(cur)?;
             let s = d.span;
-            Ok(S::new(Decl::Migration(d), s))
+            Ok(vec![S::new(Decl::Migration(d), s)])
         }
         Some(Token::View) => {
             let d = parse_view(cur)?;
             let s = d.span;
-            Ok(S::new(Decl::View(d), s))
+            Ok(vec![S::new(Decl::View(d), s)])
         }
         Some(Token::Form) => {
             let d = parse_form(cur)?;
             let s = d.span;
-            Ok(S::new(Decl::Form(d), s))
+            Ok(vec![S::new(Decl::Form(d), s)])
         }
         Some(Token::Test) => {
             let d = parse_test_decl(cur)?;
             let s = d.span;
-            Ok(S::new(Decl::Test(d), s))
+            Ok(vec![S::new(Decl::Test(d), s)])
         }
         Some(Token::Property) => {
             let d = parse_property_decl(cur)?;
             let s = d.span;
-            Ok(S::new(Decl::Property(d), s))
+            Ok(vec![S::new(Decl::Property(d), s)])
         }
         Some(Token::DbTest) => {
             let d = parse_dbtest_decl(cur)?;
             let s = d.span;
-            Ok(S::new(Decl::DbTest(d), s))
+            Ok(vec![S::new(Decl::DbTest(d), s)])
         }
         Some(Token::Import) => {
             let d = parse_import_decl(cur)?;
             let s = d.span;
-            Ok(S::new(Decl::Import(d), s))
+            Ok(vec![S::new(Decl::Import(d), s)])
         }
         Some(Token::Validator) => {
             let d = parse_validator_decl(cur, is_pub)?;
             let s = d.span;
-            Ok(S::new(Decl::Validator(d), s))
+            Ok(vec![S::new(Decl::Validator(d), s)])
         }
         Some(Token::Constraint) => {
             let d = parse_constraint_decl(cur, is_pub)?;
             let s = d.span;
-            Ok(S::new(Decl::Constraint(d), s))
+            Ok(vec![S::new(Decl::Constraint(d), s)])
         }
         Some(Token::Temporal) => {
             let d = parse_temporal_decl(cur, is_pub)?;
             let s = d.span;
-            Ok(S::new(Decl::Temporal(d), s))
+            Ok(vec![S::new(Decl::Temporal(d), s)])
         }
         Some(Token::RuleTest) => {
             let d = parse_rule_test_decl(cur)?;
             let s = d.span;
-            Ok(S::new(Decl::RuleTest(d), s))
+            Ok(vec![S::new(Decl::RuleTest(d), s)])
         }
         Some(Token::ValidatorTest) => {
             let d = parse_validator_test_decl(cur)?;
             let s = d.span;
-            Ok(S::new(Decl::ValidatorTest(d), s))
+            Ok(vec![S::new(Decl::ValidatorTest(d), s)])
         }
         other => {
             let found = other.map(|t| format!("{t:?}")).unwrap_or_else(|| "end of file".into());
@@ -241,6 +276,28 @@ fn try_parse_ui_generate(cur: &mut Cursor<'_>) -> Result<Option<UiGenerateDecl>,
     }))
 }
 
+/// `@valueObject` / `@aggregate` (spec §8.4/§8.5) — zero or more bare marker
+/// annotations before a `type` declaration (BACKLOG item 149). Recognized by
+/// exact name only, the same narrow-hardcoded-shape precedent `@export`/
+/// `@ui.generate` already establish rather than a general `@`-decorator
+/// system. Does not consume anything (returns an empty `Vec`) if the next
+/// token isn't one of these two exact names, so `@export(...)`/`@ui.generate`
+/// still parse normally afterward.
+fn parse_type_marker_annotations(cur: &mut Cursor<'_>) -> Result<Vec<String>, ParseError> {
+    let mut annotations = Vec::new();
+    loop {
+        let is_marker = matches!(cur.peek(), Some(Token::At))
+            && matches!(cur.peek2(), Some(Token::Ident(s)) if *s == "valueObject" || *s == "aggregate");
+        if !is_marker {
+            break;
+        }
+        cur.bump(); // @
+        let (name, _) = cur.expect_ident()?;
+        annotations.push(name);
+    }
+    Ok(annotations)
+}
+
 fn parse_export_annotation(cur: &mut Cursor<'_>) -> Result<Option<String>, ParseError> {
     if cur.eat(|t| matches!(t, Token::At)).is_none() {
         return Ok(None);
@@ -343,7 +400,13 @@ fn parse_fn_param(cur: &mut Cursor<'_>) -> Result<FnParam, ParseError> {
 // Type declaration
 // ------------------------------------------------------------------ //
 
-fn parse_type_decl(cur: &mut Cursor<'_>, is_pub: bool) -> Result<TypeDecl, ParseError> {
+/// Returns the parsed `TypeDecl` plus any in-body `fn` methods found inside
+/// a record body (BACKLOG item 150) — empty for every type shape other than
+/// `TypeBody::Record`, and for a record body with no in-body methods.
+/// `parse_decl`'s own `Token::Type` arm is what actually desugars a
+/// non-empty methods list into a synthesized `ImplDecl`; this function just
+/// threads them up from `parse_record_type_def`.
+fn parse_type_decl(cur: &mut Cursor<'_>, is_pub: bool, annotations: Vec<String>) -> Result<(TypeDecl, Vec<FnDecl>), ParseError> {
     let start = cur.expect(&Token::Type)?;
     let (name, name_span) = cur.expect_ident()?;
     let type_params = parse_type_params(cur)?;
@@ -354,10 +417,13 @@ fn parse_type_decl(cur: &mut Cursor<'_>, is_pub: bool) -> Result<TypeDecl, Parse
     // restricted to `impl X { ... }` blocks (enforced in typeck).
     let is_priv_ctor = cur.eat(|t| matches!(t, Token::Priv)).is_some();
 
+    let mut methods = Vec::new();
     let body = if is_priv_ctor {
         TypeBody::Sum(parse_sum_variants_no_leading_bar(cur)?)
     } else if cur.peek() == Some(&Token::LBrace) {
-        TypeBody::Record(parse_record_type_def(cur)?)
+        let (rec, ms) = parse_record_type_def(cur)?;
+        methods = ms;
+        TypeBody::Record(rec)
     } else if cur.peek() == Some(&Token::Bar) {
         // `type T = | Variant1 | Variant2` — leading bar present
         TypeBody::Sum(parse_sum_variants(cur)?)
@@ -374,16 +440,39 @@ fn parse_type_decl(cur: &mut Cursor<'_>, is_pub: bool) -> Result<TypeDecl, Parse
     };
 
     let span = start.to(cur.peek_span());
-    Ok(TypeDecl { is_pub, is_priv_ctor, name: S::new(name, name_span), type_params, body, span })
+    Ok((TypeDecl { is_pub, is_priv_ctor, annotations, name: S::new(name, name_span), type_params, body, span }, methods))
 }
 
-fn parse_record_type_def(cur: &mut Cursor<'_>) -> Result<RecordTypeDef, ParseError> {
+/// Returns the record's plain fields/computed fields plus any in-body `fn`
+/// methods (spec §8.5, BACKLOG item 150) — parsed with the exact same
+/// `parse_fn_decl` helper an ordinary `impl X { ... }` block's own method
+/// loop already uses (`parse_impl_decl` below), so a method here needs the
+/// identical explicit `name: Type` signature for every parameter that
+/// convention already requires (including any parameter meant as the
+/// receiver — this language has no `self`-keyword/implicit-receiver sugar
+/// anywhere, confirmed via existing `impl` blocks, which always spell the
+/// receiver as an ordinary named-and-typed parameter; this slice doesn't
+/// invent one either, only in-body `fn` parsing itself).
+fn parse_record_type_def(cur: &mut Cursor<'_>) -> Result<(RecordTypeDef, Vec<FnDecl>), ParseError> {
     let start = cur.expect(&Token::LBrace)?;
     let mut fields   = Vec::new();
     let mut computed = Vec::new();
+    let mut methods  = Vec::new();
 
     while cur.peek() != Some(&Token::RBrace) && !cur.at_end() {
         let _field_span = cur.peek_span();
+
+        // In-body `fn`/`pub fn`/`async fn` method (BACKLOG item 150) —
+        // desugars to a method on a synthesized `impl` block, so it's
+        // checked before the `computed`/plain-field arms below.
+        if matches!(cur.peek(), Some(Token::Fn) | Some(Token::Async))
+            || (cur.peek() == Some(&Token::Pub) && matches!(cur.peek2(), Some(Token::Fn) | Some(Token::Async)))
+        {
+            let is_pub = cur.eat(|t| matches!(t, Token::Pub)).is_some();
+            methods.push(parse_fn_decl(cur, is_pub)?);
+            cur.eat(|t| matches!(t, Token::Comma));
+            continue;
+        }
 
         // `computed fieldName: Type = expr`
         if let Some(Token::Ident(s)) = cur.peek() {
@@ -412,7 +501,7 @@ fn parse_record_type_def(cur: &mut Cursor<'_>) -> Result<RecordTypeDef, ParseErr
 
     let end = cur.expect(&Token::RBrace)?;
     let span = start.to(end);
-    Ok(RecordTypeDef { fields, computed, span })
+    Ok((RecordTypeDef { fields, computed, span }, methods))
 }
 
 fn parse_sum_variants(cur: &mut Cursor<'_>) -> Result<Vec<SumVariant>, ParseError> {

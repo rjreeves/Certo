@@ -54,7 +54,7 @@ pub fn parse(source: &str) -> Result<Module, Vec<ParseError>> {
             continue;
         }
         match parse_decl(&mut cur) {
-            Ok(d)  => decls.push(d),
+            Ok(ds) => decls.extend(ds),
             Err(e) => { errors.push(e); skip_to_next_decl(&mut cur); }
         }
     }
