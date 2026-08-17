@@ -255,6 +255,25 @@ error[E0205]: no field `userName` on type `User`
 
 **Cause:** Field access with a name that does not exist on the type.
 
+This also fires when **constructing** a record — a literal or a `.with(...)`
+copy-update that sets a field name the type doesn't declare:
+
+```
+error[E0205]: no field `totall` on type `Order`
+  --> src/main.cto:10:24
+   |
+10 |     Order { total: 5, totall: 10 }
+   |                       ^^^^^^ `Order` has no field named `totall`
+```
+
+```
+error[E0205]: no field `totall` on type `Order`
+  --> src/main.cto:12:14
+   |
+12 |     o.with(totall: 10)
+   |            ^^^^^^ `Order` has no field named `totall`
+```
+
 **Common causes:**
 
 | Symptom | Fix |
@@ -263,6 +282,11 @@ error[E0205]: no field `userName` on type `User`
 | Wrong type (accessing `User` field on an `Order`) | Verify the variable type |
 | Accessing a module function as a field (`text.len`) | Use function syntax: `Text.len(text)` |
 | Tuple access with `.0` | Tuple integer indexing is not supported; use `match (a, b) { (x, y) => x }` |
+| Typo'd field name in a record literal or `.with(...)` | Check the field name spelling against the type's declared fields |
+
+**Note:** setting a *computed* property (see `computed` in the language
+guide) instead produces `E0217`, not `E0205` — computed properties are
+rejected as "not settable," not "unknown."
 
 ---
 
