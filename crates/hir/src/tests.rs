@@ -705,3 +705,53 @@ fn expect_assertion_result_type_is_unit() {
     let body = lower_f_body("module A\nfn f(): Unit = (1).toBe(1)");
     assert_eq!(body.ty, Ty::Unit);
 }
+
+// `computed name: Ty = expr` field access (BACKLOG item 143) — field
+// access on a computed name must lower to a `Call` to the synthesized
+// accessor (`Type.name`, registered exactly like any other in-body `fn`
+// method — BACKLOG item 150), not a struct-field `Field` read.
+
+#[test]
+fn computed_field_access_lowers_to_a_call_not_a_field_read() {
+    let m = lower(
+        "module A\n\
+         type Order = { total: Int, computed isPositive: Bool = total > 0 }\n\
+         fn f(o: Order): Bool = o.isPositive"
+    );
+    let HirItem::Fn(f) = m.items.iter().find(|it| matches!(it, HirItem::Fn(f) if f.name == "f")).unwrap() else { unreachable!() };
+    let body = f.body.as_ref().expect("expected a body");
+    match &body.kind {
+        HirExprKind::Call { func, args } => {
+            assert!(matches!(&func.kind, HirExprKind::Global(name) if name == "Order.isPositive"));
+            assert_eq!(args.len(), 1, "the receiver is the call's sole argument");
+        }
+        other => panic!("expected a Call to Order.isPositive, got {other:?}"),
+    }
+}
+
+#[test]
+fn computed_field_access_return_type_is_the_declared_type() {
+    let m = lower(
+        "module A\n\
+         type Order = { total: Int, computed isPositive: Bool = total > 0 }\n\
+         fn f(o: Order): Bool = o.isPositive"
+    );
+    let HirItem::Fn(f) = m.items.iter().find(|it| matches!(it, HirItem::Fn(f) if f.name == "f")).unwrap() else { unreachable!() };
+    let body = f.body.as_ref().expect("expected a body");
+    assert_eq!(body.ty, Ty::Bool);
+}
+
+#[test]
+fn ordinary_field_access_on_a_type_with_computed_fields_is_still_a_field_read() {
+    // Regression: adding the computed-name fallback must not turn a real
+    // stored-field read into a call.
+    let m = lower(
+        "module A\n\
+         type Order = { total: Int, computed isPositive: Bool = total > 0 }\n\
+         fn f(o: Order): Int = o.total"
+    );
+    let HirItem::Fn(f) = m.items.iter().find(|it| matches!(it, HirItem::Fn(f) if f.name == "f")).unwrap() else { unreachable!() };
+    let body = f.body.as_ref().expect("expected a body");
+    assert!(matches!(&body.kind, HirExprKind::Field { field, .. } if field == "total"),
+        "expected a Field read of `total`, got {:?}", body.kind);
+}

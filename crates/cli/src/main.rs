@@ -1484,6 +1484,13 @@ pub(crate) fn type_error_to_diagnostic(e: &TypeError) -> Diagnostic {
             d
         }
 
+        TypeErrorKind::ComputedFieldNotSettable { field, type_name } => {
+            Diagnostic::error("E0217",
+                format!("`{}` is a computed property of `{}` — it's derived, not stored, and can't be set directly", field, type_name))
+                .with_span(e.span)
+                .with_note(format!("remove `{field}: ...` — it's computed automatically from `{type_name}`'s other fields"))
+        }
+
         TypeErrorKind::TemporalNotDuration { found } => {
             let names = assign_var_names(&[found]);
             Diagnostic::error("E0708",

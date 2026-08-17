@@ -20,6 +20,15 @@ pub struct TypeEnv {
     pub param_meta: HashMap<String, Vec<(String, bool)>>,
     /// Record type definitions: type_name → [(field_name, field_type)].
     pub record_fields: HashMap<String, Vec<(String, Ty)>>,
+    /// `computed` record properties (BACKLOG item 143): type_name →
+    /// [(computed_name, declared_type)]. Deliberately kept separate from
+    /// `record_fields` rather than merged in — a computed name has a type
+    /// for field-*access* purposes but is never a real stored field, so a
+    /// record literal (`TypeName { ... }`) or `.with(...)` copy-update
+    /// (BACKLOG item 151) must keep rejecting it exactly as before; only
+    /// `resolve_field_ty`'s read-access lookup checks this map, as a
+    /// fallback after `record_fields` itself misses.
+    pub computed_fields: HashMap<String, Vec<(String, Ty)>>,
     /// A type's own declared type-parameter vars: type_name → [TyVar, ...],
     /// in declaration order — the *same* vars `record_fields`'s stored field
     /// types (for a generic record) reference. A `TypeName { field: val }`
@@ -49,6 +58,7 @@ impl TypeEnv {
             constructor_vars: HashSet::new(),
             param_meta: HashMap::new(),
             record_fields: HashMap::new(),
+            computed_fields: HashMap::new(),
             type_param_vars: HashMap::new(),
             row_bounds: HashMap::new(),
             sum_variants: HashMap::new(),

@@ -1,6 +1,8 @@
-use certo_ast::span::S;
+use certo_ast::span::{S, Span};
 use certo_ast::decl::*;
-use certo_ast::expr::Expr;
+use certo_ast::expr::{Expr, Stmt};
+use certo_ast::pattern::Pattern;
+use certo_ast::types::{TypeExpr, ModulePath, TypeParam};
 use certo_lexer::Token;
 use crate::cursor::Cursor;
 use crate::error::{ParseError, ParseErrorKind};
@@ -423,6 +425,21 @@ fn parse_type_decl(cur: &mut Cursor<'_>, is_pub: bool, annotations: Vec<String>)
     } else if cur.peek() == Some(&Token::LBrace) {
         let (rec, ms) = parse_record_type_def(cur)?;
         methods = ms;
+        // `computed name: Ty = expr` (BACKLOG item 143) — desugared here
+        // into a real method on the same synthesized `impl` block item
+        // 150's in-body `fn`s already use, so field-access resolution
+        // (`crates/hir/src/lower.rs`'s `Expr::Field` arm) only needs to
+        // emit an ordinary call, not a new evaluation path. Each synthesized
+        // method's body prepends `val field = self.field` for every real
+        // stored field before the original (unmodified) computed
+        // expression — the same "destructure into locals" trick
+        // `let { x, y } = point` already uses — so a bare `paidAt` inside
+        // `computed isPaid: Bool = paidAt.isSome()` resolves as an
+        // ordinary local, with zero changes to how expression bodies are
+        // lowered anywhere downstream.
+        for c in &rec.computed {
+            methods.push(synthesize_computed_method(&name, name_span, &type_params, &rec.fields, c));
+        }
         TypeBody::Record(rec)
     } else if cur.peek() == Some(&Token::Bar) {
         // `type T = | Variant1 | Variant2` — leading bar present
@@ -441,6 +458,65 @@ fn parse_type_decl(cur: &mut Cursor<'_>, is_pub: bool, annotations: Vec<String>)
 
     let span = start.to(cur.peek_span());
     Ok((TypeDecl { is_pub, is_priv_ctor, annotations, name: S::new(name, name_span), type_params, body, span }, methods))
+}
+
+/// Desugars one `computed name: Ty = body` into a real method
+/// `fn name(self: TypeName<...>): Ty = { val f1 = self.f1; ...; body }`
+/// (BACKLOG item 143). `self`'s own type carries the record's type params
+/// as bare references (`TypeExpr::Param`), matching how a hand-written
+/// generic method's own receiver parameter would be written.
+fn synthesize_computed_method(
+    type_name: &str,
+    type_name_span: Span,
+    type_params: &[TypeParam],
+    fields: &[RecordFieldDef],
+    c: &ComputedFieldDef,
+) -> FnDecl {
+    let self_ty_args: Vec<S<TypeExpr>> = type_params.iter()
+        .map(|tp| S::new(TypeExpr::Param { name: tp.name.clone(), span: tp.name.span }, tp.name.span))
+        .collect();
+    let self_ty = S::new(TypeExpr::Named {
+        path: ModulePath { segments: vec![S::new(type_name.to_string(), type_name_span)], span: type_name_span },
+        args: self_ty_args,
+        span: type_name_span,
+    }, type_name_span);
+    let self_name = S::new("self".to_string(), c.span);
+    let self_param = FnParam { name: self_name.clone(), ty: self_ty, default: None, span: c.span };
+
+    let mut stmts: Vec<Stmt> = fields.iter().map(|f| {
+        let self_path = S::new(Expr::Path {
+            path: ModulePath { segments: vec![self_name.clone()], span: c.span },
+            span: c.span,
+        }, c.span);
+        let field_access = S::new(Expr::Field { expr: Box::new(self_path), field: f.name.clone(), span: c.span }, c.span);
+        Stmt::Val {
+            pattern: S::new(Pattern::Ident { name: f.name.clone(), span: f.name.span }, f.name.span),
+            ty: None,
+            value: field_access,
+            span: c.span,
+        }
+    }).collect();
+    stmts.push(Stmt::Expr { expr: c.body.clone(), span: c.body.span });
+    let body = S::new(Expr::Block { stmts, span: c.span }, c.span);
+
+    FnDecl {
+        is_async: false,
+        is_pub: true,
+        name: c.name.clone(),
+        // Empty, not `type_params.to_vec()` — matching every other in-body
+        // method (BACKLOG item 150): the record's own type params are
+        // introduced once, by the synthesized `ImplDecl` this method joins
+        // (`type_params: d.type_params.clone()` at the `parse_decl` call
+        // site), not re-declared per method.
+        type_params: Vec::new(),
+        params: vec![self_param],
+        ret_ty: Some(c.ty.clone()),
+        effects: None,
+        body: Some(body),
+        is_extern: false,
+        export_name: None,
+        span: c.span,
+    }
 }
 
 /// Returns the record's plain fields/computed fields plus any in-body `fn`

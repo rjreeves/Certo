@@ -451,6 +451,19 @@ fn hoist_decl(
                     .map(|f| (f.name.node.clone(), type_expr_to_ty(&f.ty.node, &mut ctx)))
                     .collect();
                 ctx.env.record_fields.insert(t.name.node.clone(), fields);
+
+                // `computed` properties (BACKLOG item 143) — registered
+                // separately from `record_fields` on purpose (see
+                // `TypeEnv.computed_fields`'s own doc comment): a computed
+                // name has a real declared type for read access, but must
+                // stay invisible to record-literal/`.with(...)`
+                // construction, which only ever consults `record_fields`.
+                if !rec.computed.is_empty() {
+                    let computed: Vec<(String, Ty)> = rec.computed.iter()
+                        .map(|c| (c.name.node.clone(), type_expr_to_ty(&c.ty.node, &mut ctx)))
+                        .collect();
+                    ctx.env.computed_fields.insert(t.name.node.clone(), computed);
+                }
             }
 
             // Register sum variants so constructors are bound in the environment.

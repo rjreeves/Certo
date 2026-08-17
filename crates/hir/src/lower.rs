@@ -55,6 +55,16 @@ struct Cx {
     /// construction and unboxed on read, since its real C storage is `void*`
     /// regardless of what concrete type it's instantiated to.
     record_field_types: HashMap<String, Vec<Ty>>,
+    /// `computed` property names per record type (BACKLOG item 143) — a
+    /// name in here is never a real struct field; `Expr::Field` lowering
+    /// checks this before falling through to `resolve_field_ty`'s ordinary
+    /// struct-read path, and instead emits a call to the synthesized
+    /// accessor method (`crates/parser/src/parse_decl.rs`'s
+    /// `synthesize_computed_method`, registered under `Type.name` — its
+    /// return type is already in `fn_ret_types` via the exact same
+    /// impl-method hoisting every other method uses, so no separate
+    /// type table is needed here).
+    computed_field_names: HashMap<String, Vec<String>>,
     /// LocalId → type, for local variables whose type is known (val bindings,
     /// function params). Lets a variable *reference* carry its type — needed so
     /// `match q { Some(x) => … }` knows `q`'s Option payload type.
@@ -80,6 +90,7 @@ impl Cx {
             variant_field_types: HashMap::new(),
             record_field_names:  HashMap::new(),
             record_field_types:  HashMap::new(),
+            computed_field_names: HashMap::new(),
             local_types:         HashMap::new(),
             errors:              Vec::new(),
         }
@@ -581,6 +592,10 @@ pub fn lower_module(module: &Module) -> Result<HirModule, Vec<LowerError>> {
                     .map(|f| ast_ty_to_ty_with_params(&f.ty.node, &tp_names))
                     .collect();
                 cx.record_field_types.insert(t.name.node.clone(), field_types);
+                if !rec.computed.is_empty() {
+                    let computed_names: Vec<String> = rec.computed.iter().map(|c| c.name.node.clone()).collect();
+                    cx.computed_field_names.insert(t.name.node.clone(), computed_names);
+                }
             }
         }
         // Register sum variant constructors and unit values.
@@ -1113,8 +1128,36 @@ fn lower_expr(expr: &S<Expr>, cx: &mut Cx) -> HirExpr {
                 HirExpr { kind: HirExprKind::Global(global_name), ty: Ty::Error, span }
             } else {
                 let base = lower_expr(expr, cx);
-                let (field_ty, boxed) = resolve_field_ty(&base.ty, &field.node, cx);
-                HirExpr { kind: HirExprKind::Field { base: Box::new(base), field: field.node.clone(), boxed }, ty: field_ty, span }
+                // `computed` properties (BACKLOG item 143) desugar to a
+                // call to the synthesized accessor method
+                // (`crates/parser/src/parse_decl.rs`'s
+                // `synthesize_computed_method`, registered under
+                // `Type.name` exactly like any other in-body `fn` method
+                // — BACKLOG item 150) rather than a struct-field read.
+                // Reuses the same `HirExprKind::Call`/`fn_ret_types`
+                // machinery an ordinary `Type.method(x)` call already
+                // uses — confirmed directly to already work correctly
+                // end-to-end via that call form before this field-access
+                // sugar was added, so no new return-type-unboxing logic
+                // is needed here either (MIR's own `Expr::App` lowering
+                // already handles a generic method's raw return the same
+                // way for every other call).
+                let is_computed = match &base.ty {
+                    Ty::Named { name, .. } => cx.computed_field_names.get(name)
+                        .map(|ns| ns.iter().any(|n| n == &field.node))
+                        .unwrap_or(false),
+                    _ => false,
+                };
+                if is_computed {
+                    let type_name = match &base.ty { Ty::Named { name, .. } => name.clone(), _ => unreachable!() };
+                    let qname = format!("{type_name}.{}", field.node);
+                    let call_ty = cx.fn_ret_types.get(&qname).cloned().unwrap_or(Ty::Error);
+                    let func = HirExpr { kind: HirExprKind::Global(qname), ty: Ty::Error, span };
+                    HirExpr { kind: HirExprKind::Call { func: Box::new(func), args: vec![base] }, ty: call_ty, span }
+                } else {
+                    let (field_ty, boxed) = resolve_field_ty(&base.ty, &field.node, cx);
+                    HirExpr { kind: HirExprKind::Field { base: Box::new(base), field: field.node.clone(), boxed }, ty: field_ty, span }
+                }
             }
         }
 

@@ -1,6 +1,7 @@
 use super::parse;
-use certo_ast::expr::{Expr, Lit, BinOp};
+use certo_ast::expr::{Expr, Lit, BinOp, Stmt};
 use certo_ast::decl::Decl;
+use certo_ast::pattern::Pattern;
 use certo_ast::span::S;
 
 fn ok(src: &str) -> certo_ast::module::Module {
@@ -302,6 +303,104 @@ fn in_body_fn_on_generic_record_carries_the_type_params_to_the_synthesized_impl(
     let Decl::Impl(i) = &m.decls[1].node else { panic!("expected impl decl") };
     assert_eq!(i.type_params.len(), 1);
     assert_eq!(i.type_params[0].name.node, "T");
+}
+
+// `computed name: Ty = expr` (BACKLOG item 143) — desugars into a
+// synthesized method on the same trailing `ImplDecl` item 150's in-body
+// `fn`s already use.
+
+#[test]
+fn computed_field_desugars_to_a_trailing_impl_method() {
+    let m = ok(
+        "module A\n\
+         type Invoice = {\n\
+         \x20   paidAt: Text?\n\
+         \x20   computed isPaid: Bool = Option.isSome(paidAt)\n\
+         }"
+    );
+    assert_eq!(m.decls.len(), 2, "expected TypeDecl + synthesized ImplDecl");
+    let Decl::Type(t) = &m.decls[0].node else { panic!("expected type decl first") };
+    let certo_ast::decl::TypeBody::Record(rec) = &t.body else { panic!("expected record body") };
+    assert_eq!(rec.fields.len(), 1, "computed must not be counted as a stored field");
+    assert_eq!(rec.computed.len(), 1);
+    assert_eq!(rec.computed[0].name.node, "isPaid");
+
+    let Decl::Impl(i) = &m.decls[1].node else { panic!("expected synthesized impl decl second") };
+    assert_eq!(i.methods.len(), 1);
+    assert_eq!(i.methods[0].name.node, "isPaid");
+    assert_eq!(i.methods[0].params.len(), 1, "expected a single synthesized receiver param");
+    assert_eq!(i.methods[0].params[0].name.node, "self");
+}
+
+#[test]
+fn computed_method_body_prepends_a_local_binding_per_stored_field() {
+    let m = ok(
+        "module A\n\
+         type Invoice = {\n\
+         \x20   paidAt: Text?\n\
+         \x20   total: Int\n\
+         \x20   computed isPaid: Bool = Option.isSome(paidAt)\n\
+         }"
+    );
+    let Decl::Impl(i) = &m.decls[1].node else { panic!("expected impl decl") };
+    let body = i.methods[0].body.as_ref().expect("expected a body");
+    let Expr::Block { stmts, .. } = &body.node else { panic!("expected a block body") };
+    // One `val` per stored field (paidAt, total), plus the original
+    // computed expression as the trailing statement.
+    assert_eq!(stmts.len(), 3);
+    assert!(matches!(&stmts[0], Stmt::Val { pattern, .. } if matches!(&pattern.node, Pattern::Ident { name, .. } if name.node == "paidAt")));
+    assert!(matches!(&stmts[1], Stmt::Val { pattern, .. } if matches!(&pattern.node, Pattern::Ident { name, .. } if name.node == "total")));
+    assert!(matches!(&stmts[2], Stmt::Expr { .. }));
+}
+
+#[test]
+fn multiple_computed_fields_are_grouped_into_one_synthesized_impl() {
+    let m = ok(
+        "module A\n\
+         type Order = {\n\
+         \x20   subtotal: Float\n\
+         \x20   computed total: Float = subtotal\n\
+         \x20   computed hasDiscount: Bool = subtotal > 0.0\n\
+         }"
+    );
+    let Decl::Impl(i) = &m.decls[1].node else { panic!("expected impl decl") };
+    assert_eq!(i.methods.len(), 2);
+    assert_eq!(i.methods[0].name.node, "total");
+    assert_eq!(i.methods[1].name.node, "hasDiscount");
+}
+
+#[test]
+fn computed_field_and_in_body_fn_method_combine_into_one_impl() {
+    let m = ok(
+        "module A\n\
+         type Cart = {\n\
+         \x20   total: Int\n\
+         \x20   computed isEmpty: Bool = total == 0\n\
+         \x20   fn addTotal(c: Cart, amount: Int): Int = c.total + amount\n\
+         }"
+    );
+    let Decl::Impl(i) = &m.decls[1].node else { panic!("expected impl decl") };
+    assert_eq!(i.methods.len(), 2);
+    assert_eq!(i.methods[0].name.node, "addTotal", "in-body fn methods collected first");
+    assert_eq!(i.methods[1].name.node, "isEmpty", "computed methods appended after");
+}
+
+#[test]
+fn computed_field_on_generic_record_carries_the_type_params_to_the_synthesized_impl() {
+    let m = ok(
+        "module A\n\
+         type Box<T> = {\n\
+         \x20   value: T\n\
+         \x20   computed described: Text = \"wrapped\"\n\
+         }"
+    );
+    let Decl::Impl(i) = &m.decls[1].node else { panic!("expected impl decl") };
+    assert_eq!(i.type_params.len(), 1);
+    assert_eq!(i.type_params[0].name.node, "T");
+    // The impl block introduces `T` once — the synthesized method itself
+    // must not re-declare it (BACKLOG item 150's own established
+    // in-body-method convention).
+    assert!(i.methods[0].type_params.is_empty());
 }
 
 #[test]

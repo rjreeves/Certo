@@ -30,6 +30,17 @@ pub enum TypeErrorKind {
     /// E0206 — name was not found in the type environment (should be caught by resolve, but belt+suspenders).
     UnboundName(String),
 
+    /// E0217 — a record literal or `.with(...)` copy-update (BACKLOG item
+    /// 151) tried to set a `computed` property (item 143) directly. A
+    /// dedicated check, not a reuse of E0205/`UnknownField`: without it,
+    /// direct literal construction surfaces this as a confusing raw C
+    /// compile error two stages later (`field designator does not refer
+    /// to any field`), and `.with(...)` doesn't surface it at all —
+    /// `.with(...)`'s own field-name validation silently drops any name
+    /// it doesn't recognize, confirmed directly (a real, separate,
+    /// pre-existing gap in `.with(...)`'s own validation, not fixed here).
+    ComputedFieldNotSettable { field: String, type_name: String },
+
     /// E0210 — a call to an `extern "C"` (FFI) function must be inside an `unsafe { }` block.
     FfiCallOutsideUnsafe { name: String },
 
@@ -97,6 +108,8 @@ impl TypeError {
                 format!("E0205: type `{}` has no field `{}`", on.display(), field),
             TypeErrorKind::UnboundName(name) =>
                 format!("E0206: unbound name `{}`", name),
+            TypeErrorKind::ComputedFieldNotSettable { field, type_name } =>
+                format!("E0217: `{}` is a computed property of `{}` — it's derived, not stored, and can't be set directly", field, type_name),
             TypeErrorKind::FfiCallOutsideUnsafe { name } =>
                 format!("E0210: call to extern function `{}` must be inside an `unsafe {{ }}` block", name),
             TypeErrorKind::NonDisplayableInterpolation { ty } =>
