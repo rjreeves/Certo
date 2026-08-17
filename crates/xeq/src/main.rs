@@ -62,8 +62,13 @@ fn main() {
             c.args(["run", &cfg.script, "--yes"]);
             c
         }
+        "ion" => {
+            let mut c = Command::new("ion-win");
+            c.arg(&cfg.script);
+            c
+        }
         other => {
-            eprintln!("error: unknown script type '.{}' — expected .ps1 or .zen", other);
+            eprintln!("error: unknown script type '.{}' — expected .ion, .ps1 or .zen", other);
             process::exit(1);
         }
     };
