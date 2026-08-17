@@ -869,54 +869,74 @@ fn lower_expr(expr: &S<Expr>, cx: &mut Cx) -> HirExpr {
                 .and_then(|s| cx.fn_params.get(s).cloned());
 
             let mut lowered_args: Vec<HirExpr> = if let Some(snames) = stdlib_names {
+                // List.map/groupBy's callback param is almost always
+                // unannotated; hint its type from the already-lowered
+                // scrutinee list's element type (BACKLOG item 113).
+                // `sortBy`/`minBy`/`maxBy`/`sumBy`'s own key-projection
+                // param needs the identical hint for the identical
+                // reason (BACKLOG item 162b) — confirmed directly: an
+                // unhinted `(x) => x` compiled to a bare `int64_t`
+                // local instead of a real `certo_fn_t` closure inside
+                // the per-call-site comparator `crates/mir/src/
+                // lower.rs`'s `lower_sort_by_call` synthesizes,
+                // producing "called object type 'int64_t' is not a
+                // function" — this same-shaped `(List<T>, T=>...)`
+                // call just never happened to have a lambda argument
+                // *and* live outside `BOXED_ABI_CALLEES` before now.
+                let needs_lambda_hint = matches!(fn_full_path.as_deref(),
+                    Some("List.map") | Some("List.groupBy")
+                    | Some("List.sortBy") | Some("List.minBy") | Some("List.maxBy") | Some("List.sumBy"));
                 // Stdlib function: only labeled reordering (no defaults).
                 if has_labels {
-                    let mut slots: Vec<Option<HirExpr>> = vec![None; snames.len()];
+                    // Determine each arg's target slot without lowering yet
+                    // (mirrors the plain positional/labeled reordering below
+                    // exactly, just deferring `lower_expr`), so that for a
+                    // needs_lambda_hint function the "list" slot's arg can be
+                    // lowered first regardless of written order — the hint
+                    // below only ever worked when the lambda happened to be
+                    // written in positional order (BACKLOG item 172: the
+                    // labeled branch always lowered every arg via plain
+                    // `lower_expr`, so a labeled call's inline lambda
+                    // param/body silently stayed `Ty::Error`, same as before
+                    // items 162b/170 fixed the positional-only case).
+                    let mut slot_for_arg: Vec<Option<usize>> = vec![None; args.len()];
+                    let mut taken = vec![false; snames.len()];
                     let mut pos_cursor = 0usize;
-                    for arg in args {
-                        let expr = lower_expr(&arg.value, cx);
-                        if let Some(label) = &arg.label {
-                            if let Some(idx) = snames.iter().position(|&n| n == label.node.as_str()) {
-                                slots[idx] = Some(expr);
-                            } else {
-                                while pos_cursor < slots.len() && slots[pos_cursor].is_some() { pos_cursor += 1; }
-                                if pos_cursor < slots.len() { slots[pos_cursor] = Some(expr); pos_cursor += 1; }
-                            }
+                    for (ai, arg) in args.iter().enumerate() {
+                        let label_idx = arg.label.as_ref()
+                            .and_then(|label| snames.iter().position(|&n| n == label.node.as_str()));
+                        let idx = if let Some(idx) = label_idx {
+                            Some(idx)
                         } else {
-                            while pos_cursor < slots.len() && slots[pos_cursor].is_some() { pos_cursor += 1; }
-                            if pos_cursor < slots.len() { slots[pos_cursor] = Some(expr); pos_cursor += 1; }
+                            while pos_cursor < taken.len() && taken[pos_cursor] { pos_cursor += 1; }
+                            if pos_cursor < taken.len() { let i = pos_cursor; pos_cursor += 1; Some(i) } else { None }
+                        };
+                        if let Some(i) = idx { taken[i] = true; }
+                        slot_for_arg[ai] = idx;
+                    }
+
+                    let list_slot_idx = if needs_lambda_hint { snames.iter().position(|&n| n == "list") } else { None };
+                    let lambda_slot_idx = if needs_lambda_hint {
+                        snames.iter().position(|&n| n == "f" || n == "key")
+                    } else { None };
+
+                    let mut slots: Vec<Option<HirExpr>> = vec![None; snames.len()];
+                    if let Some(list_idx) = list_slot_idx {
+                        if let Some(ai) = slot_for_arg.iter().position(|s| *s == Some(list_idx)) {
+                            slots[list_idx] = Some(lower_expr(&args[ai].value, cx));
                         }
                     }
-                    slots.into_iter().map(|maybe| {
-                        maybe.unwrap_or_else(|| HirExpr { kind: HirExprKind::Unit, ty: Ty::Error, span })
-                    }).collect()
-                } else {
-                    // List.map/groupBy's callback param is almost always
-                    // unannotated; hint its type from the already-lowered
-                    // scrutinee list's element type (BACKLOG item 113).
-                    // `sortBy`/`minBy`/`maxBy`/`sumBy`'s own key-projection
-                    // param needs the identical hint for the identical
-                    // reason (BACKLOG item 162b) — confirmed directly: an
-                    // unhinted `(x) => x` compiled to a bare `int64_t`
-                    // local instead of a real `certo_fn_t` closure inside
-                    // the per-call-site comparator `crates/mir/src/
-                    // lower.rs`'s `lower_sort_by_call` synthesizes,
-                    // producing "called object type 'int64_t' is not a
-                    // function" — this same-shaped `(List<T>, T=>...)`
-                    // call just never happened to have a lambda argument
-                    // *and* live outside `BOXED_ABI_CALLEES` before now.
-                    let needs_lambda_hint = matches!(fn_full_path.as_deref(),
-                        Some("List.map") | Some("List.groupBy")
-                        | Some("List.sortBy") | Some("List.minBy") | Some("List.maxBy") | Some("List.sumBy"));
-                    let mut out: Vec<HirExpr> = Vec::with_capacity(args.len());
-                    for (i, arg) in args.iter().enumerate() {
-                        if needs_lambda_hint && i == 1 {
+                    let list_ty_hint: Ty = list_slot_idx
+                        .and_then(|i| slots[i].as_ref())
+                        .and_then(|e| match &e.ty { Ty::List(inner) => Some((**inner).clone()), _ => None })
+                        .unwrap_or(Ty::Error);
+
+                    for (ai, arg) in args.iter().enumerate() {
+                        let Some(i) = slot_for_arg[ai] else { continue };
+                        if slots[i].is_some() { continue; }
+                        if Some(i) == lambda_slot_idx {
                             if let Expr::Lambda { params, body, .. } = &arg.value.node {
-                                let hint = out.first().and_then(|a: &HirExpr| match &a.ty {
-                                    Ty::List(inner) => Some((**inner).clone()),
-                                    _ => None,
-                                }).unwrap_or(Ty::Error);
-                                let lowered = lower_lambda_with_param_hint(params, body, &hint, cx, arg.value.span);
+                                let lowered = lower_lambda_with_param_hint(params, body, &list_ty_hint, cx, arg.value.span);
                                 // `sortBy`/`minBy`/`maxBy`/`sumBy`'s
                                 // key/numeric projection type restriction
                                 // (BACKLOG item 162b) is *mostly* enforced
@@ -934,6 +954,40 @@ fn lower_expr(expr: &S<Expr>, cx: &mut Cx) -> HirExpr {
                                 // without this, `List.sortBy` on a struct
                                 // list keyed by a Text field silently
                                 // miscompiled instead of erroring.
+                                let is_key_fn = matches!(fn_full_path.as_deref(),
+                                    Some("List.sortBy") | Some("List.minBy") | Some("List.maxBy") | Some("List.sumBy"));
+                                if is_key_fn {
+                                    if let HirExprKind::Lambda { body, .. } = &lowered.kind {
+                                        if !matches!(body.ty, Ty::Error) && !is_supported_key_ty(&body.ty) {
+                                            cx.err(LowerErrorKind::Unsupported(format!(
+                                                "`{}`'s key/numeric projection resolved to `{}`, which isn't \
+                                                 supported — only Int/Int8/Int16/Int32/UInt/Float/Float32 are \
+                                                 (Text's ordering isn't lexicographic here and Decimal has no \
+                                                 generic comparison/addition yet)",
+                                                fn_full_path.as_deref().unwrap_or(""), body.ty.display(),
+                                            )), arg.value.span);
+                                        }
+                                    }
+                                }
+                                slots[i] = Some(lowered);
+                                continue;
+                            }
+                        }
+                        slots[i] = Some(lower_expr(&arg.value, cx));
+                    }
+                    slots.into_iter().map(|maybe| {
+                        maybe.unwrap_or_else(|| HirExpr { kind: HirExprKind::Unit, ty: Ty::Error, span })
+                    }).collect()
+                } else {
+                    let mut out: Vec<HirExpr> = Vec::with_capacity(args.len());
+                    for (i, arg) in args.iter().enumerate() {
+                        if needs_lambda_hint && i == 1 {
+                            if let Expr::Lambda { params, body, .. } = &arg.value.node {
+                                let hint = out.first().and_then(|a: &HirExpr| match &a.ty {
+                                    Ty::List(inner) => Some((**inner).clone()),
+                                    _ => None,
+                                }).unwrap_or(Ty::Error);
+                                let lowered = lower_lambda_with_param_hint(params, body, &hint, cx, arg.value.span);
                                 let is_key_fn = matches!(fn_full_path.as_deref(),
                                     Some("List.sortBy") | Some("List.minBy") | Some("List.maxBy") | Some("List.sumBy"));
                                 if is_key_fn {
