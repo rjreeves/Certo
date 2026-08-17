@@ -1949,22 +1949,41 @@ fn lower_pat(pat: &S<certo_ast::pattern::Pattern>, scrut_ty: &Ty, cx: &mut Cx) -
                     None => Ty::Error,
                 },
             };
-            let lowered_fields: Vec<HirPat> = fields.iter().map(|pf| {
-                let field_ty = record_field_declared_ty(&named_ty, &pf.name.node, cx);
+            let field_types: Vec<Ty> = fields.iter()
+                .map(|pf| record_field_declared_ty(&named_ty, &pf.name.node, cx))
+                .collect();
+            // For naming a bound local's own type (and hinting a nested
+            // sub-pattern), substitute a bare type-param field (`Ty::Var`)
+            // with the scrutinee's own recovered instantiation argument —
+            // mirrors `Constructor`'s identical `binding_field_types`
+            // substitution just above (BACKLOG item 119/120), which this
+            // arm originally missed: without it, a bound field's *local*
+            // carried the record's raw, unsubstituted declared type
+            // (`Ty::Var(0)`) instead of the real concrete type, so a later
+            // reference to it (e.g. the match arm's own body) inferred the
+            // wrong HIR type and codegen mixed up a boxed `void*` with a
+            // real unboxed `double` — confirmed via a real repro (`match b
+            // { Box { value: v } => v, ... }` for `b: Box<Float>` failed to
+            // compile at the C stage) while verifying BACKLOG item 177.
+            // `field_types` above stays raw — `HirPat::Record` still needs
+            // it unsubstituted for the same reason `Constructor` does.
+            let named_args: &[Ty] = match &named_ty { Ty::Named { args, .. } => args, _ => &[] };
+            let binding_field_types: Vec<Ty> = field_types.iter().map(|fty| match fty {
+                Ty::Var(_) => named_args.first().cloned().unwrap_or_else(|| fty.clone()),
+                other => other.clone(),
+            }).collect();
+            let lowered_fields: Vec<HirPat> = fields.iter().zip(&binding_field_types).map(|(pf, bty)| {
                 match &pf.pattern {
-                    Some(sub) => lower_pat(sub, &field_ty, cx),
+                    Some(sub) => lower_pat(sub, bty, cx),
                     None => {
                         // shorthand `{ x }` = `{ x: x }`
                         let local = cx.define_local(&pf.name.node);
-                        if !matches!(field_ty, Ty::Error) { cx.local_types.insert(local, field_ty.clone()); }
+                        if !matches!(bty, Ty::Error) { cx.local_types.insert(local, bty.clone()); }
                         HirPat::Bind { local, name: pf.name.node.clone() }
                     }
                 }
             }).collect();
             let field_names: Vec<String> = fields.iter().map(|pf| pf.name.node.clone()).collect();
-            let field_types: Vec<Ty> = fields.iter()
-                .map(|pf| record_field_declared_ty(&named_ty, &pf.name.node, cx))
-                .collect();
             HirPat::Record { fields: lowered_fields, field_names, field_types }
         }
         // Guard / As — flatten to wildcard for now (full pattern compilation later)

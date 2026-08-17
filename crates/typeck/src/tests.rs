@@ -1670,3 +1670,74 @@ fn safe_field_access_on_a_non_optional_base_is_rejected() {
     );
 }
 
+// ------------------------------------------------------------------ //
+// Generic record patterns (BACKLOG item 177) — `check_pattern`'s
+// `Pattern::Record` arm previously unified against a permanently
+// arg-less `Ty::Named`, so any pattern on a generic record failed to
+// unify against the scrutinee's own real instantiation.
+// ------------------------------------------------------------------ //
+
+#[test]
+fn val_destructure_of_a_generic_record_type_checks() {
+    check(
+        "module A\n\
+         type Box<T> = { value: T }\n\
+         fn f(b: Box<Float>): Float = {\n\
+         \x20   val Box { value: v } = b\n\
+         \x20   v\n\
+         }"
+    ).unwrap();
+}
+
+#[test]
+fn match_arm_pattern_on_a_generic_record_type_checks() {
+    check(
+        "module A\n\
+         type Box<T> = { value: T }\n\
+         fn f(b: Box<Float>): Float = match b {\n\
+         \x20   Box { value: v } => v,\n\
+         \x20   _ => 0.0\n\
+         }"
+    ).unwrap();
+}
+
+#[test]
+fn bare_pattern_on_a_generic_record_type_checks() {
+    check(
+        "module A\n\
+         type Box<T> = { value: T }\n\
+         fn f(b: Box<Float>): Float = match b {\n\
+         \x20   { value: v } => v,\n\
+         \x20   _ => 0.0\n\
+         }"
+    ).unwrap();
+}
+
+#[test]
+fn generic_record_pattern_still_catches_a_real_type_mismatch() {
+    // Regression: fixing the false-positive unify failure must not turn
+    // into a false negative — using the bound field as the wrong type is
+    // still a real error.
+    let errs = check_err(
+        "module A\n\
+         type Box<T> = { value: T }\n\
+         fn f(b: Box<Float>): Text = {\n\
+         \x20   val Box { value: v } = b\n\
+         \x20   v\n\
+         }"
+    );
+    assert!(!errs.is_empty(), "returning a Float as Text must still be rejected");
+}
+
+#[test]
+fn non_generic_record_pattern_is_unaffected_by_the_generic_fix() {
+    check(
+        "module A\n\
+         type User = { name: Text, age: Int }\n\
+         fn f(u: User): Text = {\n\
+         \x20   val User { name: n, age: a } = u\n\
+         \x20   n\n\
+         }"
+    ).unwrap();
+}
+
