@@ -68,6 +68,16 @@ pub enum TypeErrorKind {
 
     /// E0709 — `.age` used on a non-Timestamp expression.
     AgeOnNonTimestamp { found: Ty },
+
+    /// E0710 — `List.sortBy`/`minBy`/`maxBy`/`sumBy`'s key/numeric
+    /// projection resolved to a type these functions don't support
+    /// (BACKLOG item 162b). Not a generic type mismatch: the projected
+    /// type is perfectly valid on its own, just not one of the types this
+    /// codebase's `<`/`>`/`+` C operators are correct for — `Text`'s `<`
+    /// is pointer comparison (not lexicographic) and `Decimal`'s `+`/`<`
+    /// don't compile at all (struct operands). Confirmed real numeric/
+    /// comparable set: `Int`/`Int8`/`Int16`/`Int32`/`UInt`/`Float`/`Float32`.
+    UnsupportedKeyType { fn_name: String, found: Ty },
 }
 
 impl TypeError {
@@ -107,6 +117,8 @@ impl TypeError {
                 format!("E0708: temporal body must resolve to Duration, found `{}`", found.display()),
             TypeErrorKind::AgeOnNonTimestamp { found } =>
                 format!("E0709: `.age` is only valid on Timestamp or Timestamp?, found `{}`", found.display()),
+            TypeErrorKind::UnsupportedKeyType { fn_name, found } =>
+                format!("E0710: `{}`'s key/numeric projection resolved to `{}`, which isn't supported — only Int/Int8/Int16/Int32/UInt/Float/Float32 are", fn_name, found.display()),
         }
     }
 }

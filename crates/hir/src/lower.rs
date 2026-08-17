@@ -171,6 +171,26 @@ fn stdlib_param_types() -> &'static HashMap<String, Vec<Ty>> {
             .into_iter()
             .filter_map(|name| match env.lookup(&name) {
                 Some(Ty::Fn { params, .. }) => Some((name, params.clone())),
+                // Generic stdlib functions (`List.map`, `List.sortBy`, etc)
+                // register as `Ty::Forall { body: Box<Ty::Fn>, .. }`, not a
+                // bare `Ty::Fn` — the match above silently excluded every
+                // one of them from this table (BACKLOG item 162b). Harmless
+                // for functions dispatched through `BOXED_ABI_CALLEES`
+                // (`List.map`'s own lambda-arg param types come from a
+                // completely separate mechanism, the call site's own list
+                // element type — see `crates/mir/src/lower.rs`'s
+                // `elem_ty_hint`), but `List.sortBy`/`minBy`/`maxBy`/
+                // `sumBy` are the first Forall-wrapped functions that both
+                // take a lambda argument *and* aren't in that list, so
+                // nothing had ever exercised this gap before: a bare
+                // unannotated `(x) => ...` key lambda's own param stayed
+                // `Ty::Error`, silently miscompiling to `int64_t` instead
+                // of the real element type — confirmed directly (`_l4(_l5)`:
+                // called object type 'int64_t' is not a function).
+                Some(Ty::Forall { body, .. }) => match body.as_ref() {
+                    Ty::Fn { params, .. } => Some((name, params.clone())),
+                    _ => None,
+                },
                 _ => None,
             })
             .collect()
@@ -191,8 +211,27 @@ fn generic_container_ret(full: Option<&str>, args: &[HirExpr]) -> Option<Ty> {
         }
         Some("List.getOrPanic") => args.first().and_then(list_elem),
         Some("List.filter") | Some("List.sort") | Some("List.reverse") | Some("List.distinct")
-        | Some("List.slice") | Some("List.concat") | Some("List.push") => {
+        | Some("List.slice") | Some("List.concat") | Some("List.push") | Some("List.sortBy") => {
             args.first().map(|a| a.ty.clone())
+        }
+        // `List.minBy`/`maxBy` (BACKLOG item 162b) — same shape as
+        // `List.first`/`.last`/`.find` above: `Option<T>` from the list's
+        // own element type, unrelated to the key projection's type.
+        Some("List.minBy") | Some("List.maxBy") => {
+            args.first().and_then(list_elem).map(|e| Ty::Option(Box::new(e)))
+        }
+        // `List.sumBy` (BACKLOG item 162b) — the key lambda's own resolved
+        // body type *is* the return type here (unlike `sortBy`/`minBy`/
+        // `maxBy`, which return the list's element type). Same recovery
+        // pattern as `List.map` just below: only available when the
+        // lambda's param hint let its body actually resolve.
+        Some("List.sumBy") => {
+            match args.get(1).map(|a| &a.kind) {
+                Some(HirExprKind::Lambda { body, .. }) if !matches!(body.ty, Ty::Error) => {
+                    Some(body.ty.clone())
+                }
+                _ => None,
+            }
         }
         Some("List.partition") => {
             args.first().map(|a| Ty::Tuple(vec![a.ty.clone(), a.ty.clone()]))
@@ -371,6 +410,16 @@ fn lower_lambda_with_param_hints(params: &[certo_ast::expr::LambdaParam], body: 
     HirExpr { kind: HirExprKind::Lambda { params: hir_params, body: Box::new(body), captures, ret_hint: ret_hint.clone() }, ty: Ty::Error, span }
 }
 
+/// `List.sortBy`/`minBy`/`maxBy`/`sumBy`'s key/numeric projection type
+/// restriction (BACKLOG item 162b) — mirrors `crates/typeck/src/
+/// infer_expr.rs`'s `is_supported_key_type`, kept in sync by hand since
+/// the two run at different pipeline stages against differently-resolved
+/// types (see the call site's own doc comment for why both exist).
+fn is_supported_key_ty(ty: &Ty) -> bool {
+    matches!(ty,
+        Ty::Int | Ty::Int8 | Ty::Int16 | Ty::Int32 | Ty::UInt | Ty::Float | Ty::Float32)
+}
+
 fn stdlib_param_names() -> HashMap<&'static str, &'static [&'static str]> {
     let mut m: HashMap<&'static str, &'static [&'static str]> = HashMap::new();
 
@@ -399,6 +448,10 @@ fn stdlib_param_names() -> HashMap<&'static str, &'static [&'static str]> {
     m.insert("List.all",        &["list", "pred"]);
     m.insert("List.sort",       &["list", "cmp"]);
     m.insert("List.zip",        &["a", "b"]);
+    m.insert("List.sortBy",     &["list", "key"]);
+    m.insert("List.minBy",      &["list", "key"]);
+    m.insert("List.maxBy",      &["list", "key"]);
+    m.insert("List.sumBy",      &["list", "key"]);
 
     // Map
     m.insert("Map.insert",      &["map", "key", "value"]);
@@ -811,7 +864,20 @@ fn lower_expr(expr: &S<Expr>, cx: &mut Cx) -> HirExpr {
                     // List.map/groupBy's callback param is almost always
                     // unannotated; hint its type from the already-lowered
                     // scrutinee list's element type (BACKLOG item 113).
-                    let needs_lambda_hint = matches!(fn_full_path.as_deref(), Some("List.map") | Some("List.groupBy"));
+                    // `sortBy`/`minBy`/`maxBy`/`sumBy`'s own key-projection
+                    // param needs the identical hint for the identical
+                    // reason (BACKLOG item 162b) — confirmed directly: an
+                    // unhinted `(x) => x` compiled to a bare `int64_t`
+                    // local instead of a real `certo_fn_t` closure inside
+                    // the per-call-site comparator `crates/mir/src/
+                    // lower.rs`'s `lower_sort_by_call` synthesizes,
+                    // producing "called object type 'int64_t' is not a
+                    // function" — this same-shaped `(List<T>, T=>...)`
+                    // call just never happened to have a lambda argument
+                    // *and* live outside `BOXED_ABI_CALLEES` before now.
+                    let needs_lambda_hint = matches!(fn_full_path.as_deref(),
+                        Some("List.map") | Some("List.groupBy")
+                        | Some("List.sortBy") | Some("List.minBy") | Some("List.maxBy") | Some("List.sumBy"));
                     let mut out: Vec<HirExpr> = Vec::with_capacity(args.len());
                     for (i, arg) in args.iter().enumerate() {
                         if needs_lambda_hint && i == 1 {
@@ -820,7 +886,40 @@ fn lower_expr(expr: &S<Expr>, cx: &mut Cx) -> HirExpr {
                                     Ty::List(inner) => Some((**inner).clone()),
                                     _ => None,
                                 }).unwrap_or(Ty::Error);
-                                out.push(lower_lambda_with_param_hint(params, body, &hint, cx, arg.value.span));
+                                let lowered = lower_lambda_with_param_hint(params, body, &hint, cx, arg.value.span);
+                                // `sortBy`/`minBy`/`maxBy`/`sumBy`'s
+                                // key/numeric projection type restriction
+                                // (BACKLOG item 162b) is *mostly* enforced
+                                // in typeck (E0710) — but typeck can't see
+                                // through a field access on a struct
+                                // element (`(p) => p.price`), since its own
+                                // `resolve_field_ty` returns a permanently
+                                // disconnected fresh var for field access
+                                // on a still-unbound type, before this
+                                // hint even exists. This lowered lambda's
+                                // body, by contrast, *is* correctly typed
+                                // here (the hint was just applied), so this
+                                // is the first point a field-access key can
+                                // actually be checked — confirmed directly:
+                                // without this, `List.sortBy` on a struct
+                                // list keyed by a Text field silently
+                                // miscompiled instead of erroring.
+                                let is_key_fn = matches!(fn_full_path.as_deref(),
+                                    Some("List.sortBy") | Some("List.minBy") | Some("List.maxBy") | Some("List.sumBy"));
+                                if is_key_fn {
+                                    if let HirExprKind::Lambda { body, .. } = &lowered.kind {
+                                        if !matches!(body.ty, Ty::Error) && !is_supported_key_ty(&body.ty) {
+                                            cx.err(LowerErrorKind::Unsupported(format!(
+                                                "`{}`'s key/numeric projection resolved to `{}`, which isn't \
+                                                 supported — only Int/Int8/Int16/Int32/UInt/Float/Float32 are \
+                                                 (Text's ordering isn't lexicographic here and Decimal has no \
+                                                 generic comparison/addition yet)",
+                                                fn_full_path.as_deref().unwrap_or(""), body.ty.display(),
+                                            )), arg.value.span);
+                                        }
+                                    }
+                                }
+                                out.push(lowered);
                                 continue;
                             }
                         }
@@ -1124,15 +1223,21 @@ fn lower_expr(expr: &S<Expr>, cx: &mut Cx) -> HirExpr {
                 .map(|f| (f.name.node.clone(), lower_expr(&f.value, cx)))
                 .collect();
             let hir_fields = if let Some(b) = base {
-                // Spread: `TypeName { ..base, field: val }`.
-                // Desugar into a full record literal by emitting base.field for every
-                // field not explicitly listed, using the explicit value for listed ones.
+                // Spread: `TypeName { ..base, field: val }`, or `.with(...)`'s
+                // desugar (BACKLOG item 151), which has no syntactic
+                // `ty_name` at all — `base_hir.ty` (already resolved by
+                // typeck before HIR lowering ever runs) is the fallback
+                // source of the record's real name in that case.
                 let base_hir = lower_expr(b, cx);
                 // Stash the base expression in a fresh local so it's evaluated once.
                 let base_local = cx.fresh_local();
                 // We'll reference the base via HirExprKind::Local for each field access.
-                let base_ty = record_ty.clone();
-                let all_fields: Vec<String> = ty_name.as_deref()
+                let base_ty = if matches!(record_ty, Ty::Error) { base_hir.ty.clone() } else { record_ty.clone() };
+                let base_ty_name: Option<&str> = ty_name.as_deref().or_else(|| match &base_ty {
+                    Ty::Named { name, .. } => Some(name.as_str()),
+                    _ => None,
+                });
+                let all_fields: Vec<String> = base_ty_name
                     .and_then(|n| cx.record_field_names.get(n).cloned())
                     .unwrap_or_else(|| explicit.iter().map(|(n, _)| n.clone()).collect());
 
@@ -1162,7 +1267,7 @@ fn lower_expr(expr: &S<Expr>, cx: &mut Cx) -> HirExpr {
                         (field_name.clone(), field_access)
                     }
                 }).collect();
-                let (record_ty, field_types) = recover_generic_record_ty(ty_name.as_deref(), &merged, cx);
+                let (record_ty, field_types) = recover_generic_record_ty(base_ty_name, &merged, cx);
                 let record_expr = HirExpr { kind: HirExprKind::Record { fields: merged, field_types }, ty: record_ty.clone(), span };
                 return HirExpr {
                     kind: HirExprKind::Block { stmts: vec![base_let], tail: Box::new(record_expr) },

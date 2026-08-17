@@ -1500,6 +1500,14 @@ pub(crate) fn type_error_to_diagnostic(e: &TypeError) -> Diagnostic {
                 .with_note("only fields of type Timestamp support `.age`")
         }
 
+        TypeErrorKind::UnsupportedKeyType { fn_name, found } => {
+            let names = assign_var_names(&[found]);
+            Diagnostic::error("E0710",
+                format!("`{}`'s key/numeric projection resolved to `{}`, which isn't supported", fn_name, found.display_named(&names)))
+                .with_span(e.span)
+                .with_note("only Int/Int8/Int16/Int32/UInt/Float/Float32 are supported — Text's ordering isn't lexicographic here and Decimal has no generic comparison/addition yet")
+        }
+
         TypeErrorKind::FfiCallOutsideUnsafe { name } => {
             Diagnostic::error("E0210",
                 format!("call to extern function `{}` must be inside an `unsafe {{ }}` block", name))

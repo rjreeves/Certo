@@ -358,6 +358,82 @@ pub fn infer(expr: &S<Expr>, ctx: &mut Ctx<'_>) -> Ty {
                 }
             }
 
+            // `List.sortBy`/`minBy`/`maxBy`/`sumBy`'s key/numeric projection
+            // (BACKLOG item 162b) — checked after unification so the
+            // lambda's own inferred return type is as resolved as it's
+            // going to get. Registered with an unrestricted `K`/`N` type
+            // var (matching the spec's own `K: Ord`/`N: Numeric` bounds),
+            // but only a real, closed set of types is *accepted*: this
+            // codebase's `<`/`>`/`+` C operators are only correct for
+            // plain numeric C types — `Text`'s `<` is pointer comparison,
+            // not lexicographic, and `Decimal`'s `+`/`<` don't compile at
+            // all (struct operands) — see `crates/mir/src/lower.rs`'s
+            // per-call-site comparator/adder synthesis, which relies on
+            // this check having already ruled those out.
+            const KEY_PROJECTING_CALLEES: &[&str] =
+                &["List.sortBy", "List.minBy", "List.maxBy", "List.sumBy"];
+            // NOTE: deliberately re-derived here rather than reusing the
+            // `fn_name` computed above — that variable's `Expr::Path`-only
+            // derivation never resolves a module-qualified callee written
+            // as `List.sortBy(...)` (parsed as `Expr::Field`, not
+            // `Expr::Path` — see `qualified_call_name`'s own doc comment),
+            // so `fn_name` is always `None` for every real call site this
+            // check needs to fire on. Confirmed directly: with the shared
+            // `fn_name`, this block never ran at all for
+            // `List.sortBy(names, (x) => x)`, silently admitting an
+            // unsupported `Text` key with no diagnostic. Reusing
+            // `qualified_call_name` (already used by `resolve_callee`
+            // above for exactly this same gap) fixes this check without
+            // touching the shared `fn_name`/`arg_info` derivation, which
+            // has its own, wider blast radius across labeled-arg
+            // reordering for every other module-qualified stdlib call —
+            // out of scope for BACKLOG item 162b.
+            let key_check_name = match &func.node {
+                Expr::Path { path, .. } => path.segments.last().map(|s| s.node.clone()),
+                Expr::Field { expr, field, .. } => qualified_call_name(expr, field),
+                _ => None,
+            };
+            if let Some(name) = &key_check_name {
+                if KEY_PROJECTING_CALLEES.contains(&name.as_str()) {
+                    if let Some((key_fn_ty, key_span)) = arg_info.get(1) {
+                        if let Ty::Fn { ret, .. } = ctx.uf.apply(key_fn_ty) {
+                            let resolved_key = ctx.uf.apply(&ret);
+                            // A key projection that does field access on a
+                            // struct element (`(p) => p.price`) can't be
+                            // resolved here at all: typeck's own
+                            // `Expr::Field` inference (`resolve_field_ty`)
+                            // returns a brand-new, permanently disconnected
+                            // fresh var for field access on a still-
+                            // unbound base type — confirmed directly, this
+                            // stays `Ty::Var` forever regardless of later
+                            // unification, since no constraint is ever
+                            // recorded linking it back to the field name.
+                            // Flagging a bare `Ty::Var` here would reject
+                            // every legitimate struct-element key (Float
+                            // included), a real regression confirmed by
+                            // testing `List.sortBy(products, (p) =>
+                            // p.price)`. HIR's *own* field resolution
+                            // (`crates/hir/src/lower.rs`'s `resolve_field_ty`)
+                            // correctly resolves this after the per-call-
+                            // site lambda param hint is applied, so the
+                            // genuinely-unsupported cases (Text/Decimal
+                            // struct fields) are instead caught there, as
+                            // E0601 — this check only covers what typeck
+                            // can actually see (bare/identity projections).
+                            if !matches!(resolved_key, Ty::Var(_)) && !is_supported_key_type(&resolved_key) {
+                                ctx.errors.push(TypeError {
+                                    kind: TypeErrorKind::UnsupportedKeyType {
+                                        fn_name: name.clone(),
+                                        found: resolved_key,
+                                    },
+                                    span: *key_span,
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+
             ret_ty
         }
 
@@ -506,13 +582,27 @@ pub fn infer(expr: &S<Expr>, ctx: &mut Ctx<'_>) -> Ty {
                 .map(|f| (f.name.node.clone(), infer(&f.value, ctx)))
                 .collect();
 
+            // Captured when `base` resolves to a nominal type, so a
+            // `ty_name: None` spread (e.g. `.with(...)`'s desugar — BACKLOG
+            // item 151 — which has no syntactic type name at its call site)
+            // can still return the *same* nominal type as `base` below,
+            // rather than degrading to a structural `Ty::Record` that would
+            // no longer unify against an ordinary use of that type.
+            let mut base_named: Option<Ty> = None;
+
             if let Some(b) = base {
                 let base_ty = infer(b, ctx);
                 let base_ty = ctx.uf.apply(&base_ty);
                 // Accept both structural Ty::Record and nominal Ty::Named (record spread).
                 let resolved = match &base_ty {
-                    Ty::Named { name, .. } => ctx.env.record_fields.get(name.as_str()).cloned()
-                        .map(Ty::Record),
+                    Ty::Named { .. } => {
+                        base_named = Some(base_ty.clone());
+                        if let Ty::Named { name, .. } = &base_ty {
+                            ctx.env.record_fields.get(name.as_str()).cloned().map(Ty::Record)
+                        } else {
+                            None
+                        }
+                    }
                     other => Some(other.clone()),
                 };
                 if let Some(Ty::Record(mut base_fields)) = resolved {
@@ -556,6 +646,13 @@ pub fn infer(expr: &S<Expr>, ctx: &mut Ctx<'_>) -> Ty {
                 }
                 let args: Vec<Ty> = type_params.iter().map(|v| subst[v].clone()).collect();
                 Ty::Named { name: name.clone(), args }
+            } else if let Some(named) = base_named {
+                // `.with(...)`'s desugar (BACKLOG item 151): no syntactic
+                // `ty_name`, but `base` was nominal — stay that same nominal
+                // type rather than degrading to a structural `Ty::Record`,
+                // so the result still unifies anywhere the original type is
+                // expected (e.g. passed to a `Type.method(...)` call).
+                named
             } else {
                 Ty::Record(field_tys)
             }
@@ -690,6 +787,17 @@ pub fn infer(expr: &S<Expr>, ctx: &mut Ctx<'_>) -> Ty {
 /// conversions codegen emits in `coerce_to_text` (Int/Float/Bool/Decimal/Text).
 fn is_displayable(ty: &Ty) -> bool {
     matches!(ty, Ty::Int | Ty::Float | Ty::Bool | Ty::Decimal(_) | Ty::Text)
+}
+
+/// Types `List.sortBy`/`minBy`/`maxBy`/`sumBy`'s key/numeric projection can
+/// resolve to (BACKLOG item 162b) — the real, closed set this codebase's
+/// `<`/`>`/`+` C operators are correct for (`emit_binop`,
+/// `crates/codegen/src/emit_mir.rs`). Must stay in sync with
+/// `crates/mir/src/lower.rs`'s per-call-site comparator/adder synthesis,
+/// which trusts this check has already ruled out everything else.
+fn is_supported_key_type(ty: &Ty) -> bool {
+    matches!(ty,
+        Ty::Int | Ty::Int8 | Ty::Int16 | Ty::Int32 | Ty::UInt | Ty::Float | Ty::Float32)
 }
 
 // ------------------------------------------------------------------ //

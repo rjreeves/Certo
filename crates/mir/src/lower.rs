@@ -611,6 +611,262 @@ fn lower_flip_call(f_expr: &HirExpr, b: &mut Builder) -> Operand {
     make_closure(&outer_name, Operand::Local(outer_env_dest), flip_result_ty, b)
 }
 
+/// `List.sortBy(list, key)` (BACKLOG item 162b) — synthesizes a comparator
+/// per call site and delegates to the already-real, already-working
+/// `List.sort`. The comparator can't be an ordinary hand-written C runtime
+/// function the way `List.map`'s callback dispatch is, for two independent
+/// reasons discovered while investigating this item: (1) the *key* type
+/// `K` is only known concretely at each call site (typeck's own
+/// `is_supported_key_type` check has already ruled out anything `<`/`>`
+/// aren't correct for by the time this runs); (2) `certo_list_sort`'s C
+/// implementation (`crates/stdlib/src/collections.rs`) casts the
+/// comparator's `.fn` slot directly to `CertoCmp = int64_t(*)(void*,void*,
+/// void*)` — a fixed, fully-erased signature — so the synthesized
+/// comparator's own two element params must be `void*`-boxed exactly like
+/// an ordinary user lambda passed to a `BOXED_ABI_CALLEES` function (see
+/// `lower_lambda_boxed`), even though `List.sort` itself isn't in that
+/// list (confirmed directly: a hand-written comparator over a *struct*-
+/// element list already fails to compile today, a real, separate,
+/// pre-existing gap in `List.sort` — not something this item touches,
+/// since building the comparator with the boxed shape from the start
+/// sidesteps it entirely rather than depending on it being fixed).
+fn lower_sort_by_call(list_expr: &HirExpr, key_expr: &HirExpr, b: &mut Builder) -> Operand {
+    let list_op = lower_value_expr(list_expr, b);
+    let key_op = lower_value_expr(key_expr, b);
+    // `key_expr.ty` itself is always `Ty::Error` for an inline lambda —
+    // `lower_lambda_with_param_hints` only ever fixes the lambda's *own*
+    // internal param type, never its outer `HirExpr.ty` field. The real,
+    // fully-resolved `Ty::Fn{params,ret}` only exists on the *lowered*
+    // closure value's own declared local type (set by `make_closure` in
+    // the `HirExprKind::Lambda` arm above), so it must be recovered via
+    // `infer_operand_ty` after lowering, not read off the HIR node.
+    let key_ty = infer_operand_ty(&key_op, b);
+    let (t_ty, k_ty) = match &key_ty {
+        Ty::Fn { params, ret } if params.len() == 1 => (params[0].clone(), (**ret).clone()),
+        other => (other.clone(), Ty::Error),
+    };
+    let env_ty = Ty::Tuple(vec![key_ty.clone()]);
+    let env_dest = b.declare_local("_sortby_env", env_ty);
+    b.assign(env_dest, Rvalue::Aggregate(AggregateKind::Tuple, vec![key_op]));
+
+    let idx = b.lambda_count;
+    b.lambda_count += 1;
+    let wrap_name = format!("__sort_by_cmp_{}_{}", b.fn_name, idx);
+
+    let mut lb = Builder::new(&wrap_name, b.record_field_types.clone(), b.variant_field_types.clone(), b.fn_param_tys.clone(), b.fn_ret_tys.clone());
+    // `CertoCmp` returns a plain `int64_t`, not the generic boxed-`Var(0)`
+    // convention `lower_lambda_boxed`'s own return uses — a real, narrower
+    // type is fine here since `certo_list_sort`'s C body only ever treats
+    // this return value as a raw comparison result, never round-trips it
+    // through a generic slot.
+    let ret_slot = lb.declare_local("_ret", Ty::Int);
+    let env_param = lb.declare_local("_env", Ty::Error);
+    // The two element params are always `void*`-boxed (see doc comment
+    // above) regardless of whether `T` itself would otherwise fit a raw
+    // pointer-sized slot — matching exactly how `lower_lambda_boxed`
+    // declares its own callback params, for the identical reason.
+    let a_raw = lb.declare_local("_a_boxed", Ty::Var(0));
+    let b_raw = lb.declare_local("_b_boxed", Ty::Var(0));
+
+    let key_local = lb.declare_local("_key", key_ty.clone());
+    lb.assign(key_local, Rvalue::Field { base: Operand::Local(env_param), field: "0".into() });
+
+    let a_local = lb.declare_local("_a", t_ty.clone());
+    lb.assign(a_local, Rvalue::Unbox { value: Operand::Local(a_raw), ty: t_ty.clone() });
+    let b_local = lb.declare_local("_b", t_ty.clone());
+    lb.assign(b_local, Rvalue::Unbox { value: Operand::Local(b_raw), ty: t_ty.clone() });
+
+    let ka_local = lb.declare_local("_ka", k_ty.clone());
+    let next1 = lb.new_block();
+    lb.terminate(Terminator::Call { func: Operand::Local(key_local), args: vec![Operand::Local(a_local)], dest: ka_local, next: next1 });
+    lb.switch_to(next1);
+
+    let kb_local = lb.declare_local("_kb", k_ty.clone());
+    let next2 = lb.new_block();
+    lb.terminate(Terminator::Call { func: Operand::Local(key_local), args: vec![Operand::Local(b_local)], dest: kb_local, next: next2 });
+    lb.switch_to(next2);
+
+    // if ka < kb then -1 else if ka > kb then 1 else 0
+    let lt_local = lb.declare_local("_lt", Ty::Bool);
+    lb.assign(lt_local, Rvalue::BinOp { op: certo_hir::BinOp::Lt, lhs: Operand::Local(ka_local), rhs: Operand::Local(kb_local) });
+    let lt_bb = lb.new_block();
+    let ge_bb = lb.new_block();
+    lb.terminate(Terminator::If { cond: Operand::Local(lt_local), true_bb: lt_bb, false_bb: ge_bb });
+
+    lb.switch_to(lt_bb);
+    lb.assign(ret_slot, Rvalue::Use(Operand::Const(MirConst::Int(-1))));
+    emit_defers_then_return(Operand::Local(ret_slot), &mut lb);
+
+    lb.switch_to(ge_bb);
+    let gt_local = lb.declare_local("_gt", Ty::Bool);
+    lb.assign(gt_local, Rvalue::BinOp { op: certo_hir::BinOp::Gt, lhs: Operand::Local(ka_local), rhs: Operand::Local(kb_local) });
+    let gt_bb = lb.new_block();
+    let eq_bb = lb.new_block();
+    lb.terminate(Terminator::If { cond: Operand::Local(gt_local), true_bb: gt_bb, false_bb: eq_bb });
+
+    lb.switch_to(gt_bb);
+    lb.assign(ret_slot, Rvalue::Use(Operand::Const(MirConst::Int(1))));
+    emit_defers_then_return(Operand::Local(ret_slot), &mut lb);
+
+    lb.switch_to(eq_bb);
+    lb.assign(ret_slot, Rvalue::Use(Operand::Const(MirConst::Int(0))));
+    emit_defers_then_return(Operand::Local(ret_slot), &mut lb);
+
+    let wrap_fn = MirFn { name: wrap_name.clone(), param_count: 3, locals: lb.locals, blocks: lb.blocks };
+    b.lifted_fns.extend(lb.lifted_fns);
+    b.lifted_fns.push(wrap_fn);
+
+    // Opaque, matching `lower_lambda_boxed`'s own choice: this closure is
+    // only ever consumed by `certo_list_sort`'s own raw `.fn`/`.env` cast,
+    // never called via `emit_callee`'s locally-typed-cast path.
+    let cmp_op = make_closure(&wrap_name, Operand::Local(env_dest), opaque_fn_ty(), b);
+
+    let dest = b.declare_local("_sorted", Ty::List(Box::new(t_ty)));
+    let next = b.new_block();
+    b.terminate(Terminator::Call { func: Operand::Global("List.sort".into()), args: vec![list_op, cmp_op], dest, next });
+    b.switch_to(next);
+    Operand::Local(dest)
+}
+
+/// `List.minBy`/`List.maxBy` (BACKLOG item 162b) — `List.sortBy` ascending
+/// then take the first/last element. Reuses `lower_sort_by_call` entirely
+/// rather than a second, independent comparator synthesis; `List.first`/
+/// `List.last` already correctly heap-box-aware-unwrap their `Option<T>`
+/// result (see `OPT_UNWRAP_CALLEES` above), so no new unboxing logic is
+/// needed here either.
+fn lower_min_max_by_call(list_expr: &HirExpr, key_expr: &HirExpr, take_last: bool, b: &mut Builder) -> Operand {
+    let sorted_op = lower_sort_by_call(list_expr, key_expr, b);
+    // Recover `T` from the sorted list's own real declared type rather than
+    // `key_expr.ty` (always `Ty::Error` for an inline lambda — see the
+    // identical note in `lower_sort_by_call`).
+    let t_ty = match infer_operand_ty(&sorted_op, b) {
+        Ty::List(inner) => *inner,
+        other => other,
+    };
+
+    let needs_unwrap = t_ty.needs_heap_box();
+    let raw_dest = b.declare_local("_minmax_raw", if needs_unwrap { Ty::Option(Box::new(Ty::Error)) } else { Ty::Option(Box::new(t_ty.clone())) });
+    let next = b.new_block();
+    let fn_name = if take_last { "List.last" } else { "List.first" };
+    b.terminate(Terminator::Call { func: Operand::Global(fn_name.into()), args: vec![sorted_op], dest: raw_dest, next });
+    b.switch_to(next);
+    if needs_unwrap {
+        let real = b.declare_local("_minmax", Ty::Option(Box::new(t_ty.clone())));
+        b.assign(real, Rvalue::UnwrapOptStructBox { value: Operand::Local(raw_dest), ty: Ty::Option(Box::new(t_ty)) });
+        Operand::Local(real)
+    } else {
+        Operand::Local(raw_dest)
+    }
+}
+
+/// `List.sumBy(list, key)` (BACKLOG item 162b) — synthesizes a dedicated
+/// named summation function per call site rather than reusing
+/// `List.fold`: it's called directly (`Operand::Global`, never passed
+/// around as a closure *value*), so unlike `List.sortBy`'s comparator it
+/// needs none of the generic `certo_fn_t`/`void*` boxing — its real,
+/// concrete `(List<T>, T=>N) -> N` signature is used as-is, exactly like
+/// any other ordinary top-level function `certo_list_get_or_panic`/etc are
+/// called with. Manually loops (mirroring `HirExprKind::For`'s own
+/// hand-rolled loop lowering just above, including its identical
+/// `List.getOrPanic` unboxing for a `Float`/heap-boxed element type)
+/// rather than delegating to `List.fold`, since accumulating through
+/// *that* function's own generic `void*` accumulator slot would reintroduce
+/// exactly the boxing question this function exists to avoid — `N` is
+/// real and already known to be a plain numeric C type at this point
+/// (typeck's `is_supported_key_type`), so a raw `+` and a real zero
+/// literal are both always correct here.
+fn lower_sum_by_call(list_expr: &HirExpr, key_expr: &HirExpr, b: &mut Builder) -> Operand {
+    let list_op = lower_value_expr(list_expr, b);
+    let key_op = lower_value_expr(key_expr, b);
+    // See the identical note in `lower_sort_by_call`: `key_expr.ty` is
+    // always `Ty::Error` for an inline lambda, so the real type must come
+    // from the lowered closure value's own declared local type.
+    let key_ty = infer_operand_ty(&key_op, b);
+    let (t_ty, n_ty) = match &key_ty {
+        Ty::Fn { params, ret } if params.len() == 1 => (params[0].clone(), (**ret).clone()),
+        other => (other.clone(), Ty::Error),
+    };
+
+    let idx = b.lambda_count;
+    b.lambda_count += 1;
+    let wrap_name = format!("__sum_by_{}_{}", b.fn_name, idx);
+
+    let mut lb = Builder::new(&wrap_name, b.record_field_types.clone(), b.variant_field_types.clone(), b.fn_param_tys.clone(), b.fn_ret_tys.clone());
+    let ret_slot = lb.declare_local("_ret", n_ty.clone());
+    let list_param = lb.declare_local("_list", Ty::List(Box::new(t_ty.clone())));
+    let key_param = lb.declare_local("_key", key_ty.clone());
+
+    let zero = match &n_ty {
+        Ty::Float | Ty::Float32 => Operand::Const(MirConst::Float(0.0)),
+        _ => Operand::Const(MirConst::Int(0)),
+    };
+    let acc_local = lb.declare_local("_acc", n_ty.clone());
+    lb.assign(acc_local, Rvalue::Use(zero));
+
+    let len_local = lb.declare_local("_len", Ty::Int);
+    let len_done = lb.new_block();
+    lb.terminate(Terminator::Call { func: Operand::Global("List.len".into()), args: vec![Operand::Local(list_param)], dest: len_local, next: len_done });
+    lb.switch_to(len_done);
+
+    let i_local = lb.declare_local("_i", Ty::Int);
+    lb.assign(i_local, Rvalue::Use(Operand::Const(MirConst::Int(0))));
+
+    let test_bb = lb.new_block();
+    let body_bb = lb.new_block();
+    let exit_bb = lb.new_block();
+    lb.terminate(Terminator::Goto(test_bb));
+
+    lb.switch_to(test_bb);
+    let cmp = lb.declare_local("_cmp", Ty::Bool);
+    lb.assign(cmp, Rvalue::BinOp { op: certo_hir::BinOp::Lt, lhs: Operand::Local(i_local), rhs: Operand::Local(len_local) });
+    lb.terminate(Terminator::If { cond: Operand::Local(cmp), true_bb: body_bb, false_bb: exit_bb });
+
+    lb.switch_to(body_bb);
+    // Same `List.getOrPanic` raw-`void*`-return unboxing `HirExprKind::For`
+    // above already needs for exactly the same reason (Float bit-pattern,
+    // or a struct element too wide for a pointer-sized slot).
+    let elem_needs_unbox = matches!(t_ty, Ty::Float) || t_ty.needs_heap_box();
+    let elem_raw = lb.declare_local("_elem_raw", if elem_needs_unbox { Ty::Var(0) } else { t_ty.clone() });
+    let elem_done = lb.new_block();
+    lb.terminate(Terminator::Call { func: Operand::Global("List.getOrPanic".into()), args: vec![Operand::Local(list_param), Operand::Local(i_local)], dest: elem_raw, next: elem_done });
+    lb.switch_to(elem_done);
+    let elem_local = if elem_needs_unbox {
+        let real = lb.declare_local("_elem", t_ty.clone());
+        lb.assign(real, Rvalue::Unbox { value: Operand::Local(elem_raw), ty: t_ty.clone() });
+        real
+    } else {
+        elem_raw
+    };
+
+    let key_val = lb.declare_local("_kval", n_ty.clone());
+    let key_done = lb.new_block();
+    lb.terminate(Terminator::Call { func: Operand::Local(key_param), args: vec![Operand::Local(elem_local)], dest: key_val, next: key_done });
+    lb.switch_to(key_done);
+
+    let acc_new = lb.declare_local("_acc_new", n_ty.clone());
+    lb.assign(acc_new, Rvalue::BinOp { op: certo_hir::BinOp::Add, lhs: Operand::Local(acc_local), rhs: Operand::Local(key_val) });
+    lb.assign(acc_local, Rvalue::Use(Operand::Local(acc_new)));
+
+    let i_new = lb.declare_local("_i_new", Ty::Int);
+    lb.assign(i_new, Rvalue::BinOp { op: certo_hir::BinOp::Add, lhs: Operand::Local(i_local), rhs: Operand::Const(MirConst::Int(1)) });
+    lb.assign(i_local, Rvalue::Use(Operand::Local(i_new)));
+    lb.terminate(Terminator::Goto(test_bb));
+
+    lb.switch_to(exit_bb);
+    lb.assign(ret_slot, Rvalue::Use(Operand::Local(acc_local)));
+    emit_defers_then_return(Operand::Local(ret_slot), &mut lb);
+
+    let wrap_fn = MirFn { name: wrap_name.clone(), param_count: 2, locals: lb.locals, blocks: lb.blocks };
+    b.lifted_fns.extend(lb.lifted_fns);
+    b.lifted_fns.push(wrap_fn);
+
+    let dest = b.declare_local("_sum", n_ty);
+    let next = b.new_block();
+    b.terminate(Terminator::Call { func: Operand::Global(wrap_name), args: vec![list_op, key_op], dest, next });
+    b.switch_to(next);
+    Operand::Local(dest)
+}
+
 /// Wrap a lifted lambda's generated global function and its closure
 /// environment into a `certo_fn_t { fn, env }` value in the *enclosing*
 /// builder `b` — BACKLOG item 140. `ty` is the closure's own declared
@@ -1044,6 +1300,20 @@ fn lower_expr(expr: &HirExpr, b: &mut Builder) -> Operand {
                 // doc comment for the nested-closure design.
                 if name == "flip" && args.len() == 1 {
                     return lower_flip_call(&args[0], b);
+                }
+                // `List.sortBy`/`minBy`/`maxBy`/`sumBy` — BACKLOG item 162b.
+                // See `lower_sort_by_call`'s own doc comment for why these
+                // need per-call-site synthesis rather than an ordinary
+                // hand-written C runtime function, same reasoning as
+                // `compose`/`const`/`flip` above.
+                if name == "List.sortBy" && args.len() == 2 {
+                    return lower_sort_by_call(&args[0], &args[1], b);
+                }
+                if (name == "List.minBy" || name == "List.maxBy") && args.len() == 2 {
+                    return lower_min_max_by_call(&args[0], &args[1], name == "List.maxBy", b);
+                }
+                if name == "List.sumBy" && args.len() == 2 {
+                    return lower_sum_by_call(&args[0], &args[1], b);
                 }
             }
             let func_op = lower_expr(func, b);

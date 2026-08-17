@@ -19,6 +19,7 @@ the fix, and a minimal reproduction.
 | [E0600–E0601](#e0600-e0601-hir-lowering-errors) | HIR lowering |
 | [E0700–E0702](#e0700-e0702-validator-rule-errors) | Validator rules |
 | [E0708–E0709](#e0708-e0709-temporal--age-errors) | Temporal / `.age` |
+| [E0710](#e0710-unsupported-keynumeric-projection-type) | `sortBy`/`minBy`/`maxBy`/`sumBy` projections |
 | [L001–L005](#l001-l005-lint-warnings) | Lint warnings |
 
 ---
@@ -1230,6 +1231,44 @@ error[E0709]: `.age` requires a Timestamp field, found `Int`
 
 **Fix:** Ensure the field is declared as `Timestamp` in the `type`, not as
 `Int` or `DateTime`.
+
+---
+
+## E0710  Unsupported key/numeric projection type
+
+```
+error[E0710]: `List.sortBy`'s key/numeric projection resolved to `Text`,
+which isn't supported — only Int/Int8/Int16/Int32/UInt/Float/Float32 are
+  --> src/rules.cto:12:29
+   |
+   = note: only Int/Int8/Int16/Int32/UInt/Float/Float32 are supported —
+     Text's ordering isn't lexicographic here and Decimal has no generic
+     comparison/addition yet
+```
+
+**Cause:** `List.sortBy`/`List.minBy`/`List.maxBy`/`List.sumBy`'s key or
+numeric projection function (the second argument) resolved to a type
+outside the supported set. This is a deliberate restriction, not a gap
+that will be lifted casually: this codebase's raw `<`/`>`/`+` C operators
+are only correct for `Int`/`Int8`/`Int16`/`Int32`/`UInt`/`Float`/`Float32`
+— `Text`'s `<` is a raw pointer comparison (not lexicographic), and
+`Decimal` is a struct with no generic `<`/`+` to synthesize a call to.
+
+**Fix:** Project through a supported numeric type instead — e.g. compare
+by a `Text` field's length rather than the `Text` itself, or convert a
+`Decimal` to `Float`/`Int` before comparing/summing:
+
+```certo
+// Wrong — Text key
+val sorted = List.sortBy(products, (p) => p.name)
+
+// Fix — project to a supported type
+val sorted = List.sortBy(products, (p) => Text.len(p.name))
+```
+
+Note that this restriction applies only to the *projected* key/numeric
+type — the list's element type `T` itself is unrestricted, including
+struct/record types.
 
 ---
 
