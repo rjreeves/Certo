@@ -59,6 +59,33 @@ fn import_aliased() {
     }
 }
 
+// `import when [key = "value"] X` (spec §3.5, BACKLOG item 144) — the
+// exact spec example uses `target`/`"wasm"`, but the key isn't special-cased
+// anywhere in the grammar, so any identifier is accepted.
+
+#[test]
+fn import_when_condition_parses() {
+    let m = ok("module A\nimport when [target = \"wasm\"] Stdlib.Text");
+    assert_eq!(m.imports.len(), 1);
+    let cond = m.imports[0].when.as_ref().expect("expected a when condition");
+    assert_eq!(cond.key, "target");
+    assert_eq!(cond.value, "wasm");
+}
+
+#[test]
+fn import_when_condition_works_with_named_import() {
+    let m = ok("module A\nimport when [target = \"wasm\"] Stdlib.Collections.{ List }");
+    assert!(m.imports[0].when.is_some());
+    assert!(matches!(&m.imports[0].kind, certo_ast::module::ImportKind::Named(_)));
+}
+
+#[test]
+fn ordinary_import_has_no_when_condition() {
+    // Regression: the common case (no `when` at all) must be unaffected.
+    let m = ok("module A\nimport Stdlib.DateTime");
+    assert!(m.imports[0].when.is_none());
+}
+
 // ------------------------------------------------------------------ //
 // Declarations
 // ------------------------------------------------------------------ //

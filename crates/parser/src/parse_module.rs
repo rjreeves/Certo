@@ -76,25 +76,35 @@ fn parse_import(cur: &mut Cursor<'_>) -> Result<Import, ParseError> {
     let is_pub = cur.eat(|t| matches!(t, Token::Pub)).is_some();
     cur.expect(&Token::Import)?;
 
-    // `import when [target = "wasm"] ...`
-    let when = if let Some(Token::Ident(s)) = cur.peek() {
-        if *s == "when" {
-            cur.bump();
-            cur.expect(&Token::LBracket)?;
-            let (key, _) = cur.expect_ident()?;
-            cur.expect(&Token::Eq)?;
-            let (tok, tok_span) = cur.bump().ok_or(ParseError {
-                kind: ParseErrorKind::UnexpectedEof, span: start,
-            })?;
-            let value = if let Token::StringLit(s) = tok { s.to_string() } else {
-                return Err(ParseError {
-                    kind: ParseErrorKind::Expected { expected: "string".into(), found: format!("{tok:?}") },
-                    span: tok_span,
-                });
-            };
-            cur.expect(&Token::RBracket)?;
-            Some(ImportCondition { key, value, span: start })
-        } else { None }
+    // `import when [target = "wasm"] ...` (spec §3.5, BACKLOG item 144) — `when`
+    // is always lexed as the dedicated `Token::When` keyword (the same one
+    // `parse_decl.rs`'s trigger-condition parsing already checks correctly),
+    // never as a plain `Token::Ident("when")`, so this must match the real
+    // token. Accepted-and-ignored, same treatment as item 149's `@valueObject`/
+    // `@aggregate` annotations: the condition is parsed and stored on
+    // `Import.when` (round-trips through `certo fmt`, which already formats
+    // it defensively), but nothing downstream ever reads it to gate the
+    // import — this compiler has no build-target concept for it to gate
+    // against (`certo-wasm` is a real alternate backend, but a wholly
+    // separate binary sharing no target/platform notion with the main
+    // `certo` CLI; building real gating means inventing that concept from
+    // scratch, a separate, larger, undesigned task — not attempted here).
+    let when = if cur.peek() == Some(&Token::When) {
+        cur.bump();
+        cur.expect(&Token::LBracket)?;
+        let (key, _) = cur.expect_ident()?;
+        cur.expect(&Token::Eq)?;
+        let (tok, tok_span) = cur.bump().ok_or(ParseError {
+            kind: ParseErrorKind::UnexpectedEof, span: start,
+        })?;
+        let value = if let Token::StringLit(s) = tok { s.to_string() } else {
+            return Err(ParseError {
+                kind: ParseErrorKind::Expected { expected: "string".into(), found: format!("{tok:?}") },
+                span: tok_span,
+            });
+        };
+        cur.expect(&Token::RBracket)?;
+        Some(ImportCondition { key, value, span: start })
     } else { None };
 
     let path = parse_module_path(cur)?;
