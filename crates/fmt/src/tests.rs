@@ -34,6 +34,14 @@ fn aliased_import() {
     assert_contains(&out, "import Stdlib.DateTime as DT");
 }
 
+#[test]
+fn import_when_condition_round_trips() {
+    // BACKLOG item 144 — `import when [target = "wasm"]` must round-trip
+    // through the formatter unchanged, not get silently dropped.
+    let out = fmt("module A\nimport when [target = \"wasm\"] Stdlib.Text");
+    assert_contains(&out, "import when [target = \"wasm\"] Stdlib.Text");
+}
+
 // ------------------------------------------------------------------ //
 // fn declarations
 // ------------------------------------------------------------------ //
