@@ -903,3 +903,24 @@ fn bare_record_pattern_shorthand_field_binds_a_local() {
         other => panic!("expected HirPat::Record, got {other:?}"),
     }
 }
+
+#[test]
+fn generic_record_match_arm_binding_gets_the_real_substituted_type_not_ty_var() {
+    // Regression (found while verifying BACKLOG item 177): a bound field's
+    // *local* must carry the scrutinee's real instantiation type (`Float`),
+    // not the record's raw, unsubstituted declared type (`Ty::Var(0)`) —
+    // otherwise a later reference to it (here, the arm's own body) infers
+    // the wrong HIR type and codegen mismatches a boxed `void*` against a
+    // real unboxed `double`.
+    let m = lower(
+        "module A\n\
+         type Box<T> = { value: T }\n\
+         fn f(b: Box<Float>): Float = match b {\n\
+         \x20   Box { value: v } => v,\n\
+         \x20   _ => 0.0\n\
+         }"
+    );
+    let HirItem::Fn(f) = m.items.iter().find(|it| matches!(it, HirItem::Fn(f) if f.name == "f")).unwrap() else { unreachable!() };
+    let HirExprKind::Match { arms, .. } = &f.body.as_ref().unwrap().kind else { panic!("expected a match expr") };
+    assert_eq!(arms[0].body.ty, Ty::Float, "arm body (the bound `v`) must resolve to Float, not {:?}", arms[0].body.ty);
+}

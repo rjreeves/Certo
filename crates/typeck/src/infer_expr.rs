@@ -1381,11 +1381,28 @@ fn check_pattern(pat: &certo_ast::pattern::Pattern, expected: Ty, ctx: &mut Ctx<
             let declared = type_name.as_ref().and_then(|n| ctx.env.record_fields.get(n).cloned());
 
             if let (Some(name), Some(declared)) = (&type_name, &declared) {
+                // A generic record's declared field types (`record_fields`)
+                // reference its own type-param vars, minted *once* at the
+                // type's own hoisting — each pattern occurrence must
+                // instantiate them fresh and unify against the record's
+                // *real* instantiation args, not a permanently empty
+                // `args` (BACKLOG item 177, found while verifying item
+                // 145's own match-arm record-pattern fix) — mirrors
+                // `Expr::Record`'s own identical, already-correct fix for
+                // record-*literal* construction just above in this same
+                // function. Empty for a non-generic type, matching the
+                // previous (correct) behaviour exactly.
+                let type_params = ctx.env.type_param_vars.get(name.as_str()).cloned().unwrap_or_default();
+                let subst: HashMap<TyVar, Ty> = type_params.iter().map(|&v| {
+                    *ctx.counter += 1;
+                    (v, Ty::Var(*ctx.counter))
+                }).collect();
+                let args: Vec<Ty> = type_params.iter().map(|v| subst[v].clone()).collect();
                 let inst = ctx.instantiate(expected);
-                ctx.unify(Ty::Named { name: name.clone(), args: vec![] }, inst, *span);
+                ctx.unify(Ty::Named { name: name.clone(), args }, inst, *span);
                 for f in fields {
                     let field_ty = declared.iter().find(|(n, _)| n == &f.name.node)
-                        .map(|(_, t)| t.clone())
+                        .map(|(_, t)| t.apply_subst(&subst))
                         .unwrap_or_else(|| ctx.fresh());
                     match &f.pattern {
                         Some(p) => check_pattern(&p.node, field_ty, ctx),
