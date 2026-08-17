@@ -1,4 +1,5 @@
 use certo_ast::module::{Module, Import, ImportKind};
+use certo_ast::decl::Decl;
 use crate::fmt_decl::fmt_decl;
 
 /// Format a complete module to canonical Certo source.
@@ -20,8 +21,17 @@ pub fn fmt_module(module: &Module) -> String {
         }
     }
 
-    // Declarations — blank line between each
+    // Declarations — blank line between each. Skips a synthesized trailing
+    // `impl` block (BACKLOG item 175): its content — in-body `fn` methods
+    // and `computed` properties — is already fully represented by the
+    // preceding `type`'s own body, which `fmt_type_decl` prints directly;
+    // printing the synthesized impl too would duplicate it (and for a
+    // `computed` property, produce output that fails to recompile at all,
+    // since both copies would define the same accessor).
     for sdecl in &module.decls {
+        if let Decl::Impl(i) = &sdecl.node {
+            if i.is_synthesized { continue; }
+        }
         out.push('\n');
         out.push_str(&fmt_decl(&sdecl.node, 0));
         out.push('\n');

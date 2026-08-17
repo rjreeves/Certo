@@ -73,6 +73,7 @@ pub fn parse_decl(cur: &mut Cursor<'_>) -> Result<Vec<S<Decl>>, ParseError> {
                     },
                     type_params: d.type_params.clone(),
                     methods,
+                    is_synthesized: true,
                     span: s,
                 };
                 decls.push(S::new(Decl::Impl(impl_decl), s));
@@ -712,7 +713,10 @@ fn parse_record_type_def(cur: &mut Cursor<'_>) -> Result<(RecordTypeDef, Vec<FnD
 
     let end = cur.expect(&Token::RBrace)?;
     let span = start.to(end);
-    Ok((RecordTypeDef { fields, computed, span }, methods))
+    // `methods` is retained on `RecordTypeDef` itself (in original,
+    // un-desugared form) purely for `certo fmt` to round-trip from
+    // (BACKLOG item 175) — see `RecordTypeDef::methods`'s own doc comment.
+    Ok((RecordTypeDef { fields, computed, methods: methods.clone(), span }, methods))
 }
 
 fn parse_sum_variants(cur: &mut Cursor<'_>) -> Result<Vec<SumVariant>, ParseError> {
@@ -851,7 +855,7 @@ fn parse_impl_decl(cur: &mut Cursor<'_>) -> Result<ImplDecl, ParseError> {
     }
     let end = cur.expect(&Token::RBrace)?;
     let span = start.to(end);
-    Ok(ImplDecl { trait_path, type_path, type_params, methods, span })
+    Ok(ImplDecl { trait_path, type_path, type_params, methods, is_synthesized: false, span })
 }
 
 // ------------------------------------------------------------------ //
