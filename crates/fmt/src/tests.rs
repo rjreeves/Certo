@@ -145,6 +145,35 @@ fn hand_written_standalone_impl_block_still_prints_normally() {
     assert_contains(&out, "fn get(b: Box): Int");
 }
 
+// BACKLOG item 176 — `certo fmt` previously dropped a record literal's type
+// name entirely, and formatted a `.with(...)` copy-update using a bare
+// `with` keyword that isn't valid expression syntax anywhere in this
+// language — both produced output that fails to re-parse.
+
+#[test]
+fn record_literal_keeps_its_type_name() {
+    let out = fmt("module A\ntype Point = { x: Int, y: Int }\nfn f(): Point = Point { x: 1, y: 2 }");
+    assert_contains(&out, "Point { x: 1, y: 2 }");
+    assert_not_contains(&out, "= { x: 1, y: 2 }");
+}
+
+#[test]
+fn with_copy_update_round_trips_as_dot_with_call() {
+    let out = fmt(
+        "module A\ntype Order = { total: Int, status: Text }\nfn f(o: Order): Order = o.with(status: \"closed\")"
+    );
+    assert_contains(&out, "o.with(status: \"closed\")");
+    assert_not_contains(&out, " with {");
+}
+
+#[test]
+fn record_spread_with_explicit_type_name_round_trips() {
+    let out = fmt(
+        "module A\ntype Order = { total: Int, status: Text }\nfn f(o: Order): Order = Order { ..o, status: \"closed\" }"
+    );
+    assert_contains(&out, "Order { ..o, status: \"closed\" }");
+}
+
 #[test]
 fn sum_type() {
     let out = fmt("module A\ntype Color = | Red | Green | Blue");

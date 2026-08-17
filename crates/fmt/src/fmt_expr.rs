@@ -97,15 +97,39 @@ pub fn fmt_expr(expr: &Expr, indent: usize) -> String {
             group(&elems, "(", ")", ", ", indent, false)
         }
 
-        Expr::Record { base, fields, .. } => {
+        // Four real shapes share this one AST node (BACKLOG item 176 —
+        // the previous version here ignored `ty_name` entirely and used a
+        // bare `with` keyword that isn't valid expression syntax anywhere
+        // in this language, so reformatting silently corrupted every one
+        // of them into unparseable output):
+        //   - `ty_name: Some, base: None`       -> `TypeName { field: value }`
+        //   - `ty_name: Some, base: Some`       -> `TypeName { ..base, field: value }`
+        //     (the real spread grammar, `parse_expr.rs`'s `parse_record_body`)
+        //   - `ty_name: None, base: Some`       -> `base.with(field: value)`
+        //     (item 151's postfix `.with(...)` desugar — never has a
+        //     syntactic type name, always resolved from `base`'s own type)
+        //   - `ty_name: None, base: None`       -> no real source form
+        //     exists for a bare, unnamed record literal in this language
+        //     (item 145) — formatted permissively rather than panicking.
+        Expr::Record { ty_name, base, fields, .. } => {
             let fs: Vec<String> = fields.iter()
                 .map(|f| format!("{}: {}", f.name.node, fmt_expr(&f.value.node, indent + 1)))
                 .collect();
-            let body = group(&fs, "{ ", " }", ", ", indent, true);
-            if let Some(b) = base {
-                format!("{} with {}", fmt_expr(&b.node, indent), body)
-            } else {
-                body
+            match (ty_name, base) {
+                (Some(name), None) => {
+                    let body = group(&fs, "{ ", " }", ", ", indent, true);
+                    format!("{} {}", name, body)
+                }
+                (Some(name), Some(b)) => {
+                    let mut parts = vec![format!("..{}", fmt_expr(&b.node, indent))];
+                    parts.extend(fs);
+                    let body = group(&parts, "{ ", " }", ", ", indent, true);
+                    format!("{} {}", name, body)
+                }
+                (None, Some(b)) => {
+                    format!("{}.with({})", fmt_expr(&b.node, indent), fs.join(", "))
+                }
+                (None, None) => group(&fs, "{ ", " }", ", ", indent, true),
             }
         }
 
