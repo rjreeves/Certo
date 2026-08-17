@@ -259,6 +259,79 @@ fn list_group_by_return_type_is_map_of_key_to_list() {
     }
 }
 
+// `List.sortBy`/`minBy`/`maxBy`/`sumBy` (BACKLOG item 162b) — same
+// `generic_container_ret` return-type recovery mechanism as `List.map`/
+// `groupBy` above, plus the E0601 key/numeric projection restriction for
+// the cases typeck's own `Expr::Field` inference can't see through
+// (struct-element field-access keys — see `crates/typeck/src/tests.rs`'s
+// `sortby_struct_float_field_key_does_not_false_positive` for the typeck
+// half of this same restriction).
+
+#[test]
+fn sortby_return_type_is_list_of_element_type() {
+    let m = lower("module A\nimport Stdlib.Collections.{ List }\nfn f(xs: List<Int>): List<Int> = List.sortBy(xs, (x) => x)");
+    if let HirItem::Fn(f) = &m.items[0] {
+        assert_eq!(f.body.as_ref().unwrap().ty, Ty::List(Box::new(Ty::Int)));
+    } else {
+        panic!("expected Fn");
+    }
+}
+
+#[test]
+fn minby_maxby_return_type_is_option_of_element_type() {
+    for name in ["minBy", "maxBy"] {
+        let m = lower(&format!(
+            "module A\nimport Stdlib.Collections.{{ List }}\nfn f(xs: List<Int>): Int? = List.{name}(xs, (x) => x)"));
+        if let HirItem::Fn(f) = &m.items[0] {
+            assert_eq!(f.body.as_ref().unwrap().ty, Ty::Option(Box::new(Ty::Int)), "for List.{name}");
+        } else {
+            panic!("expected Fn");
+        }
+    }
+}
+
+#[test]
+fn sumby_return_type_is_projected_key_type() {
+    let m = lower(
+        "module A\nimport Stdlib.Collections.{ List }\ntype Product = { name: Text, price: Float }\n\
+         fn f(ps: List<Product>): Float = List.sumBy(ps, (p) => p.price)");
+    if let HirItem::Fn(f) = &m.items[0] {
+        assert_eq!(f.body.as_ref().unwrap().ty, Ty::Float);
+    } else {
+        panic!("expected Fn");
+    }
+}
+
+#[test]
+fn sortby_struct_text_field_key_is_e0601() {
+    // The genuinely-unsupported case: typeck can't see through the field
+    // access to know it's Text (see the typeck-side regression test this
+    // mirrors), so this is the *only* place it's actually caught.
+    let err = try_lower(
+        "module A\nimport Stdlib.Collections.{ List }\ntype Product = { name: Text, price: Float }\n\
+         fn f(ps: List<Product>): List<Product> = List.sortBy(ps, (p) => p.name)"
+    ).unwrap_err();
+    let msg = match &err[0].kind {
+        crate::error::LowerErrorKind::Unsupported(m) => m.clone(),
+        other => panic!("expected LowerErrorKind::Unsupported (E0601), got {other:?}"),
+    };
+    assert!(msg.contains("List.sortBy") && msg.contains("Text"), "unexpected message: {msg}");
+}
+
+#[test]
+fn sortby_struct_float_field_key_lowers_ok() {
+    // Regression: a struct-element key that *does* project to a supported
+    // type (Float) must not be rejected just because typeck itself
+    // couldn't resolve it — this is exactly the false-positive the typeck-
+    // side fix (`crate::infer_expr`'s `!matches!(resolved_key, Ty::Var(_))`
+    // guard) exists to avoid; this HIR-level check is what actually
+    // validates it correctly, using the post-hint type.
+    lower(
+        "module A\nimport Stdlib.Collections.{ List }\ntype Product = { name: Text, price: Float }\n\
+         fn f(ps: List<Product>): List<Product> = List.sortBy(ps, (p) => p.price)"
+    );
+}
+
 #[test]
 fn map_get_return_type_is_option_of_value_type() {
     let m = lower("module A\nimport Stdlib.Collections.{ Map }\nfn f(m: Map<Text, Float>): Float? = Map.get(m, \"k\")");

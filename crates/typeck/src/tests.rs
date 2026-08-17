@@ -268,6 +268,116 @@ fn matcher_works_without_a_literal_expect_receiver() {
     check("module A\nfn f(): Unit = (3).toBe(3)").unwrap();
 }
 
+// `List.sortBy`/`minBy`/`maxBy`/`sumBy` key/numeric projection restriction
+// (E0710, BACKLOG item 162b) — needs the *real* `List.sortBy`-shaped
+// `Ty::Forall` registration (these are module-qualified stdlib functions,
+// not covered by `seed_builtins`'s small hardcoded set), so these use
+// `check_module_seeded` with a hand-registered env rather than the plain
+// `check`/`check_err` helpers above. Registered directly against
+// `certo_typeck`'s own `Ty`/`TypeEnv` (mirroring `crates/stdlib/src/
+// seed.rs`'s real registration exactly) rather than depending on the
+// `certo-stdlib` crate itself — that crate depends on `certo-typeck`, so
+// pulling it in as a dev-dependency here builds a second, incompatible
+// copy of this very crate (confirmed directly: `expected TypeEnv, found
+// TypeEnv` from two distinct compilations of the same source).
+fn seeded_check(src: &str) -> Result<(), Vec<crate::error::TypeError>> {
+    use crate::Ty;
+    let module = parse(src).expect("parse error");
+    resolve(&module).expect("resolve error");
+    let mut env = crate::TypeEnv::new();
+    let mut counter = 0u32;
+    let mut fresh = || { counter += 1; counter };
+
+    let a = fresh();
+    let k = fresh();
+    let list_a = Ty::List(Box::new(Ty::Var(a)));
+    let key_fn = Ty::Fn { params: vec![Ty::Var(a)], ret: Box::new(Ty::Var(k)) };
+    env.define("List.sortBy", Ty::Forall {
+        vars: vec![a, k],
+        body: Box::new(Ty::Fn { params: vec![list_a.clone(), key_fn.clone()], ret: Box::new(list_a.clone()) }),
+    });
+    env.define_param_meta("List.sortBy", vec![("list".into(), false), ("key".into(), false)]);
+
+    for name in ["minBy", "maxBy"] {
+        let a = fresh();
+        let k = fresh();
+        let list_a = Ty::List(Box::new(Ty::Var(a)));
+        let key_fn = Ty::Fn { params: vec![Ty::Var(a)], ret: Box::new(Ty::Var(k)) };
+        let full = format!("List.{name}");
+        env.define(full.as_str(), Ty::Forall {
+            vars: vec![a, k],
+            body: Box::new(Ty::Fn { params: vec![list_a, key_fn], ret: Box::new(Ty::Option(Box::new(Ty::Var(a)))) }),
+        });
+        env.define_param_meta(full.as_str(), vec![("list".into(), false), ("key".into(), false)]);
+    }
+
+    {
+        let a = fresh();
+        let n = fresh();
+        let list_a = Ty::List(Box::new(Ty::Var(a)));
+        let key_fn = Ty::Fn { params: vec![Ty::Var(a)], ret: Box::new(Ty::Var(n)) };
+        env.define("List.sumBy", Ty::Forall {
+            vars: vec![a, n],
+            body: Box::new(Ty::Fn { params: vec![list_a, key_fn], ret: Box::new(Ty::Var(n)) }),
+        });
+        env.define_param_meta("List.sumBy", vec![("list".into(), false), ("key".into(), false)]);
+    }
+
+    crate::infer_decl::check_module_seeded(&module, env, counter)
+}
+
+fn seeded_first_error_kind(src: &str) -> TypeErrorKind {
+    seeded_check(src).unwrap_err().into_iter().next().expect("expected at least one error").kind
+}
+
+#[test]
+fn sortby_int_key_ok() {
+    seeded_check("module A\nfn f(xs: List<Int>): List<Int> = List.sortBy(xs, (x) => x)").unwrap();
+}
+
+#[test]
+fn sortby_float_key_ok() {
+    seeded_check("module A\nfn f(xs: List<Float>): List<Float> = List.sortBy(xs, (x) => x)").unwrap();
+}
+
+#[test]
+fn sortby_text_key_is_e0710() {
+    let kind = seeded_first_error_kind(
+        "module A\nfn f(xs: List<Text>): List<Text> = List.sortBy(xs, (x) => x)");
+    assert!(matches!(kind, TypeErrorKind::UnsupportedKeyType { .. }), "expected E0710, got {kind:?}");
+}
+
+#[test]
+fn minby_maxby_sumby_text_key_is_e0710() {
+    for fname in ["minBy", "maxBy", "sumBy"] {
+        let kind = seeded_first_error_kind(&format!(
+            "module A\nfn f(xs: List<Text>): Unit = {{\n    val r = List.{fname}(xs, (x) => x)\n}}"));
+        assert!(matches!(kind, TypeErrorKind::UnsupportedKeyType { .. }),
+            "expected E0710 for List.{fname}, got {kind:?}");
+    }
+}
+
+#[test]
+fn sortby_struct_float_field_key_does_not_false_positive() {
+    // Regression test: a key projection that does field access on a struct
+    // element (`(p) => p.price`) can't be resolved by typeck's own
+    // `Expr::Field` inference at all — it returns a disconnected fresh
+    // `Ty::Var`, never `Ty::Float`, no matter how the rest of unification
+    // resolves (`resolve_field_ty`'s `Ty::Var(_) => ctx.fresh()` branch
+    // records no constraint linking it back to the field name). Confirmed
+    // directly: before this test existed, this exact snippet was wrongly
+    // rejected as E0710 ("resolved to `T`") the moment the check was fixed
+    // to actually run at all (it originally never fired for *any*
+    // module-qualified call — see the check site's own doc comment). The
+    // fix is for typeck to stay silent on an unresolved `Ty::Var` here and
+    // defer to HIR's own, later, correctly-hinted check instead (E0601,
+    // see `certo-hir`'s tests).
+    seeded_check(
+        "module A\ntype Product = { name: Text, price: Float }\n\
+         fn f(ps: List<Product>): List<Product> = List.sortBy(ps, (p) => p.price)"
+    ).unwrap();
+}
+
 // Constraint
 
 #[test]

@@ -1413,3 +1413,59 @@ fn flip_synthesizes_nested_trampolines() {
     assert_contains(&out, "__flip_outer_");
     assert_contains(&out, "__flip_inner_");
 }
+
+// ------------------------------------------------------------------ //
+// List.sortBy/minBy/maxBy/sumBy (BACKLOG item 162b) — the same class of
+// per-call-site MIR synthesis as the combinators above, but with a real
+// comparator/adder over the *projected* key/numeric type instead of a
+// closure-delegating trampoline. See `crates/mir/src/tests.rs` for the
+// MIR-shape checks (the `Terminator::Call`/lifted-fn structure) this
+// verifies has actually reached generated C correctly.
+// ------------------------------------------------------------------ //
+
+#[test]
+fn sortby_generates_a_real_comparator_and_calls_list_sort() {
+    let out = codegen(
+        "module A\nimport Stdlib.Collections.{ List }\nfn run(): List<Int> = List.sortBy([3, 1, 2], (x) => x)");
+    assert_contains(&out, "__sort_by_cmp_");
+    assert_contains(&out, "certo_list_sort(");
+}
+
+#[test]
+fn sortby_struct_key_unboxes_element_to_the_real_struct_type() {
+    // The comparator's two element params must be unboxed to the real
+    // struct type (Product), not left as raw int64_t/void* — otherwise
+    // `.price` field access inside the comparator doesn't compile
+    // (confirmed directly during this item's own debugging: this exact
+    // case failed with "member reference base type 'int64_t' is not a
+    // structure or union" before the HIR-side fixes landed).
+    let out = codegen(
+        "module A\nimport Stdlib.Collections.{ List }\n\
+         type Product = { name: Text, price: Float }\n\
+         fn run(): List<Product> = List.sortBy([Product { name: \"a\", price: 1.0 }], (p) => p.price)");
+    assert_contains(&out, "__sort_by_cmp_");
+    assert_contains(&out, ".price");
+}
+
+#[test]
+fn minby_reuses_sortby_then_calls_list_first() {
+    let out = codegen(
+        "module A\nimport Stdlib.Collections.{ List }\nfn run(): Int? = List.minBy([3, 1, 2], (x) => x)");
+    assert_contains(&out, "__sort_by_cmp_");
+    assert_contains(&out, "certo_list_first(");
+}
+
+#[test]
+fn maxby_reuses_sortby_then_calls_list_last() {
+    let out = codegen(
+        "module A\nimport Stdlib.Collections.{ List }\nfn run(): Int? = List.maxBy([3, 1, 2], (x) => x)");
+    assert_contains(&out, "__sort_by_cmp_");
+    assert_contains(&out, "certo_list_last(");
+}
+
+#[test]
+fn sumby_synthesizes_a_named_summation_loop() {
+    let out = codegen(
+        "module A\nimport Stdlib.Collections.{ List }\nfn run(): Int = List.sumBy([3, 1, 2], (x) => x)");
+    assert_contains(&out, "__sum_by_");
+}

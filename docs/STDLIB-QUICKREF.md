@@ -262,14 +262,22 @@ List.chunked<T>(list: List<T>, size: Int): List<List<T>>
 List.groupBy<T, K>(list: List<T>, key: T => K): Map<K, List<T>>  // K uses Map's pointer-equality keys — see below
 List.flatMap<A, B>(list: List<A>, f: A => List<B>): List<B>  // map then flatten one level
 List.reduce<T, A>(list: List<T>, init: A, f: (A, T) => A): A  // same as List.fold, spec's own name
+List.sortBy<T, K>(list: List<T>, key: T => K): List<T>   // ascending by projected key
+List.minBy<T, K>(list: List<T>, key: T => K): T?         // None on an empty list
+List.maxBy<T, K>(list: List<T>, key: T => K): T?         // None on an empty list
+List.sumBy<T, N>(list: List<T>, key: T => N): N          // sums the projected numeric field
 ```
 
-`sortBy`/`sumBy`/`minBy`/`maxBy` (key/numeric projections) are not implemented
-yet — unlike the functions above, each needs a real comparison or addition
-over the *projected* key/numeric type, resolved fresh per call site (the
-same class of per-call-site MIR synthesis `compose`/`const`/`flip` needed —
-BACKLOG items 140-142), not just a closure-delegating C function. Split out
-as its own item (162) rather than rushed in alongside `flatMap`/`reduce`.
+`sortBy`/`minBy`/`maxBy`/`sumBy`'s key/numeric projection (`K`/`N` above)
+is restricted to `Int`/`Int8`/`Int16`/`Int32`/`UInt`/`Float`/`Float32` — a
+deliberate scope decision, not a missing case: this codebase's `<`/`>`/`+`
+C operators are only correct for those types (`Text`'s `<` is raw pointer
+comparison, not lexicographic, and `Decimal` has no generic comparison/
+addition operator to synthesize a call to). Passing an unsupported
+projection type is a compile error, `E0710` (see
+[ERROR-REFERENCE.md](ERROR-REFERENCE.md)). The list element type `T` itself
+is unrestricted, including struct/record types — only the *projected*
+key/sum type is limited.
 
 ### Map\<K, V\>
 

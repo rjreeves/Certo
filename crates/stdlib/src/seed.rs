@@ -414,6 +414,64 @@ pub fn seed_stdlib(env: &mut TypeEnv, counter: &mut u32) {
             }),
         });
     }
+    // `List.sortBy`/`List.minBy`/`List.maxBy`/`List.sumBy` (BACKLOG item
+    // 162b, split out of item 162's own aggregate-functions half). The
+    // type signatures below accept any key/numeric type `K`/`N` — same as
+    // the spec's own `K: Ord`/`N: Numeric` bounds — but `crates/typeck/src
+    // /infer_expr.rs`'s post-unification check restricts what's actually
+    // *accepted* to the types this codebase's `<`/`>`/`+` operators are
+    // genuinely correct for (`Int`/`Int8`/`Int16`/`Int32`/`UInt`/`Float`/
+    // `Float32` — real C numeric operators); `Text`/`Decimal`/records are
+    // rejected with a real error (E0710) rather than silently miscompiling
+    // (`Text`'s `<` is pointer comparison, not lexicographic) or hard-
+    // failing at the C compiler (`Decimal`'s `+`/`<` on a struct). The
+    // comparator/adder itself is synthesized per call site in
+    // `crates/mir/src/lower.rs`, using the caller's own resolved concrete
+    // key/numeric type — same technique `compose`/`const`/`flip` (items
+    // 140-142) already established for this codebase's other functions
+    // whose C implementation can't be generic/type-erased.
+    {
+        let a = fresh(); let k = fresh();
+        let key = fn1(Ty::Var(a), Ty::Var(k));
+        let list_a = Ty::List(Box::new(Ty::Var(a)));
+        env.define("List.sortBy", Ty::Forall {
+            vars: vec![a, k],
+            body: Box::new(fn2(list_a.clone(), key, list_a)),
+        });
+    }
+    {
+        let a = fresh(); let k = fresh();
+        let key = fn1(Ty::Var(a), Ty::Var(k));
+        env.define("List.minBy", Ty::Forall {
+            vars: vec![a, k],
+            body: Box::new(fn2(
+                Ty::List(Box::new(Ty::Var(a))), key,
+                Ty::Option(Box::new(Ty::Var(a))),
+            )),
+        });
+    }
+    {
+        let a = fresh(); let k = fresh();
+        let key = fn1(Ty::Var(a), Ty::Var(k));
+        env.define("List.maxBy", Ty::Forall {
+            vars: vec![a, k],
+            body: Box::new(fn2(
+                Ty::List(Box::new(Ty::Var(a))), key,
+                Ty::Option(Box::new(Ty::Var(a))),
+            )),
+        });
+    }
+    {
+        let a = fresh(); let n = fresh();
+        let key = fn1(Ty::Var(a), Ty::Var(n));
+        env.define("List.sumBy", Ty::Forall {
+            vars: vec![a, n],
+            body: Box::new(fn2(
+                Ty::List(Box::new(Ty::Var(a))), key,
+                Ty::Var(n),
+            )),
+        });
+    }
 
     // ---------------------------------------------------------------- //
     // Collections — Map<K, V>
@@ -1256,6 +1314,10 @@ pub fn seed_stdlib(env: &mut TypeEnv, counter: &mut u32) {
     pm!("List.groupBy",    "list", "key");
     pm!("List.flatMap",    "list", "f");
     pm!("List.reduce",     "list", "init", "f");
+    pm!("List.sortBy",     "list", "key");
+    pm!("List.minBy",      "list", "key");
+    pm!("List.maxBy",      "list", "key");
+    pm!("List.sumBy",      "list", "key");
 
     // Map
     pm!("Map.insert",      "map", "key", "value");
