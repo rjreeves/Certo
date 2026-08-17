@@ -1,6 +1,7 @@
+use std::collections::HashSet;
 use certo_ast::span::{S, Span};
 use certo_ast::decl::*;
-use certo_ast::expr::{Expr, Stmt};
+use certo_ast::expr::{Expr, Stmt, Lit, FStringPart, ExpectMatcher};
 use certo_ast::pattern::Pattern;
 use certo_ast::types::{TypeExpr, ModulePath, TypeParam};
 use certo_lexer::Token;
@@ -438,7 +439,7 @@ fn parse_type_decl(cur: &mut Cursor<'_>, is_pub: bool, annotations: Vec<String>)
         // ordinary local, with zero changes to how expression bodies are
         // lowered anywhere downstream.
         for c in &rec.computed {
-            methods.push(synthesize_computed_method(&name, name_span, &type_params, &rec.fields, c));
+            methods.push(synthesize_computed_method(&name, name_span, &type_params, &rec.fields, &rec.computed, c));
         }
         TypeBody::Record(rec)
     } else if cur.peek() == Some(&Token::Bar) {
@@ -460,6 +461,102 @@ fn parse_type_decl(cur: &mut Cursor<'_>, is_pub: bool, annotations: Vec<String>)
     Ok((TypeDecl { is_pub, is_priv_ctor, annotations, name: S::new(name, name_span), type_params, body, span }, methods))
 }
 
+/// Collects every bare (single-segment) identifier referenced anywhere in
+/// an expression tree (BACKLOG item 173) — used to decide which *other*
+/// `computed` properties on the same record a synthesized computed
+/// accessor's prelude should also bind. Deliberately approximate: it does
+/// not distinguish a genuinely free reference from one already shadowed by
+/// an inner `val`/lambda-param/match-binding of the same name (a bare
+/// identifier is collected either way) — an extra, unused prelude binding
+/// is harmless, the same tradeoff the unconditional stored-field prelude
+/// below already accepts, so a real scope-tracking pass isn't needed here.
+fn collect_referenced_idents(expr: &S<Expr>, out: &mut HashSet<String>) {
+    match &expr.node {
+        Expr::Lit { value, .. } => {
+            if let Lit::FString(parts) = value {
+                for p in parts {
+                    if let FStringPart::Interpolated(e) = p { collect_referenced_idents(e, out); }
+                }
+            }
+        }
+        Expr::Path { path, .. } => {
+            if path.segments.len() == 1 { out.insert(path.segments[0].node.clone()); }
+        }
+        Expr::App { func, args, .. } => {
+            collect_referenced_idents(func, out);
+            for a in args { collect_referenced_idents(&a.value, out); }
+        }
+        Expr::Pipe { left, right, .. } | Expr::BinOp { left, right, .. } => {
+            collect_referenced_idents(left, out);
+            collect_referenced_idents(right, out);
+        }
+        Expr::UnOp { expr, .. }
+        | Expr::Field { expr, .. }
+        | Expr::SafeField { expr, .. }
+        | Expr::Try { expr, .. }
+        | Expr::Await { expr, .. }
+        | Expr::Spawn { expr, .. }
+        | Expr::Ascribe { expr, .. }
+        | Expr::Age { expr, .. } => collect_referenced_idents(expr, out),
+        Expr::Transaction { body, .. } | Expr::Unsafe { body, .. } => collect_referenced_idents(body, out),
+        Expr::If { cond, then_expr, else_expr, .. } => {
+            collect_referenced_idents(cond, out);
+            collect_referenced_idents(then_expr, out);
+            collect_referenced_idents(else_expr, out);
+        }
+        Expr::Match { scrutinee, arms, .. } => {
+            collect_referenced_idents(scrutinee, out);
+            for arm in arms {
+                if let Some(g) = &arm.guard { collect_referenced_idents(g, out); }
+                collect_referenced_idents(&arm.body, out);
+            }
+        }
+        Expr::Block { stmts, .. } => {
+            for s in stmts {
+                match s {
+                    Stmt::Val { value, .. } => collect_referenced_idents(value, out),
+                    Stmt::Var { value, .. } => collect_referenced_idents(value, out),
+                    Stmt::Assign { value, .. } => collect_referenced_idents(value, out),
+                    Stmt::Defer { body, .. } => collect_referenced_idents(body, out),
+                    Stmt::Expr { expr, .. } => collect_referenced_idents(expr, out),
+                }
+            }
+        }
+        Expr::Lambda { body, .. } => collect_referenced_idents(body, out),
+        Expr::List { elements, .. } | Expr::Tuple { elements, .. } => {
+            for e in elements { collect_referenced_idents(e, out); }
+        }
+        Expr::Record { base, fields, .. } => {
+            if let Some(b) = base { collect_referenced_idents(b, out); }
+            for f in fields { collect_referenced_idents(&f.value, out); }
+        }
+        Expr::Guard { cond, else_expr, .. } => {
+            collect_referenced_idents(cond, out);
+            collect_referenced_idents(else_expr, out);
+        }
+        Expr::Require { expr, error, .. } => {
+            collect_referenced_idents(expr, out);
+            collect_referenced_idents(error, out);
+        }
+        Expr::Parallel { tasks, timeout, .. } => {
+            for t in tasks { collect_referenced_idents(t, out); }
+            if let Some(t) = timeout { collect_referenced_idents(t, out); }
+        }
+        Expr::For { iter, body, .. } => {
+            collect_referenced_idents(iter, out);
+            collect_referenced_idents(body, out);
+        }
+        Expr::While { cond, body, .. } => {
+            collect_referenced_idents(cond, out);
+            collect_referenced_idents(body, out);
+        }
+        Expr::ExpectAssertion { actual, matcher, .. } => {
+            collect_referenced_idents(actual, out);
+            if let ExpectMatcher::ToBe(e) = matcher { collect_referenced_idents(e, out); }
+        }
+    }
+}
+
 /// Desugars one `computed name: Ty = body` into a real method
 /// `fn name(self: TypeName<...>): Ty = { val f1 = self.f1; ...; body }`
 /// (BACKLOG item 143). `self`'s own type carries the record's type params
@@ -470,6 +567,7 @@ fn synthesize_computed_method(
     type_name_span: Span,
     type_params: &[TypeParam],
     fields: &[RecordFieldDef],
+    all_computed: &[ComputedFieldDef],
     c: &ComputedFieldDef,
 ) -> FnDecl {
     let self_ty_args: Vec<S<TypeExpr>> = type_params.iter()
@@ -496,6 +594,43 @@ fn synthesize_computed_method(
             span: c.span,
         }
     }).collect();
+
+    // BACKLOG item 173: a computed body may also reference *other*
+    // computed properties on the same record, not just stored fields —
+    // bind exactly the ones it actually references (via the conservative
+    // textwalk above), not every computed property regardless of use.
+    // Each binding is `val other = self.other`, and since `other` is a
+    // real computed name, HIR's own `Expr::Field` computed-field fallback
+    // (`crates/hir/src/lower.rs`) already lowers that read to a real call
+    // to `TypeName.other(self)` — so this needs zero new evaluation logic,
+    // the same "destructure into locals" reuse the stored-field prelude
+    // above already relies on. Deliberately excludes `c`'s own name: a
+    // computed property directly referencing itself would just re-call the
+    // method currently being defined (guaranteed infinite recursion), so a
+    // self-reference is left unbound here and instead fails as an ordinary
+    // E0206 undefined-name error. A genuine *cycle* between two different
+    // computed properties (A referencing B, B referencing A) isn't
+    // statically caught — same as any other mutual-recursion-without-a-
+    // base-case in this language; only actually recurses forever if the
+    // cyclic accessor is ever called.
+    let mut referenced = HashSet::new();
+    collect_referenced_idents(&c.body, &mut referenced);
+    for other in all_computed {
+        if other.name.node != c.name.node && referenced.contains(&other.name.node) {
+            let self_path = S::new(Expr::Path {
+                path: ModulePath { segments: vec![self_name.clone()], span: c.span },
+                span: c.span,
+            }, c.span);
+            let field_access = S::new(Expr::Field { expr: Box::new(self_path), field: other.name.clone(), span: c.span }, c.span);
+            stmts.push(Stmt::Val {
+                pattern: S::new(Pattern::Ident { name: other.name.clone(), span: other.name.span }, other.name.span),
+                ty: None,
+                value: field_access,
+                span: c.span,
+            });
+        }
+    }
+
     stmts.push(Stmt::Expr { expr: c.body.clone(), span: c.body.span });
     let body = S::new(Expr::Block { stmts, span: c.span }, c.span);
 
