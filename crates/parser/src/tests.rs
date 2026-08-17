@@ -403,6 +403,75 @@ fn computed_field_on_generic_record_carries_the_type_params_to_the_synthesized_i
     assert!(i.methods[0].type_params.is_empty());
 }
 
+// `computed` referencing another `computed` (BACKLOG item 173) — the
+// synthesized method's prelude gains an extra `val other = self.other`
+// binding for each *other* computed property the body actually
+// references, on top of the unconditional one-per-stored-field bindings
+// item 143 already adds.
+
+#[test]
+fn computed_referencing_another_computed_gets_an_extra_prelude_binding() {
+    let m = ok(
+        "module A\n\
+         type Order = {\n\
+         \x20   subtotal: Float\n\
+         \x20   computed hasDiscount: Bool = subtotal > 100.0\n\
+         \x20   computed summary: Text = if hasDiscount then \"discounted\" else \"full price\"\n\
+         }"
+    );
+    let Decl::Impl(i) = &m.decls[1].node else { panic!("expected impl decl") };
+    let summary = i.methods.iter().find(|f| f.name.node == "summary").expect("expected a summary method");
+    let body = summary.body.as_ref().expect("expected a body");
+    let Expr::Block { stmts, .. } = &body.node else { panic!("expected a block body") };
+    // val subtotal = self.subtotal (stored field); val hasDiscount =
+    // self.hasDiscount (referenced sibling computed); the original body.
+    assert_eq!(stmts.len(), 3, "expected stored-field binding + referenced-computed binding + body");
+    assert!(matches!(&stmts[0], Stmt::Val { pattern, .. } if matches!(&pattern.node, Pattern::Ident { name, .. } if name.node == "subtotal")));
+    assert!(matches!(&stmts[1], Stmt::Val { pattern, .. } if matches!(&pattern.node, Pattern::Ident { name, .. } if name.node == "hasDiscount")));
+    assert!(matches!(&stmts[2], Stmt::Expr { .. }));
+}
+
+#[test]
+fn computed_not_referencing_other_computed_fields_gets_no_extra_bindings() {
+    let m = ok(
+        "module A\n\
+         type Order = {\n\
+         \x20   subtotal: Float\n\
+         \x20   computed hasDiscount: Bool = subtotal > 100.0\n\
+         \x20   computed isEmpty: Bool = subtotal == 0.0\n\
+         }"
+    );
+    let Decl::Impl(i) = &m.decls[1].node else { panic!("expected impl decl") };
+    let is_empty = i.methods.iter().find(|f| f.name.node == "isEmpty").expect("expected an isEmpty method");
+    let body = is_empty.body.as_ref().expect("expected a body");
+    let Expr::Block { stmts, .. } = &body.node else { panic!("expected a block body") };
+    // Only the stored-field binding plus the body — `hasDiscount` is a
+    // sibling computed property, but `isEmpty`'s own body never references
+    // it, so no binding should be synthesized for it.
+    assert_eq!(stmts.len(), 2, "unrelated sibling computed properties must not get bound");
+}
+
+#[test]
+fn computed_referencing_itself_does_not_get_a_self_binding() {
+    // A direct self-reference would just re-call the method being defined
+    // (guaranteed infinite recursion) — left unbound so it instead fails
+    // downstream as an ordinary E0206 undefined-name error.
+    let m = ok(
+        "module A\n\
+         type Weird = {\n\
+         \x20   n: Int\n\
+         \x20   computed loopy: Int = loopy + 1\n\
+         }"
+    );
+    let Decl::Impl(i) = &m.decls[1].node else { panic!("expected impl decl") };
+    let loopy = i.methods.iter().find(|f| f.name.node == "loopy").expect("expected a loopy method");
+    let body = loopy.body.as_ref().expect("expected a body");
+    let Expr::Block { stmts, .. } = &body.node else { panic!("expected a block body") };
+    // val n = self.n (stored field); the original body — no `val loopy = self.loopy`.
+    assert_eq!(stmts.len(), 2);
+    assert!(!stmts.iter().any(|s| matches!(s, Stmt::Val { pattern, .. } if matches!(&pattern.node, Pattern::Ident { name, .. } if name.node == "loopy"))));
+}
+
 #[test]
 fn type_alias() {
     let m = ok("module A\ntype UserId = UUID");
