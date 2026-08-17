@@ -27,6 +27,22 @@ pub enum Ty {
     Bool,
     Char,   // single ASCII byte — same byte-oriented convention as Text
     Text,
+    /// `BoundedText(n)` (spec §3.3, BACKLOG item 147) — a maximum-length
+    /// annotation, deliberately a **separate variant from `Text`** rather
+    /// than parameterizing `Text` itself (which is matched bare in far more
+    /// places across this codebase than `Decimal` ever was, so parameterizing
+    /// it directly would have meant updating every one of those sites).
+    /// Mirrors `Decimal(p, s)`'s own precedent exactly otherwise: always the
+    /// same runtime representation as plain `Text`, a compile-time-only
+    /// refinement with **zero runtime length enforcement** anywhere — a
+    /// deliberate scope decision, not an oversight (see BACKLOG item 147's
+    /// own writeup). See `unify.rs`: bare `Text` unifies freely with any
+    /// `BoundedText(n)` in both directions (so a bounded value flows through
+    /// ordinary `Text`-typed stdlib code unchanged, matching the spec's own
+    /// newtype-wrapper usage, e.g. `type Email = Email(BoundedText(255))`);
+    /// two different `BoundedText` max lengths do not unify with each other,
+    /// matching `Decimal`'s identical treatment of mismatched parameters.
+    BoundedText(Option<u32>),
     Unit,
     Uuid,
 
@@ -330,6 +346,8 @@ impl Ty {
             Ty::Float32 => "Float32".into(),
             Ty::Decimal(None)          => "Decimal".into(),
             Ty::Decimal(Some((p, s))) => format!("Decimal({}, {})", p, s),
+            Ty::BoundedText(None)     => "BoundedText".into(),
+            Ty::BoundedText(Some(n)) => format!("BoundedText({})", n),
             Ty::Bool    => "Bool".into(),
             Ty::Char    => "Char".into(),
             Ty::Text    => "Text".into(),

@@ -577,6 +577,7 @@ fn ast_ty_to_c_str(te: &certo_ast::types::TypeExpr) -> String {
                 "Decimal" => "certo_decimal_t".into(),
                 "Bool"    => "bool".into(),
                 "Text"    => "certo_text_t".into(),
+                "BoundedText" => "certo_text_t".into(),
                 "Unit"    => "certo_unit_t".into(),
                 "UUID"    => "certo_uuid_t".into(),
                 // These stdlib scalar types have a C-side typedef prefixed
@@ -611,6 +612,9 @@ fn ast_ty_to_c_str(te: &certo_ast::types::TypeExpr) -> String {
         // Same runtime representation as bare `Decimal` — the parameter is a
         // compile-time-only refinement.
         TypeExpr::DecimalParam { .. } => "certo_decimal_t".into(),
+        // Same runtime representation as bare `Text` — the max length is a
+        // compile-time-only refinement (BACKLOG item 147).
+        TypeExpr::BoundedTextParam { .. } => "certo_text_t".into(),
     }
 }
 

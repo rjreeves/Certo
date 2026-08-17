@@ -78,6 +78,19 @@ impl UnionFind {
             (Ty::Bool,    Ty::Bool)    => Ok(()),
             (Ty::Char,    Ty::Char)    => Ok(()),
             (Ty::Text,    Ty::Text)    => Ok(()),
+            // `BoundedText(n)` (BACKLOG item 147) mirrors `Decimal(p,s)`'s
+            // own two rules exactly, just across a separate `Ty` variant
+            // instead of a parameterized `Text` itself (see `Ty::BoundedText`'s
+            // doc comment for why): two different max lengths don't unify
+            // with each other (falls through to the mismatch arm below), and
+            // — since it's a distinct variant from `Text`, unlike `Decimal`'s
+            // self-parameterization — it also needs an explicit cross-variant
+            // rule so a bounded value stays usable anywhere plain `Text` is
+            // expected (and vice versa), matching the spec's own newtype
+            // usage (`type Email = Email(BoundedText(255))`, passed around
+            // just like any other `Text`-shaped value).
+            (Ty::BoundedText(a), Ty::BoundedText(b)) if a.is_none() || b.is_none() || a == b => Ok(()),
+            (Ty::Text, Ty::BoundedText(_)) | (Ty::BoundedText(_), Ty::Text) => Ok(()),
             (Ty::Unit,    Ty::Unit)    => Ok(()),
             (Ty::Uuid,    Ty::Uuid)    => Ok(()),
 

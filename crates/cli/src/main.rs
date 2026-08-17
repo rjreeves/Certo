@@ -1009,7 +1009,7 @@ fn introspect_live_schema_for_sync(db_url: &str, schema_name: &str) -> Result<Ve
     }
 
     let col_query = format!(
-        "SELECT table_name, column_name, data_type, is_nullable, numeric_precision, numeric_scale \
+        "SELECT table_name, column_name, data_type, is_nullable, numeric_precision, numeric_scale, character_maximum_length \
          FROM information_schema.columns \
          WHERE table_schema = '{}' \
          ORDER BY table_name, ordinal_position;",
@@ -1034,15 +1034,16 @@ fn introspect_live_schema_for_sync(db_url: &str, schema_name: &str) -> Result<Ve
     for line in stdout.lines() {
         let line = line.trim();
         if line.is_empty() { continue; }
-        let parts: Vec<&str> = line.splitn(6, '|').collect();
-        if parts.len() < 6 { continue; }
+        let parts: Vec<&str> = line.splitn(7, '|').collect();
+        if parts.len() < 7 { continue; }
         let table_name = parts[0].trim().to_string();
         let col_name    = parts[1].trim().to_string();
         let pg_type     = parts[2].trim();
         let nullable    = parts[3].trim().eq_ignore_ascii_case("YES");
         let precision   = parts[4].trim().parse::<i64>().ok();
         let scale       = parts[5].trim().parse::<i64>().ok();
-        let certo_type  = pg_type_to_certo(pg_type, precision, scale);
+        let char_max_len = parts[6].trim().parse::<i64>().ok();
+        let certo_type  = pg_type_to_certo(pg_type, precision, scale, char_max_len);
 
         let idx = match tables.iter().position(|t| t.name == table_name) {
             Some(i) => i,
@@ -2827,7 +2828,7 @@ fn diff_schema_against_live(expected: &certo_dbschema::Schema, schema_name: &str
 
     // Query live columns from information_schema.
     let col_query = format!(
-        "SELECT table_name, column_name, data_type, is_nullable, numeric_precision, numeric_scale \
+        "SELECT table_name, column_name, data_type, is_nullable, numeric_precision, numeric_scale, character_maximum_length \
          FROM information_schema.columns \
          WHERE table_schema = '{}' \
          ORDER BY table_name, ordinal_position;",
@@ -2853,13 +2854,14 @@ fn diff_schema_against_live(expected: &certo_dbschema::Schema, schema_name: &str
     for line in String::from_utf8_lossy(&col_out.stdout).lines() {
         let line = line.trim();
         if line.is_empty() { continue; }
-        let parts: Vec<&str> = line.splitn(6, '|').collect();
-        if parts.len() < 6 { continue; }
+        let parts: Vec<&str> = line.splitn(7, '|').collect();
+        if parts.len() < 7 { continue; }
         let raw_table = parts[0].trim().to_string();
         let raw_col   = parts[1].trim().to_string();
         let precision = parts[4].trim().parse::<i64>().ok();
         let scale     = parts[5].trim().parse::<i64>().ok();
-        let certo_ty  = pg_type_to_certo(parts[2].trim(), precision, scale);
+        let char_max_len = parts[6].trim().parse::<i64>().ok();
+        let certo_ty  = pg_type_to_certo(parts[2].trim(), precision, scale, char_max_len);
         let nullable  = parts[3].trim().eq_ignore_ascii_case("YES");
         let certo_col = certo_dbschema::snake_to_camel(&raw_col);
         let entry = live.entry(certo_dbschema::snake_to_pascal(&raw_table))
@@ -2959,7 +2961,9 @@ fn diff_schema_against_live(expected: &certo_dbschema::Schema, schema_name: &str
 fn types_match(code_ty: &str, live_ty: &str) -> bool {
     let a = code_ty.trim_end_matches('?').to_lowercase();
     let b = live_ty.trim_end_matches('?').to_lowercase();
-    a == b || certo_dbschema::decimal_bare_vs_param(&a, &b)
+    a == b
+        || certo_dbschema::decimal_bare_vs_param(&a, &b)
+        || certo_dbschema::bounded_text_bare_vs_param(&a, &b)
 }
 
 // ------------------------------------------------------------------ //
@@ -3054,7 +3058,7 @@ fn cmd_db_pull(args: &[String]) {
 
     // Query columns from information_schema.
     let col_query = format!(
-        "SELECT table_name, column_name, data_type, is_nullable, numeric_precision, numeric_scale \
+        "SELECT table_name, column_name, data_type, is_nullable, numeric_precision, numeric_scale, character_maximum_length \
          FROM information_schema.columns \
          WHERE table_schema = '{}' \
          ORDER BY table_name, ordinal_position;",
@@ -3117,15 +3121,16 @@ fn cmd_db_pull(args: &[String]) {
     for line in col_text.lines() {
         let line = line.trim();
         if line.is_empty() { continue; }
-        let parts: Vec<&str> = line.splitn(6, '|').collect();
-        if parts.len() < 6 { continue; }
+        let parts: Vec<&str> = line.splitn(7, '|').collect();
+        if parts.len() < 7 { continue; }
         let table   = parts[0].trim();
         let col     = parts[1].trim();
         let pg_type = parts[2].trim();
         let nullable = parts[3].trim().eq_ignore_ascii_case("YES");
         let precision = parts[4].trim().parse::<i64>().ok();
         let scale     = parts[5].trim().parse::<i64>().ok();
-        let certo_type = pg_type_to_certo(pg_type, precision, scale);
+        let char_max_len = parts[6].trim().parse::<i64>().ok();
+        let certo_type = pg_type_to_certo(pg_type, precision, scale, char_max_len);
         if !tables.contains(&table.to_string()) {
             tables.push(table.to_string());
         }
@@ -3280,12 +3285,19 @@ fn cmd_db_pull(args: &[String]) {
 /// `numeric_scale` — only meaningful (non-NULL) for `numeric`/`decimal` columns;
 /// `money` and everything else always pass `None`, falling back to bare `Decimal`.
 /// Emits `Decimal(p, s)` (real BACKLOG item 128 fidelity) only when both are present.
-fn pg_type_to_certo(pg: &str, precision: Option<i64>, scale: Option<i64>) -> String {
+/// `char_max_len` comes from `character_maximum_length` — only meaningful for
+/// `character varying`/`varchar`/`char`/`bpchar` (Postgres reports `NULL` for
+/// an unbounded `text` column); emits `BoundedText(n)` (BACKLOG item 147) when
+/// present, mirroring `Decimal(p, s)`'s identical treatment just above.
+fn pg_type_to_certo(pg: &str, precision: Option<i64>, scale: Option<i64>, char_max_len: Option<i64>) -> String {
     match pg {
         "integer" | "int" | "int4" | "bigint" | "int8" | "smallint" | "int2"
             | "serial" | "bigserial" | "smallserial"   => "Int".to_string(),
-        "text" | "character varying" | "varchar" | "char"
-            | "bpchar" | "name" | "citext"             => "Text".to_string(),
+        "character varying" | "varchar" | "char" | "bpchar" => match char_max_len {
+            Some(n) => format!("BoundedText({})", n),
+            None    => "Text".to_string(),
+        },
+        "text" | "name" | "citext"                     => "Text".to_string(),
         "boolean" | "bool"                             => "Bool".to_string(),
         "real" | "float4" | "double precision" | "float8" => "Float".to_string(),
         "numeric" | "decimal" | "money"                => match (precision, scale) {

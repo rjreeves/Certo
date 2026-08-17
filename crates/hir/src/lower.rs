@@ -2069,6 +2069,7 @@ fn ast_ty_to_ty_with_params(te: &certo_ast::types::TypeExpr, type_params: &[&str
                 "Bool"    => Ty::Bool,
                 "Char"    => Ty::Char,
                 "Text"    => Ty::Text,
+                "BoundedText" => Ty::BoundedText(None),
                 "Unit"    => Ty::Unit,
                 "UUID"    => Ty::Uuid,
                 "List"    => Ty::List(Box::new(targs.into_iter().next().unwrap_or(Ty::Error))),
@@ -2094,6 +2095,7 @@ fn ast_ty_to_ty_with_params(te: &certo_ast::types::TypeExpr, type_params: &[&str
         // Ty::Var(0) round-trips to void* in the C backend.
         TypeExpr::Param { .. } => Ty::Var(0),
         TypeExpr::DecimalParam { precision, scale, .. } => Ty::Decimal(Some((*precision, *scale))),
+        TypeExpr::BoundedTextParam { max_len, .. } => Ty::BoundedText(Some(*max_len)),
         _ => Ty::Error,
     }
 }

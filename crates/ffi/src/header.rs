@@ -139,6 +139,7 @@ fn ty_expr_str(te: &certo_ast::types::TypeExpr) -> String {
         TypeExpr::Ptr { inner, .. } => format!("*{}", ty_expr_str(&inner.node)),
         TypeExpr::Param { name, .. } => name.node.clone(),
         TypeExpr::DecimalParam { precision, scale, .. } => format!("Decimal({}, {})", precision, scale),
+        TypeExpr::BoundedTextParam { max_len, .. } => format!("BoundedText({})", max_len),
     }
 }
 

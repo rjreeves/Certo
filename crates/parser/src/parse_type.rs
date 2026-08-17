@@ -137,6 +137,13 @@ fn parse_named_type(cur: &mut Cursor<'_>) -> Result<S<TypeExpr>, ParseError> {
         return parse_decimal_params(cur, span_start);
     }
 
+    // `BoundedText(255)` — max length (BACKLOG item 147). Same
+    // single-exact-name special case as `Decimal(p, s)` above, not a
+    // general "parenthesized literal args" grammar rule.
+    if path.segments.len() == 1 && path.segments[0].node == "BoundedText" && cur.peek() == Some(&Token::LParen) {
+        return parse_bounded_text_param(cur, span_start);
+    }
+
     // Generic args: `<T, U>`
     let args = if cur.peek() == Some(&Token::Lt) {
         cur.bump();
@@ -184,6 +191,43 @@ fn parse_u8_literal(cur: &mut Cursor<'_>) -> Result<u8, ParseError> {
             s.parse::<u8>().map_err(|_| ParseError {
                 kind: ParseErrorKind::InvalidLiteral(
                     format!("`{}` is not a valid Decimal precision/scale (expected 0-255)", s)
+                ),
+                span,
+            })
+        }
+        other => {
+            let found = other.map(|t| format!("{t:?}")).unwrap_or_else(|| "end of file".into());
+            Err(ParseError {
+                kind: ParseErrorKind::Expected { expected: "integer literal".into(), found },
+                span,
+            })
+        }
+    }
+}
+
+/// `(255)` — the max-length argument for `BoundedText`. `path_span` is the
+/// span of the already-consumed `BoundedText` name, for the overall span.
+fn parse_bounded_text_param(cur: &mut Cursor<'_>, path_span: certo_ast::span::Span) -> Result<S<TypeExpr>, ParseError> {
+    cur.expect(&Token::LParen)?;
+    let max_len = parse_u32_literal(cur)?;
+    let end = cur.expect(&Token::RParen)?;
+    let span = path_span.to(end);
+    Ok(S::new(TypeExpr::BoundedTextParam { max_len, span }, span))
+}
+
+/// A plain, non-negative decimal integer literal — used only for
+/// `BoundedText(n)`'s max length, which needs a wider range than
+/// `Decimal(p, s)`'s 0-255 precision/scale (a string length can reasonably
+/// exceed 255).
+fn parse_u32_literal(cur: &mut Cursor<'_>) -> Result<u32, ParseError> {
+    let span = cur.peek_span();
+    match cur.peek() {
+        Some(Token::Integer(s)) => {
+            let s = *s;
+            cur.bump();
+            s.parse::<u32>().map_err(|_| ParseError {
+                kind: ParseErrorKind::InvalidLiteral(
+                    format!("`{}` is not a valid BoundedText length (expected 0-4294967295)", s)
                 ),
                 span,
             })

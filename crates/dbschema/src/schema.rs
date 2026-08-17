@@ -128,6 +128,19 @@ pub fn decimal_bare_vs_param(a: &str, b: &str) -> bool {
     (is_bare(&a) && is_param(&b)) || (is_param(&a) && is_bare(&b))
 }
 
+/// Same carve-out as `decimal_bare_vs_param`, for `Text` vs `BoundedText(n)`
+/// (BACKLOG item 147) — mirrors `certo_typeck::unify`'s identical rule that
+/// bare `Ty::Text` unifies freely with any `Ty::BoundedText`. Two different
+/// `BoundedText` max lengths still conflict — only ever `true` when exactly
+/// one side is bare `Text`.
+pub fn bounded_text_bare_vs_param(a: &str, b: &str) -> bool {
+    let a = a.trim_end_matches('?').to_lowercase();
+    let b = b.trim_end_matches('?').to_lowercase();
+    let is_bare  = |s: &str| s == "text";
+    let is_param = |s: &str| s.starts_with("boundedtext(");
+    (is_bare(&a) && is_param(&b)) || (is_param(&a) && is_bare(&b))
+}
+
 /// Stringify a surface TypeExpr for comparison with migration column types.
 pub fn te_to_str(te: &TypeExpr) -> String {
     match te {
@@ -148,5 +161,6 @@ pub fn te_to_str(te: &TypeExpr) -> String {
         TypeExpr::Ptr { inner, .. } => format!("*{}", te_to_str(&inner.node)),
         TypeExpr::Param { name, .. } => name.node.clone(),
         TypeExpr::DecimalParam { precision, scale, .. } => format!("Decimal({}, {})", precision, scale),
+        TypeExpr::BoundedTextParam { max_len, .. } => format!("BoundedText({})", max_len),
     }
 }
