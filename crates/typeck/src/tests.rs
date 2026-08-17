@@ -336,11 +336,74 @@ fn seeded_check(src: &str) -> Result<(), Vec<crate::error::TypeError>> {
         env.define_param_meta("List.slice", vec![("list".into(), false), ("from".into(), false), ("to".into(), false)]);
     }
 
+    // `List.map`/`Option.isSome` (BACKLOG item 162's own dot-call
+    // coverage) — real signatures per `crates/stdlib/src/seed.rs`.
+    {
+        let a = fresh();
+        let b = fresh();
+        let list_a = Ty::List(Box::new(Ty::Var(a)));
+        let f_ty = Ty::Fn { params: vec![Ty::Var(a)], ret: Box::new(Ty::Var(b)) };
+        env.define("List.map", Ty::Forall {
+            vars: vec![a, b],
+            body: Box::new(Ty::Fn { params: vec![list_a, f_ty], ret: Box::new(Ty::List(Box::new(Ty::Var(b)))) }),
+        });
+        env.define_param_meta("List.map", vec![("list".into(), false), ("f".into(), false)]);
+    }
+    {
+        let a = fresh();
+        env.define("Option.isSome", Ty::Forall {
+            vars: vec![a],
+            body: Box::new(Ty::Fn { params: vec![Ty::Option(Box::new(Ty::Var(a)))], ret: Box::new(Ty::Bool) }),
+        });
+        env.define_param_meta("Option.isSome", vec![("opt".into(), false)]);
+    }
+
     crate::infer_decl::check_module_seeded(&module, env, counter)
 }
 
 fn seeded_first_error_kind(src: &str) -> TypeErrorKind {
     seeded_check(src).unwrap_err().into_iter().next().expect("expected at least one error").kind
+}
+
+#[test]
+fn dot_call_ufcs_smoke_test() {
+    seeded_check("module A\nfn f(xs: List<Int>): List<Int> = xs.map((x) => x)").unwrap();
+}
+
+#[test]
+fn dot_call_on_option_receiver() {
+    seeded_check("module A\nfn f(o: Option<Int>): Bool = o.isSome()").unwrap();
+}
+
+#[test]
+fn dot_call_labeled_args_reorder_correctly() {
+    // `List.slice(list, from, to)` called via dot-call with the trailing
+    // two args out of order and labeled — the receiver is spliced in as
+    // the implicit `list` slot, and the existing labeled-arg reordering
+    // logic (unmodified, operating on the rewritten `args`) must still
+    // place `from`/`to` correctly despite the extra leading argument.
+    seeded_check("module A\nfn f(xs: List<Int>): List<Int> = xs.slice(to: 5, from: 1)").unwrap();
+}
+
+#[test]
+fn dot_call_qualified_form_is_equivalent_to_dot_form() {
+    // Same call, written both ways, must produce the same (successful) result —
+    // proves the UFCS rewrite doesn't diverge from the pre-existing qualified path.
+    seeded_check("module A\nfn f(xs: List<Int>): List<Int> = List.map(xs, (x) => x)").unwrap();
+    seeded_check("module A\nfn f(xs: List<Int>): List<Int> = xs.map((x) => x)").unwrap();
+}
+
+#[test]
+fn dot_call_on_unknown_method_is_still_e0205() {
+    // A genuine field/method-name typo with no matching `"Order.frobnicate"`
+    // registered anywhere must still fail as an ordinary unknown-field
+    // access, not be silently swallowed by the UFCS rewrite attempt.
+    let kind = seeded_first_error_kind(
+        "module A\n\
+         type Order = { total: Int }\n\
+         fn f(o: Order): Int = o.frobnicate()"
+    );
+    assert!(matches!(kind, TypeErrorKind::UnknownField { .. }), "expected E0205, got {kind:?}");
 }
 
 #[test]

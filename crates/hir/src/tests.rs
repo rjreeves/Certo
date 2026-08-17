@@ -250,6 +250,72 @@ fn list_map_return_type_recovered_via_lambda_param_hint() {
     }
 }
 
+// ------------------------------------------------------------------ //
+// Dot-call UFCS (BACKLOG item 162) — `xs.map(f)` must lower to the exact
+// same `HirExprKind::Call{ func: Global("List.map"), args: [xs, f] }`
+// shape the already-working qualified form `List.map(xs, f)` produces,
+// with identical return-type recovery and lambda-param hinting (both of
+// which run entirely downstream of this rewrite, unmodified).
+// ------------------------------------------------------------------ //
+
+#[test]
+fn dot_call_lowers_to_same_shape_as_qualified_call() {
+    let qualified = lower(
+        "module A\nimport Stdlib.Collections.{ List }\nfn f(xs: List<Int>): List<Int> = List.map(xs, (x) => x)");
+    let dotted = lower(
+        "module A\nimport Stdlib.Collections.{ List }\nfn f(xs: List<Int>): List<Int> = xs.map((x) => x)");
+    let get_call = |m: &crate::HirModule| -> (String, usize) {
+        if let HirItem::Fn(f) = &m.items[0] {
+            if let HirExprKind::Call { func, args } = &f.body.as_ref().unwrap().kind {
+                if let HirExprKind::Global(name) = &func.kind {
+                    return (name.clone(), args.len());
+                }
+            }
+        }
+        panic!("expected a Call to a Global callee");
+    };
+    assert_eq!(get_call(&qualified), ("List.map".to_string(), 2));
+    assert_eq!(get_call(&dotted), ("List.map".to_string(), 2));
+}
+
+#[test]
+fn dot_call_return_type_recovered_via_lambda_param_hint() {
+    // Same as `list_map_return_type_recovered_via_lambda_param_hint` above,
+    // written as a dot-call — the lambda-hint machinery only ever looks at
+    // the (post-rewrite) `args`, so it must work identically either way.
+    let m = lower(
+        "module A\nimport Stdlib.Collections.{ List }\nfn f(xs: List<Float>): List<Float> = xs.map((x) => x * 2.0)");
+    if let HirItem::Fn(f) = &m.items[0] {
+        assert_eq!(f.body.as_ref().unwrap().ty, Ty::List(Box::new(Ty::Float)));
+    }
+}
+
+#[test]
+fn dot_call_on_option_lowers_to_qualified_global() {
+    let m = lower(
+        "module A\nfn f(o: Option<Int>): Bool = o.isSome()");
+    if let HirItem::Fn(f) = &m.items[0] {
+        if let HirExprKind::Call { func, args } = &f.body.as_ref().unwrap().kind {
+            assert!(matches!(&func.kind, HirExprKind::Global(name) if name == "Option.isSome"));
+            assert_eq!(args.len(), 1);
+        } else {
+            panic!("expected Call, got {:?}", f.body.as_ref().unwrap().kind);
+        }
+    }
+}
+
+#[test]
+fn dot_call_field_access_typo_is_unaffected() {
+    // A genuine field-access typo (no matching `"Order.frobnicate"` global
+    // anywhere) must still lower as an ordinary (erroring) field access,
+    // not be swallowed by the UFCS rewrite attempt.
+    let m = lower(
+        "module A\ntype Order = { total: Int }\nfn f(o: Order): Int = o.nonexistent");
+    if let HirItem::Fn(f) = &m.items[0] {
+        assert!(matches!(&f.body.as_ref().unwrap().kind, HirExprKind::Field { .. }));
+    }
+}
+
 #[test]
 fn list_group_by_return_type_is_map_of_key_to_list() {
     let m = lower(
