@@ -452,6 +452,21 @@ fn stdlib_param_names() -> HashMap<&'static str, &'static [&'static str]> {
     m.insert("List.minBy",      &["list", "key"]);
     m.insert("List.maxBy",      &["list", "key"]);
     m.insert("List.sumBy",      &["list", "key"]);
+    // `List.groupBy` needed this table for a different reason than
+    // sortBy/minBy/maxBy/sumBy did (BACKLOG item 170, corrected after
+    // investigation): its callback's own param type comes from a wholly
+    // separate mechanism (`lower_lambda_boxed`'s `elem_ty_hint`, since
+    // `List.groupBy` is a `BOXED_ABI_CALLEES` member — struct-keyed
+    // `List.groupBy` already worked fine without this entry). What
+    // actually broke, only reachable after BACKLOG item 171 fixed
+    // labeled-arg reordering for module-qualified typeck calls generally:
+    // `List.groupBy(key: ..., list: ...)` then type-checked correctly but
+    // still *lowered* its arguments in written (unreordered) source order
+    // here, since this table — not item 171's typeck-side one — is what
+    // gates HIR's own labeled-arg reordering, producing a real, confirmed
+    // C-level argument-order mismatch (`certo_list_group_by` called with
+    // the key closure and list swapped).
+    m.insert("List.groupBy",    &["list", "key"]);
 
     // Map
     m.insert("Map.insert",      &["map", "key", "value"]);

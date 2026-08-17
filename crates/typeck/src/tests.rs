@@ -323,6 +323,19 @@ fn seeded_check(src: &str) -> Result<(), Vec<crate::error::TypeError>> {
         env.define_param_meta("List.sumBy", vec![("list".into(), false), ("key".into(), false)]);
     }
 
+    // `List.slice` (BACKLOG item 171's own regression coverage) — real
+    // signature per `crates/stdlib/src/seed.rs`: `List.slice<T>(list:
+    // List<T>, from: Int, to: Int): List<T>`.
+    {
+        let a = fresh();
+        let list_a = Ty::List(Box::new(Ty::Var(a)));
+        env.define("List.slice", Ty::Forall {
+            vars: vec![a],
+            body: Box::new(Ty::Fn { params: vec![list_a.clone(), Ty::Int, Ty::Int], ret: Box::new(list_a) }),
+        });
+        env.define_param_meta("List.slice", vec![("list".into(), false), ("from".into(), false), ("to".into(), false)]);
+    }
+
     crate::infer_decl::check_module_seeded(&module, env, counter)
 }
 
@@ -376,6 +389,38 @@ fn sortby_struct_float_field_key_does_not_false_positive() {
         "module A\ntype Product = { name: Text, price: Float }\n\
          fn f(ps: List<Product>): List<Product> = List.sortBy(ps, (p) => p.price)"
     ).unwrap();
+}
+
+// Labeled-argument reordering for module-qualified stdlib calls (BACKLOG
+// item 171). `List.slice(list, from, to)` parses its callee as
+// `Expr::Field { expr: Path("List"), field: "slice" }`, not `Expr::Path` —
+// before this fix, `Expr::App`'s `fn_name` derivation only ever handled
+// `Expr::Path`, so it was silently `None` for every such call, and the
+// labeled-arg-reordering branch (gated on `fn_name`) never ran — a
+// positionally-mismatched labeled call like the one below type-checked as
+// if the labels didn't exist, comparing `to`'s value against the `from`
+// slot and vice versa. Confirmed directly via the real compiled `certo.exe`
+// this was reachable in practice: `List.groupBy(key: ..., list: ...)`
+// type-checked fine (no typeck error) but then *lowered* its arguments in
+// written order regardless (a separate, HIR-side reordering gap — BACKLOG
+// item 170's corrected fix, `crates/hir/src/tests.rs`).
+#[test]
+fn labeled_args_reorder_for_module_qualified_call() {
+    // Written out of order and with mismatched types per position
+    // (`to`/`from` swapped from their declared order) — only type-checks
+    // if the labels are actually used to reorder them.
+    seeded_check(
+        "module A\nfn f(xs: List<Int>): List<Int> = List.slice(to: 3, list: xs, from: 1)"
+    ).unwrap();
+}
+
+#[test]
+fn labeled_args_wrong_type_after_reordering_is_still_caught() {
+    // `from`/`to` must still be `Int` after reordering — this isn't just
+    // "labels are ignored and it happens to type-check anyway".
+    let kind = seeded_first_error_kind(
+        "module A\nfn f(xs: List<Int>): List<Int> = List.slice(to: 3, list: xs, from: \"x\")");
+    assert!(matches!(kind, TypeErrorKind::Mismatch { .. }), "expected E0200, got {kind:?}");
 }
 
 // Constraint
