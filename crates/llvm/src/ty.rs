@@ -20,6 +20,7 @@ pub fn llvm_ty(ty: &Ty) -> String {
         Ty::Bool       => "i1".into(),
         Ty::Char       => "i8".into(),
         Ty::Text       => "ptr".into(),    // const char*
+        Ty::BoundedText(_) => "ptr".into(), // same runtime representation as Text
         Ty::Unit       => "i8".into(),     // placeholder; void used for return type
         Ty::Uuid       => "ptr".into(),
         Ty::Decimal(_) => "ptr".into(),    // certo_decimal_t*
@@ -68,6 +69,7 @@ pub fn ast_ty_to_llvm(te: &certo_ast::types::TypeExpr) -> String {
                 "Bool"    => "i1".into(),
                 "Char"    => "i8".into(),
                 "Text"    => "ptr".into(),
+                "BoundedText" => "ptr".into(),
                 "Unit"    => "i8".into(),
                 "Decimal" => "ptr".into(),
                 "UUID"    => "ptr".into(),
@@ -82,6 +84,7 @@ pub fn ast_ty_to_llvm(te: &certo_ast::types::TypeExpr) -> String {
         TypeExpr::Ptr { .. }    => "ptr".into(),
         TypeExpr::Param { .. }  => "ptr".into(),
         TypeExpr::DecimalParam { .. } => "ptr".into(),
+        TypeExpr::BoundedTextParam { .. } => "ptr".into(),
     }
 }
 

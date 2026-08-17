@@ -70,6 +70,20 @@ pub enum TypeExpr {
         scale:     u8,
         span:      Span,
     },
+
+    /// `BoundedText(255)` (spec §3.3, BACKLOG item 147) — a maximum-length
+    /// annotation on `Text`, mirroring `DecimalParam`'s own shape: the
+    /// parser only ever produces this for the exact single-segment name
+    /// `BoundedText`, not a general mechanism. Deliberately a **compile-time
+    /// refinement only** (matching `Decimal(p,s)`'s own established
+    /// precedent — see `Ty::BoundedText`'s doc comment) — no runtime length
+    /// check is performed anywhere; `max_len` is carried through purely for
+    /// type-level bookkeeping (unification, display, DB-schema drift
+    /// comparison), the same way `Decimal`'s `precision`/`scale` are.
+    BoundedTextParam {
+        max_len: u32,
+        span:    Span,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]

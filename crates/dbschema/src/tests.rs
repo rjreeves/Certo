@@ -330,3 +330,34 @@ fn unrelated_types_not_compatible() {
 fn decimal_bare_vs_param_strips_nullable_suffix() {
     assert!(crate::schema::decimal_bare_vs_param("Decimal?", "Decimal(19, 4)?"));
 }
+
+// ------------------------------------------------------------------ //
+// bounded_text_bare_vs_param — BACKLOG item 147
+// ------------------------------------------------------------------ //
+
+#[test]
+fn bare_text_compatible_with_bounded_text_either_order() {
+    assert!(crate::schema::bounded_text_bare_vs_param("Text", "BoundedText(255)"));
+    assert!(crate::schema::bounded_text_bare_vs_param("BoundedText(255)", "Text"));
+}
+
+#[test]
+fn different_bounded_text_lengths_not_compatible() {
+    assert!(!crate::schema::bounded_text_bare_vs_param("BoundedText(10)", "BoundedText(255)"));
+}
+
+#[test]
+fn same_bounded_text_lengths_not_flagged_by_this_helper() {
+    assert!(!crate::schema::bounded_text_bare_vs_param("BoundedText(255)", "BoundedText(255)"));
+}
+
+#[test]
+fn unrelated_types_not_compatible_bounded_text() {
+    assert!(!crate::schema::bounded_text_bare_vs_param("Int", "BoundedText(255)"));
+    assert!(!crate::schema::bounded_text_bare_vs_param("Text", "Decimal(19, 4)"));
+}
+
+#[test]
+fn bounded_text_bare_vs_param_strips_nullable_suffix() {
+    assert!(crate::schema::bounded_text_bare_vs_param("Text?", "BoundedText(255)?"));
+}

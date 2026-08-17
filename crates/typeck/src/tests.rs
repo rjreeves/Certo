@@ -1310,6 +1310,56 @@ fn decimal_param_display_shows_precision_scale() {
 }
 
 // ------------------------------------------------------------------ //
+// BoundedText(n) — BACKLOG item 147
+// ------------------------------------------------------------------ //
+
+#[test]
+fn bounded_text_param_type_checks() {
+    check("module A\nfn f(x: BoundedText(255)): BoundedText(255) = x").unwrap();
+}
+
+#[test]
+fn bounded_text_concat_type_checks() {
+    // `++` unifies both operands against Text — BoundedText must flow
+    // through it exactly like plain Text (compile-time-only refinement,
+    // zero special-casing needed anywhere Text is already accepted).
+    check("module A\nfn f(x: BoundedText(255), y: BoundedText(255)): Text = x ++ y").unwrap();
+}
+
+#[test]
+fn bare_text_unifies_with_bounded_text_both_ways() {
+    // The core design decision: a bare `Text` value can be passed where
+    // `BoundedText(n)` is expected, and vice versa — same runtime
+    // representation, the length is a compile-time-only refinement.
+    check("module A\nfn f(x: Text): BoundedText(255) = x").unwrap();
+    check("module A\nfn g(x: BoundedText(255)): Text = x").unwrap();
+}
+
+#[test]
+fn different_bounded_text_lengths_do_not_unify() {
+    // BoundedText(10) and BoundedText(255) are NOT interchangeable — only a
+    // bare Text on one side makes them compatible.
+    let src = "module A\nfn f(x: BoundedText(10)): BoundedText(255) = x";
+    let kind = first_error_kind(src);
+    assert!(
+        matches!(kind, TypeErrorKind::Mismatch { .. } | TypeErrorKind::CannotUnify { .. }),
+        "expected BoundedText(10)/BoundedText(255) to be exclusive, got: {:?}", kind
+    );
+}
+
+#[test]
+fn bounded_text_param_display_shows_max_len() {
+    let src = "module A\nfn f(x: BoundedText(10)): BoundedText(255) = x";
+    let kind = first_error_kind(src);
+    let TypeErrorKind::Mismatch { expected, found } = kind else {
+        panic!("expected Mismatch, got {:?}", kind);
+    };
+    let both = format!("{} {}", expected.display(), found.display());
+    assert!(both.contains("BoundedText(255)"), "got: {both}");
+    assert!(both.contains("BoundedText(10)"), "got: {both}");
+}
+
+// ------------------------------------------------------------------ //
 // Secret<T> not-Loggable/Serializable check (BACKLOG item 78)
 // ------------------------------------------------------------------ //
 

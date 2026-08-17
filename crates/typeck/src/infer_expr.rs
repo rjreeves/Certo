@@ -57,6 +57,7 @@ pub fn type_expr_to_ty(te: &TypeExpr, ctx: &mut Ctx<'_>) -> Ty {
                 "Bool"    => Ty::Bool,
                 "Char"    => Ty::Char,
                 "Text"    => Ty::Text,
+                "BoundedText" => Ty::BoundedText(None),
                 "Unit"    => Ty::Unit,
                 "UUID"    => Ty::Uuid,
                 "Option"  => Ty::Option(Box::new(targs.into_iter().next().unwrap_or(Ty::Error))),
@@ -127,6 +128,7 @@ pub fn type_expr_to_ty(te: &TypeExpr, ctx: &mut Ctx<'_>) -> Ty {
         }
         TE::Ptr { inner, .. } => type_expr_to_ty(&inner.node, ctx),
         TE::DecimalParam { precision, scale, .. } => Ty::Decimal(Some((*precision, *scale))),
+        TE::BoundedTextParam { max_len, .. } => Ty::BoundedText(Some(*max_len)),
     }
 }
 

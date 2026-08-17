@@ -14,6 +14,7 @@ pub fn ty_to_c(ty: &Ty) -> String {
         Ty::Bool    => "bool".into(),
         Ty::Char    => "char".into(),
         Ty::Text    => "certo_text_t".into(),
+        Ty::BoundedText(_) => "certo_text_t".into(), // same runtime representation as Text
         Ty::Unit    => "int64_t".into(), // Unit locals stored as 0; certo_unit_t only in function sigs
         Ty::Uuid    => "certo_uuid_t".into(),
 
@@ -122,6 +123,7 @@ pub fn mangle(ty: &Ty) -> String {
         Ty::Bool    => "bool".into(),
         Ty::Char    => "char".into(),
         Ty::Text    => "text".into(),
+        Ty::BoundedText(_) => "text".into(),
         Ty::Unit    => "unit".into(),
         Ty::Uuid    => "uuid".into(),
         Ty::Option(t)   => format!("opt_{}", mangle(t)),

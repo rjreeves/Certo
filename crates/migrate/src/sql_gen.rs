@@ -83,7 +83,7 @@ fn fk_action(a: &FkAction) -> &'static str {
     }
 }
 
-fn te_to_sql(te: &TypeExpr) -> &'static str {
+fn te_to_sql(te: &TypeExpr) -> String {
     use TypeExpr::*;
     match te {
         Named { path, .. } => {
@@ -94,15 +94,26 @@ fn te_to_sql(te: &TypeExpr) -> &'static str {
                 "Decimal"  => "NUMERIC",
                 "Bool"     => "BOOLEAN",
                 "Text"     => "TEXT",
+                "BoundedText" => "TEXT",
                 "UUID"     => "UUID",
                 "Date"     => "DATE",
                 "DateTime" => "TIMESTAMPTZ",
                 "Json"     => "JSONB",
                 _          => "TEXT",
-            }
+            }.to_string()
         }
-        Option { .. } => "TEXT",
-        _             => "TEXT",
+        // `Decimal(p, s)`/`BoundedText(n)` (BACKLOG items 132/147) — both
+        // previously fell through to the generic `_ => "TEXT"` catch-all
+        // below (confirmed: `Decimal(19, 4)` migration columns silently
+        // emitted `TEXT` DDL, dropping precision/scale entirely, never
+        // actually fixed when item 132 shipped Decimal's own type support).
+        // `NUMERIC(p, s)`/`VARCHAR(n)` are real Postgres syntax, so unlike
+        // every other case in this function these two carry the parameter
+        // through into the generated DDL rather than discarding it.
+        DecimalParam { precision, scale, .. } => format!("NUMERIC({}, {})", precision, scale),
+        BoundedTextParam { max_len, .. } => format!("VARCHAR({})", max_len),
+        Option { .. } => "TEXT".to_string(),
+        _             => "TEXT".to_string(),
     }
 }
 

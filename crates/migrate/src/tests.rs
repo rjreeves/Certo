@@ -33,6 +33,14 @@ fn bool_ty() -> S<TypeExpr> {
     })
 }
 
+fn decimal_param_ty(precision: u8, scale: u8) -> S<TypeExpr> {
+    s(TypeExpr::DecimalParam { precision, scale, span: dummy_span() })
+}
+
+fn bounded_text_ty(max_len: u32) -> S<TypeExpr> {
+    s(TypeExpr::BoundedTextParam { max_len, span: dummy_span() })
+}
+
 fn make_col(name: &str, ty: S<TypeExpr>, pk: bool, nullable: bool) -> ColumnDef {
     ColumnDef { name: name.to_string(), ty, primary_key: pk, nullable, unique: false, default: None, span: dummy_span() }
 }
@@ -61,6 +69,38 @@ fn create_table_basic() {
 fn drop_table_generates_sql() {
     let op = MigrationOp::DropTable { name: "old_table".to_string(), span: dummy_span() };
     assert_eq!(op_to_sql(&op), "DROP TABLE old_table;");
+}
+
+#[test]
+fn decimal_param_column_emits_numeric_precision_scale() {
+    // BACKLOG item 147 — found (and fixed here) while mirroring Decimal's
+    // own precedent: `Decimal(p, s)` previously fell through to the
+    // generic `_ => "TEXT"` catch-all in `te_to_sql`, silently dropping
+    // precision/scale from migration DDL despite item 128's own type
+    // support shipping. A `Decimal(19, 4)` column must emit real
+    // `NUMERIC(19, 4)` DDL, not `TEXT`.
+    let op = MigrationOp::CreateTable {
+        name: "prices".to_string(),
+        columns: vec![make_col("amount", decimal_param_ty(19, 4), false, false)],
+        span: dummy_span(),
+    };
+    let sql = op_to_sql(&op);
+    assert!(sql.contains("amount NUMERIC(19, 4) NOT NULL"), "got: {}", sql);
+    assert!(!sql.contains("TEXT"), "got: {}", sql);
+}
+
+#[test]
+fn bounded_text_param_column_emits_varchar_with_length() {
+    // BACKLOG item 147 — `BoundedText(n)` must emit real `VARCHAR(n)` DDL,
+    // not silently fall through to plain `TEXT` the way the pre-existing
+    // `Decimal(p, s)` gap this item's own investigation found used to.
+    let op = MigrationOp::CreateTable {
+        name: "users".to_string(),
+        columns: vec![make_col("zip", bounded_text_ty(10), false, false)],
+        span: dummy_span(),
+    };
+    let sql = op_to_sql(&op);
+    assert!(sql.contains("zip VARCHAR(10) NOT NULL"), "got: {}", sql);
 }
 
 #[test]

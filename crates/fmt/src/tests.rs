@@ -192,6 +192,14 @@ fn decimal_param_round_trips() {
 }
 
 #[test]
+fn bounded_text_param_round_trips() {
+    // BACKLOG item 147 — `BoundedText(255)` must round-trip through the
+    // formatter unchanged, not collapse to bare `Text`.
+    let out = fmt("module A\ntype User = { zip: BoundedText(10) }");
+    assert_contains(&out, "zip: BoundedText(10)");
+}
+
+#[test]
 fn type_alias() {
     let out = fmt("module A\ntype Name = Text");
     assert_contains(&out, "type Name = Text");

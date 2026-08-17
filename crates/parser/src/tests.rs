@@ -1394,6 +1394,57 @@ fn decimal_out_of_range_precision_is_error() {
 }
 
 // ------------------------------------------------------------------ //
+// BoundedText(n) — BACKLOG item 147
+// ------------------------------------------------------------------ //
+
+#[test]
+fn bounded_text_with_max_len_parses() {
+    use certo_ast::types::TypeExpr;
+    let m = ok("module A\nfn f(x: BoundedText(255)): Unit = todo()");
+    let Decl::Fn(decl) = &m.decls[0].node else { panic!("expected fn decl") };
+    let TypeExpr::BoundedTextParam { max_len, .. } = &decl.params[0].ty.node
+        else { panic!("expected BoundedTextParam, got {:?}", decl.params[0].ty.node) };
+    assert_eq!(*max_len, 255);
+}
+
+#[test]
+fn bare_text_still_parses_as_named() {
+    // Regression guard: plain `Text` (no parens) must be unaffected — only
+    // the `BoundedText(` form is special-cased.
+    use certo_ast::types::TypeExpr;
+    let m = ok("module A\nfn f(x: Text): Unit = todo()");
+    let Decl::Fn(decl) = &m.decls[0].node else { panic!("expected fn decl") };
+    assert!(matches!(&decl.params[0].ty.node,
+        TypeExpr::Named { path, args, .. } if path.segments[0].node == "Text" && args.is_empty()));
+}
+
+#[test]
+fn bounded_text_optional_parses() {
+    use certo_ast::types::TypeExpr;
+    let m = ok("module A\nfn f(x: BoundedText(255)?): Unit = todo()");
+    let Decl::Fn(decl) = &m.decls[0].node else { panic!("expected fn decl") };
+    let TypeExpr::Option { inner, .. } = &decl.params[0].ty.node
+        else { panic!("expected Option, got {:?}", decl.params[0].ty.node) };
+    assert!(matches!(&inner.node, TypeExpr::BoundedTextParam { .. }));
+}
+
+#[test]
+fn bounded_text_missing_arg_is_error() {
+    err("module A\nfn f(x: BoundedText()): Unit = todo()");
+}
+
+#[test]
+fn bounded_text_non_integer_arg_is_error() {
+    err("module A\nfn f(x: BoundedText(n)): Unit = todo()");
+}
+
+#[test]
+fn bounded_text_out_of_range_len_is_error() {
+    // Max length is u32 — bigger than u32::MAX doesn't fit.
+    err("module A\nfn f(x: BoundedText(99999999999999)): Unit = todo()");
+}
+
+// ------------------------------------------------------------------ //
 // `live val` inside a view (BACKLOG item 88 — parsing slice only)
 // ------------------------------------------------------------------ //
 
