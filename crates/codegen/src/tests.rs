@@ -1469,3 +1469,36 @@ fn sumby_synthesizes_a_named_summation_loop() {
         "module A\nimport Stdlib.Collections.{ List }\nfn run(): Int = List.sumBy([3, 1, 2], (x) => x)");
     assert_contains(&out, "__sum_by_");
 }
+
+// BACKLOG item 170 (corrected after investigation) — `List.groupBy`'s own
+// struct-key case already worked (it's a `BOXED_ABI_CALLEES` member, using
+// an independent param-type-hint mechanism), but labeled-argument
+// *reordering* for it was genuinely broken: `crates/hir/src/lower.rs`'s
+// `stdlib_param_names()` table (which gates whether HIR reorders a
+// module-qualified call's labeled args at all) was missing `List.groupBy`,
+// so `List.groupBy(key: ..., list: ...)` lowered its arguments in written
+// (unreordered) source order — confirmed directly via a real compile
+// failure (`passing 'certo_fn_t' to parameter of incompatible type
+// 'CertoList *'`) before this fix. Checks the actual call site's operand
+// order specifically (not the whole output — a labeled call directly
+// returned as a function's own tail expression surfaces a separate,
+// narrower, pre-existing return-type quirk unrelated to argument order,
+// flagged separately rather than folded into this fix).
+#[test]
+fn groupby_labeled_args_reorder_to_match_positional_call() {
+    let out = codegen(
+        "module A\nimport Stdlib.Collections.{ List }\nfn run(): Unit = {\n  val g = List.groupBy(key: (x) => x, list: [1, 2, 3])\n}");
+    // The list operand (from certo_list_of) must be the *first* argument to
+    // certo_list_group_by, the closure the second — not swapped.
+    assert_contains(&out, "= certo_list_of(3,");
+    let group_by_call = out.lines().find(|l| l.contains("certo_list_group_by(")).expect("expected a certo_list_group_by call");
+    // The list-holding local is assigned from certo_list_of two lines
+    // earlier than the closure-holding local (typeof(...){ .fn = ..., .env
+    // = ... }); confirm the call passes them in that same list-then-closure
+    // order rather than reversed.
+    let list_local = out.lines().find(|l| l.contains("certo_list_of(3,")).and_then(|l| l.split('=').next()).unwrap().trim();
+    let closure_local = out.lines().find(|l| l.contains(".fn = __lam_")).and_then(|l| l.split('=').next()).unwrap().trim();
+    let list_pos = group_by_call.find(list_local).expect("list local should appear in the call");
+    let closure_pos = group_by_call.find(closure_local).expect("closure local should appear in the call");
+    assert!(list_pos < closure_pos, "expected list operand before closure operand in: {group_by_call}");
+}

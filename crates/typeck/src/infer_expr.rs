@@ -226,12 +226,26 @@ pub fn infer(expr: &S<Expr>, ctx: &mut Ctx<'_>) -> Ty {
         Expr::App { func, args, span } => {
             let has_labels = args.iter().any(|a| a.label.is_some());
             // Build both a full-qualified path (for stdlib) and a short name (for user-defined).
-            let (fn_full_path, fn_short_name) = if let Expr::Path { path, .. } = &func.node {
-                let full = path.segments.iter().map(|s| s.node.as_str()).collect::<Vec<_>>().join(".");
-                let short = path.segments.last().map(|s| s.node.clone());
-                (Some(full), short)
-            } else {
-                (None, None)
+            //
+            // A module-qualified call (`List.sortBy(...)`) parses as
+            // `Expr::Field { expr: Path("List"), field: "sortBy" }`, not
+            // `Expr::Path` — confirmed directly (BACKLOG item 171): before
+            // this `Expr::Field` arm existed, `fn_name` was silently `None`
+            // for every such call, so labeled-arg reordering/default-param
+            // insertion below never ran for *any* qualified stdlib call
+            // (`List.groupBy(key: ..., list: ...)` type-checked the
+            // arguments positionally instead of by label, a real, reproduced
+            // break). `resolve_callee` below already works around this gap
+            // for its own, narrower purpose via the same `qualified_call_name`
+            // helper reused here — this closes the gap at the source instead.
+            let (fn_full_path, fn_short_name) = match &func.node {
+                Expr::Path { path, .. } => {
+                    let full = path.segments.iter().map(|s| s.node.as_str()).collect::<Vec<_>>().join(".");
+                    let short = path.segments.last().map(|s| s.node.clone());
+                    (Some(full), short)
+                }
+                Expr::Field { expr, field, .. } => (qualified_call_name(expr, field), None),
+                _ => (None, None),
             };
             // Prefer full-path lookup (stdlib), fall back to short name (user-defined).
             let fn_name: Option<String> = fn_full_path
@@ -372,28 +386,12 @@ pub fn infer(expr: &S<Expr>, ctx: &mut Ctx<'_>) -> Ty {
             // this check having already ruled those out.
             const KEY_PROJECTING_CALLEES: &[&str] =
                 &["List.sortBy", "List.minBy", "List.maxBy", "List.sumBy"];
-            // NOTE: deliberately re-derived here rather than reusing the
-            // `fn_name` computed above — that variable's `Expr::Path`-only
-            // derivation never resolves a module-qualified callee written
-            // as `List.sortBy(...)` (parsed as `Expr::Field`, not
-            // `Expr::Path` — see `qualified_call_name`'s own doc comment),
-            // so `fn_name` is always `None` for every real call site this
-            // check needs to fire on. Confirmed directly: with the shared
-            // `fn_name`, this block never ran at all for
-            // `List.sortBy(names, (x) => x)`, silently admitting an
-            // unsupported `Text` key with no diagnostic. Reusing
-            // `qualified_call_name` (already used by `resolve_callee`
-            // above for exactly this same gap) fixes this check without
-            // touching the shared `fn_name`/`arg_info` derivation, which
-            // has its own, wider blast radius across labeled-arg
-            // reordering for every other module-qualified stdlib call —
-            // out of scope for BACKLOG item 162b.
-            let key_check_name = match &func.node {
-                Expr::Path { path, .. } => path.segments.last().map(|s| s.node.clone()),
-                Expr::Field { expr, field, .. } => qualified_call_name(expr, field),
-                _ => None,
-            };
-            if let Some(name) = &key_check_name {
+            // `fn_name` now correctly resolves a module-qualified callee
+            // like `List.sortBy(...)` (BACKLOG item 171 fixed the shared
+            // `Expr::Field` gap at its source) — this used to re-derive the
+            // name itself via `qualified_call_name` directly, back when
+            // that gap was worked around locally rather than fixed.
+            if let Some(name) = &fn_name {
                 if KEY_PROJECTING_CALLEES.contains(&name.as_str()) {
                     if let Some((key_fn_ty, key_span)) = arg_info.get(1) {
                         if let Ty::Fn { ret, .. } = ctx.uf.apply(key_fn_ty) {
