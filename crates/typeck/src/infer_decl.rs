@@ -196,6 +196,10 @@ fn walk_ffi(
             for t in tasks { walk_ffi(t, in_unsafe, extern_fns, errors); }
             if let Some(t) = timeout { walk_ffi(t, in_unsafe, extern_fns, errors); }
         }
+        Expr::WithTimeout { duration, body, .. } => {
+            walk_ffi(duration, in_unsafe, extern_fns, errors);
+            walk_ffi(body, in_unsafe, extern_fns, errors);
+        }
         Expr::Record { base, fields, .. } => {
             if let Some(b) = base { walk_ffi(b, in_unsafe, extern_fns, errors); }
             for fld in fields { walk_ffi(&fld.value, in_unsafe, extern_fns, errors); }
@@ -335,6 +339,10 @@ fn walk_priv_ctors(
         Expr::Parallel { tasks, timeout, .. } => {
             for t in tasks { walk_priv_ctors(t, self_type, priv_ctors, errors); }
             if let Some(t) = timeout { walk_priv_ctors(t, self_type, priv_ctors, errors); }
+        }
+        Expr::WithTimeout { duration, body, .. } => {
+            walk_priv_ctors(duration, self_type, priv_ctors, errors);
+            walk_priv_ctors(body, self_type, priv_ctors, errors);
         }
         Expr::Record { base, fields, .. } => {
             if let Some(b) = base { walk_priv_ctors(b, self_type, priv_ctors, errors); }

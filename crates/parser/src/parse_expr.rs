@@ -496,6 +496,9 @@ fn parse_atom(cur: &mut Cursor<'_>) -> Result<S<Expr>, ParseError> {
         // `parallel { ... }`
         Some(Token::Parallel) => parse_parallel(cur),
 
+        // `withTimeout(duration) { body }`
+        Some(Token::WithTimeout) => parse_with_timeout(cur),
+
         // `for x in iter { body }`
         Some(Token::For) => parse_for(cur),
 
@@ -918,6 +921,22 @@ fn parse_parallel(cur: &mut Cursor<'_>) -> Result<S<Expr>, ParseError> {
     let end = cur.expect(&Token::RBrace)?;
     let span = start.to(end);
     Ok(S::new(Expr::Parallel { tasks, timeout, span }, span))
+}
+
+/// `withTimeout(duration) { body }` — BACKLOG item 122.
+fn parse_with_timeout(cur: &mut Cursor<'_>) -> Result<S<Expr>, ParseError> {
+    let start = cur.peek_span();
+    cur.bump(); // eat `withTimeout`
+    cur.expect(&Token::LParen)?;
+    let duration = parse_expr(cur)?;
+    cur.expect(&Token::RParen)?;
+    let body = parse_block(cur)?;
+    let span = start.to(body.span);
+    Ok(S::new(Expr::WithTimeout {
+        duration: Box::new(duration),
+        body:     Box::new(body),
+        span,
+    }, span))
 }
 
 /// Split an f-string content string into literal and interpolated parts.

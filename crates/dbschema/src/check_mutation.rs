@@ -160,6 +160,12 @@ fn check_expr(
             None
         }
 
+        Expr::WithTimeout { duration, body, .. } => {
+            check_expr(&duration.node, scope, schema, errors);
+            check_expr(&body.node, scope, schema, errors);
+            None
+        }
+
         Expr::Transaction { body, .. } | Expr::Unsafe { body, .. } => {
             check_expr(&body.node, scope, schema, errors);
             None

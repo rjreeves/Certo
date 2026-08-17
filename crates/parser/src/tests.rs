@@ -1607,6 +1607,23 @@ fn every_desugars_to_spawn_of_while_true() {
     assert_eq!(stmts.len(), 2, "expected [sleep(...), println(...)], got {:?}", stmts);
 }
 
+// ------------------------------------------------------------------ //
+// `withTimeout(duration) { body }` — BACKLOG item 122
+// ------------------------------------------------------------------ //
+
+#[test]
+fn with_timeout_parses_duration_and_body() {
+    let body = parse_fn_body(
+        "module A\nasync fn f(): Int? = withTimeout(Duration.seconds(5)) {\n work()\n}");
+    let Expr::WithTimeout { duration, body, .. } = &body.node else {
+        panic!("expected Expr::WithTimeout, got {:?}", body.node)
+    };
+    assert!(matches!(&duration.node, Expr::App { .. }), "expected Duration.seconds(5) call, got {:?}", duration.node);
+    let Expr::Block { stmts, .. } = &body.node else { panic!("expected a block body, got {:?}", body.node) };
+    assert_eq!(stmts.len(), 1, "expected [work()], got {:?}", stmts);
+}
+
+
 #[test]
 fn every_as_plain_identifier_elsewhere_is_unaffected() {
     // `every` is a contextual identifier — only special when directly

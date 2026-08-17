@@ -114,6 +114,11 @@ pub fn resolve_expr(expr: &S<Expr>, scope: &mut ScopeChain) {
             if let Some(t) = timeout { resolve_expr(t, scope); }
         }
 
+        Expr::WithTimeout { duration, body, .. } => {
+            resolve_expr(duration, scope);
+            resolve_expr(body, scope);
+        }
+
         Expr::Transaction { body, .. }
         | Expr::Unsafe { body, .. } => resolve_expr(body, scope),
 

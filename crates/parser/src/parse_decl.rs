@@ -543,6 +543,10 @@ fn collect_referenced_idents(expr: &S<Expr>, out: &mut HashSet<String>) {
             for t in tasks { collect_referenced_idents(t, out); }
             if let Some(t) = timeout { collect_referenced_idents(t, out); }
         }
+        Expr::WithTimeout { duration, body, .. } => {
+            collect_referenced_idents(duration, out);
+            collect_referenced_idents(body, out);
+        }
         Expr::For { iter, body, .. } => {
             collect_referenced_idents(iter, out);
             collect_referenced_idents(body, out);

@@ -158,6 +158,10 @@ pub fn fmt_expr(expr: &Expr, indent: usize) -> String {
             format!("parallel {{\n{}{}\n{}}}", body, timeout_str, ind(indent))
         }
 
+        Expr::WithTimeout { duration, body, .. } => {
+            format!("withTimeout({}) {}", fmt_expr(&duration.node, indent), fmt_expr(&body.node, indent))
+        }
+
         Expr::Ascribe { expr, ty, .. } =>
             format!("{}: {}", fmt_expr(&expr.node, indent), fmt_type(&ty.node, indent)),
 

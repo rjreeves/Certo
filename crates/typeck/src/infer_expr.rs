@@ -821,6 +821,16 @@ pub fn infer(expr: &S<Expr>, ctx: &mut Ctx<'_>) -> Ty {
             Ty::Tuple(tasks.iter().map(|t| infer(t, ctx)).collect())
         }
 
+        // `withTimeout(d) { body }` (BACKLOG item 122) — cooperative-cancellation
+        // timeout: `Some(value)` if `body` finishes before `d` elapses, `None`
+        // if the deadline passes first (the caller is never blocked past it).
+        Expr::WithTimeout { duration, body, span } => {
+            let dur_ty = infer(duration, ctx);
+            ctx.unify(dur_ty, Ty::Named { name: "Duration".into(), args: vec![] }, *span);
+            let body_ty = infer(body, ctx);
+            Ty::Option(Box::new(body_ty))
+        }
+
         Expr::Transaction { body, .. } | Expr::Unsafe { body, .. } => infer(body, ctx),
 
         Expr::Ascribe { expr, ty, span } => {

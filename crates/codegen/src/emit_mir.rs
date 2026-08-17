@@ -120,7 +120,18 @@ pub fn emit_spawn_support(sites: &[SpawnSite], emitted_joins: &mut HashSet<Strin
         writeln!(out, "static void* {}(void* _p) {{", s.worker_name).unwrap();
         writeln!(out, "    {}* c = ({}*)_p;", s.ctx_name, s.ctx_name).unwrap();
         writeln!(out, "    c->result = {}({});", s.func_c, call_args).unwrap();
-        writeln!(out, "    __certo_task_signal_done(&c->hdr);").unwrap();
+        // Ordinary spawn/parallel joins never call __certo_task_hdr_try_abandon,
+        // so this CAS always wins for them (behaviorally identical to the old
+        // unconditional signal-done) — the abandon branch below only ever runs
+        // for a task a `withTimeout(d) { ... }` (BACKLOG item 122) gave up
+        // waiting on, where the worker itself must own cleanup instead of the
+        // joiner, since nothing else will ever join or free this context.
+        writeln!(out, "    if (__certo_task_hdr_try_finish(&c->hdr)) {{").unwrap();
+        writeln!(out, "        __certo_task_signal_done(&c->hdr);").unwrap();
+        writeln!(out, "    }} else {{").unwrap();
+        writeln!(out, "        __certo_task_hdr_abandon_cleanup(&c->hdr);").unwrap();
+        writeln!(out, "        free(c);").unwrap();
+        writeln!(out, "    }}").unwrap();
         writeln!(out, "    return 0;").unwrap();
         writeln!(out, "}}").unwrap();
     }
@@ -410,6 +421,44 @@ fn emit_stmt(stmt: &MirStmt, locals: &[MirLocalDecl], fn_cname: &str, spawn_idx:
             writeln!(out, "      }}").unwrap();
             writeln!(out, "      {} = ((__certo_join_{}_t*)({t}))->result;", lhs, rmangle).unwrap();
             writeln!(out, "      free((void*)({t}));").unwrap();
+            writeln!(out, "    }}").unwrap();
+        }
+        Rvalue::JoinTimedCancel { task, deadline, ret_ty } => {
+            // `withTimeout(d) { ... }` — BACKLOG item 122. Unlike `JoinTimed`
+            // above, never panics: on timeout the task is safely *abandoned*
+            // instead of leaked (via the atomic ownership handoff in
+            // `__certo_task_hdr_try_abandon`/`__certo_task_hdr_try_finish`,
+            // `crates/codegen/src/emit_module.rs`) and this yields a null
+            // (`None`) `Option` pointer rather than a boxed value. A task
+            // that finished in the tiny race window between the timed wait
+            // failing and the abandon attempt is treated as an on-time
+            // success (`Some`), not discarded — `__certo_thread_join` there
+            // returns near-instantly since the worker is already done or
+            // finishing.
+            let t = emit_operand(task);
+            let d = emit_operand(deadline);
+            let cty = ty_to_c(ret_ty);
+            let rmangle = mangle(ret_ty);
+            writeln!(out, "    {{").unwrap();
+            writeln!(out, "      __certo_task_hdr_t* _wt_hdr = (__certo_task_hdr_t*)({t});").unwrap();
+            writeln!(out, "      int64_t _remaining_ms = ({d}) - certo_monotonic_millis();").unwrap();
+            writeln!(out, "      bool _wt_ok;").unwrap();
+            writeln!(out, "      if (__certo_thread_join_timed(_wt_hdr, _remaining_ms)) {{").unwrap();
+            writeln!(out, "        _wt_ok = true;").unwrap();
+            writeln!(out, "      }} else if (!__certo_task_hdr_try_abandon(_wt_hdr)) {{").unwrap();
+            writeln!(out, "        __certo_thread_join(_wt_hdr->thread);").unwrap();
+            writeln!(out, "        _wt_ok = true;").unwrap();
+            writeln!(out, "      }} else {{").unwrap();
+            writeln!(out, "        _wt_ok = false;").unwrap();
+            writeln!(out, "      }}").unwrap();
+            writeln!(out, "      if (_wt_ok) {{").unwrap();
+            writeln!(out, "        {cty}* _ob = ({cty}*)malloc(sizeof({cty}));").unwrap();
+            writeln!(out, "        *_ob = ((__certo_join_{}_t*)({t}))->result;", rmangle).unwrap();
+            writeln!(out, "        free((void*)({t}));").unwrap();
+            writeln!(out, "        {} = (void*)_ob;", lhs).unwrap();
+            writeln!(out, "      }} else {{").unwrap();
+            writeln!(out, "        {} = NULL;", lhs).unwrap();
+            writeln!(out, "      }}").unwrap();
             writeln!(out, "    }}").unwrap();
         }
         Rvalue::BoxSome { value, ty } => {
