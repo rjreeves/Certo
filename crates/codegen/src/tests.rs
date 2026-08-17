@@ -1502,3 +1502,30 @@ fn groupby_labeled_args_reorder_to_match_positional_call() {
     let closure_pos = group_by_call.find(closure_local).expect("closure local should appear in the call");
     assert!(list_pos < closure_pos, "expected list operand before closure operand in: {group_by_call}");
 }
+
+// ------------------------------------------------------------------ //
+// `computed` record properties (BACKLOG item 143)
+// ------------------------------------------------------------------ //
+
+#[test]
+fn computed_field_access_generates_a_real_accessor_fn_and_calls_it() {
+    // Field access on a computed name must compile to a real function call
+    // (the same shape an ordinary `impl_method_emits_executable_fn` gets),
+    // not a `.isPositive` struct member read — Order's real C struct has
+    // no such member.
+    let c = codegen(
+        "module A\ntype Order = { total: Int, computed isPositive: Bool = total > 0 }\n\
+         fn run(o: Order): Bool = o.isPositive");
+    assert_contains(&c, "certo_order_is_positive");
+    assert_not_contains(&c, ".isPositive");
+}
+
+#[test]
+fn computed_field_body_reads_the_real_stored_field() {
+    let c = codegen(
+        "module A\ntype Order = { total: Int, computed isPositive: Bool = total > 0 }\n\
+         fn run(o: Order): Bool = o.isPositive");
+    // Inside the synthesized accessor, `total` must read the real struct
+    // field (the `val total = self.total` prelude binding).
+    assert_contains(&c, ".total");
+}

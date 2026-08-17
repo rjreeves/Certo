@@ -423,6 +423,72 @@ fn labeled_args_wrong_type_after_reordering_is_still_caught() {
     assert!(matches!(kind, TypeErrorKind::Mismatch { .. }), "expected E0200, got {kind:?}");
 }
 
+// `computed name: Ty = expr` field access (BACKLOG item 143). No stdlib
+// seeding needed here — these bodies only use plain comparisons, so the
+// plain `check`/`check_err` helpers (backed by `seed_builtins`) suffice.
+
+#[test]
+fn computed_field_read_type_checks_ok() {
+    check(
+        "module A\n\
+         type Order = { total: Int, computed isPositive: Bool = total > 0 }\n\
+         fn f(o: Order): Bool = o.isPositive"
+    ).unwrap();
+}
+
+#[test]
+fn computed_field_read_wrong_expected_type_is_e0200() {
+    let kind = first_error_kind(
+        "module A\n\
+         type Order = { total: Int, computed isPositive: Bool = total > 0 }\n\
+         fn f(o: Order): Text = o.isPositive"
+    );
+    assert!(matches!(kind, TypeErrorKind::Mismatch { .. }), "expected E0200, got {kind:?}");
+}
+
+#[test]
+fn setting_a_computed_field_in_a_literal_is_e0217() {
+    let kind = first_error_kind(
+        "module A\n\
+         type Order = { total: Int, computed isPositive: Bool = total > 0 }\n\
+         fn f(): Order = Order { total: 5, isPositive: true }"
+    );
+    assert!(matches!(kind, TypeErrorKind::ComputedFieldNotSettable { .. }), "expected E0217, got {kind:?}");
+}
+
+#[test]
+fn setting_a_computed_field_via_with_is_e0217() {
+    let kind = first_error_kind(
+        "module A\n\
+         type Order = { total: Int, computed isPositive: Bool = total > 0 }\n\
+         fn f(o: Order): Order = o.with(isPositive: false)"
+    );
+    assert!(matches!(kind, TypeErrorKind::ComputedFieldNotSettable { .. }), "expected E0217, got {kind:?}");
+}
+
+#[test]
+fn a_real_stored_field_of_the_same_shape_is_unaffected() {
+    // Regression: the computed-field check must only fire for an actual
+    // computed name, never suppress the ordinary field-set path.
+    check(
+        "module A\n\
+         type Order = { total: Int, computed isPositive: Bool = total > 0 }\n\
+         fn f(): Order = Order { total: 5 }"
+    ).unwrap();
+}
+
+#[test]
+fn accessing_a_genuinely_unknown_field_on_a_type_with_computed_fields_is_still_e0205() {
+    // Regression: adding the computed-fields fallback lookup must not mask
+    // a real "no such field at all" error.
+    let kind = first_error_kind(
+        "module A\n\
+         type Order = { total: Int, computed isPositive: Bool = total > 0 }\n\
+         fn f(o: Order): Int = o.nonexistent"
+    );
+    assert!(matches!(kind, TypeErrorKind::UnknownField { .. }), "expected E0205, got {kind:?}");
+}
+
 // Constraint
 
 #[test]

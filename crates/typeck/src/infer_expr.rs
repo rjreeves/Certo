@@ -152,12 +152,21 @@ fn resolve_field_ty(obj_ty: Ty, field: &S<String>, span: Span, ctx: &mut Ctx<'_>
             if let Some(fields) = ctx.env.record_fields.get(name.as_str()).cloned() {
                 match fields.iter().find(|(n, _)| n == &field.node) {
                     Some((_, ty)) => ty.clone(),
-                    None => {
-                        ctx.errors.push(TypeError {
-                            kind: TypeErrorKind::UnknownField { field: field.node.clone(), on: obj_ty },
-                            span,
-                        });
-                        Ty::Error
+                    // `computed` properties (BACKLOG item 143) — a real
+                    // stored field never wins over a computed one of the
+                    // same name (the parser rejects that shape earlier),
+                    // so checking this only after `fields` misses is safe
+                    // and keeps this the sole extra lookup on the hot path.
+                    None => match ctx.env.computed_fields.get(name.as_str())
+                        .and_then(|cs| cs.iter().find(|(n, _)| n == &field.node)) {
+                        Some((_, ty)) => ty.clone(),
+                        None => {
+                            ctx.errors.push(TypeError {
+                                kind: TypeErrorKind::UnknownField { field: field.node.clone(), on: obj_ty },
+                                span,
+                            });
+                            Ty::Error
+                        }
                     }
                 }
             } else {
@@ -615,6 +624,31 @@ pub fn infer(expr: &S<Expr>, ctx: &mut Ctx<'_>) -> Ty {
                         kind: TypeErrorKind::Mismatch { expected: Ty::Record(vec![]), found: base_ty },
                         span: *span,
                     });
+                }
+            }
+            // Reject setting a `computed` property directly (BACKLOG item
+            // 143), for both a direct literal (`ty_name` present) and a
+            // `.with(...)` copy-update (`ty_name: None`, but `base` is
+            // nominal) — checked against whichever of the two actually
+            // names the type here, since exactly one is ever present.
+            let computed_check_name = ty_name.clone()
+                .or_else(|| match &base_named {
+                    Some(Ty::Named { name, .. }) => Some(name.clone()),
+                    _ => None,
+                });
+            if let Some(tn) = &computed_check_name {
+                if let Some(computed_names) = ctx.env.computed_fields.get(tn.as_str()) {
+                    for f in fields.iter() {
+                        if computed_names.iter().any(|(n, _)| n == &f.name.node) {
+                            ctx.errors.push(TypeError {
+                                kind: TypeErrorKind::ComputedFieldNotSettable {
+                                    field: f.name.node.clone(),
+                                    type_name: tn.clone(),
+                                },
+                                span: f.span,
+                            });
+                        }
+                    }
                 }
             }
             // When written as `TypeName { ... }`, unify each field value against
