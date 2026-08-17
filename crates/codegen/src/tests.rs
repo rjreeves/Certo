@@ -1549,3 +1549,42 @@ fn computed_field_body_reads_the_real_stored_field() {
     // field (the `val total = self.total` prelude binding).
     assert_contains(&c, ".total");
 }
+
+// ------------------------------------------------------------------ //
+// Record patterns in `match` (BACKLOG item 145) — previously flattened
+// to a wildcard in HIR, so a bound field name compiled to an undeclared
+// C identifier (`certo_n`) instead of a real struct-field read.
+// ------------------------------------------------------------------ //
+
+#[test]
+fn match_arm_record_pattern_compiles_to_a_real_field_read() {
+    let c = codegen(
+        "module A\ntype User = { name: Text, age: Int }\n\
+         fn run(u: User): Text = match u {\n\
+         \x20   User { name: n, age: a } => n,\n\
+         \x20   _ => \"?\"\n\
+         }");
+    // The bound field must be a real struct-member read off the scrutinee,
+    // not a bare, never-declared local (`certo_n`).
+    assert_contains(&c, ".name");
+    assert_contains(&c, ".age");
+}
+
+#[test]
+fn bare_record_pattern_match_arm_compiles_the_same_as_the_prefixed_form() {
+    let prefixed = codegen(
+        "module A\ntype User = { name: Text, age: Int }\n\
+         fn run(u: User): Text = match u {\n\
+         \x20   User { name: n, age: a } => n,\n\
+         \x20   _ => \"?\"\n\
+         }");
+    let bare = codegen(
+        "module A\ntype User = { name: Text, age: Int }\n\
+         fn run(u: User): Text = match u {\n\
+         \x20   { name: n, age: a } => n,\n\
+         \x20   _ => \"?\"\n\
+         }");
+    let prefixed_sig = prefixed.lines().find(|l| l.contains("certo_run(")).expect("expected a certo_run() signature");
+    let bare_sig = bare.lines().find(|l| l.contains("certo_run(")).expect("expected a certo_run() signature");
+    assert_eq!(prefixed_sig, bare_sig);
+}

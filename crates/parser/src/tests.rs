@@ -472,6 +472,68 @@ fn computed_referencing_itself_does_not_get_a_self_binding() {
     assert!(!stmts.iter().any(|s| matches!(s, Stmt::Val { pattern, .. } if matches!(&pattern.node, Pattern::Ident { name, .. } if name.node == "loopy"))));
 }
 
+// Bare (no leading type name) record patterns (BACKLOG item 145).
+
+#[test]
+fn bare_record_pattern_parses_in_val_position() {
+    let m = ok("module A\nfn f(u: Text): Unit = {\n    val { name, age } = u\n}");
+    let Decl::Fn(f) = &m.decls[0].node else { panic!("expected fn decl") };
+    let Expr::Block { stmts, .. } = &f.body.as_ref().unwrap().node else { panic!("expected block body") };
+    let Stmt::Val { pattern, .. } = &stmts[0] else { panic!("expected val stmt") };
+    match &pattern.node {
+        Pattern::Record { path, fields, .. } => {
+            assert!(path.is_none(), "bare pattern must have no leading type name");
+            assert_eq!(fields.len(), 2);
+            assert_eq!(fields[0].name.node, "name");
+            assert_eq!(fields[1].name.node, "age");
+        }
+        other => panic!("expected Pattern::Record, got {other:?}"),
+    }
+}
+
+#[test]
+fn bare_record_pattern_parses_in_match_arm_position() {
+    let m = ok("module A\nfn f(u: Text): Text = match u {\n    { name: n } => n,\n    _ => \"?\"\n}");
+    let Decl::Fn(f) = &m.decls[0].node else { panic!("expected fn decl") };
+    let Expr::Match { arms, .. } = &f.body.as_ref().unwrap().node else { panic!("expected match expr") };
+    match &arms[0].pattern.node {
+        Pattern::Record { path, fields, .. } => {
+            assert!(path.is_none());
+            assert_eq!(fields[0].name.node, "name");
+        }
+        other => panic!("expected Pattern::Record, got {other:?}"),
+    }
+}
+
+#[test]
+fn bare_record_pattern_supports_shorthand_and_rest() {
+    let m = ok("module A\nfn f(u: Text): Unit = {\n    val { name, ..} = u\n}");
+    let Decl::Fn(f) = &m.decls[0].node else { panic!("expected fn decl") };
+    let Expr::Block { stmts, .. } = &f.body.as_ref().unwrap().node else { panic!("expected block body") };
+    let Stmt::Val { pattern, .. } = &stmts[0] else { panic!("expected val stmt") };
+    match &pattern.node {
+        Pattern::Record { fields, rest, .. } => {
+            assert_eq!(fields.len(), 1);
+            assert!(fields[0].pattern.is_none(), "shorthand field has no explicit sub-pattern");
+            assert!(*rest);
+        }
+        other => panic!("expected Pattern::Record, got {other:?}"),
+    }
+}
+
+#[test]
+fn type_prefixed_record_pattern_still_parses_with_a_path() {
+    // Regression: the existing `TypeName { ... }` form must be unaffected.
+    let m = ok("module A\ntype User = { name: Text }\nfn f(u: User): Unit = {\n    val User { name } = u\n}");
+    let Decl::Fn(f) = &m.decls[1].node else { panic!("expected fn decl") };
+    let Expr::Block { stmts, .. } = &f.body.as_ref().unwrap().node else { panic!("expected block body") };
+    let Stmt::Val { pattern, .. } = &stmts[0] else { panic!("expected val stmt") };
+    match &pattern.node {
+        Pattern::Record { path, .. } => assert!(path.is_some()),
+        other => panic!("expected Pattern::Record, got {other:?}"),
+    }
+}
+
 #[test]
 fn type_alias() {
     let m = ok("module A\ntype UserId = UUID");
