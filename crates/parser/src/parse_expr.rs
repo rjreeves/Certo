@@ -182,6 +182,32 @@ fn parse_postfix(cur: &mut Cursor<'_>) -> Result<S<Expr>, ParseError> {
             // `expr.age` — temporal age property (only valid on Timestamp fields; type checker enforces)
             // `expr.toBe(y)` / `.toBeTrue()` / etc — assertion matchers (BACKLOG item 165)
             // `expr.field` — regular field access
+            // `expr.with(field: value, ...)` — immutable copy-update syntax
+            // (spec §8.5, BACKLOG item 151). Desugars directly to
+            // `Expr::Record`'s own already-working base-spread mechanism
+            // (the same one `TypeName { ..base, field: value }` already
+            // uses) with `ty_name: None`, since the receiver's type name
+            // isn't spelled out at this call site — typeck and HIR lowering
+            // both recover it from `base`'s own resolved type instead (see
+            // their own `Expr::Record`/spread-lowering code for the other
+            // half of this feature).
+            Some(Token::Dot) if cur.peek2() == Some(&Token::With) => {
+                cur.bump(); // .
+                cur.bump(); // with
+                cur.expect(&Token::LParen)?;
+                let mut fields = Vec::new();
+                while cur.peek() != Some(&Token::RParen) && !cur.at_end() {
+                    let (fname, fspan) = cur.expect_ident()?;
+                    cur.expect(&Token::Colon)?;
+                    let value = parse_expr(cur)?;
+                    let fspan_full = fspan.to(value.span);
+                    fields.push(RecordField { name: S::new(fname, fspan), value, span: fspan_full });
+                    if cur.eat(|t| matches!(t, Token::Comma)).is_none() { break; }
+                }
+                let end = cur.expect(&Token::RParen)?;
+                let span = expr.span.to(end);
+                expr = S::new(Expr::Record { ty_name: None, base: Some(Box::new(expr)), fields, span }, span);
+            }
             Some(Token::Dot) => {
                 cur.bump();
                 let (field, field_span) = cur.expect_ident()?;

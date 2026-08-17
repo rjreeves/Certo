@@ -113,6 +113,13 @@ pub struct TypeDecl {
     /// Only meaningful when `body` is `TypeBody::Sum` with exactly one
     /// variant named the same as `name`.
     pub is_priv_ctor: bool,
+    /// `@valueObject` / `@aggregate` (spec §8.4/§8.5) — zero or more marker
+    /// annotations written before the `type` keyword (BACKLOG item 149).
+    /// Accepted-and-ignored: neither is shown to change compiled behavior
+    /// anywhere in the spec's own examples, so these are recognized and
+    /// preserved (round-tripped by `certo fmt`) purely as documentation/
+    /// intent markers, not given real semantics.
+    pub annotations: Vec<String>,
     pub name:        Ident,
     pub type_params: Vec<TypeParam>,
     pub body:        TypeBody,

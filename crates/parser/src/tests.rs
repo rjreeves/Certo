@@ -189,6 +189,122 @@ fn unknown_annotation_is_error() {
 }
 
 #[test]
+fn value_object_annotation_is_recorded_on_type_decl() {
+    let m = ok("module A\n@valueObject\ntype Money = { amount: Int, currency: Text }");
+    let Decl::Type(t) = &m.decls[0].node else { panic!("expected type decl") };
+    assert_eq!(t.annotations, vec!["valueObject".to_string()]);
+}
+
+#[test]
+fn aggregate_annotation_is_recorded_on_type_decl() {
+    let m = ok("module A\n@aggregate\ntype Cart = { id: UUID }");
+    let Decl::Type(t) = &m.decls[0].node else { panic!("expected type decl") };
+    assert_eq!(t.annotations, vec!["aggregate".to_string()]);
+}
+
+#[test]
+fn type_decl_without_annotation_has_empty_annotations() {
+    let m = ok("module A\ntype T = Int");
+    let Decl::Type(t) = &m.decls[0].node else { panic!("expected type decl") };
+    assert!(t.annotations.is_empty());
+}
+
+#[test]
+fn value_object_annotation_before_non_type_decl_is_error() {
+    err("module A\n@valueObject\npub fn f(): Int = 1");
+}
+
+#[test]
+fn aggregate_annotation_still_allows_export_annotation_to_be_recognized() {
+    // @valueObject/@aggregate are tried first and cleanly no-op when the
+    // next `@` is `@export` instead, so `@export(...)` before `pub fn`
+    // still works exactly as before this feature existed.
+    let m = ok("module A\n@export(\"my_add\")\npub fn add(a: Int, b: Int): Int = a + b");
+    let Decl::Fn(f) = &m.decls[0].node else { panic!("expected fn decl") };
+    assert_eq!(f.export_name.as_deref(), Some("my_add"));
+}
+
+// ------------------------------------------------------------------ //
+// In-body `fn` methods on a record type (BACKLOG item 150) — desugars to
+// a synthesized `impl` block, so `module.decls` gains one extra `Decl::Impl`
+// right after the `Decl::Type`.
+// ------------------------------------------------------------------ //
+
+#[test]
+fn in_body_fn_method_desugars_to_a_trailing_impl_decl() {
+    let m = ok(
+        "module A\n\
+         type Cart = {\n\
+         \x20   id: UUID,\n\
+         \x20   total: Int\n\
+         \x20   fn addTotal(c: Cart, amount: Int): Int = c.total + amount\n\
+         }"
+    );
+    assert_eq!(m.decls.len(), 2, "expected TypeDecl + synthesized ImplDecl");
+    let Decl::Type(t) = &m.decls[0].node else { panic!("expected type decl first") };
+    assert_eq!(t.name.node, "Cart");
+    let certo_ast::decl::TypeBody::Record(rec) = &t.body else { panic!("expected record body") };
+    assert_eq!(rec.fields.len(), 2, "in-body fn must not be counted as a field");
+
+    let Decl::Impl(i) = &m.decls[1].node else { panic!("expected synthesized impl decl second") };
+    assert!(i.trait_path.is_none());
+    assert_eq!(i.type_path.segments.len(), 1);
+    assert_eq!(i.type_path.segments[0].node, "Cart");
+    assert_eq!(i.methods.len(), 1);
+    assert_eq!(i.methods[0].name.node, "addTotal");
+}
+
+#[test]
+fn record_type_without_in_body_fn_has_no_synthesized_impl() {
+    let m = ok("module A\ntype Point = { x: Int, y: Int }");
+    assert_eq!(m.decls.len(), 1, "no in-body fn means no extra decl");
+}
+
+#[test]
+fn multiple_in_body_fn_methods_are_grouped_into_one_synthesized_impl() {
+    let m = ok(
+        "module A\n\
+         type Cart = {\n\
+         \x20   total: Int\n\
+         \x20   fn addTotal(c: Cart, amount: Int): Int = c.total + amount\n\
+         \x20   fn isEmpty(c: Cart): Bool = c.total == 0\n\
+         }"
+    );
+    assert_eq!(m.decls.len(), 2);
+    let Decl::Impl(i) = &m.decls[1].node else { panic!("expected impl decl") };
+    assert_eq!(i.methods.len(), 2);
+    assert_eq!(i.methods[0].name.node, "addTotal");
+    assert_eq!(i.methods[1].name.node, "isEmpty");
+}
+
+#[test]
+fn in_body_pub_fn_method_is_recorded_as_pub() {
+    let m = ok(
+        "module A\n\
+         type Cart = {\n\
+         \x20   total: Int\n\
+         \x20   pub fn addTotal(c: Cart, amount: Int): Int = c.total + amount\n\
+         }"
+    );
+    let Decl::Impl(i) = &m.decls[1].node else { panic!("expected impl decl") };
+    assert!(i.methods[0].is_pub);
+}
+
+#[test]
+fn in_body_fn_on_generic_record_carries_the_type_params_to_the_synthesized_impl() {
+    let m = ok(
+        "module A\n\
+         type Box<T> = {\n\
+         \x20   value: T\n\
+         \x20   fn get(b: Box<T>): T = b.value\n\
+         }"
+    );
+    let Decl::Impl(i) = &m.decls[1].node else { panic!("expected impl decl") };
+    assert_eq!(i.type_params.len(), 1);
+    assert_eq!(i.type_params[0].name.node, "T");
+}
+
+#[test]
 fn type_alias() {
     let m = ok("module A\ntype UserId = UUID");
     match &m.decls[0].node {

@@ -83,7 +83,10 @@ fn fmt_fn_param(p: &FnParam) -> String {
 fn fmt_type_decl(t: &TypeDecl, indent: usize) -> String {
     let pub_str = if t.is_pub { "pub " } else { "" };
     let params  = fmt_type_params(&t.type_params);
-    match &t.body {
+    // `@valueObject`/`@aggregate` (BACKLOG item 149) — each on its own line
+    // immediately before `type`, matching how they're written in source.
+    let annotation_prefix: String = t.annotations.iter().map(|a| format!("@{a}\n")).collect();
+    let body = match &t.body {
         TypeBody::Alias(te) =>
             format!("{}type {}{} = {}", pub_str, t.name.node, params, fmt_type(&te.node, indent)),
 
@@ -117,7 +120,8 @@ fn fmt_type_decl(t: &TypeDecl, indent: usize) -> String {
             }).collect();
             format!("{}type {}{} =\n{}", pub_str, t.name.node, params, vs.join("\n"))
         }
-    }
+    };
+    format!("{annotation_prefix}{body}")
 }
 
 // ------------------------------------------------------------------ //

@@ -79,6 +79,15 @@ fn record_type() {
 }
 
 #[test]
+fn value_object_annotation_round_trips() {
+    // BACKLOG item 149 — `@valueObject`/`@aggregate` are preserved by the
+    // formatter, not silently dropped.
+    let out = fmt("module A\n@valueObject\ntype Money = { amount: Int }");
+    assert_contains(&out, "@valueObject");
+    assert_contains(&out, "type Money = {");
+}
+
+#[test]
 fn sum_type() {
     let out = fmt("module A\ntype Color = | Red | Green | Blue");
     assert_contains(&out, "type Color =");
