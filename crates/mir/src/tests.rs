@@ -1,6 +1,6 @@
 use certo_parser::parse;
 use certo_hir::{lower_module, HirItem};
-use crate::{lower_fn, Terminator, Rvalue, Operand, MirConst};
+use crate::{lower_fn, Terminator, Rvalue, Operand, MirConst, MirStmt};
 
 fn mir_fn(src: &str) -> crate::MirFn {
     let module = parse(src).expect("parse error");
@@ -17,6 +17,16 @@ fn mir_fn_named(src: &str, name: &str) -> crate::MirFn {
         _ => None,
     }).unwrap_or_else(|| panic!("expected fn named {name}"));
     lower_fn(f, &hir.record_field_types, &hir.variant_field_types, &hir.fn_param_tys, &hir.fn_ret_tys).0
+}
+
+fn mir_fn_and_lifted_named(src: &str, name: &str) -> (crate::MirFn, Vec<crate::MirFn>) {
+    let module = parse(src).expect("parse error");
+    let hir = lower_module(&module).expect("hir error");
+    let f = hir.items.iter().find_map(|it| match it {
+        HirItem::Fn(f) if f.name == name => Some(f),
+        _ => None,
+    }).unwrap_or_else(|| panic!("expected fn named {name}"));
+    lower_fn(f, &hir.record_field_types, &hir.variant_field_types, &hir.fn_param_tys, &hir.fn_ret_tys)
 }
 
 #[test]
@@ -123,4 +133,60 @@ fn generic_call_unboxes_resolved_bare_return_via_unbox_some() {
     )));
     assert!(has_unbox_some, "expected an UnboxSome for the resolved bare-T return value");
     assert!(!has_unbox, "must not use the mismatched Unbox/unbox_value scheme here");
+}
+
+// ------------------------------------------------------------------ //
+// Cooperative-cancellation checkpoint for spawn worker loops — BACKLOG item 186
+// ------------------------------------------------------------------ //
+
+#[test]
+fn spawn_block_body_while_loop_gets_cancel_checkpoint() {
+    // An inline `spawn { ... }` block body (unlike `spawn f(a, b)`, a direct
+    // call to an existing function) is lowered into a dedicated function via
+    // `lift_spawn_body`, which now always gets one hidden trailing
+    // cancel-token parameter, and every `while`/`for` loop lowered directly
+    // into that function's own control flow checks it before looping back.
+    let (_, lifted) = mir_fn_and_lifted_named(
+        "module A\nfn f(): Unit [async] = spawn {\n  var i = 0\n  while i < 3 {\n    i = i + 1\n  }\n}",
+        "f");
+    let worker = lifted.iter().find(|lf| lf.name.starts_with("__spawn_"))
+        .expect("expected a lifted spawn worker function");
+    assert_eq!(worker.param_count, 1, "no real captures here, so param_count must be exactly 1 (the hidden cancel-token param)");
+    let has_checkpoint_call = worker.blocks.iter().any(|bb| bb.stmts.iter().any(|s| matches!(s,
+        MirStmt::Assign { rvalue: Rvalue::Call { func: Operand::Global(name), .. }, .. } if name == "__certo_task_hdr_is_abandoned"
+    )));
+    assert!(has_checkpoint_call, "expected a checkpoint call to __certo_task_hdr_is_abandoned in the loop's lifted body, got: {:?}", worker.blocks);
+}
+
+#[test]
+fn spawn_direct_named_call_is_not_lifted_and_gets_no_checkpoint() {
+    // `spawn f(a, b)` — a direct call to an existing, possibly-shared named
+    // function — must NOT be marked lifted, and must NOT synthesize a
+    // dedicated `__spawn_*` wrapper: the existing function's own signature
+    // (and every other, non-spawn call site of it) must stay untouched.
+    let (mf, lifted) = mir_fn_and_lifted_named(
+        "module A\nfn work(): Unit = unit\nfn f(): Unit [async] = spawn work()",
+        "f");
+    let is_lifted = mf.blocks.iter().flat_map(|bb| &bb.stmts).find_map(|s| match s {
+        MirStmt::Assign { rvalue: Rvalue::Spawn { is_lifted, .. }, .. } => Some(*is_lifted),
+        _ => None,
+    });
+    assert_eq!(is_lifted, Some(false), "a direct spawn of a named function must not be marked lifted");
+    assert!(!lifted.iter().any(|lf| lf.name.starts_with("__spawn_")),
+        "a direct named-function spawn must not synthesize a lifted wrapper, got: {:?}", lifted.iter().map(|lf| &lf.name).collect::<Vec<_>>());
+}
+
+#[test]
+fn ordinary_function_while_loop_has_no_checkpoint() {
+    // No-regression check: an ordinary top-level function's own `while`
+    // loop (never lifted, never inside a spawn body) must keep its plain
+    // unconditional back-edge — no cancel-token param, no checkpoint call.
+    let mf = mir_fn_named(
+        "module A\nfn f(): Unit = {\n  var i = 0\n  while i < 3 {\n    i = i + 1\n  }\n}",
+        "f");
+    assert_eq!(mf.param_count, 0);
+    let has_checkpoint_call = mf.blocks.iter().any(|bb| bb.stmts.iter().any(|s| matches!(s,
+        MirStmt::Assign { rvalue: Rvalue::Call { func: Operand::Global(name), .. }, .. } if name == "__certo_task_hdr_is_abandoned"
+    )));
+    assert!(!has_checkpoint_call, "an ordinary function's while loop must not get a cancellation checkpoint");
 }

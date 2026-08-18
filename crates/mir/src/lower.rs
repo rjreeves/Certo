@@ -51,6 +51,16 @@ struct Builder {
     /// --coverage`) — see `crates/codegen/src/emit_mir.rs`'s `#line`
     /// emission, the only consumer.
     current_span: Span,
+    /// Set only inside `lift_spawn_body`'s own `Builder` (BACKLOG item 186)
+    /// — the local holding this spawn worker's own task-header pointer,
+    /// which `While`/`For`'s loop-back-edge lowering checks each iteration
+    /// to exit early if a `withTimeout` has abandoned this task. `None` for
+    /// every ordinary function (including per-call-site synthesized helpers
+    /// like `List.sumBy`'s own accumulator loop, which get their own fresh
+    /// `Builder` and are correctly *not* checkpointed even when called from
+    /// inside a spawn body — see the item 186 BACKLOG writeup for why that's
+    /// a real, honest scope boundary rather than an oversight).
+    cancel_check_local: Option<MirLocal>,
 }
 
 impl Builder {
@@ -77,6 +87,7 @@ impl Builder {
             fn_param_tys,
             fn_ret_tys,
             current_span: Span::DUMMY,
+            cancel_check_local: None,
         }
     }
 
@@ -126,6 +137,29 @@ impl Builder {
 
 /// Emit all pending deferred expressions (LIFO), then terminate with Return.
 /// Clones the defer list so the Builder can be mutably borrowed during lowering.
+/// A loop's own back-edge (BACKLOG item 186): jump to `header_bb` to run
+/// another iteration, same as a plain `Terminator::Goto` always did — unless
+/// this `Builder` is lowering a lifted spawn-worker body (`cancel_check_local`
+/// is `Some`), in which case it first checks whether a `withTimeout` has
+/// abandoned this task and jumps straight to `exit_bb` instead, skipping the
+/// rest of the loop. Reusing `exit_bb` (the loop's own normal "condition
+/// false" exit) rather than a separate abort path means `defer{}`s still run
+/// and the function still returns normally — the checkpoint firing looks
+/// identical, downstream, to the loop condition having just become false.
+fn loop_back_edge(b: &mut Builder, header_bb: BlockId, exit_bb: BlockId) {
+    match b.cancel_check_local {
+        Some(cancel_local) => {
+            let abandoned = b.declare_local("_cancel_check", Ty::Bool);
+            b.assign(abandoned, Rvalue::Call {
+                func: Operand::Global("__certo_task_hdr_is_abandoned".into()),
+                args: vec![Operand::Local(cancel_local)],
+            });
+            b.terminate(Terminator::If { cond: Operand::Local(abandoned), true_bb: exit_bb, false_bb: header_bb });
+        }
+        None => b.terminate(Terminator::Goto(header_bb)),
+    }
+}
+
 fn emit_defers_then_return(return_op: Operand, b: &mut Builder) {
     let defers: Vec<certo_hir::HirExpr> = b.defers.clone();
     for body in defers.iter().rev() {
@@ -893,6 +927,16 @@ fn opaque_fn_ty() -> Ty {
     Ty::Fn { params: Vec::new(), ret: Box::new(Ty::Error) }
 }
 
+/// Marker type for a lifted spawn worker's hidden cancel-token parameter
+/// (BACKLOG item 186) — an opaque `__certo_task_hdr_t*`, compiled to `void*`
+/// (`crates/codegen/src/ty_to_c.rs`), same convention as `__CertoTask`. Not
+/// `Ty::Error`: that already means "raw `int64_t`" elsewhere in this
+/// pipeline (the exact confusion behind BACKLOG items 179/189), which would
+/// be wrong for a pointer-typed parameter.
+fn cancel_token_ty() -> Ty {
+    Ty::Named { name: "__CertoCancelToken".into(), args: Vec::new() }
+}
+
 /// Lift a lambda literal that's being passed directly as the callback
 /// argument to one of `BOXED_ABI_CALLEES`. Every param is unboxed on entry
 /// and the return value boxed on exit, so the lambda's C signature is
@@ -1057,6 +1101,15 @@ fn lift_spawn_body(body: &HirExpr, captures: &[LocalId], b: &mut Builder) -> (St
     for (cid, ty) in captures.iter().zip(&capture_tys) {
         lb.map_hir_local(*cid, "_cap", ty.clone());
     }
+    // Hidden trailing parameter (BACKLOG item 186) — this task's own header
+    // pointer, appended by codegen's spawn trampoline (`emit_spawn_support`),
+    // not part of `captures`/`arg_ops` below since it isn't a value known at
+    // spawn time, only once the worker's context struct exists. Every
+    // `While`/`For` loop lowered directly into this function's own control
+    // flow (via `lower_expr(body, &mut lb)` just below) checks it on each
+    // back-edge to exit early once a `withTimeout` abandons this task.
+    let cancel_local = lb.declare_local("_cancel_hdr", cancel_token_ty());
+    lb.cancel_check_local = Some(cancel_local);
     lb.current_span = body.span;
     let result = lower_expr(body, &mut lb);
     let ret_ty = infer_operand_ty(&result, &lb);
@@ -1068,7 +1121,11 @@ fn lift_spawn_body(body: &HirExpr, captures: &[LocalId], b: &mut Builder) -> (St
 
     let lifted_fn = MirFn {
         name: fn_name.clone(),
-        param_count: captures.len(),
+        // +1 for the hidden trailing cancel-token parameter, which is NOT
+        // reflected in `arg_ops` below (`Rvalue::Spawn`'s own `args`) — it's
+        // supplied by the trampoline at call time, not stored in the
+        // per-site context struct like a real capture.
+        param_count: captures.len() + 1,
         locals: lb.locals,
         blocks: lb.blocks,
     };
@@ -2115,7 +2172,7 @@ fn lower_expr(expr: &HirExpr, b: &mut Builder) -> Operand {
                 rhs: Operand::Const(MirConst::Int(1)),
             });
             b.assign(i_local, Rvalue::Use(Operand::Local(inc)));
-            b.terminate(Terminator::Goto(loop_test_bb));
+            loop_back_edge(b, loop_test_bb, loop_exit_bb);
 
             b.switch_to(loop_exit_bb);
             Operand::Const(MirConst::Unit)
@@ -2141,7 +2198,7 @@ fn lower_expr(expr: &HirExpr, b: &mut Builder) -> Operand {
 
             b.switch_to(loop_body_bb);
             lower_expr(body, b); // result discarded — while evaluates to Unit
-            b.terminate(Terminator::Goto(loop_header_bb));
+            loop_back_edge(b, loop_header_bb, loop_exit_bb);
 
             b.switch_to(loop_exit_bb);
             Operand::Const(MirConst::Unit)
@@ -2163,7 +2220,7 @@ fn lower_expr(expr: &HirExpr, b: &mut Builder) -> Operand {
                         args: vec![ret_ty.clone()],
                     };
                     let dest = b.declare_local("__task", task_ty);
-                    b.assign(dest, Rvalue::Spawn { func: func_op, args: arg_ops, ret_ty: ret_ty.clone() });
+                    b.assign(dest, Rvalue::Spawn { func: func_op, args: arg_ops, ret_ty: ret_ty.clone(), is_lifted: false });
                     return Operand::Local(dest);
                 }
             }
@@ -2178,7 +2235,7 @@ fn lower_expr(expr: &HirExpr, b: &mut Builder) -> Operand {
                 let (lifted_name, arg_ops, ret_ty) = lift_spawn_body(body, captures, b);
                 let task_ty = certo_typeck::Ty::Named { name: "__CertoTask".into(), args: vec![ret_ty.clone()] };
                 let dest = b.declare_local("__task", task_ty);
-                b.assign(dest, Rvalue::Spawn { func: Operand::Global(lifted_name), args: arg_ops, ret_ty });
+                b.assign(dest, Rvalue::Spawn { func: Operand::Global(lifted_name), args: arg_ops, ret_ty, is_lifted: true });
                 return Operand::Local(dest);
             }
             // `args` is always exactly one element in practice — no real

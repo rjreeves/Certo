@@ -978,5 +978,15 @@ static inline bool __certo_task_hdr_try_abandon(__certo_task_hdr_t* hdr) {
 static inline bool __certo_task_hdr_try_finish(__certo_task_hdr_t* hdr) {
     return __sync_bool_compare_and_swap(&hdr->state, 0, 2);
 }
+/* A lifted spawn worker's own cooperative-cancellation checkpoint (BACKLOG
+   item 186), called at each loop back-edge with its own header pointer
+   (passed by the spawn trampoline — `emit_spawn_support`). Reading `state`
+   here never races with the CAS functions above: this only ever runs on
+   the worker's own thread, the only thread that can observe `state == 1`
+   (abandoned) without itself having caused that transition, and `state` is
+   `volatile` so this read is never cached stale across the loop. */
+static inline bool __certo_task_hdr_is_abandoned(__certo_task_hdr_t* hdr) {
+    return hdr->state == 1;
+}
 /* ---- end Certo runtime ---- */
 "#;
