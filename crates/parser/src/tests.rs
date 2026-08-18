@@ -186,6 +186,40 @@ fn async_fn_decl() {
     }
 }
 
+// `[async]` effect annotation — BACKLOG item 185. `async` lexes as the
+// reserved `Token::Async` keyword, which `expect_ident()` alone can never
+// match, so this effect bracket previously failed to parse at all — the
+// exact form `certo`'s own effect-checker errors (E0400/E0402) tell the
+// user to write.
+
+#[test]
+fn async_effect_annotation_parses() {
+    use certo_ast::types::Effect;
+    let m = ok("module A\nfn f(): Unit [async] = spawn work()\nfn work(): Unit = unit");
+    let Decl::Fn(f) = &m.decls[0].node else { panic!("expected fn decl") };
+    let effects = f.effects.as_ref().expect("expected an effect set");
+    assert_eq!(effects.effects.len(), 1);
+    assert!(matches!(effects.effects[0].node, Effect::Async));
+}
+
+#[test]
+fn async_effect_annotation_combines_with_other_effects() {
+    use certo_ast::types::Effect;
+    let m = ok("module A\nfn f(): Unit [io, async] = spawn work()\nfn work(): Unit = unit");
+    let Decl::Fn(f) = &m.decls[0].node else { panic!("expected fn decl") };
+    let effects = f.effects.as_ref().expect("expected an effect set");
+    assert_eq!(effects.effects.len(), 2);
+    assert!(matches!(effects.effects[0].node, Effect::Io));
+    assert!(matches!(effects.effects[1].node, Effect::Async));
+    // Order shouldn't matter either — `[async, io]` must parse the same way.
+    let m2 = ok("module A\nfn f(): Unit [async, io] = spawn work()\nfn work(): Unit = unit");
+    let Decl::Fn(f2) = &m2.decls[0].node else { panic!("expected fn decl") };
+    let effects2 = f2.effects.as_ref().expect("expected an effect set");
+    assert_eq!(effects2.effects.len(), 2);
+    assert!(matches!(effects2.effects[0].node, Effect::Async));
+    assert!(matches!(effects2.effects[1].node, Effect::Io));
+}
+
 #[test]
 fn export_annotation_sets_export_name() {
     let m = ok("module A\n@export(\"my_custom_add\")\npub fn addNumbers(a: Int, b: Int): Int = a + b");
