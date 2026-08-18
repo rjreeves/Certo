@@ -15,7 +15,23 @@ pub const DATETIME_C: &str = r#"
 
 typedef int64_t CertoDateTime;   /* Unix seconds */
 typedef int64_t CertoDate;       /* Unix seconds at midnight UTC */
-typedef int64_t CertoDuration;   /* signed span, in seconds */
+typedef int64_t CertoDuration;   /* signed span, in MILLISECONDS (BACKLOG
+                                     item 188) — DateTime/Date remain whole-
+                                     second Unix timestamps (unchanged, a
+                                     separate and much larger gap not
+                                     attempted here), so a Duration used in
+                                     DateTime/Date arithmetic still only
+                                     affects/reflects whole seconds; see the
+                                     DateTime/Date <-> Duration bridge below
+                                     for the /1000 and x1000 conversions
+                                     that keep that arithmetic correct now
+                                     that Duration's own internal unit has
+                                     changed. Duration-to-Duration operations
+                                     (add, sub, negate, eq, lt, gt) and the
+                                     accessors and constructors below are
+                                     unaffected by DateTime/Date's coarser
+                                     grain and are now genuinely
+                                     millisecond-precise. */
 
 /* ---- constructors ---- */
 
@@ -84,27 +100,22 @@ int64_t certo_datetime_second(CertoDateTime dt) { time_t t = (time_t)dt; struct 
 
 /* ---- Duration: constructors ---- */
 
-/* `CertoDuration` (see its own typedef above) stores whole seconds only —
-   there is no sub-second field anywhere in this representation. `n`
-   milliseconds is therefore truncated to whole seconds, same as every
-   `certo_duration_to_*` accessor below already truncates on the read side
-   (BACKLOG item 187) — real millisecond-precision `Duration` values would
-   need a wider representation change across this whole file, not attempted
-   here; this constructor exists so *specifying* a duration in milliseconds
-   is possible at all (previously it wasn't — `Duration.milliseconds` had no
-   registration anywhere), not to add precision this type doesn't have. */
-CertoDuration certo_duration_milliseconds(int64_t n) { return (CertoDuration)(n / 1000); }
-CertoDuration certo_duration_seconds(int64_t n) { return (CertoDuration)n; }
-CertoDuration certo_duration_minutes(int64_t n) { return (CertoDuration)(n * 60); }
-CertoDuration certo_duration_hours  (int64_t n) { return (CertoDuration)(n * 3600); }
-CertoDuration certo_duration_days   (int64_t n) { return (CertoDuration)(n * 86400); }
+/* `CertoDuration` (see its own typedef above) now stores milliseconds —
+   BACKLOG item 188, widened from the previous whole-seconds-only
+   representation (item 187's own honest limitation). `Duration.milliseconds`
+   is exact now, not truncated to zero. */
+CertoDuration certo_duration_milliseconds(int64_t n) { return (CertoDuration)n; }
+CertoDuration certo_duration_seconds(int64_t n) { return (CertoDuration)(n * 1000); }
+CertoDuration certo_duration_minutes(int64_t n) { return (CertoDuration)(n * 60000); }
+CertoDuration certo_duration_hours  (int64_t n) { return (CertoDuration)(n * 3600000); }
+CertoDuration certo_duration_days   (int64_t n) { return (CertoDuration)(n * 86400000); }
 
-/* ---- Duration: accessors (truncating) ---- */
+/* ---- Duration: accessors (truncating to the coarser unit) ---- */
 
-int64_t certo_duration_to_seconds(CertoDuration d) { return d; }
-int64_t certo_duration_to_minutes(CertoDuration d) { return d / 60; }
-int64_t certo_duration_to_hours  (CertoDuration d) { return d / 3600; }
-int64_t certo_duration_to_days   (CertoDuration d) { return d / 86400; }
+int64_t certo_duration_to_seconds(CertoDuration d) { return d / 1000; }
+int64_t certo_duration_to_minutes(CertoDuration d) { return d / 60000; }
+int64_t certo_duration_to_hours  (CertoDuration d) { return d / 3600000; }
+int64_t certo_duration_to_days   (CertoDuration d) { return d / 86400000; }
 
 /* ---- Duration: arithmetic ---- */
 
@@ -118,11 +129,19 @@ bool certo_duration_eq (CertoDuration a, CertoDuration b) { return a == b; }
 bool certo_duration_lt (CertoDuration a, CertoDuration b) { return a < b; }
 bool certo_duration_gt (CertoDuration a, CertoDuration b) { return a > b; }
 
-/* ---- DateTime/Date <-> Duration ---- */
-
-CertoDateTime certo_datetime_add_duration(CertoDateTime dt, CertoDuration d) { return dt + d; }
-CertoDuration certo_datetime_diff        (CertoDateTime a, CertoDateTime b)  { return a - b; }
-CertoDate     certo_date_add_duration    (CertoDate d, CertoDuration dur)    { return d + dur; }
+/* ---- DateTime/Date <-> Duration ----
+   DateTime/Date are whole-second Unix timestamps (unchanged by item 188);
+   Duration is now milliseconds — these three functions are the only place
+   the two representations meet, so they convert explicitly rather than
+   silently mixing units (adding a raw millisecond count as if it were
+   seconds would misplace a `Duration.days(30)` deadline by a factor of
+   1000). A sub-second Duration (e.g. `Duration.milliseconds(500)`) still
+   contributes zero whole seconds here — DateTime/Date's own coarser grain,
+   not this conversion, is what truncates it; see the `CertoDuration`
+   typedef comment above. */
+CertoDateTime certo_datetime_add_duration(CertoDateTime dt, CertoDuration d) { return dt + d / 1000; }
+CertoDuration certo_datetime_diff        (CertoDateTime a, CertoDateTime b)  { return (a - b) * 1000; }
+CertoDate     certo_date_add_duration    (CertoDate d, CertoDuration dur)    { return d + dur / 1000; }
 
 /* ---- parse ISO 8601 ---- */
 CertoDateTime certo_datetime_parse_iso(certo_text_t s) {
