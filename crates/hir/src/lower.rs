@@ -812,7 +812,7 @@ fn lower_expr(expr: &S<Expr>, cx: &mut Cx) -> HirExpr {
     match &expr.node {
         // Desugar f-string to ++ chain before generic lit handling
         Expr::Lit { value: Lit::FString(parts), .. } => {
-            let mut segments: Vec<HirExpr> = parts.iter().map(|p| match p {
+            let segments: Vec<HirExpr> = parts.iter().map(|p| match p {
                 FStringPart::Literal(s) => HirExpr {
                     kind: HirExprKind::Str(s.clone()), ty: Ty::Text, span,
                 },
@@ -821,8 +821,18 @@ fn lower_expr(expr: &S<Expr>, cx: &mut Cx) -> HirExpr {
             if segments.is_empty() {
                 return HirExpr { kind: HirExprKind::Str(String::new()), ty: Ty::Text, span };
             }
-            let first = segments.remove(0);
-            return segments.into_iter().fold(first, |acc, seg| HirExpr {
+            // Always seed with an empty Text literal and fold *every* segment
+            // (not just segments after the first) through a Concat node, even
+            // when there's only one — `f"{n}"` (bare interpolation, no
+            // surrounding literal text) parses to a single-element `parts`
+            // list. Returning that one segment directly would skip Concat
+            // entirely, so a non-Text interpolated value (e.g. `n: Int`)
+            // would keep its original type and reach codegen's
+            // `certo_println`/`certo_text_concat` as a raw int, read as a
+            // pointer and segfault — `coerce_to_text` (`crates/codegen/src/
+            // emit_mir.rs`) only ever runs on a Concat operand.
+            let seed = HirExpr { kind: HirExprKind::Str(String::new()), ty: Ty::Text, span };
+            return segments.into_iter().fold(seed, |acc, seg| HirExpr {
                 kind: HirExprKind::BinOp {
                     op:  BinOp::Concat,
                     lhs: Box::new(acc),

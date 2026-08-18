@@ -1095,3 +1095,48 @@ fn with_timeout_task_references_the_spawned_local() {
     assert!(matches!(&task.kind, HirExprKind::Local(id) if id == task_local),
         "JoinTimedCancel's task must reference the spawned local, got {:?}", task.kind);
 }
+
+// Bare-interpolation f-string (`f"{n}"`, no surrounding literal text) — found
+// while looking at item 183, unrelated to it. `parse_fstring_parts`
+// (`crates/parser/src/parse_expr.rs`) yields a single-element `parts` list
+// for this shape (no leading/trailing `Literal("")`), and the old lowering
+// took the first segment as-is whenever nothing else needed folding into it,
+// so the f-string's *own* type became whatever the interpolated expression's
+// type was (e.g. `Int`) instead of `Text` — never passing through the
+// `Concat` node that codegen's `coerce_to_text` (`crates/codegen/src/
+// emit_mir.rs`) relies on to convert a non-Text value. A `println(f"{n}")`
+// with `n: Int` compiled cleanly but segfaulted at runtime, reading the raw
+// `int64_t` as a `certo_text_t` pointer.
+
+#[test]
+fn bare_interpolation_f_string_has_text_type_not_the_interpolated_expr_type() {
+    let body = lower_f_body("module A\nfn f(n: Int): Text = f\"{n}\"");
+    assert_eq!(body.ty, Ty::Text, "f\"{{n}}\"'s own type must be Text, not Int, got {:?}", body.ty);
+}
+
+#[test]
+fn bare_interpolation_f_string_lowers_to_a_concat_not_a_bare_local() {
+    // The fix routes even a single segment through `BinOp::Concat` (seeded
+    // with an empty Text literal) so codegen's per-operand `coerce_to_text`
+    // always runs — asserting the *shape*, not just the final `Ty`, is what
+    // actually pins the fix: a bare `Local(n)` could still incorrectly carry
+    // a forged `Ty::Text` without ever being converted at the value level.
+    let body = lower_f_body("module A\nfn f(n: Int): Text = f\"{n}\"");
+    assert!(matches!(&body.kind, HirExprKind::BinOp { op: BinOp::Concat, .. }),
+        "expected a Concat chain even for a single interpolation, got {:?}", body.kind);
+}
+
+#[test]
+fn multi_part_f_string_still_lowers_to_a_left_folded_concat_chain() {
+    // No-regression check: `f"hello {name}!"` (literal, interpolation,
+    // literal — three parts) must still fold left-to-right into nested
+    // Concat nodes, same as before this fix, just now seeded with an extra
+    // leading empty-string Concat rather than starting from the first
+    // segment directly.
+    let body = lower_f_body("module A\nfn f(name: Text): Text = f\"hello {name}!\"");
+    let HirExprKind::BinOp { op: BinOp::Concat, rhs, .. } = &body.kind else {
+        panic!("expected outermost Concat, got {:?}", body.kind)
+    };
+    assert!(matches!(&rhs.kind, HirExprKind::Str(s) if s == "!"), "expected trailing literal \"!\", got {:?}", rhs.kind);
+    assert_eq!(body.ty, Ty::Text);
+}
