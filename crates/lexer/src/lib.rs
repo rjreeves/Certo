@@ -110,6 +110,7 @@ pub enum Token<'src> {
     #[token("require")]     Require,
     #[token("ensure")]      Ensure,
     #[token("defer")]       Defer,
+    #[token("use")]         Use,
     #[token("with")]        With,
     #[token("constraint")]  Constraint,
     #[token("temporal")]    Temporal,

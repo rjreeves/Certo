@@ -1666,3 +1666,63 @@ fn every_as_plain_identifier_elsewhere_is_unaffected() {
     ok("module A\nfn f(every: Int): Int = every + 1");
     ok("module A\nfn f(): Int = {\n val every = 5\n every\n}");
 }
+
+// ------------------------------------------------------------------ //
+// `use name = expr { body }` — BACKLOG item 152
+// ------------------------------------------------------------------ //
+
+#[test]
+fn use_desugars_to_val_defer_close_then_body() {
+    let body = parse_fn_body(
+        "module A\nfn f(): Text = use r = makeResource() {\n println(\"using\")\n \"done\"\n}");
+    let Expr::Block { stmts, .. } = &body.node else { panic!("expected Expr::Block, got {:?}", body.node) };
+    // [val r = makeResource(), defer { r.close() }, println("using"), "done"]
+    assert_eq!(stmts.len(), 4, "expected [val, defer, println, \"done\"], got {:?}", stmts);
+    let Stmt::Val { pattern, value, .. } = &stmts[0] else { panic!("expected Stmt::Val, got {:?}", stmts[0]) };
+    assert!(matches!(&pattern.node, Pattern::Ident { name, .. } if name.node == "r"));
+    assert!(matches!(&value.node, Expr::App { .. }), "expected makeResource() call, got {:?}", value.node);
+    let Stmt::Defer { body: defer_body, .. } = &stmts[1] else { panic!("expected Stmt::Defer, got {:?}", stmts[1]) };
+    let Expr::Block { stmts: defer_stmts, .. } = &defer_body.node else { panic!("expected defer's body to be a Block") };
+    assert_eq!(defer_stmts.len(), 1, "expected [r.close()], got {:?}", defer_stmts);
+    let Stmt::Expr { expr: close_expr, .. } = &defer_stmts[0] else { panic!("expected Stmt::Expr, got {:?}", defer_stmts[0]) };
+    let Expr::App { func, args, .. } = &close_expr.node else { panic!("expected Expr::App for r.close(), got {:?}", close_expr.node) };
+    assert!(args.is_empty(), "close() takes no arguments, got {:?}", args);
+    let Expr::Field { expr: recv, field, .. } = &func.node else { panic!("expected Expr::Field for r.close, got {:?}", func.node) };
+    assert_eq!(field.node, "close");
+    assert!(matches!(&recv.node, Expr::Path { path, .. } if path.segments.len() == 1 && path.segments[0].node == "r"));
+}
+
+#[test]
+fn use_resource_expr_ending_in_a_call_does_not_swallow_the_body_as_a_trailing_lambda() {
+    // `use r = f(x) { ... }` is ambiguous with trailing-lambda call syntax
+    // (`f(x) { arg => ... }`) unless `use`'s own resource-expression parse
+    // suppresses it, same as `parse_match` already does for `match c { ... }`.
+    let body = parse_fn_body(
+        "module A\nfn f(): Unit = use r = makeResource(1, 2) {\n println(\"body\")\n}");
+    let Expr::Block { stmts, .. } = &body.node else { panic!("expected Expr::Block, got {:?}", body.node) };
+    let Stmt::Val { value, .. } = &stmts[0] else { panic!("expected Stmt::Val, got {:?}", stmts[0]) };
+    let Expr::App { args, .. } = &value.node else { panic!("expected makeResource(1, 2) call, got {:?}", value.node) };
+    assert_eq!(args.len(), 2, "the resource call must keep its own two arguments, not gain a trailing-lambda third, got {:?}", args);
+}
+
+#[test]
+fn use_body_value_is_the_whole_expressions_value() {
+    // The `use` expression's own value is its body's tail expression —
+    // matching spec §7.4's own example, where `use file = ... { ... Ok(x) }`
+    // is used directly as a function's return value.
+    let body = parse_fn_body(
+        "module A\nfn f(): Text = use r = makeResource() {\n \"done\"\n}");
+    let Expr::Block { stmts, .. } = &body.node else { panic!("expected Expr::Block") };
+    let Stmt::Expr { expr: tail, .. } = stmts.last().expect("expected a tail statement") else {
+        panic!("expected the last statement to be Stmt::Expr, got {:?}", stmts.last())
+    };
+    assert!(matches!(&tail.node, Expr::Lit { value: Lit::String(s), .. } if s == "done"), "expected the tail to be \"done\", got {:?}", tail.node);
+}
+
+#[test]
+fn use_as_plain_identifier_is_rejected_since_use_is_now_reserved() {
+    // Unlike `every`/`live`/`unsafe` (contextual identifiers), `use` is a
+    // real reserved lexer token (BACKLOG item 152) — it can no longer be
+    // used as an ordinary variable/parameter name.
+    err("module A\nfn f(use: Int): Int = use + 1");
+}

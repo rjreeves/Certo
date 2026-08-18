@@ -1,6 +1,7 @@
 use certo_ast::span::{S, Span};
 use certo_ast::expr::*;
 use certo_ast::types::ModulePath;
+use certo_ast::pattern::Pattern;
 
 use certo_lexer::Token;
 use crate::cursor::Cursor;
@@ -478,6 +479,14 @@ fn parse_atom(cur: &mut Cursor<'_>) -> Result<S<Expr>, ParseError> {
             let full = span.to(expr.span);
             Ok(S::new(Expr::Await { expr: Box::new(expr), span: full }, full))
         }
+
+        // `use name = expr { body }` (BACKLOG item 152) — automatic resource
+        // cleanup on scope exit. Pure parser sugar, same treatment as
+        // `every()`: desugars immediately into `{ val name = expr; defer {
+        // name.close() }; body... }`, a shape `resolve`/`typeck`/`hir`
+        // already fully understand (ordinary `val`, `defer`, and UFCS
+        // dot-call), needing no new AST node or downstream support.
+        Some(Token::Use)      => parse_use(cur),
 
         // `spawn expr`
         Some(Token::Spawn)    => {
@@ -1072,6 +1081,51 @@ fn parse_every(cur: &mut Cursor<'_>) -> Result<S<Expr>, ParseError> {
 
     // `spawn while true { ... }`
     Ok(S::new(Expr::Spawn { expr: Box::new(while_loop), span }, span))
+}
+
+/// `use name = expr { body }` → `{ val name = expr; defer { name.close() }; body... }`
+/// — BACKLOG item 152. `defer` already runs on every exit path (normal
+/// return, an early `return`/`?` inside `body`, or a panic unwinding
+/// through it), so this needs no new close-on-unwind mechanism of its
+/// own — it just emits the same `Stmt::Defer` a hand-written `defer {
+/// name.close() }` would. Deliberately not resource-type-specific: the
+/// desugaring only ever emits an ordinary `name.close()` dot-call, so
+/// typeck's own existing UFCS resolution (item 162) decides whether
+/// `name`'s type actually has a `.close()` — works for `File` or any
+/// other type that defines one (e.g. `DbConnection`, via a
+/// `DbConnection.close` alias), with no new trait/constraint machinery.
+fn parse_use(cur: &mut Cursor<'_>) -> Result<S<Expr>, ParseError> {
+    let start = cur.expect(&Token::Use)?;
+    let (name, name_span) = cur.expect_ident()?;
+    cur.expect(&Token::Eq)?;
+    // Suppress trailing-lambda parsing so `use r = f(x) { ... }` reads the
+    // `{ ... }` as `use`'s own body, not as a trailing-lambda argument to
+    // `f(x)` — same ambiguity `parse_match` already resolves this way for
+    // `match c { ... }`.
+    let prev = cur.set_suppress_trailing_lambda(true);
+    let resource_expr = parse_expr(cur)?;
+    cur.set_suppress_trailing_lambda(prev);
+    let user_body = parse_block(cur)?;
+    let span = start.to(user_body.span);
+
+    let val_stmt = Stmt::Val {
+        pattern: S::new(Pattern::Ident { name: S::new(name.clone(), name_span), span: name_span }, name_span),
+        ty: None,
+        value: resource_expr,
+        span: name_span,
+    };
+
+    // `name.close()`
+    let name_ref = S::new(Expr::Path { path: ModulePath { segments: vec![S::new(name, name_span)], span: name_span }, span: name_span }, name_span);
+    let close_field = S::new(Expr::Field { expr: Box::new(name_ref), field: S::new("close".to_string(), span), span }, span);
+    let close_call = S::new(Expr::App { func: Box::new(close_field), args: vec![], span }, span);
+    let defer_body = S::new(Expr::Block { stmts: vec![Stmt::Expr { expr: close_call, span }], span }, span);
+    let defer_stmt = Stmt::Defer { body: defer_body, span };
+
+    let Expr::Block { stmts: user_stmts, .. } = user_body.node else { unreachable!("parse_block always returns Expr::Block") };
+    let mut stmts = vec![val_stmt, defer_stmt];
+    stmts.extend(user_stmts);
+    Ok(S::new(Expr::Block { stmts, span }, span))
 }
 
 fn unescape_str(s: &str) -> String {
