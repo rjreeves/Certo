@@ -709,6 +709,7 @@ pub fn seed_stdlib(env: &mut TypeEnv, counter: &mut u32) {
 
     let dur = || Ty::Named { name: "Duration".into(), args: vec![] };
 
+    def!("Duration.milliseconds", fn1(Ty::Int, dur()));
     def!("Duration.seconds",   fn1(Ty::Int, dur()));
     def!("Duration.minutes",   fn1(Ty::Int, dur()));
     def!("Duration.hours",     fn1(Ty::Int, dur()));

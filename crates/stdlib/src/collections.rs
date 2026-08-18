@@ -208,7 +208,17 @@ CertoList* certo_list_flat_map(CertoList* l, certo_fn_t f) {
     return out;
 }
 
-bool certo_list_contains_ptr(CertoList* l, void* item) {
+/* `List.contains` (BACKLOG item 181) — this was originally written as
+   `certo_list_contains_ptr`, one letter off from the name `crates/codegen`'s
+   own `List.contains` → `certo_list_contains` naming convention actually
+   calls, and never referenced under either name from anywhere else in the
+   codebase — so every real program calling `List.contains` failed to link
+   with `undefined symbol: certo_list_contains`, confirmed to have never
+   worked at all rather than having regressed. Renamed to the name the call
+   site really uses; pointer-equality semantics are unchanged (correct for
+   boxed `Int`/`Bool`/`Float` elements, same documented limitation
+   `List.distinct` below already carries for boxed `Text`/records). */
+bool certo_list_contains(CertoList* l, void* item) {
     if (!l) return false;
     for (int64_t i = 0; i < l->len; i++) if (l->data[i] == item) return true;
     return false;
@@ -269,7 +279,7 @@ CertoList* certo_list_sort(CertoList* l, certo_fn_t f) {
 /* ---- distinct / partition / chunked ---- */
 
 /* Pointer-equality dedup, first-occurrence order — same equality convention
- * as certo_list_contains_ptr/Map's key equality (see STDLIB-QUICKREF's note
+ * as certo_list_contains/Map's key equality (see STDLIB-QUICKREF's note
  * on Map: use Text keys carefully, since two equal strings are different
  * pointers unless interned). O(n^2), matching this runtime's existing
  * unoptimized style (certo_list_sort etc.). */

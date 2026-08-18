@@ -144,9 +144,25 @@ impl Cx {
 /// so `val f = intToFloat(3); val g = f / 2.0` silently computed truncating
 /// integer division instead of `Float` division — BACKLOG item 129).
 /// Every concrete (non-generic) stdlib function is now picked up
-/// automatically; generic producers (`List.get<T>`, registered as `Forall`)
-/// are skipped here — their payload type depends on the call's argument
-/// types, which `generic_container_ret` below recovers structurally instead.
+/// automatically; genuine generic producers (`List.get<T>`, whose *return*
+/// type itself mentions the bound type var) are skipped here — their
+/// payload type depends on the call's argument types, which
+/// `generic_container_ret` below recovers structurally instead.
+///
+/// A `Forall`-wrapped signature is unwrapped to its inner `Ty::Fn` before
+/// this check, rather than skipped outright — BACKLOG item 179's own
+/// investigation found the previous direct-`Ty::Fn`-only match silently
+/// excluded *every* generic stdlib function, even ones like
+/// `List.len<T>(list: List<T>): Int` whose return type is fully concrete
+/// regardless of `T` (only the *parameter* is generic). That left `List.len`
+/// invisible here, so `val n = List.len(xs)`'s local kept the `Ty::Error` →
+/// `int64_t` fallback from this doc comment's own warning above — normally
+/// silent, but fatal the moment anything downstream needed to know it was
+/// really an `Int` (a `certo_int_to_text` conversion for an f-string
+/// interpolating `n`, say): the raw `int64_t` bits got read as a `Text`
+/// pointer and dereferenced, segfaulting. Confirmed via direct testing
+/// (`val xs: List<Int> = [1,2,3]; val n = List.len(xs); println(f"{n}")`)
+/// before writing this fix.
 fn stdlib_ret_types() -> &'static HashMap<String, Ty> {
     static TABLE: OnceLock<HashMap<String, Ty>> = OnceLock::new();
     TABLE.get_or_init(|| {
@@ -155,9 +171,16 @@ fn stdlib_ret_types() -> &'static HashMap<String, Ty> {
         certo_stdlib::seed_stdlib(&mut env, &mut counter);
         env.names()
             .into_iter()
-            .filter_map(|name| match env.lookup(&name) {
-                Some(Ty::Fn { ret, .. }) if !ret.has_vars() => Some((name, (**ret).clone())),
-                _ => None,
+            .filter_map(|name| {
+                let ty = env.lookup(&name)?;
+                let unwrapped = match ty {
+                    Ty::Forall { body, .. } => body.as_ref(),
+                    other => other,
+                };
+                match unwrapped {
+                    Ty::Fn { ret, .. } if !ret.has_vars() => Some((name, (**ret).clone())),
+                    _ => None,
+                }
             })
             .collect()
     })
@@ -234,6 +257,28 @@ fn stdlib_param_types() -> &'static HashMap<String, Vec<Ty>> {
 fn generic_container_ret(full: Option<&str>, args: &[HirExpr]) -> Option<Ty> {
     let list_elem = |a: &HirExpr| match &a.ty { Ty::List(inner) => Some((**inner).clone()), _ => None };
     let map_kv = |a: &HirExpr| match &a.ty { Ty::Map(k, v) => Some(((**k).clone(), (**v).clone())), _ => None };
+    // A callback argument's own return type, recovered two ways: an inline
+    // lambda whose param-hinted body actually resolved (the original path,
+    // e.g. `(x) => x * 2`), or — BACKLOG item 180 — a bare reference to a
+    // named function (`xs.map(double)`), whose real `Ty::Fn{params, ret}` is
+    // already populated by `Expr::Path`'s own lowering above (see that arm's
+    // comment: reconstructed from `cx.fn_params`/`cx.fn_ret_types` for
+    // exactly this "callback passed by name" case, following the identical
+    // precedent `dbQueryTyped`/`Query.list`/`Query.first` already use just
+    // below). Without the second branch, a named-function callback silently
+    // left the caller's `val` binding `Ty::Error`-typed — harmless until
+    // something downstream (an f-string interpolation, another chained call)
+    // actually needed the real type, at which point it read raw bits through
+    // the wrong C type and crashed — the same failure shape item 179 found
+    // for `List.len`, confirmed here by direct testing with
+    // `xs.map(double)` where `double` is a plain top-level `fn`.
+    let callback_ret_ty = |a: &HirExpr| match &a.kind {
+        HirExprKind::Lambda { body, .. } if !matches!(body.ty, Ty::Error) => Some(body.ty.clone()),
+        _ => match &a.ty {
+            Ty::Fn { ret, .. } => Some((**ret).clone()),
+            _ => None,
+        },
+    };
 
     match full {
         Some("List.get") | Some("List.first") | Some("List.last") | Some("List.find") => {
@@ -255,14 +300,7 @@ fn generic_container_ret(full: Option<&str>, args: &[HirExpr]) -> Option<Ty> {
         // `maxBy`, which return the list's element type). Same recovery
         // pattern as `List.map` just below: only available when the
         // lambda's param hint let its body actually resolve.
-        Some("List.sumBy") => {
-            match args.get(1).map(|a| &a.kind) {
-                Some(HirExprKind::Lambda { body, .. }) if !matches!(body.ty, Ty::Error) => {
-                    Some(body.ty.clone())
-                }
-                _ => None,
-            }
-        }
+        Some("List.sumBy") => args.get(1).and_then(callback_ret_ty),
         Some("List.partition") => {
             args.first().map(|a| Ty::Tuple(vec![a.ty.clone(), a.ty.clone()]))
         }
@@ -271,22 +309,11 @@ fn generic_container_ret(full: Option<&str>, args: &[HirExpr]) -> Option<Ty> {
         // so its body's type is now recoverable (not guaranteed — only when the
         // hinted param propagated through, e.g. a direct arithmetic/literal
         // body) rather than unconditionally `Ty::Error`.
-        Some("List.map") => {
-            match args.get(1).map(|a| &a.kind) {
-                Some(HirExprKind::Lambda { body, .. }) if !matches!(body.ty, Ty::Error) => {
-                    Some(Ty::List(Box::new(body.ty.clone())))
-                }
-                _ => None,
-            }
-        }
+        Some("List.map") => args.get(1).and_then(callback_ret_ty).map(|t| Ty::List(Box::new(t))),
         Some("List.groupBy") => {
             let elem = args.first().and_then(list_elem)?;
-            match args.get(1).map(|a| &a.kind) {
-                Some(HirExprKind::Lambda { body, .. }) if !matches!(body.ty, Ty::Error) => {
-                    Some(Ty::Map(Box::new(body.ty.clone()), Box::new(Ty::List(Box::new(elem)))))
-                }
-                _ => None,
-            }
+            args.get(1).and_then(callback_ret_ty)
+                .map(|key_ty| Ty::Map(Box::new(key_ty), Box::new(Ty::List(Box::new(elem)))))
         }
         Some("Map.get") => args.first().and_then(map_kv).map(|(_, v)| Ty::Option(Box::new(v))),
         Some("Map.remove") | Some("Map.insert") => args.first().map(|a| a.ty.clone()),
