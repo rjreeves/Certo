@@ -1251,6 +1251,36 @@ fn with_timeout_ordinary_spawn_await_unaffected() {
 }
 
 // ------------------------------------------------------------------ //
+// Cooperative-cancellation checkpoint for spawn worker loops — BACKLOG item 186
+// ------------------------------------------------------------------ //
+
+#[test]
+fn inline_spawn_loop_gets_hidden_cancel_param_and_checkpoint() {
+    // An inline `spawn { ... }` block body containing a `while` loop is
+    // lowered into a dedicated `__spawn_*` function (`lift_spawn_body`),
+    // which must gain a hidden trailing cancel-token parameter, and the
+    // trampoline must pass its own header pointer (`&c->hdr`) into it.
+    let c = codegen(
+        "module A\nfn f(): Unit [async] = spawn {\n  var i = 0\n  while i < 3 {\n    i = i + 1\n  }\n}");
+    assert_contains(&c, "__spawn_f_0(void*");
+    assert_contains(&c, "__certo_task_hdr_is_abandoned");
+    assert_contains(&c, "&c->hdr");
+}
+
+#[test]
+fn direct_named_spawn_call_signature_is_unmodified() {
+    // `spawn f(a, b)` — a direct call to an existing, possibly-shared named
+    // function — must NOT gain the hidden cancel-token parameter: that
+    // function's real signature (and every ordinary, non-spawn call site of
+    // it) must be completely untouched by this feature.
+    let c = codegen(
+        "module A\nfn work(n: Int): Int = n + 1\nfn f(a: Int): Unit [async] = {\n  spawn work(a)\n  unit\n}");
+    assert_contains(&c, "int64_t certo_work(int64_t");
+    assert_not_contains(&c, "certo_work(int64_t _l1, void*");
+    assert_not_contains(&c, "__certo_task_hdr_is_abandoned");
+}
+
+// ------------------------------------------------------------------ //
 // State machines
 // ------------------------------------------------------------------ //
 

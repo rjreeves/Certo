@@ -71,7 +71,15 @@ pub enum Rvalue {
     Aggregate(AggregateKind, Vec<Operand>),
     /// Spawn `func(args)` on a new OS thread. Produces an opaque task handle
     /// (a heap pointer). `ret_ty` is the type the task will compute.
-    Spawn { func: Operand, args: Vec<Operand>, ret_ty: Ty },
+    /// `is_lifted` (BACKLOG item 186) — true when `func` is a dedicated
+    /// function synthesized by `lift_spawn_body` for this call site alone
+    /// (an inline `spawn { ... }`/`withTimeout(d) { ... }` block body),
+    /// false when `func` is an existing, possibly-shared named function
+    /// (`spawn f(a, b)`). Only a lifted function's own signature carries the
+    /// extra hidden cancellation-token parameter the codegen trampoline
+    /// passes — an ordinary shared function's signature and every other
+    /// call site of it must stay untouched.
+    Spawn { func: Operand, args: Vec<Operand>, ret_ty: Ty, is_lifted: bool },
     /// Join a task handle produced by `Spawn`, yielding its result of `ret_ty`.
     Join { task: Operand, ret_ty: Ty },
     /// Join a task handle with a shared deadline (an absolute monotonic-clock

@@ -64,6 +64,13 @@ pub struct SpawnSite {
     pub func_c:      String,   // C name of the function to call (e.g. `certo_work`)
     pub arg_tys:     Vec<Ty>,
     pub ret_ty:      Ty,
+    /// BACKLOG item 186 — true when `func_c` is a dedicated function
+    /// synthesized just for this call site (`lift_spawn_body`), which
+    /// therefore has a hidden trailing cancel-token parameter the worker
+    /// passes its own header pointer through. False for a direct call to an
+    /// existing, possibly-shared named function (`spawn f(a, b)`), whose
+    /// signature must not be touched.
+    pub is_lifted:   bool,
 }
 
 /// Collect the spawn sites of a function in emission order. The names are derived
@@ -75,7 +82,7 @@ pub fn collect_spawn_sites(f: &MirFn) -> Vec<SpawnSite> {
     let mut idx = 0u32;
     for bb in &f.blocks {
         for stmt in &bb.stmts {
-            if let MirStmt::Assign { rvalue: Rvalue::Spawn { func, args, ret_ty }, .. } = stmt {
+            if let MirStmt::Assign { rvalue: Rvalue::Spawn { func, args, ret_ty, is_lifted }, .. } = stmt {
                 let func_c = match func {
                     Operand::Global(n) => c_fn_name(n),
                     other => emit_operand(other),
@@ -87,6 +94,7 @@ pub fn collect_spawn_sites(f: &MirFn) -> Vec<SpawnSite> {
                     func_c,
                     arg_tys,
                     ret_ty: ret_ty.clone(),
+                    is_lifted: *is_lifted,
                 });
                 idx += 1;
             }
@@ -116,10 +124,20 @@ pub fn emit_spawn_support(sites: &[SpawnSite], emitted_joins: &mut HashSet<Strin
         }
         writeln!(out, "}} {};", s.ctx_name).unwrap();
         // Worker: unpack the context, call the function, store the result.
-        let call_args = (0..s.arg_tys.len()).map(|i| format!("c->a{}", i)).collect::<Vec<_>>().join(", ");
+        // A lifted worker (BACKLOG item 186) gets one extra trailing
+        // argument — its own header pointer, for its loops' cancellation
+        // checkpoints — appended here rather than stored in the context
+        // struct like a real capture, since it's this struct's own address,
+        // not a value known at spawn time. An ordinary shared function
+        // (`is_lifted` false) gets no such argument — its signature and
+        // every other call site of it are untouched.
+        let mut call_args: Vec<String> = (0..s.arg_tys.len()).map(|i| format!("c->a{}", i)).collect();
+        if s.is_lifted {
+            call_args.push("&c->hdr".to_string());
+        }
         writeln!(out, "static void* {}(void* _p) {{", s.worker_name).unwrap();
         writeln!(out, "    {}* c = ({}*)_p;", s.ctx_name, s.ctx_name).unwrap();
-        writeln!(out, "    c->result = {}({});", s.func_c, call_args).unwrap();
+        writeln!(out, "    c->result = {}({});", s.func_c, call_args.join(", ")).unwrap();
         // Ordinary spawn/parallel joins never call __certo_task_hdr_try_abandon,
         // so this CAS always wins for them (behaviorally identical to the old
         // unconditional signal-done) — the abandon branch below only ever runs

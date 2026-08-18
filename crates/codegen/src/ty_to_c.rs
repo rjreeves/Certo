@@ -36,6 +36,10 @@ pub fn ty_to_c(ty: &Ty) -> String {
         }
         // A spawned-task handle is an opaque heap pointer.
         Ty::Named { name, .. } if name == "__CertoTask" => "void*".into(),
+        // A lifted spawn worker's hidden cancel-token parameter (BACKLOG
+        // item 186) — the worker's own `__certo_task_hdr_t*`, passed by
+        // codegen's spawn trampoline so its loops can check for abandonment.
+        Ty::Named { name, .. } if name == "__CertoCancelToken" => "void*".into(),
         // `Channel<T>` is a `CertoChannel*` regardless of `T` — like `Map<K,V>`
         // above, no per-instantiation typedef is ever emitted, so this must be
         // checked before the generic `Ty::Named` arm below (which assumes a
