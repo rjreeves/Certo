@@ -1547,8 +1547,26 @@ fn lower_expr(expr: &S<Expr>, cx: &mut Cx) -> HirExpr {
 
         // `await task` — join a spawned task.
         Expr::Await { expr, .. } => {
+            // BACKLOG item 191 — this used to hardcode `Ty::Error` regardless
+            // of `inner`'s own already-resolved type, discarding it exactly
+            // like items 179/180/182 each found in a different spot. `await
+            // <plain call>` (no preceding `spawn`) never changes the value's
+            // type at all — MIR's own `Await` lowering confirms this,
+            // falling back to the operand's own inferred type whenever it
+            // isn't a real `__CertoTask` handle — so propagating `inner.ty`
+            // directly is correct, not just a fallback. `await <a genuinely
+            // spawned task>` is a separate, pre-existing, still-open gap:
+            // `spawn`'s own HIR node is *also* unconditionally `Ty::Error`
+            // (its own comment cites the same reason `parallel`'s tuple
+            // elements are, since only the *task's own* type is knowable
+            // this early, not its unwrapped-by-await result) and — per
+            // `lower_block`'s `Stmt::Val` handling just below — a `Ty::Error`
+            // initializer never even registers a local type, so `inner.ty`
+            // here is already `Ty::Error` for that case regardless; this
+            // fix can only ever improve on that, never regress it.
             let inner = lower_expr(expr, cx);
-            HirExpr { kind: HirExprKind::Await(Box::new(inner)), ty: Ty::Error, span }
+            let ty = inner.ty.clone();
+            HirExpr { kind: HirExprKind::Await(Box::new(inner)), ty, span }
         }
 
         // `spawn expr` — run expr in a new task.
