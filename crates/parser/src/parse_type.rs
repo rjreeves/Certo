@@ -349,7 +349,23 @@ pub fn parse_effect_set(cur: &mut Cursor<'_>) -> Result<Option<EffectSet>, Parse
 
     let mut effects = Vec::new();
     loop {
-        let (name, name_span) = cur.expect_ident()?;
+        // `async` is the only effect name that collides with a reserved
+        // keyword (`Token::Async`, used for `async fn`) — confirmed by
+        // checking every other effect name (`pure`, `io`, `fallible`,
+        // `unsafe`, `db`/`read`/`write`) against the lexer's own token
+        // list; none of the others are reserved, so `expect_ident()`
+        // already matches them fine. Without this, `expect_ident()` alone
+        // can never match `Token::Async`, so `[async]` — the exact form
+        // this crate's own effect-checker error messages tell the user to
+        // write — could never actually be parsed, silently making
+        // `spawn`/`await`/`parallel`/`withTimeout` unusable in any function
+        // with an explicit effect signature (BACKLOG item 185).
+        let (name, name_span) = if cur.peek() == Some(&Token::Async) {
+            let (_, span) = cur.bump().unwrap();
+            ("async".to_string(), span)
+        } else {
+            cur.expect_ident()?
+        };
         // Handle `db.read` / `db.write`
         let full = if cur.peek() == Some(&Token::Dot) {
             cur.bump();
