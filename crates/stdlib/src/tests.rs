@@ -529,6 +529,21 @@ fn collections_c_contains_list_and_map() {
 }
 
 #[test]
+fn collections_c_list_contains_matches_the_name_codegen_actually_calls() {
+    // BACKLOG item 181 — the runtime function was originally named
+    // `certo_list_contains_ptr`, one letter off from the name
+    // `crates/codegen`'s own `List.contains` -> `certo_list_contains` naming
+    // convention actually calls (confirmed via `c_fn_name`), and never
+    // referenced under either name anywhere else in the codebase — so every
+    // real program calling `List.contains` failed to link with
+    // `undefined symbol: certo_list_contains`. Assert the exact call-site
+    // name is defined, and that the old, unreferenced name is gone (not
+    // just that a second alias was added alongside it).
+    assert!(COLLECTIONS_C.contains("bool certo_list_contains("), "missing certo_list_contains");
+    assert!(!COLLECTIONS_C.contains("bool certo_list_contains_ptr("), "stale certo_list_contains_ptr definition should be gone");
+}
+
+#[test]
 fn text_c_contains_key_functions() {
     assert!(TEXT_C.contains("certo_text_concat"),     "missing text_concat");
     assert!(TEXT_C.contains("certo_text_trim"),       "missing text_trim");
@@ -956,13 +971,32 @@ fn datetime_diff_seconds_type() {
 #[test]
 fn duration_functions_registered() {
     let env = seeded_env();
-    for name in &["Duration.seconds", "Duration.minutes", "Duration.hours", "Duration.days",
+    for name in &["Duration.milliseconds",
+                  "Duration.seconds", "Duration.minutes", "Duration.hours", "Duration.days",
                   "Duration.toSeconds", "Duration.toMinutes", "Duration.toHours", "Duration.toDays",
                   "Duration.add", "Duration.sub", "Duration.negate",
                   "Duration.eq", "Duration.lt", "Duration.gt",
                   "DateTime.addDuration", "DateTime.diff", "Date.addDuration"] {
         assert!(env.lookup(name).is_some(), "missing: {}", name);
     }
+}
+
+#[test]
+fn duration_milliseconds_type_and_runtime_present() {
+    // BACKLOG item 187 — `Duration.milliseconds(n: Int): Duration` didn't
+    // exist at all (only .seconds/.minutes/.hours/.days). `CertoDuration`
+    // stores whole seconds only, so this truncates sub-second values —
+    // documented at the runtime definition, not silently precise.
+    let env = seeded_env();
+    let dur = Ty::Named { name: "Duration".into(), args: vec![] };
+    match env.lookup("Duration.milliseconds").unwrap() {
+        Ty::Fn { params, ret } => {
+            assert_eq!(params, &vec![Ty::Int]);
+            assert_eq!(**ret, dur);
+        }
+        other => panic!("expected Ty::Fn, got {other:?}"),
+    }
+    assert!(DATETIME_C.contains("certo_duration_milliseconds"), "missing certo_duration_milliseconds");
 }
 
 #[test]

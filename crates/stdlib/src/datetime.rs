@@ -84,6 +84,16 @@ int64_t certo_datetime_second(CertoDateTime dt) { time_t t = (time_t)dt; struct 
 
 /* ---- Duration: constructors ---- */
 
+/* `CertoDuration` (see its own typedef above) stores whole seconds only —
+   there is no sub-second field anywhere in this representation. `n`
+   milliseconds is therefore truncated to whole seconds, same as every
+   `certo_duration_to_*` accessor below already truncates on the read side
+   (BACKLOG item 187) — real millisecond-precision `Duration` values would
+   need a wider representation change across this whole file, not attempted
+   here; this constructor exists so *specifying* a duration in milliseconds
+   is possible at all (previously it wasn't — `Duration.milliseconds` had no
+   registration anywhere), not to add precision this type doesn't have. */
+CertoDuration certo_duration_milliseconds(int64_t n) { return (CertoDuration)(n / 1000); }
 CertoDuration certo_duration_seconds(int64_t n) { return (CertoDuration)n; }
 CertoDuration certo_duration_minutes(int64_t n) { return (CertoDuration)(n * 60); }
 CertoDuration certo_duration_hours  (int64_t n) { return (CertoDuration)(n * 3600); }

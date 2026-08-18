@@ -228,6 +228,44 @@ fn list_get_or_panic_return_type_is_element_type() {
 }
 
 #[test]
+fn list_len_return_type_is_int_not_error() {
+    // BACKLOG item 179 — `List.len<T>(list: List<T>): Int` is registered as
+    // a `Ty::Forall` (generic in its *parameter*), which `stdlib_ret_types()`
+    // used to skip entirely (it only ever matched a direct, non-generic
+    // `Ty::Fn`) even though the *return* type (`Int`) is fully concrete
+    // regardless of `T`. Left unresolved, this silently fell back to
+    // `Ty::Error`'s `int64_t` layout-compatible default — indistinguishable
+    // in the emitted C from a real `Int` until something (an f-string
+    // interpolation choosing its `*_to_text` conversion) actually needed to
+    // know the difference, at which point it read a `Text` pointer's bits
+    // out of a raw `int64_t` and segfaulted.
+    let m = lower("module A\nimport Stdlib.Collections.{ List }\nfn f(xs: List<Int>): Int = List.len(xs)");
+    if let HirItem::Fn(f) = &m.items[0] {
+        assert_eq!(f.body.as_ref().unwrap().ty, Ty::Int);
+    }
+}
+
+#[test]
+fn option_is_some_return_type_is_bool_not_error() {
+    // BACKLOG item 182 — `List.first(xs)` chained with `Option.isSome(...)`
+    // segfaulted at runtime, but investigation found `certo_list_first`,
+    // `certo_option_is_some`, and their call-site codegen were all already
+    // correct. The real cause was the *same* bug item 179 fixed for
+    // `List.len`: `Option.isSome<T>(opt: Option<T>): Bool` is also a
+    // `Ty::Forall`-wrapped stdlib signature whose *return* type (`Bool`) is
+    // fully concrete regardless of `T` — `stdlib_ret_types()`'s old
+    // direct-`Ty::Fn`-only match excluded it too, leaving its call's HIR
+    // type `Ty::Error` and corrupting the downstream `certo_bool_to_text`
+    // call. No separate code change was needed here — confirmed fixed by
+    // item 179's `Ty::Forall`-unwrap alone; this test exists so the fix
+    // stays pinned for this call site specifically, not just `List.len`.
+    let m = lower("module A\nfn f(o: Option<Int>): Bool = Option.isSome(o)");
+    if let HirItem::Fn(f) = &m.items[0] {
+        assert_eq!(f.body.as_ref().unwrap().ty, Ty::Bool);
+    }
+}
+
+#[test]
 fn list_filter_sort_reverse_distinct_preserve_list_type() {
     for call in ["List.filter(xs, (x) => true)", "List.reverse(xs)", "List.distinct(xs)"] {
         let src = format!("module A\nimport Stdlib.Collections.{{ List }}\nfn f(xs: List<Float>): List<Float> = {call}");
@@ -248,6 +286,39 @@ fn list_map_return_type_recovered_via_lambda_param_hint() {
     if let HirItem::Fn(f) = &m.items[0] {
         assert_eq!(f.body.as_ref().unwrap().ty, Ty::List(Box::new(Ty::Float)));
     }
+}
+
+#[test]
+fn list_map_return_type_recovered_via_named_function_callback() {
+    // BACKLOG item 180 — the lambda-only recovery above left a *named*
+    // function callback (`xs.map(double)`) silently `Ty::Error`-typed
+    // instead of `List<Int>`, since `generic_container_ret`'s `List.map`
+    // arm only ever matched a `HirExprKind::Lambda`. A bare reference to a
+    // top-level `fn` already carries its real `Ty::Fn{params, ret}` (see
+    // `Expr::Path`'s own lowering), so the fix reads the return type from
+    // there when the callback isn't an inline lambda at all.
+    let m = lower("module A\nimport Stdlib.Collections.{ List }\nfn double(x: Int): Int = x * 2\nfn f(xs: List<Int>): List<Int> = List.map(xs, double)");
+    let f = m.items.iter().find_map(|it| if let HirItem::Fn(f) = it { if f.name == "f" { Some(f) } else { None } } else { None }).unwrap();
+    assert_eq!(f.body.as_ref().unwrap().ty, Ty::List(Box::new(Ty::Int)));
+}
+
+#[test]
+fn list_group_by_and_sum_by_recover_return_type_from_named_function_callback() {
+    // Same fix, same class of bug, for List.groupBy's key type and
+    // List.sumBy's numeric type.
+    let m = lower(
+        "module A\nimport Stdlib.Collections.{ List }\n\
+         fn keyOf(x: Int): Int = x % 2\n\
+         fn f(xs: List<Int>): Map<Int, List<Int>> = List.groupBy(xs, keyOf)");
+    let f = m.items.iter().find_map(|it| if let HirItem::Fn(f) = it { if f.name == "f" { Some(f) } else { None } } else { None }).unwrap();
+    assert_eq!(f.body.as_ref().unwrap().ty, Ty::Map(Box::new(Ty::Int), Box::new(Ty::List(Box::new(Ty::Int)))));
+
+    let m2 = lower(
+        "module A\nimport Stdlib.Collections.{ List }\n\
+         fn identity(x: Int): Int = x\n\
+         fn g(xs: List<Int>): Int = List.sumBy(xs, identity)");
+    let g = m2.items.iter().find_map(|it| if let HirItem::Fn(f) = it { if f.name == "g" { Some(f) } else { None } } else { None }).unwrap();
+    assert_eq!(g.body.as_ref().unwrap().ty, Ty::Int);
 }
 
 // ------------------------------------------------------------------ //
