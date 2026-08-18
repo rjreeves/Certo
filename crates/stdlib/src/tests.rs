@@ -984,9 +984,11 @@ fn duration_functions_registered() {
 #[test]
 fn duration_milliseconds_type_and_runtime_present() {
     // BACKLOG item 187 — `Duration.milliseconds(n: Int): Duration` didn't
-    // exist at all (only .seconds/.minutes/.hours/.days). `CertoDuration`
-    // stores whole seconds only, so this truncates sub-second values —
-    // documented at the runtime definition, not silently precise.
+    // exist at all (only .seconds/.minutes/.hours/.days). Originally
+    // truncated sub-second values since `CertoDuration` stored whole
+    // seconds only — item 188 (below) widened the representation to
+    // milliseconds, so this constructor is now exact; see
+    // `duration_milliseconds_is_exact_not_truncated_item_188`.
     let env = seeded_env();
     let dur = Ty::Named { name: "Duration".into(), args: vec![] };
     match env.lookup("Duration.milliseconds").unwrap() {
@@ -997,6 +999,48 @@ fn duration_milliseconds_type_and_runtime_present() {
         other => panic!("expected Ty::Fn, got {other:?}"),
     }
     assert!(DATETIME_C.contains("certo_duration_milliseconds"), "missing certo_duration_milliseconds");
+}
+
+#[test]
+fn duration_milliseconds_is_exact_not_truncated_item_188() {
+    // BACKLOG item 188 — `CertoDuration` widened from whole-seconds-only to
+    // milliseconds, so `Duration.milliseconds(n)` must return `n` exactly,
+    // not `n / 1000` (item 187's original, documented truncation).
+    assert!(
+        DATETIME_C.contains("CertoDuration certo_duration_milliseconds(int64_t n) { return (CertoDuration)n; }"),
+        "certo_duration_milliseconds must return n exactly, not a truncated whole-second value"
+    );
+}
+
+#[test]
+fn duration_constructors_scale_to_milliseconds() {
+    // Every coarser constructor must convert its input into the new
+    // millisecond-denominated internal unit, not pass it through raw
+    // (which would silently mean "n milliseconds" instead of "n seconds/
+    // minutes/hours/days" — a catastrophic scale error, not just imprecision).
+    assert!(DATETIME_C.contains("certo_duration_seconds(int64_t n) { return (CertoDuration)(n * 1000); }"));
+    assert!(DATETIME_C.contains("certo_duration_minutes(int64_t n) { return (CertoDuration)(n * 60000); }"));
+    assert!(DATETIME_C.contains("certo_duration_hours  (int64_t n) { return (CertoDuration)(n * 3600000); }"));
+    assert!(DATETIME_C.contains("certo_duration_days   (int64_t n) { return (CertoDuration)(n * 86400000); }"));
+}
+
+#[test]
+fn duration_accessors_convert_from_milliseconds() {
+    assert!(DATETIME_C.contains("certo_duration_to_seconds(CertoDuration d) { return d / 1000; }"));
+    assert!(DATETIME_C.contains("certo_duration_to_minutes(CertoDuration d) { return d / 60000; }"));
+    assert!(DATETIME_C.contains("certo_duration_to_hours  (CertoDuration d) { return d / 3600000; }"));
+    assert!(DATETIME_C.contains("certo_duration_to_days   (CertoDuration d) { return d / 86400000; }"));
+}
+
+#[test]
+fn datetime_date_duration_bridge_converts_units() {
+    // The three functions where a whole-second DateTime/Date meets a
+    // millisecond Duration must convert explicitly — a regression here
+    // would silently apply a Duration as if it were 1000x larger/smaller
+    // than intended (e.g. `Duration.days(30)` misapplied as 30000 days).
+    assert!(DATETIME_C.contains("certo_datetime_add_duration(CertoDateTime dt, CertoDuration d) { return dt + d / 1000; }"));
+    assert!(DATETIME_C.contains("certo_datetime_diff        (CertoDateTime a, CertoDateTime b)  { return (a - b) * 1000; }"));
+    assert!(DATETIME_C.contains("certo_date_add_duration    (CertoDate d, CertoDuration dur)    { return d + dur / 1000; }"));
 }
 
 #[test]
