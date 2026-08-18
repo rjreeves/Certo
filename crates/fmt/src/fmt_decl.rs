@@ -307,7 +307,30 @@ fn fmt_view(v: &ViewDecl, indent: usize) -> String {
 }
 
 fn fmt_form(f: &FormDecl, indent: usize) -> String {
-    format!("form {} {{\n{}    // ...\n{}}}", f.name.node, ind(indent), ind(indent))
+    let target = if f.target.segments.is_empty() {
+        String::new()
+    } else {
+        format!(" -> {}", f.target.segments.iter().map(|s| s.node.as_str()).collect::<Vec<_>>().join("."))
+    };
+    if f.fields.is_empty() && f.pk.is_none() && f.on_submit.is_none() && f.on_success.is_none() {
+        return format!("form {}{} {{}}", f.name.node, target);
+    }
+    let body_ind = format!("{}    ", ind(indent));
+    let mut lines = Vec::new();
+    for field in &f.fields {
+        let ty = field.field_type.as_ref().map(|e| fmt_expr(&e.node, indent + 1)).unwrap_or_default();
+        lines.push(format!("{body_ind}{}: {ty}", field.name.node));
+    }
+    if let Some(pk) = &f.pk {
+        lines.push(format!("{body_ind}pk: {pk}"));
+    }
+    if let Some(on_submit) = &f.on_submit {
+        lines.push(format!("{body_ind}onSubmit: {}", fmt_expr(&on_submit.node, indent + 1)));
+    }
+    if let Some(on_success) = &f.on_success {
+        lines.push(format!("{body_ind}onSuccess: {}", fmt_expr(&on_success.node, indent + 1)));
+    }
+    format!("form {}{} {{\n{}\n{}}}", f.name.node, target, lines.join("\n"), ind(indent))
 }
 
 fn fmt_ui_generate(g: &certo_ast::decl::UiGenerateDecl, indent: usize) -> String {

@@ -305,3 +305,50 @@ fn with_timeout_idempotent() {
     let out2 = fmt(&out1);
     assert_eq!(out1, out2, "withTimeout formatting not idempotent");
 }
+
+// ------------------------------------------------------------------ //
+// `form` declarations — BACKLOG item 190. `fmt_form` used to be a hardcoded
+// stub (`form Name { // ... }`) that discarded every real field, target,
+// pk, onSubmit, and onSuccess regardless of what was actually parsed —
+// running `certo fmt` in place on a file with a `form` declaration silently
+// destroyed its content. These pin the real round-trip.
+// ------------------------------------------------------------------ //
+
+#[test]
+fn form_flat_fields_round_trip() {
+    let out = fmt("module A\nform CreateCustomer -> Customer {\n    custName: Text\n    custPhone: Text\n}");
+    assert_contains(&out, "form CreateCustomer -> Customer {");
+    assert_contains(&out, "custName: Text");
+    assert_contains(&out, "custPhone: Text");
+    assert_not_contains(&out, "// ...");
+}
+
+#[test]
+fn form_without_target_arrow_round_trips_without_one() {
+    let out = fmt("module A\nform CreateCustomer {\n    custName: Text\n}");
+    assert_contains(&out, "form CreateCustomer {");
+    assert_not_contains(&out, "->");
+}
+
+#[test]
+fn form_pk_on_submit_on_success_round_trip() {
+    let out = fmt(
+        "module A\nfn createProduct(): Unit = {}\nform ProductForm -> Product {\n    name: Text\n    pk: name\n    onSubmit: createProduct\n}");
+    assert_contains(&out, "pk: name");
+    assert_contains(&out, "onSubmit: createProduct");
+}
+
+#[test]
+fn form_empty_body_round_trips_to_empty_braces() {
+    let out = fmt("module A\nform Empty -> Customer {}");
+    assert_contains(&out, "form Empty -> Customer {}");
+    assert_not_contains(&out, "// ...");
+}
+
+#[test]
+fn form_idempotent() {
+    let src  = "module A\nfn createProduct(): Unit = {}\nform ProductForm -> Product {\n    name: Text\n    price: Int\n    pk: name\n    onSubmit: createProduct\n}";
+    let out1 = fmt(src);
+    let out2 = fmt(&out1);
+    assert_eq!(out1, out2, "form formatting not idempotent");
+}
