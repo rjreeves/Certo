@@ -248,6 +248,7 @@ fn token_matches(a: &Token<'_>, b: &Token<'static>) -> bool {
         (Require,   Require)   |
         (Ensure,    Ensure)    |
         (Defer,     Defer)     |
+        (Use,       Use)       |
         (With,      With)      |
         (On,        On)        |
         (Constraint, Constraint) |
