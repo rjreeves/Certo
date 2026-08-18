@@ -1140,3 +1140,32 @@ fn multi_part_f_string_still_lowers_to_a_left_folded_concat_chain() {
     assert!(matches!(&rhs.kind, HirExprKind::Str(s) if s == "!"), "expected trailing literal \"!\", got {:?}", rhs.kind);
     assert_eq!(body.ty, Ty::Text);
 }
+
+// `await <plain call>` used to hardcode its own HIR type to `Ty::Error`
+// regardless of the awaited expression's own already-resolved type — the
+// same "known type discarded" failure shape as items 179/180/182, just in
+// `Expr::Await`'s own lowering this time. Found while verifying item 186's
+// checkpoint fix didn't break withTimeout's successful (non-abandoned)
+// path: `withTimeout(d) { await namedFn() }` compiled cleanly but
+// segfaulted on success, because the match-arm binding unwrapping its
+// `Option<T>` result inherited `Ty::Error` for `T`, so an f-string
+// interpolating it skipped `certo_int_to_text` and read the raw int as a
+// text pointer — BACKLOG item 191.
+
+#[test]
+fn await_of_plain_call_has_the_calls_own_type_not_error() {
+    let body = lower_f_body("module A\nasync fn work(): Int = 1\nasync fn f(): Int = await work()");
+    assert_eq!(body.ty, Ty::Int, "await <plain call>'s own type must be the call's real type, got {:?}", body.ty);
+}
+
+#[test]
+fn with_timeout_await_body_result_type_is_option_of_the_awaited_calls_type() {
+    // The exact original repro: withTimeout's own Option<T> must resolve T
+    // from the awaited call's real type, not silently fall back to Error.
+    let m = lower(
+        "module A\nasync fn work(): Int = 1\nasync fn f(): Int? = withTimeout(Duration.seconds(5)) { await work() }");
+    let HirItem::Fn(f) = m.items.iter().find(|it| matches!(it, HirItem::Fn(f) if f.name == "f")).unwrap() else { unreachable!() };
+    let body = f.body.as_ref().unwrap();
+    assert_eq!(body.ty, Ty::Option(Box::new(Ty::Int)),
+        "withTimeout(d) {{ await work() }}'s own type must be Option<Int>, got {:?}", body.ty);
+}
