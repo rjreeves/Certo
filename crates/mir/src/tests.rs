@@ -190,3 +190,119 @@ fn ordinary_function_while_loop_has_no_checkpoint() {
     )));
     assert!(!has_checkpoint_call, "an ordinary function's while loop must not get a cancellation checkpoint");
 }
+
+// ------------------------------------------------------------------ //
+// Scope-aware `defer` — BACKLOG item 193
+// ------------------------------------------------------------------ //
+
+/// Every named-function call target across a `MirFn`, in true control-flow
+/// order — a DFS over the block graph (`Goto`/`If`/`Call`'s own `next`/
+/// `Switch`), not the raw `blocks` vector order. Block *creation* order
+/// doesn't reliably match execution order: `HirExprKind::If`'s own
+/// lowering creates `then_bb`/`else_bb`/`join_bb` up front, before either
+/// branch is lowered into, so a call inside `then_bb` that itself needs a
+/// continuation block gets a *higher* block id than `join_bb` despite
+/// running strictly before it — walking `blocks` by index would report
+/// that call as happening *after* whatever runs post-join, which is
+/// backwards. Local function names only (`Operand::Global`) — MIR keeps
+/// the bare Certo name, not codegen's later `certo_`-prefixed C name.
+fn call_trace(mf: &crate::MirFn) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut visited = std::collections::HashSet::new();
+    let mut stack = vec![0usize];
+    while let Some(id) = stack.pop() {
+        if !visited.insert(id) { continue; }
+        let bb = &mf.blocks[id];
+        for stmt in &bb.stmts {
+            if let MirStmt::Assign { rvalue: Rvalue::Call { func: Operand::Global(name), .. }, .. } = stmt {
+                out.push(name.clone());
+            }
+        }
+        match &bb.terminator {
+            Some(Terminator::Goto(next)) => stack.push(*next),
+            Some(Terminator::If { true_bb, false_bb, .. }) => { stack.push(*false_bb); stack.push(*true_bb); }
+            Some(Terminator::Call { func: Operand::Global(name), next, .. }) => {
+                out.push(name.clone());
+                stack.push(*next);
+            }
+            Some(Terminator::Switch { targets, otherwise, .. }) => {
+                stack.push(*otherwise);
+                for (_, bb_id) in targets { stack.push(*bb_id); }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+#[test]
+fn defer_inside_an_if_branch_fires_before_code_that_follows_the_if_not_at_functions_end() {
+    // The exact bug BACKLOG item 193 fixed: a `defer` used to only ever
+    // fire once, right before the *enclosing function's* own final
+    // return — not at the natural end of whatever block directly
+    // contains it. Here, `sideEffect()` (the deferred call) must appear
+    // *before* `afterward()` in call order, since the defer sits inside
+    // the `if`'s own true-branch and must fire when that branch ends —
+    // under the old bug, `sideEffect` would only ever appear at the very
+    // end of the trace, after `afterward`.
+    let mf = mir_fn_named(
+        "module A\nfn other(): Unit = unit\nfn sideEffect(): Unit = unit\nfn afterward(): Unit = unit\n\
+         fn f(): Unit = {\n  if true then {\n    defer { sideEffect() }\n    other()\n  } else { unit }\n  afterward()\n}",
+        "f");
+    let trace = call_trace(&mf);
+    let side_effect_pos = trace.iter().position(|n| n == "sideEffect")
+        .unwrap_or_else(|| panic!("sideEffect() never called at all, got trace: {:?}", trace));
+    let afterward_pos = trace.iter().position(|n| n == "afterward")
+        .unwrap_or_else(|| panic!("afterward() never called at all, got trace: {:?}", trace));
+    assert!(side_effect_pos < afterward_pos,
+        "deferred call must fire before code following the if, got trace: {:?}", trace);
+}
+
+#[test]
+fn defer_at_the_top_level_of_a_function_still_fires_at_its_own_end_unaffected() {
+    // No-regression check: a `defer` that already sat directly in the
+    // function's own top-level body (the one shape every pre-193 test
+    // happened to use, which is why this bug was invisible until now)
+    // must keep working exactly as before.
+    let mf = mir_fn_named(
+        "module A\nfn cleanup(): Unit = unit\nfn work(): Unit = unit\n\
+         fn f(): Unit = {\n  defer { cleanup() }\n  work()\n}",
+        "f");
+    let trace = call_trace(&mf);
+    assert_eq!(trace, vec!["work", "cleanup"],
+        "work() must run before the deferred cleanup(), which fires at the function's own end");
+}
+
+#[test]
+fn defer_inside_an_early_exit_branch_fires_before_the_error_propagates() {
+    // The other real exit path (BACKLOG item 193's own scope): a `defer`
+    // inside a block that exits early via `?` must fire before that
+    // early return actually happens. `?`'s own lowering (`HirExprKind::Try`)
+    // always statically emits *both* branches — the never-taken success
+    // continuation (`unreachable()` here, since `fail()` always errors)
+    // genuinely exists in the compiled MIR even though this specific
+    // runtime never reaches it, so a whole-graph call trace correctly
+    // contains `unreachable` too; that's not a bug, and the real
+    // "unreachable never actually runs" property was already confirmed
+    // by a real compiled program (BACKLOG item 193's own end-to-end
+    // verification). What a static MIR test *can* pin precisely: the
+    // specific block that `?`'s error branch returns from — identified
+    // directly, not inferred from trace order — must itself contain the
+    // deferred `cleanup()` call before its own `Return`.
+    let mf = mir_fn_named(
+        "module A\nfn fail(): Result<Unit, Text> = Err(\"boom\")\nfn cleanup(): Unit = unit\nfn unreachable(): Unit = unit\n\
+         fn f(): Result<Unit, Text> = {\n  defer { cleanup() }\n  fail()?\n  unreachable()\n}",
+        "f");
+    // An ordinary user-function call like `cleanup()` lowers via
+    // `Terminator::Call` (its own continuation block, `next`), not
+    // `Rvalue::Call` (which is reserved for internal helper calls like
+    // `__result_unwrap`) — so the block calling `cleanup` and the block
+    // that actually returns are two directly-linked blocks, not one.
+    let cleanup_call = mf.blocks.iter().find_map(|bb| match &bb.terminator {
+        Some(Terminator::Call { func: Operand::Global(name), next, .. }) if name == "cleanup" => Some(*next),
+        _ => None,
+    });
+    let next_id = cleanup_call.unwrap_or_else(|| panic!("no call to cleanup() found at all, got blocks: {:#?}", mf.blocks));
+    assert!(matches!(mf.blocks[next_id].terminator, Some(Terminator::Return(_))),
+        "the block right after the deferred cleanup() call must return — got: {:#?}", mf.blocks[next_id]);
+}
