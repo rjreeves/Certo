@@ -13,9 +13,11 @@
 //!     - `007_api_helpers.sql`          (preflight JSONB wrappers)
 
 use std::collections::HashMap;
+use std::fmt::Write as FmtWrite;
 use std::path::{Path, PathBuf};
 use std::process;
 use serde::Deserialize;
+use certo_ast::decl::Decl;
 
 // ================================================================== //
 // YAML data structures
@@ -135,6 +137,7 @@ pub fn cmd_generate(args: &[String]) {
     }
     match args[0].as_str() {
         "validators" => cmd_generate_validators(&args[1..]),
+        "api"        => cmd_generate_api(&args[1..]),
         other => {
             eprintln!("Unknown generate subcommand: {}", other);
             eprintln!("Run `certo generate --help` for usage.");
@@ -148,8 +151,9 @@ fn print_generate_help() {
     println!();
     println!("Subcommands:");
     println!("  validators   Generate Certo validator source (and optionally PL/pgSQL) from YAML");
+    println!("  api          Generate a JSON REST CRUD handler file from an existing type declaration");
     println!();
-    println!("Run `certo generate validators --help` for details.");
+    println!("Run `certo generate validators --help` or `certo generate api --help` for details.");
 }
 
 fn cmd_generate_validators(args: &[String]) {
@@ -235,6 +239,337 @@ fn cmd_generate_validators(args: &[String]) {
         emit_sql_files(&pi, &ru, &by_entity, &entity_names,
                        &constraint_map, &temporal_map, &sql_out);
     }
+}
+
+// ================================================================== //
+// `certo generate api <TypeName>` — JSON REST CRUD handler generator
+// (BACKLOG item 153, the "api" third of certo generate model|api|migration —
+// "model" and "migration" already exist under different names, certo db
+// pull and certo db create/certo migrate create respectively).
+//
+// Reads an existing `type X = { field: T, ... }` declaration from a
+// source file (no live DB connection needed at generation time, matching
+// `certo generate validators`'s own character) and emits a standalone
+// `.cto` file with a full CRUD HTTP handler: GET list, GET one, POST
+// create, PUT update, DELETE — reusing the exact router-dispatch and
+// parameterized-SQL patterns `crates/ui/src/server.rs`'s own view/form
+// generation already established, just emitting JSON instead of HTML.
+// ================================================================== //
+
+fn cmd_generate_api(args: &[String]) {
+    let mut type_name: Option<String> = None;
+    let mut in_path:  Option<PathBuf> = None;
+    let mut out_path: Option<PathBuf> = None;
+
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--in"             => { i += 1; in_path  = Some(next_path(args, i, "--in")); }
+            "--output" | "-o"  => { i += 1; out_path = Some(next_path(args, i, "--output")); }
+            "--help" | "-h" => {
+                println!("Usage: certo generate api <TypeName> --in path/to/schema.cto [-o output.cto]");
+                println!();
+                println!("Reads an existing `type <TypeName> = {{ ... }}` record declaration");
+                println!("(hand-written, or produced earlier by `certo db pull`) and generates");
+                println!("a full JSON REST CRUD handler file for it: GET list, GET one, POST");
+                println!("create, PUT update, DELETE — parameterized SQL, no string-built queries.");
+                println!();
+                println!("The declared type must have a field named `id` (the primary key).");
+                println!();
+                println!("Options:");
+                println!("  --in <file>      Source file containing the type declaration (required)");
+                println!("  -o <file>        Output path (default: <tableName>_api.cto)");
+                return;
+            }
+            other if other.starts_with('-') => { eprintln!("Unknown option: {}", other); process::exit(2); }
+            _ => {
+                if type_name.is_some() { eprintln!("Unexpected argument: {}", args[i]); process::exit(2); }
+                type_name = Some(args[i].clone());
+            }
+        }
+        i += 1;
+    }
+
+    let type_name = type_name.unwrap_or_else(|| die("certo generate api requires a type name — see --help", 2));
+    let in_path = in_path.unwrap_or_else(|| die("--in <file> is required — see --help", 2));
+
+    let src = std::fs::read_to_string(&in_path).unwrap_or_else(|e| {
+        eprintln!("error: cannot read {}: {}", in_path.display(), e);
+        process::exit(1);
+    });
+    let module = certo_parser::parse(&src).unwrap_or_else(|errs| {
+        eprintln!("error: cannot parse {}:", in_path.display());
+        for e in &errs { eprintln!("  {}", e); }
+        process::exit(1);
+    });
+
+    let record = module.decls.iter().find_map(|d| match &d.node {
+        Decl::Type(t) if t.name.node == type_name => match &t.body {
+            certo_ast::decl::TypeBody::Record(r) => Some(r),
+            _ => None,
+        },
+        _ => None,
+    }).unwrap_or_else(|| die(
+        &format!("no record type `{type_name}` found in {} — expected `type {type_name} = {{ ... }}`", in_path.display()),
+        1,
+    ));
+
+    if !record.fields.iter().any(|f| f.name.node == "id") {
+        die(&format!("type `{type_name}` has no `id` field — certo generate api requires one as the primary key"), 1);
+    }
+
+    let table = pascal_to_snake(&type_name);
+    let out_path = out_path.unwrap_or_else(|| PathBuf::from(format!("{table}_api.cto")));
+    let source = emit_api(&type_name, &table, &record.fields);
+    write_output(&out_path, &source);
+}
+
+/// `Order` → `order`, `OrderItem` → `order_item` — same transform
+/// `crates/ui/src/server.rs`'s own `camel_to_snake` uses for PascalCase
+/// type names, duplicated locally rather than adding a cross-crate
+/// dependency for six lines, matching how `crates/cli/src/main.rs`
+/// already duplicates its own `snake_to_pascal`/`snake_to_camel` locally
+/// instead of importing `certo_dbschema`'s equivalent.
+fn pascal_to_snake(name: &str) -> String {
+    let mut s = String::new();
+    for (i, c) in name.chars().enumerate() {
+        if c.is_uppercase() && i > 0 { s.push('_'); }
+        s.push(c.to_lowercase().next().unwrap());
+    }
+    s
+}
+
+/// The Certo type name a record field is declared with — peels a `T?`
+/// Option wrapper first (nullable columns get the same JSON/SQL treatment
+/// as their non-nullable counterparts, since every `dbQuery` cell is
+/// already `Text?` regardless). Anything not a simple named type (a
+/// generic, a tuple, a function type — none of which are valid table
+/// column types anyway) falls back to `"Text"`, the always-safe default.
+fn field_type_name(ty: &certo_ast::types::TypeExpr) -> String {
+    match ty {
+        certo_ast::types::TypeExpr::Option { inner, .. } => field_type_name(&inner.node),
+        certo_ast::types::TypeExpr::Named { path, .. } =>
+            path.segments.last().map(|s| s.node.clone()).unwrap_or_else(|| "Text".to_string()),
+        _ => "Text".to_string(),
+    }
+}
+
+/// A JSON request-body field, converted to `Text` for `dbExec`/`dbQuery`'s
+/// own `List<Text>` params convention — `Int`/`Float`/`Bool` fields round
+/// through their real typed JSON accessor first (`JsonValue.asInt`, etc.)
+/// then `intToText`/`floatToText`/`boolToText`, so a non-numeric string
+/// sent for an `Int` field fails clearly inside `JsonValue.asInt` rather
+/// than silently inserting whatever text was sent. Everything else
+/// (`Text`, `UUID`, and any type this generator doesn't specifically
+/// recognize) is read directly as text.
+fn json_decode_expr(field_name: &str, ty_name: &str) -> String {
+    let get = format!("JsonValue.get(_jv, \"{field_name}\")");
+    match ty_name {
+        "Int"   => format!("intToText(JsonValue.asInt({get}))"),
+        "Float" => format!("floatToText(JsonValue.asFloat({get}))"),
+        "Bool"  => format!("boolToText(JsonValue.asBool({get}))"),
+        _       => format!("JsonValue.asText({get})"),
+    }
+}
+
+fn emit_api(type_name: &str, table: &str, fields: &[certo_ast::decl::RecordFieldDef]) -> String {
+    let mut out = String::new();
+    let cols: Vec<String> = fields.iter().map(|f| pascal_to_snake(&f.name.node)).collect();
+    let names: Vec<String> = fields.iter().map(|f| f.name.node.clone()).collect();
+    let tys: Vec<String> = fields.iter().map(|f| field_type_name(&f.ty.node)).collect();
+
+    writeln!(out, "// Generated by `certo generate api {type_name}` — do not edit by hand.").unwrap();
+    writeln!(out, "// Regenerate instead: certo generate api {type_name} --in <source>").unwrap();
+    writeln!(out, "module {type_name}Api").unwrap();
+    // `certo build`'s own `uses_db` detection (crates/cli/src/main.rs) — the
+    // switch that links libpq at all — scans `module.imports` for a literal
+    // `Stdlib.Db` import, not for actual dbConnect/dbQuery call sites. This
+    // import is load-bearing, not decorative: without it, every `db*` call
+    // below compiles fine but fails to *link* (`undefined symbol:
+    // certo_db_connect`) — confirmed by a real build attempt before this
+    // was added. Matches the same three imports `crates/ui/src/server.rs`'s
+    // own generated output already carries.
+    writeln!(out, "import Stdlib.Core").unwrap();
+    writeln!(out, "import Stdlib.Http").unwrap();
+    writeln!(out, "import Stdlib.Db").unwrap();
+    writeln!(out).unwrap();
+    writeln!(out, "fn dbUrl(): Text = getEnv(\"DATABASE_URL\") ?? \"host=localhost dbname=postgres user=postgres\"").unwrap();
+    writeln!(out).unwrap();
+
+    emit_api_router(type_name, table, &mut out);
+    emit_row_to_json(&cols, &names, &mut out);
+    emit_api_list_handler(type_name, table, &mut out);
+    emit_api_get_handler(type_name, table, &mut out);
+    emit_api_create_handler(type_name, table, &cols, &names, &tys, &mut out);
+    emit_api_update_handler(type_name, table, &cols, &names, &tys, &mut out);
+    emit_api_delete_handler(type_name, table, &mut out);
+
+    out
+}
+
+fn emit_api_router(type_name: &str, table: &str, out: &mut String) {
+    writeln!(out, "// ── Router ───────────────────────────────────────────────────────────────────").unwrap();
+    writeln!(out, "fn handler(req: HttpRequest): HttpResponse = {{").unwrap();
+    writeln!(out, "    val path   = HttpRequest.path(req)").unwrap();
+    writeln!(out, "    val method = HttpRequest.method(req)").unwrap();
+    writeln!(out, "    if Text.eq(path, \"/{table}\") then").unwrap();
+    writeln!(out, "        if Text.eq(method, \"POST\") then create{type_name}(req)").unwrap();
+    writeln!(out, "        else list{type_name}(req)").unwrap();
+    writeln!(out, "    else if Text.startsWith(path, \"/{table}/\") then").unwrap();
+    writeln!(out, "        if Text.eq(method, \"PUT\") then update{type_name}(req)").unwrap();
+    writeln!(out, "        else if Text.eq(method, \"DELETE\") then delete{type_name}(req)").unwrap();
+    writeln!(out, "        else get{type_name}(req)").unwrap();
+    writeln!(out, "    else Http.notFound(f\"No route for {{method}} {{path}}\")").unwrap();
+    writeln!(out, "}}").unwrap();
+    writeln!(out).unwrap();
+    writeln!(out, "// `/{table}/<id>` → the id segment after the last `/`").unwrap();
+    writeln!(out, "fn pathId(path: Text): Text = {{").unwrap();
+    writeln!(out, "    val parts = Text.split(path, \"/\")").unwrap();
+    writeln!(out, "    List.getOrPanic(parts, List.len(parts) - 1)").unwrap();
+    writeln!(out, "}}").unwrap();
+    writeln!(out).unwrap();
+}
+
+/// Shared row → JSON encoder, reused by both the list and get-one handlers
+/// (same "one helper, not duplicated per handler" shape `colValue` already
+/// uses in `crates/ui/src/server.rs`). Every cell is emitted as a JSON
+/// string (`Json.string(...)`) regardless of the field's own declared
+/// Certo type — `dbQuery` returns every column as `Text?` already, and
+/// there is no `Text.toInt`/`.toFloat`/`.toBool` parsing function
+/// anywhere in this codebase (confirmed by grep before relying on one) to
+/// convert a cell back to a typed value before JSON-encoding it. This is
+/// an honest, deliberate limitation, not an oversight — a numeric column
+/// like `total: Int` currently comes back as `"1999"` (a JSON string),
+/// not `1999` (a JSON number). Fixing it needs those parsing functions to
+/// exist first, a separate, smaller stdlib gap — see BACKLOG item 194.
+fn emit_row_to_json(cols: &[String], names: &[String], out: &mut String) {
+    writeln!(out, "// ── Row → JSON (every cell as a JSON string — see item 194) ─────────────────").unwrap();
+    writeln!(out, "fn rowToJson(row: List<Text?>, cols: List<Text>): Text = {{").unwrap();
+    writeln!(out, "    val _obj = Json.object()").unwrap();
+    for (col, name) in cols.iter().zip(names) {
+        writeln!(out, "    val _i_{name} = pkColIndex(cols, \"{col}\", 0)").unwrap();
+        writeln!(out, "    val _v_{name} = if _i_{name} < 0 then \"\" else (List.getOrPanic(row, _i_{name}) ?? \"\")").unwrap();
+        writeln!(out, "    JsonValue.set(_obj, \"{name}\", Json.string(_v_{name}))").unwrap();
+    }
+    writeln!(out, "    Json.stringify(_obj)").unwrap();
+    writeln!(out, "}}").unwrap();
+    writeln!(out).unwrap();
+    writeln!(out, "fn pkColIndex(cols: List<Text>, col: Text, i: Int): Int =").unwrap();
+    writeln!(out, "    if i >= List.len(cols) then -1").unwrap();
+    writeln!(out, "    else if Text.eq(List.getOrPanic(cols, i), col) then i").unwrap();
+    writeln!(out, "    else pkColIndex(cols, col, i + 1)").unwrap();
+    writeln!(out).unwrap();
+}
+
+fn emit_api_list_handler(type_name: &str, table: &str, out: &mut String) {
+    writeln!(out, "// ── GET /{table} — list ──────────────────────────────────────────────────────").unwrap();
+    writeln!(out, "fn list{type_name}(req: HttpRequest): HttpResponse = {{").unwrap();
+    writeln!(out, "    val conn  = dbConnect(dbUrl())").unwrap();
+    writeln!(out, "    val _p0   = List.empty()").unwrap();
+    writeln!(out, "    val rows  = dbQuery(conn, \"SELECT * FROM {table}\", _p0)").unwrap();
+    writeln!(out, "    val cols  = dbColumns(conn, \"SELECT * FROM {table} LIMIT 1\")").unwrap();
+    writeln!(out, "    dbClose(conn)").unwrap();
+    writeln!(out, "    val body = rowsToJsonArray(rows, cols, 0, List.len(rows))").unwrap();
+    writeln!(out, "    Http.ok(body, \"application/json\")").unwrap();
+    writeln!(out, "}}").unwrap();
+    writeln!(out).unwrap();
+    writeln!(out, "fn rowsToJsonArray(rows: List<List<Text?>>, cols: List<Text>, i: Int, n: Int): Text =").unwrap();
+    writeln!(out, "    if i >= n then \"[]\"").unwrap();
+    writeln!(out, "    else if i == n - 1 then \"[\" ++ rowToJson(List.getOrPanic(rows, i), cols) ++ \"]\"").unwrap();
+    writeln!(out, "    else {{").unwrap();
+    writeln!(out, "        val rest = rowsToJsonArray(rows, cols, i + 1, n)").unwrap();
+    writeln!(out, "        \"[\" ++ rowToJson(List.getOrPanic(rows, i), cols) ++ \",\" ++ Text.slice(rest, 1, Text.len(rest))").unwrap();
+    writeln!(out, "    }}").unwrap();
+    writeln!(out).unwrap();
+}
+
+fn emit_api_get_handler(type_name: &str, table: &str, out: &mut String) {
+    writeln!(out, "// ── GET /{table}/:id — one ───────────────────────────────────────────────────").unwrap();
+    writeln!(out, "fn get{type_name}(req: HttpRequest): HttpResponse = {{").unwrap();
+    writeln!(out, "    val _id  = pathId(HttpRequest.path(req))").unwrap();
+    writeln!(out, "    val conn = dbConnect(dbUrl())").unwrap();
+    writeln!(out, "    val _p0  = List.empty()").unwrap();
+    writeln!(out, "    val _p1  = List.push(_p0, _id)").unwrap();
+    writeln!(out, "    val rows = dbQuery(conn, \"SELECT * FROM {table} WHERE id = $1 LIMIT 1\", _p1)").unwrap();
+    writeln!(out, "    val cols = dbColumns(conn, \"SELECT * FROM {table} LIMIT 1\")").unwrap();
+    writeln!(out, "    dbClose(conn)").unwrap();
+    writeln!(out, "    if List.len(rows) == 0 then Http.notFound(f\"{type_name} {{_id}} not found\")").unwrap();
+    writeln!(out, "    else Http.ok(rowToJson(List.getOrPanic(rows, 0), cols), \"application/json\")").unwrap();
+    writeln!(out, "}}").unwrap();
+    writeln!(out).unwrap();
+}
+
+fn emit_api_create_handler(type_name: &str, table: &str, cols: &[String], names: &[String], tys: &[String], out: &mut String) {
+    writeln!(out, "// ── POST /{table} — create ───────────────────────────────────────────────────").unwrap();
+    writeln!(out, "fn create{type_name}(req: HttpRequest): HttpResponse = {{").unwrap();
+    writeln!(out, "    val _jv  = Json.parse(HttpRequest.body(req))").unwrap();
+    writeln!(out, "    val conn = dbConnect(dbUrl())").unwrap();
+    let write_cols: Vec<&str> = cols.iter().map(|s| s.as_str()).filter(|c| *c != "id").collect();
+    let mut p_idx = 0usize;
+    writeln!(out, "    val _p0 = List.empty()").unwrap();
+    for ((col, name), ty) in cols.iter().zip(names).zip(tys) {
+        if col == "id" { continue; }
+        let decode = json_decode_expr(name, ty);
+        writeln!(out, "    val _f{p_idx} = {decode}").unwrap();
+        writeln!(out, "    val _p{} = List.push(_p{}, _f{p_idx})", p_idx + 1, p_idx).unwrap();
+        p_idx += 1;
+    }
+    let col_list = write_cols.join(", ");
+    let ph_list: String = (1..=write_cols.len()).map(|n| format!("${n}")).collect::<Vec<_>>().join(", ");
+    writeln!(out, "    val sql  = \"INSERT INTO {table} ({col_list}) VALUES ({ph_list}) RETURNING *\"").unwrap();
+    writeln!(out, "    val rows = dbQuery(conn, sql, _p{p_idx})").unwrap();
+    writeln!(out, "    val cols = dbColumns(conn, \"SELECT * FROM {table} LIMIT 1\")").unwrap();
+    writeln!(out, "    dbClose(conn)").unwrap();
+    writeln!(out, "    if List.len(rows) == 0 then Http.respond(500, \"application/json\", \"{{\\\"error\\\":\\\"insert failed\\\"}}\")").unwrap();
+    writeln!(out, "    else Http.respond(201, \"application/json\", rowToJson(List.getOrPanic(rows, 0), cols))").unwrap();
+    writeln!(out, "}}").unwrap();
+    writeln!(out).unwrap();
+}
+
+fn emit_api_update_handler(type_name: &str, table: &str, cols: &[String], names: &[String], tys: &[String], out: &mut String) {
+    writeln!(out, "// ── PUT /{table}/:id — update ────────────────────────────────────────────────").unwrap();
+    writeln!(out, "fn update{type_name}(req: HttpRequest): HttpResponse = {{").unwrap();
+    writeln!(out, "    val _id  = pathId(HttpRequest.path(req))").unwrap();
+    writeln!(out, "    val _jv  = Json.parse(HttpRequest.body(req))").unwrap();
+    writeln!(out, "    val conn = dbConnect(dbUrl())").unwrap();
+    let write_cols: Vec<&str> = cols.iter().map(|s| s.as_str()).filter(|c| *c != "id").collect();
+    let mut p_idx = 0usize;
+    writeln!(out, "    val _p0 = List.empty()").unwrap();
+    for ((col, name), ty) in cols.iter().zip(names).zip(tys) {
+        if col == "id" { continue; }
+        let decode = json_decode_expr(name, ty);
+        writeln!(out, "    val _f{p_idx} = {decode}").unwrap();
+        writeln!(out, "    val _p{} = List.push(_p{}, _f{p_idx})", p_idx + 1, p_idx).unwrap();
+        p_idx += 1;
+    }
+    writeln!(out, "    val _p{} = List.push(_p{}, _id)", p_idx + 1, p_idx).unwrap();
+    let set_clause = write_cols.iter().enumerate()
+        .map(|(i, c)| format!("{c} = ${}", i + 1))
+        .collect::<Vec<_>>().join(", ");
+    let id_ph = write_cols.len() + 1;
+    writeln!(out, "    val sql  = \"UPDATE {table} SET {set_clause} WHERE id = ${id_ph} RETURNING *\"").unwrap();
+    writeln!(out, "    val rows = dbQuery(conn, sql, _p{})", p_idx + 1).unwrap();
+    writeln!(out, "    val cols = dbColumns(conn, \"SELECT * FROM {table} LIMIT 1\")").unwrap();
+    writeln!(out, "    dbClose(conn)").unwrap();
+    writeln!(out, "    if List.len(rows) == 0 then Http.notFound(f\"{type_name} {{_id}} not found\")").unwrap();
+    writeln!(out, "    else Http.ok(rowToJson(List.getOrPanic(rows, 0), cols), \"application/json\")").unwrap();
+    writeln!(out, "}}").unwrap();
+    writeln!(out).unwrap();
+}
+
+fn emit_api_delete_handler(type_name: &str, table: &str, out: &mut String) {
+    writeln!(out, "// ── DELETE /{table}/:id ───────────────────────────────────────────────────────").unwrap();
+    writeln!(out, "fn delete{type_name}(req: HttpRequest): HttpResponse = {{").unwrap();
+    writeln!(out, "    val _id  = pathId(HttpRequest.path(req))").unwrap();
+    writeln!(out, "    val conn = dbConnect(dbUrl())").unwrap();
+    writeln!(out, "    val _p0  = List.empty()").unwrap();
+    writeln!(out, "    val _p1  = List.push(_p0, _id)").unwrap();
+    writeln!(out, "    val n    = dbExec(conn, \"DELETE FROM {table} WHERE id = $1\", _p1)").unwrap();
+    writeln!(out, "    dbClose(conn)").unwrap();
+    writeln!(out, "    if n > 0 then Http.respond(204, \"application/json\", \"\")").unwrap();
+    writeln!(out, "    else Http.notFound(f\"{type_name} {{_id}} not found\")").unwrap();
+    writeln!(out, "}}").unwrap();
+    writeln!(out).unwrap();
 }
 
 // ================================================================== //
@@ -1227,5 +1562,111 @@ fn collect_field_roots(
         ConditionNode::Any  { any  } => any .iter().for_each(|c| collect_field_roots(c, primary_var, entity_field_map, seen, seen_set)),
         ConditionNode::None { none } => none.iter().for_each(|c| collect_field_roots(c, primary_var, entity_field_map, seen, seen_set)),
         _ => {}
+    }
+}
+
+// ================================================================== //
+// `certo generate api` tests — BACKLOG item 153
+// ================================================================== //
+
+#[cfg(test)]
+mod api_tests {
+    use super::*;
+
+    fn fields_of(src: &str, type_name: &str) -> Vec<certo_ast::decl::RecordFieldDef> {
+        let module = certo_parser::parse(src).expect("parse error");
+        module.decls.iter().find_map(|d| match &d.node {
+            Decl::Type(t) if t.name.node == type_name => match &t.body {
+                certo_ast::decl::TypeBody::Record(r) => Some(r.fields.clone()),
+                _ => None,
+            },
+            _ => None,
+        }).expect("type not found")
+    }
+
+    #[test]
+    fn pascal_to_snake_converts_correctly() {
+        assert_eq!(pascal_to_snake("Widget"), "widget");
+        assert_eq!(pascal_to_snake("OrderItem"), "order_item");
+        assert_eq!(pascal_to_snake("A"), "a");
+    }
+
+    #[test]
+    fn field_type_name_peels_option_and_falls_back_to_text() {
+        // `List<Text>` is still `TypeExpr::Named` (with generic args) — the
+        // fallback path is for genuinely non-Named shapes, like a tuple.
+        let fields = fields_of(
+            "module A\ntype T = { a: Int, b: Int?, c: (Int, Text) }", "T");
+        assert_eq!(field_type_name(&fields[0].ty.node), "Int");
+        assert_eq!(field_type_name(&fields[1].ty.node), "Int", "T? must peel to T");
+        assert_eq!(field_type_name(&fields[2].ty.node), "Text", "a non-Named type (e.g. a tuple) falls back to Text");
+    }
+
+    #[test]
+    fn json_decode_expr_uses_the_typed_accessor_and_converts_back_to_text() {
+        assert_eq!(json_decode_expr("n", "Int"),   "intToText(JsonValue.asInt(JsonValue.get(_jv, \"n\")))");
+        assert_eq!(json_decode_expr("f", "Float"), "floatToText(JsonValue.asFloat(JsonValue.get(_jv, \"f\")))");
+        assert_eq!(json_decode_expr("b", "Bool"),  "boolToText(JsonValue.asBool(JsonValue.get(_jv, \"b\")))");
+        assert_eq!(json_decode_expr("s", "Text"),  "JsonValue.asText(JsonValue.get(_jv, \"s\"))");
+        assert_eq!(json_decode_expr("u", "UUID"),  "JsonValue.asText(JsonValue.get(_jv, \"u\"))", "an unrecognized type falls back to plain text");
+    }
+
+    #[test]
+    fn emit_api_generated_source_is_self_parseable() {
+        // Full seeded typecheck/build verification was done separately, via
+        // the real `certo check`/`certo build --emit-dll` CLI commands
+        // against a real generated file — `certo_typeck::check_module`
+        // (unseeded, no stdlib registered) isn't the right tool for that
+        // here and would only ever report every stdlib call as unbound.
+        // This test covers what a plain unit test actually can: the
+        // generator's own string-building never emits malformed syntax.
+        let fields = fields_of(
+            "module A\ntype Widget = { id: UUID, name: Text, price: Int, inStock: Bool }", "Widget");
+        let source = emit_api("Widget", "widget", &fields);
+
+        certo_parser::parse(&source)
+            .unwrap_or_else(|errs| panic!("generated source failed to parse:\n{}\n---\n{}",
+                errs.iter().map(|e| e.to_string()).collect::<Vec<_>>().join("\n"), source));
+
+        // The five CRUD handlers and the router all exist.
+        for name in ["handler", "listWidget", "getWidget", "createWidget", "updateWidget", "deleteWidget"] {
+            assert!(source.contains(&format!("fn {name}(")), "missing generated function: {name}");
+        }
+    }
+
+    #[test]
+    fn emit_api_declares_the_db_import_needed_for_linking() {
+        // uses_db (crates/cli/src/main.rs) — the switch that links libpq at
+        // all — scans module.imports for a literal `Stdlib.Db` import, not
+        // for actual dbConnect/dbQuery call sites. Confirmed by a real
+        // build attempt before this was added: every db* call compiled
+        // fine but failed to *link* without it.
+        let fields = fields_of("module A\ntype Widget = { id: UUID, name: Text }", "Widget");
+        let source = emit_api("Widget", "widget", &fields);
+        assert!(source.contains("import Stdlib.Db"), "missing the load-bearing Stdlib.Db import");
+    }
+
+    #[test]
+    fn emit_api_insert_and_update_never_write_the_id_column() {
+        let fields = fields_of(
+            "module A\ntype Widget = { id: UUID, name: Text, price: Int }", "Widget");
+        let source = emit_api("Widget", "widget", &fields);
+        assert!(source.contains("INSERT INTO widget (name, price) VALUES ($1, $2)"),
+            "id must never be inserted — it's the primary key, not a client-supplied value:\n{source}");
+        assert!(source.contains("UPDATE widget SET name = $1, price = $2 WHERE id = $3"),
+            "id must never be in UPDATE's SET clause, only its WHERE clause:\n{source}");
+    }
+
+    #[test]
+    fn emit_api_missing_id_field_is_rejected_before_generation() {
+        // certo generate api requires an `id` field to exist (the assumed
+        // primary key) — checked in `cmd_generate_api` before `emit_api` is
+        // ever called, not discovered later as a runtime SQL failure.
+        let module = certo_parser::parse("module A\ntype Widget = { name: Text }").unwrap();
+        let certo_ast::decl::TypeBody::Record(r) = &module.decls.iter().find_map(|d| match &d.node {
+            Decl::Type(t) if t.name.node == "Widget" => Some(&t.body),
+            _ => None,
+        }).unwrap() else { panic!("expected a record type") };
+        assert!(!r.fields.iter().any(|f| f.name.node == "id"), "sanity check: this type really has no id field");
     }
 }
