@@ -633,7 +633,7 @@ fn seed_advances_counter() {
 fn conversion_functions_registered() {
     let env = seeded_env();
     for name in &["intToText", "floatToText", "boolToText",
-                  "floatToInt", "intToFloat", "parseInt", "parseFloat", "parseDecimal"] {
+                  "floatToInt", "intToFloat", "parseInt", "parseFloat", "parseDecimal", "parseBool"] {
         assert!(env.lookup(name).is_some(), "missing: {}", name);
     }
 }
@@ -672,6 +672,31 @@ fn parse_float_returns_option_float() {
         }
         other => panic!("expected Fn, got {:?}", other),
     }
+}
+
+#[test]
+fn parse_bool_returns_option_bool() {
+    // BACKLOG item 194 — parseInt/parseFloat already existed; this was
+    // the one genuine gap, needed so certo generate api's own JSON
+    // encoding could dispatch per field type instead of always Json.string.
+    let env = seeded_env();
+    match env.lookup("parseBool").unwrap() {
+        Ty::Fn { params, ret } => {
+            assert_eq!(params, &[Ty::Text]);
+            assert_eq!(ret.as_ref(), &Ty::Option(Box::new(Ty::Bool)));
+        }
+        other => panic!("expected Fn, got {:?}", other),
+    }
+}
+
+#[test]
+fn parse_bool_accepts_exactly_the_lowercase_form_bool_to_text_produces() {
+    // A real inverse of certo_bool_to_text ("true"/"false" lowercase),
+    // not an approximation — checked against the actual C source, not
+    // just assumed to match.
+    assert!(CORE_C.contains("bool* certo_parse_bool(certo_text_t s)"));
+    assert!(CORE_C.contains("strcmp(s, \"true\")"));
+    assert!(CORE_C.contains("strcmp(s, \"false\")"));
 }
 
 #[test]
