@@ -19,9 +19,24 @@ struct Builder {
     lambda_count: u32,
     /// Name prefix from the enclosing function (for naming lifted lambdas).
     fn_name:     String,
-    /// Deferred expressions accumulated by `defer { ... }` statements.
-    /// Emitted in LIFO order before every `Return` terminator.
-    defers:      Vec<certo_hir::HirExpr>,
+    /// Deferred expressions accumulated by `defer { ... }` statements —
+    /// BACKLOG item 193. A stack of scope frames, one per currently-open
+    /// `HirExprKind::Block` (pushed/popped by that arm's own lowering, see
+    /// below): a `defer` pushes onto the *innermost* open frame, not one
+    /// flat function-wide list, so it fires at the natural end of the
+    /// block that actually contains it — not only once, at the enclosing
+    /// *function's* own eventual return, which is what this looked like
+    /// before this item (any block nested inside a larger function — an
+    /// `if`/`match` arm, not the function's own outer body — never got
+    /// its own defers to run until the whole function finally returned).
+    /// Draining a frame at its own block's natural exit is destructive
+    /// (`Vec::pop`, run once); draining the *whole stack* for an early
+    /// exit (`emit_defers_then_return`, used by both the function's real
+    /// `Return` and `?`'s error-propagation branch) is non-destructive
+    /// (clone-then-emit) since it fires from a side branch that doesn't
+    /// actually end the block — code after it (the `?`'s success path)
+    /// still needs every still-open frame intact.
+    defer_stack: Vec<Vec<certo_hir::HirExpr>>,
     /// Record type name → ordered declared field types (BACKLOG item 119) —
     /// a `Ty::Var(0)` entry marks a bare type-param field, which is
     /// heap-boxed on construction and unboxed on read since its C storage
@@ -81,7 +96,7 @@ impl Builder {
             lifted_fns: Vec::new(),
             lambda_count: 0,
             fn_name: fn_name.to_string(),
-            defers:    Vec::new(),
+            defer_stack: Vec::new(),
             record_field_types,
             variant_field_types,
             fn_param_tys,
@@ -160,11 +175,25 @@ fn loop_back_edge(b: &mut Builder, header_bb: BlockId, exit_bb: BlockId) {
     }
 }
 
+/// Runs every currently-open scope's own deferred bodies, then returns —
+/// BACKLOG item 193. Used by the function's own real final return and by
+/// `?`'s error-propagation branch (`HirExprKind::Try`), the only two ways
+/// a Certo function ever actually returns (there is no explicit `return`
+/// statement — confirmed: `Token::Return` is reserved but never consumed
+/// anywhere in the parser). Both are genuine "exit the whole function"
+/// points, so every still-open frame must fire, innermost first, then
+/// LIFO within each frame. Non-destructive (clones the stack rather than
+/// draining it): a `?`'s error branch is a side branch off the main flow,
+/// not the actual end of its enclosing block — the success continuation
+/// right after it still needs every currently-open frame intact, since
+/// nothing has really exited yet from *that* path's point of view.
 fn emit_defers_then_return(return_op: Operand, b: &mut Builder) {
-    let defers: Vec<certo_hir::HirExpr> = b.defers.clone();
-    for body in defers.iter().rev() {
-        b.current_span = body.span;
-        lower_expr(body, b);
+    let frames: Vec<Vec<certo_hir::HirExpr>> = b.defer_stack.clone();
+    for frame in frames.iter().rev() {
+        for body in frame.iter().rev() {
+            b.current_span = body.span;
+            lower_expr(body, b);
+        }
     }
     b.terminate(Terminator::Return(return_op));
 }
@@ -1606,8 +1635,26 @@ fn lower_expr(expr: &HirExpr, b: &mut Builder) -> Operand {
         }
 
         HirExprKind::Block { stmts, tail } => {
+            // BACKLOG item 193 — every block gets its own defer scope, not
+            // just the enclosing function's own top-level body. Pushed
+            // before this block's own statements run (any `defer` among
+            // them pushes onto *this* frame, via `HirStmt::Defer`'s own
+            // lowering), popped and drained right here once the block's
+            // own value is known — its natural exit — so a `defer` inside
+            // an `if`/`match` arm fires when *that* arm's block ends, not
+            // only once, whenever the enclosing function eventually
+            // returns. Cheap even for the overwhelming majority of blocks
+            // that never contain a `defer`: an empty frame's drain is a
+            // zero-iteration loop, no generated-code difference at all.
+            b.defer_stack.push(Vec::new());
             for stmt in stmts { lower_stmt(stmt, b); }
-            lower_expr(tail, b)
+            let result = lower_expr(tail, b);
+            let frame = b.defer_stack.pop().expect("Block must pop the frame it just pushed");
+            for body in frame.iter().rev() {
+                b.current_span = body.span;
+                lower_expr(body, b);
+            }
+            result
         }
 
         HirExprKind::Match { scrutinee, arms } => {
@@ -2332,7 +2379,14 @@ fn lower_stmt(stmt: &HirStmt, b: &mut Builder) {
             lower_expr(e, b);
         }
         HirStmt::Defer { body } => {
-            b.defers.push(body.clone());
+            // Pushes onto the *innermost* open scope frame (BACKLOG item
+            // 193) — the `HirExprKind::Block` currently being lowered,
+            // which always has a frame open by the time any of its own
+            // statements (including this one) are reached; see that arm's
+            // own push/pop.
+            b.defer_stack.last_mut()
+                .expect("HirStmt::Defer reached with no open defer scope — every defer sits inside some Block, which always pushes a frame first")
+                .push(body.clone());
         }
     }
 }
