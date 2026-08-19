@@ -397,7 +397,7 @@ fn emit_api(type_name: &str, table: &str, fields: &[certo_ast::decl::RecordField
     writeln!(out).unwrap();
 
     emit_api_router(type_name, table, &mut out);
-    emit_row_to_json(&cols, &names, &mut out);
+    emit_row_to_json(&cols, &names, &tys, &mut out);
     emit_api_list_handler(type_name, table, &mut out);
     emit_api_get_handler(type_name, table, &mut out);
     emit_api_create_handler(type_name, table, &cols, &names, &tys, &mut out);
@@ -432,24 +432,32 @@ fn emit_api_router(type_name: &str, table: &str, out: &mut String) {
 
 /// Shared row → JSON encoder, reused by both the list and get-one handlers
 /// (same "one helper, not duplicated per handler" shape `colValue` already
-/// uses in `crates/ui/src/server.rs`). Every cell is emitted as a JSON
-/// string (`Json.string(...)`) regardless of the field's own declared
-/// Certo type — `dbQuery` returns every column as `Text?` already, and
-/// there is no `Text.toInt`/`.toFloat`/`.toBool` parsing function
-/// anywhere in this codebase (confirmed by grep before relying on one) to
-/// convert a cell back to a typed value before JSON-encoding it. This is
-/// an honest, deliberate limitation, not an oversight — a numeric column
-/// like `total: Int` currently comes back as `"1999"` (a JSON string),
-/// not `1999` (a JSON number). Fixing it needs those parsing functions to
-/// exist first, a separate, smaller stdlib gap — see BACKLOG item 194.
-fn emit_row_to_json(cols: &[String], names: &[String], out: &mut String) {
-    writeln!(out, "// ── Row → JSON (every cell as a JSON string — see item 194) ─────────────────").unwrap();
+/// uses in `crates/ui/src/server.rs`). Each cell is encoded per the
+/// field's own declared Certo type — `Int`/`Float`/`Bool` go through
+/// `parseInt`/`parseFloat`/`parseBool` (BACKLOG item 194; `parseInt`/
+/// `parseFloat` already existed, only `parseBool` needed adding) to
+/// become a real JSON number/boolean instead of a string, since
+/// `dbQuery` returns every column as `Text?` regardless of its real
+/// type. A cell that fails to parse (in practice: a `NULL` column, whose
+/// raw text is `""`) encodes as `Json.null()` rather than a bogus
+/// default — more faithful than the empty-string behavior this replaced,
+/// not just type-safe. `Text`/`UUID`/anything this generator doesn't
+/// specifically recognize still encodes as a plain JSON string.
+fn emit_row_to_json(cols: &[String], names: &[String], tys: &[String], out: &mut String) {
+    writeln!(out, "// ── Row → JSON (typed per field — Int/Float/Bool as real JSON values) ───────").unwrap();
     writeln!(out, "fn rowToJson(row: List<Text?>, cols: List<Text>): Text = {{").unwrap();
     writeln!(out, "    val _obj = Json.object()").unwrap();
-    for (col, name) in cols.iter().zip(names) {
+    for ((col, name), ty) in cols.iter().zip(names).zip(tys) {
         writeln!(out, "    val _i_{name} = pkColIndex(cols, \"{col}\", 0)").unwrap();
         writeln!(out, "    val _v_{name} = if _i_{name} < 0 then \"\" else (List.getOrPanic(row, _i_{name}) ?? \"\")").unwrap();
-        writeln!(out, "    JsonValue.set(_obj, \"{name}\", Json.string(_v_{name}))").unwrap();
+        let json_expr = match ty.as_str() {
+            "Int"   => format!("match parseInt(_v_{name}) {{ Some(n) => Json.int(n), None => Json.null() }}"),
+            "Float" => format!("match parseFloat(_v_{name}) {{ Some(n) => Json.float(n), None => Json.null() }}"),
+            "Bool"  => format!("match parseBool(_v_{name}) {{ Some(b) => Json.bool(b), None => Json.null() }}"),
+            _       => format!("Json.string(_v_{name})"),
+        };
+        writeln!(out, "    val _j_{name} = {json_expr}").unwrap();
+        writeln!(out, "    JsonValue.set(_obj, \"{name}\", _j_{name})").unwrap();
     }
     writeln!(out, "    Json.stringify(_obj)").unwrap();
     writeln!(out, "}}").unwrap();
@@ -1655,6 +1663,31 @@ mod api_tests {
             "id must never be inserted — it's the primary key, not a client-supplied value:\n{source}");
         assert!(source.contains("UPDATE widget SET name = $1, price = $2 WHERE id = $3"),
             "id must never be in UPDATE's SET clause, only its WHERE clause:\n{source}");
+    }
+
+    #[test]
+    fn emit_row_to_json_encodes_int_float_bool_as_real_json_values_not_strings() {
+        // BACKLOG item 194 — list/get responses used to JSON-encode every
+        // column as a string regardless of its declared type. parseInt/
+        // parseFloat already existed; parseBool was the one real gap.
+        let fields = fields_of(
+            "module A\ntype Widget = { id: UUID, price: Int, weight: Float, inStock: Bool }", "Widget");
+        let source = emit_api("Widget", "widget", &fields);
+        assert!(source.contains("match parseInt(_v_price) { Some(n) => Json.int(n), None => Json.null() }"),
+            "Int field must decode via parseInt into a real JSON number:\n{source}");
+        assert!(source.contains("match parseFloat(_v_weight) { Some(n) => Json.float(n), None => Json.null() }"),
+            "Float field must decode via parseFloat into a real JSON number:\n{source}");
+        assert!(source.contains("match parseBool(_v_inStock) { Some(b) => Json.bool(b), None => Json.null() }"),
+            "Bool field must decode via parseBool into a real JSON boolean:\n{source}");
+    }
+
+    #[test]
+    fn emit_row_to_json_still_encodes_text_and_unrecognized_types_as_json_strings() {
+        let fields = fields_of(
+            "module A\ntype Widget = { id: UUID, name: Text }", "Widget");
+        let source = emit_api("Widget", "widget", &fields);
+        assert!(source.contains("val _j_id = Json.string(_v_id)"), "UUID falls back to Json.string:\n{source}");
+        assert!(source.contains("val _j_name = Json.string(_v_name)"), "Text encodes as Json.string:\n{source}");
     }
 
     #[test]

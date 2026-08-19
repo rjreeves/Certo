@@ -39,6 +39,10 @@ pub fn seed_stdlib(env: &mut TypeEnv, counter: &mut u32) {
     def!("parseInt",     fn1(Ty::Text, Ty::Option(Box::new(Ty::Int))));
     def!("parseFloat",   fn1(Ty::Text, Ty::Option(Box::new(Ty::Float))));
     def!("parseDecimal", fn1(Ty::Text, Ty::Option(Box::new(Ty::Decimal(None)))));
+    // BACKLOG item 194 — `parseInt`/`parseFloat` already existed; `parseBool`
+    // was the one genuine gap (`certo generate api`'s own row-to-JSON codegen
+    // needed all three to encode typed values instead of always Json.string).
+    def!("parseBool",    fn1(Ty::Text, Ty::Option(Box::new(Ty::Bool))));
 
     // Option constructors — Some(x) / None
     {

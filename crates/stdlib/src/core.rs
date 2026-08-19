@@ -282,6 +282,21 @@ double* certo_parse_float(certo_text_t s) {
     return box;
 }
 
+/* Accepts exactly "true"/"false" (case-sensitive) — the same lowercase
+   form `certo_bool_to_text` above already produces, so `parseBool` is a
+   real inverse of it, not just an approximation. NULL (None) on anything
+   else, same convention as `certo_parse_int`/`certo_parse_float`. */
+bool* certo_parse_bool(certo_text_t s) {
+    if (!s) return NULL;
+    bool v;
+    if (strcmp(s, "true") == 0) v = true;
+    else if (strcmp(s, "false") == 0) v = false;
+    else return NULL;
+    bool *box = (bool*)malloc(sizeof(bool));
+    *box = v;
+    return box;
+}
+
 /* Monotonic millisecond counter for measuring elapsed time (not wall-clock).
    Windows headers arrive via the prelude (winsock2.h/windows.h). */
 #ifndef _WIN32
