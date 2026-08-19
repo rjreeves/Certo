@@ -806,6 +806,18 @@ pub fn seed_stdlib(env: &mut TypeEnv, counter: &mut u32) {
     def!("readFile",   fn1(Ty::Text, Ty::Option(Box::new(Ty::Text))));
     def!("writeFile",  fn2(Ty::Text, Ty::Text, Ty::Bool));
 
+    // File — open-handle API (BACKLOG item 192), for `use file = File.open(path) { ... }`
+    // (item 152). Opaque handle, same `void*` convention as `__CertoTask`/`Channel`.
+    // `.open` reports failure as `Option` like every sibling file function above,
+    // not a new `Result<File, IOError>` — no `IOError` type exists in this codebase.
+    {
+        let file = || Ty::Named { name: "File".into(), args: vec![] };
+        def!("File.open",    fn1(Ty::Text, Ty::Option(Box::new(file()))));
+        def!("File.readAll", fn1(file(), Ty::Option(Box::new(Ty::Text))));
+        def!("File.write",   fn2(file(), Ty::Text, Ty::Bool));
+        def!("File.close",   fn1(file(), Ty::Unit));
+    }
+
     // Bytes — opaque binary buffer (pointer-sized handle).
     {
         let bytes = || Ty::Named { name: "Bytes".into(), args: vec![] };
@@ -1385,6 +1397,7 @@ pub fn seed_stdlib(env: &mut TypeEnv, counter: &mut u32) {
     // File / Path
     pm!("writeFile",   "path", "content");
     pm!("appendFile",  "path", "content");
+    pm!("File.write",  "file", "content");
     pm!("Path.join",   "base", "part");
 
     // Process
