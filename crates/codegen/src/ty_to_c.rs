@@ -45,6 +45,10 @@ pub fn ty_to_c(ty: &Ty) -> String {
         // checked before the generic `Ty::Named` arm below (which assumes a
         // real struct named after the type exists).
         Ty::Named { name, .. } if name == "Channel" => "void*".into(),
+        // `File` (BACKLOG item 192) is an opaque `FILE*` handle — same
+        // convention as `Channel`/`__CertoTask`, must also be checked before
+        // the generic `Ty::Named` catch-all below.
+        Ty::Named { name, .. } if name == "File" => "void*".into(),
         // These stdlib scalar types have a C-side typedef prefixed `Certo`
         // (`CertoDateTime`, etc. — see crates/stdlib/src/datetime.rs) rather
         // than matching their bare Certo name; an explicit `DateTime`/`Date`/

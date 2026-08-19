@@ -1346,6 +1346,107 @@ fn file_c_contains_key_functions() {
 }
 
 // ------------------------------------------------------------------ //
+// File — open-handle API (BACKLOG item 192)
+// ------------------------------------------------------------------ //
+
+#[test]
+fn file_open_returns_option_file() {
+    let env = seeded_env();
+    let file = Ty::Named { name: "File".into(), args: vec![] };
+    match env.lookup("File.open").unwrap() {
+        Ty::Fn { params, ret } => {
+            assert_eq!(params, &[Ty::Text]);
+            assert_eq!(ret.as_ref(), &Ty::Option(Box::new(file)));
+        }
+        other => panic!("expected Fn, got {:?}", other),
+    }
+}
+
+#[test]
+fn file_read_all_returns_option_text() {
+    let env = seeded_env();
+    let file = Ty::Named { name: "File".into(), args: vec![] };
+    match env.lookup("File.readAll").unwrap() {
+        Ty::Fn { params, ret } => {
+            assert_eq!(params, &[file]);
+            assert_eq!(ret.as_ref(), &Ty::Option(Box::new(Ty::Text)));
+        }
+        other => panic!("expected Fn, got {:?}", other),
+    }
+}
+
+#[test]
+fn file_write_returns_bool() {
+    let env = seeded_env();
+    let file = Ty::Named { name: "File".into(), args: vec![] };
+    match env.lookup("File.write").unwrap() {
+        Ty::Fn { params, ret } => {
+            assert_eq!(params, &[file, Ty::Text]);
+            assert_eq!(ret.as_ref(), &Ty::Bool);
+        }
+        other => panic!("expected Fn, got {:?}", other),
+    }
+}
+
+#[test]
+fn file_close_returns_unit() {
+    let env = seeded_env();
+    let file = Ty::Named { name: "File".into(), args: vec![] };
+    match env.lookup("File.close").unwrap() {
+        Ty::Fn { params, ret } => {
+            assert_eq!(params, &[file]);
+            assert_eq!(ret.as_ref(), &Ty::Unit);
+        }
+        other => panic!("expected Fn, got {:?}", other),
+    }
+}
+
+#[test]
+fn file_open_heap_boxes_its_result() {
+    assert!(FILE_C.contains("void* certo_file_open("), "File.open must return a boxed Option");
+    assert!(FILE_C.contains("__certo_opt_box((int64_t)f)"), "File.open must heap-box the handle");
+}
+
+#[test]
+fn file_close_returns_int64_not_void() {
+    // A stdlib function whose Certo signature is Unit still compiles to a
+    // real C return value (int64_t 0), matching every other Unit-returning
+    // function in this codebase (e.g. certo_println) — a plain `void`
+    // return caused a real compile error at every call site, since
+    // codegen always assigns a call's result to an int64_t-typed local
+    // regardless of the Certo-level Unit semantics. Caught by a real
+    // end-to-end compile before this was fixed, not just inspected.
+    assert!(FILE_C.contains("int64_t certo_file_close("), "certo_file_close must return int64_t, not void");
+}
+
+#[test]
+fn file_read_and_write_seek_before_switching_modes() {
+    // `File.open` uses "r+b" so one handle can serve both `.readAll()` and
+    // `.write(...)` — but C's stdio requires an intervening
+    // file-positioning call between a read and a following write (or vice
+    // versa) on the same update-mode stream (C99 §7.19.5.3). Confirmed by
+    // direct testing this isn't just a theoretical concern: without this,
+    // a write immediately following a read reported success but silently
+    // failed to reach the file at all.
+    assert!(FILE_C.contains("certo_file_read_all(CertoFile file)"));
+    assert!(FILE_C.contains("certo_file_write(CertoFile file, certo_text_t content)"));
+    let read_all_body = FILE_C.split("certo_file_read_all(CertoFile file)").nth(1).unwrap();
+    let read_all_body = &read_all_body[..read_all_body.find('}').unwrap()];
+    assert!(read_all_body.contains("fseek(f, 0, SEEK_CUR)"), "readAll must seek before its own read");
+    let write_body = FILE_C.split("certo_file_write(CertoFile file, certo_text_t content)").nth(1).unwrap();
+    let write_body = &write_body[..write_body.find('}').unwrap()];
+    assert!(write_body.contains("fseek(f, 0, SEEK_CUR)"), "write must seek before writing");
+}
+
+#[test]
+fn file_c_contains_open_handle_functions() {
+    assert!(FILE_C.contains("certo_file_open"),     "missing File.open");
+    assert!(FILE_C.contains("certo_file_read_all"), "missing File.readAll");
+    assert!(FILE_C.contains("certo_file_write"),    "missing File.write");
+    assert!(FILE_C.contains("certo_file_close"),    "missing File.close");
+}
+
+// ------------------------------------------------------------------ //
 // Path
 // ------------------------------------------------------------------ //
 
