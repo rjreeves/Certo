@@ -1324,6 +1324,14 @@ fn parse_form(cur: &mut Cursor<'_>) -> Result<FormDecl, ParseError> {
                         span: key_span,
                     });
                 }
+                "field" => {
+                    // BACKLOG item 166 — the nested `field NAME { label:,
+                    // placeholder:, type:, options:, rows: }` block (spec
+                    // §10.3), coexisting with the flat `fieldName: TypeExpr`
+                    // shorthand handled below — a form body can freely mix
+                    // both, they append to the same `fields` list.
+                    fields.push(parse_form_field(cur)?);
+                }
                 _ => {
                     // field declaration
                     cur.expect(&Token::Colon)?;
@@ -1345,6 +1353,84 @@ fn parse_form(cur: &mut Cursor<'_>) -> Result<FormDecl, ParseError> {
     }
     let span = start.to(end_span);
     Ok(FormDecl { name: S::new(name, name_span), target, fields, pk, on_submit, on_success, span })
+}
+
+/// `field NAME { label: "...", placeholder: "...", type: <expr>, options: <expr>, rows: N }`
+/// — BACKLOG item 166. Every key is optional; an empty block (`field name {}`)
+/// is valid and equivalent to the flat `name: <nothing>` shape with no
+/// metadata at all. `type` is a reserved lexer token (`Token::Type`, used by
+/// `type X = { ... }` declarations) so it can't be read via `expect_ident`
+/// like the other keys — checked directly against the token instead.
+fn parse_form_field(cur: &mut Cursor<'_>) -> Result<FormField, ParseError> {
+    let (name, name_span) = cur.expect_ident()?;
+    cur.expect(&Token::LBrace)?;
+
+    let mut label = None;
+    let mut placeholder = None;
+    let mut field_type = None;
+    let mut options = None;
+    let mut rows = None;
+
+    loop {
+        if cur.peek() == Some(&Token::RBrace) { break; }
+
+        if cur.peek() == Some(&Token::Type) {
+            cur.bump();
+            cur.expect(&Token::Colon)?;
+            field_type = Some(parse_expr(cur)?);
+            cur.eat(|t| matches!(t, Token::Comma));
+            continue;
+        }
+
+        let (key, key_span) = cur.expect_ident()?;
+        match key.as_str() {
+            "label" => {
+                cur.expect(&Token::Colon)?;
+                let (tok, tspan) = cur.bump().ok_or(ParseError { kind: ParseErrorKind::UnexpectedEof, span: key_span })?;
+                let Token::StringLit(s) = tok else {
+                    return Err(ParseError {
+                        kind: ParseErrorKind::Expected { expected: "string literal".into(), found: format!("{tok:?}") },
+                        span: tspan,
+                    });
+                };
+                label = Some(s.to_string());
+            }
+            "placeholder" => {
+                cur.expect(&Token::Colon)?;
+                let (tok, tspan) = cur.bump().ok_or(ParseError { kind: ParseErrorKind::UnexpectedEof, span: key_span })?;
+                let Token::StringLit(s) = tok else {
+                    return Err(ParseError {
+                        kind: ParseErrorKind::Expected { expected: "string literal".into(), found: format!("{tok:?}") },
+                        span: tspan,
+                    });
+                };
+                placeholder = Some(s.to_string());
+            }
+            "options" => {
+                cur.expect(&Token::Colon)?;
+                options = Some(parse_expr(cur)?);
+            }
+            "rows" => {
+                cur.expect(&Token::Colon)?;
+                let (tok, tspan) = cur.bump().ok_or(ParseError { kind: ParseErrorKind::UnexpectedEof, span: key_span })?;
+                let Token::Integer(s) = tok else {
+                    return Err(ParseError {
+                        kind: ParseErrorKind::Expected { expected: "integer".into(), found: format!("{tok:?}") },
+                        span: tspan,
+                    });
+                };
+                rows = Some(s.parse::<u32>().unwrap_or(0));
+            }
+            other => return Err(ParseError {
+                kind: ParseErrorKind::Custom(format!(
+                    "unexpected key `{other}` in form field — expected one of: label, placeholder, type, options, rows")),
+                span: key_span,
+            }),
+        }
+        cur.eat(|t| matches!(t, Token::Comma));
+    }
+    let end_span = cur.expect(&Token::RBrace)?;
+    Ok(FormField { name: S::new(name, name_span), label, placeholder, field_type, options, rows, span: name_span.to(end_span) })
 }
 
 // ------------------------------------------------------------------ //

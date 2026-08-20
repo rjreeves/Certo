@@ -12,7 +12,7 @@
 //! Each `form` becomes a GET route (empty form) and a POST route (INSERT to DB).
 
 use std::fmt::Write as FmtWrite;
-use certo_ast::decl::{Decl, ViewDecl, FormDecl, TypeBody, RecordFieldDef, UiGenerateDecl};
+use certo_ast::decl::{Decl, ViewDecl, FormDecl, FormField, TypeBody, RecordFieldDef, UiGenerateDecl};
 use certo_ast::expr::{Expr, Stmt};
 use certo_ast::module::Module;
 use certo_ast::span::S;
@@ -421,12 +421,10 @@ fn emit_form_get_handler(f: &FormDecl, out: &mut String) {
 
             // Emit each field as its own val to avoid deep ++ chains
             for (i, field) in f.fields.iter().enumerate() {
-                let fname  = &field.name.node;
-                let fcol   = camel_to_snake(fname);
-                let label  = field.label.as_deref().unwrap_or(fname.as_str());
-                let itype  = infer_input_type(fname, &field.field_type);
-                writeln!(out,
-                    "    val _ef{i} = \"<div class=\\\"field\\\"><label for=\\\"{fname}\\\">{label}</label>\" ++ \"<input id=\\\"{fname}\\\" name=\\\"{fname}\\\" type=\\\"{itype}\\\" value=\\\"\" ++ colValue(_rows, _cols, \"{fcol}\") ++ \"\\\" required></div>\"").unwrap();
+                let fcol    = camel_to_snake(&field.name.node);
+                let prefill = format!("colValue(_rows, _cols, \"{fcol}\")");
+                let expr    = field_html_expr(field, Some(&prefill));
+                writeln!(out, "    val _ef{i} = {expr}").unwrap();
             }
 
             // Build body by joining field vars in small chains
@@ -444,11 +442,8 @@ fn emit_form_get_handler(f: &FormDecl, out: &mut String) {
 
     // Create form (no pre-fill) — emit each field as its own val
     for (i, field) in f.fields.iter().enumerate() {
-        let fname = &field.name.node;
-        let label = field.label.as_deref().unwrap_or(fname.as_str());
-        let itype = infer_input_type(fname, &field.field_type);
-        writeln!(out,
-            "    val _ef{i} = \"<div class=\\\"field\\\"><label for=\\\"{fname}\\\">{label}</label>\" ++ \"<input id=\\\"{fname}\\\" name=\\\"{fname}\\\" type=\\\"{itype}\\\" required></div>\"").unwrap();
+        let expr = field_html_expr(field, None);
+        writeln!(out, "    val _ef{i} = {expr}").unwrap();
     }
 
     let n = f.fields.len();
@@ -680,7 +675,43 @@ fn escape_certo_str(s: &str) -> String {
      .replace('\r', "")
 }
 
-fn infer_input_type(name: &str, _ft: &Option<certo_ast::span::S<certo_ast::expr::Expr>>) -> &'static str {
+/// The HTML `<input type="...">` value, or the sentinel "select"/"textarea"
+/// for a widget that isn't a plain `<input>` at all (BACKLOG item 166) — an
+/// explicit `type:` widget descriptor (from either the nested `field NAME {
+/// type: ... }` block or the flat `fieldName: TypeExpr` shorthand, which
+/// share the same `field_type` AST slot) takes priority; falling through to
+/// the pre-existing field-name heuristic when absent, unchanged.
+fn infer_input_type(name: &str, field_type: &Option<certo_ast::span::S<certo_ast::expr::Expr>>) -> &'static str {
+    if let Some(ft) = field_type {
+        use certo_ast::expr::Expr;
+        let head = match &ft.node {
+            Expr::Path { path, .. } => path.segments.last().map(|s| s.node.as_str()),
+            Expr::App { func, .. } => match &func.node {
+                Expr::Path { path, .. } => path.segments.last().map(|s| s.node.as_str()),
+                _ => None,
+            },
+            _ => None,
+        };
+        if let Some(h) = head {
+            match h.to_lowercase().as_str() {
+                "select" | "dropdown"                  => return "select",
+                "richtext"                              => return "textarea",
+                "email"                                 => return "email",
+                "password"                               => return "password",
+                "phone" | "tel"                         => return "tel",
+                "date"                                   => return "date",
+                "url" | "website"                        => return "url",
+                "time"                                   => return "time",
+                "number"                                 => return "number",
+                "currencyinput" | "currency" | "money"  => return "number",
+                "color" | "colour"                       => return "color",
+                "checkbox"                               => return "checkbox",
+                "range"                                  => return "range",
+                _ => {}
+            }
+        }
+    }
+
     let lower = name.to_lowercase();
     if lower.contains("email")                          { return "email"; }
     if lower.contains("password")                       { return "password"; }
@@ -688,6 +719,51 @@ fn infer_input_type(name: &str, _ft: &Option<certo_ast::span::S<certo_ast::expr:
     if lower.contains("date")                           { return "date"; }
     if lower.contains("url") || lower.contains("website") { return "url"; }
     "text"
+}
+
+/// One field's `<div class="field">...</div>` as a *Certo source
+/// expression* (this whole function generates text that gets compiled as
+/// part of the handler, not real HTML directly) — BACKLOG item 166.
+/// `prefill`, when given, is a raw Certo expression snippet (e.g.
+/// `colValue(_rows, _cols, "col")`) spliced in via `++` for the edit form's
+/// pre-filled value; `None` for the create form, which has nothing to fill.
+fn field_html_expr(field: &FormField, prefill: Option<&str>) -> String {
+    let fname = &field.name.node;
+    let label = field.label.as_deref().unwrap_or(fname.as_str());
+    let itype = infer_input_type(fname, &field.field_type);
+    let head  = format!("<div class=\\\"field\\\"><label for=\\\"{fname}\\\">{label}</label>");
+
+    if itype == "select" {
+        // BACKLOG item 166 — `options:` is parsed (`FormField.options`) but
+        // not yet rendered: a real live-query-backed `<select>` needs the
+        // generated handler to run a DB query before rendering, its own
+        // separate follow-on. Pre-fill is meaningless with no `<option>`s
+        // to mark `selected`, so `prefill` is intentionally unused here.
+        return format!(
+            "\"{head}<!-- TODO: populate <select> options for '{fname}' -->\" ++ \"<select id=\\\"{fname}\\\" name=\\\"{fname}\\\"></select></div>\""
+        );
+    }
+
+    if itype == "textarea" || field.rows.is_some_and(|r| r > 1) {
+        let rows = field.rows.unwrap_or(3);
+        return match prefill {
+            Some(pf) => format!(
+                "\"{head}<textarea id=\\\"{fname}\\\" name=\\\"{fname}\\\" rows=\\\"{rows}\\\">\" ++ {pf} ++ \"</textarea></div>\""
+            ),
+            None => format!(
+                "\"{head}<textarea id=\\\"{fname}\\\" name=\\\"{fname}\\\" rows=\\\"{rows}\\\"></textarea></div>\""
+            ),
+        };
+    }
+
+    match prefill {
+        Some(pf) => format!(
+            "\"{head}<input id=\\\"{fname}\\\" name=\\\"{fname}\\\" type=\\\"{itype}\\\" value=\\\"\" ++ {pf} ++ \"\\\" required></div>\""
+        ),
+        None => format!(
+            "\"{head}<input id=\\\"{fname}\\\" name=\\\"{fname}\\\" type=\\\"{itype}\\\" required></div>\""
+        ),
+    }
 }
 
 // ------------------------------------------------------------------ //
@@ -807,6 +883,70 @@ mod tests {
         // grow a stray comment about bindings that don't exist.
         let out = server_source("module M\nview Home {\n layout = Text(\"Hi\")\n}");
         assert!(!out.contains("live bindings"), "unexpected live-binding comment\n{}", out);
+    }
+
+    // ------------------------------------------------------------------ //
+    // Nested `field NAME { type: ... }` widget kinds (BACKLOG item 166)
+    // ------------------------------------------------------------------ //
+
+    #[test]
+    fn nested_field_type_select_renders_select_in_create_form() {
+        let out = server_source(
+            "module M\nform CreateWidget -> Widget {\n field categoryId { type: Select }\n}"
+        );
+        assert!(out.contains("<select id=\\\"categoryId\\\" name=\\\"categoryId\\\">"), "expected <select>, got:\n{out}");
+        assert!(out.contains("TODO: populate <select> options"), "expected the options TODO comment, got:\n{out}");
+        assert!(!out.contains("<input"), "should not also render an <input> for a Select field, got:\n{out}");
+    }
+
+    #[test]
+    fn nested_field_type_richtext_renders_textarea_with_default_rows() {
+        let out = server_source(
+            "module M\nform CreateWidget -> Widget {\n field description { type: RichText }\n}"
+        );
+        assert!(out.contains("<textarea"), "expected <textarea>, got:\n{out}");
+        assert!(out.contains("rows=\\\"3\\\""), "expected the default rows=3 (no `rows:` key given), got:\n{out}");
+    }
+
+    #[test]
+    fn nested_field_type_currency_input_renders_numeric_input() {
+        let out = server_source(
+            "module M\nform CreateWidget -> Widget {\n field price { type: CurrencyInput(USD) }\n}"
+        );
+        assert!(out.contains("type=\\\"number\\\""), "expected a numeric <input>, got:\n{out}");
+    }
+
+    #[test]
+    fn edit_form_textarea_field_prefills_via_concatenation_not_a_value_attribute() {
+        // A textarea's pre-filled content is text *between* its open/close
+        // tags, not a `value="..."` attribute the way <input> pre-fills.
+        let out = server_source(
+            "module M\nform EditWidget -> Widget {\n pk: id\n field description { type: RichText }\n}"
+        );
+        assert!(out.contains("<textarea"), "expected <textarea> in edit form, got:\n{out}");
+        assert!(out.contains("++ colValue("), "expected the pre-fill value spliced in via `++`, got:\n{out}");
+    }
+
+    #[test]
+    fn edit_form_select_field_has_no_prefill_expression() {
+        // No `<option>`s exist yet (options: is parsed but not rendered,
+        // BACKLOG item 166's own scope decision) so there's nothing to mark
+        // `selected` — a Select field's edit-form line must not attempt a
+        // `colValue` pre-fill splice at all.
+        let out = server_source(
+            "module M\nform EditWidget -> Widget {\n pk: id\n field categoryId { type: Select }\n}"
+        );
+        let select_line = out.lines().find(|l| l.contains("<select")).expect("expected a <select> line");
+        assert!(!select_line.contains("colValue"), "a Select field should not attempt to pre-fill, got:\n{select_line}");
+    }
+
+    #[test]
+    fn flat_and_nested_fields_coexist_in_generated_form() {
+        let out = server_source(
+            "module M\nform CreateWidget -> Widget {\n name: Text\n field description { type: RichText }\n}"
+        );
+        assert!(out.contains("\"name\""), "expected the flat `name` field, got:\n{out}");
+        assert!(out.contains("<textarea"), "expected the nested `description` field's textarea, got:\n{out}");
     }
 
     // ------------------------------------------------------------------ //
