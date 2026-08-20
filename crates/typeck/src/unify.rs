@@ -43,11 +43,23 @@ impl UnionFind {
 
     /// Unify two types, recording the necessary bindings.
     /// Returns `Err` for type mismatches or occurs-check failures.
-    pub fn unify(&mut self, a: Ty, b: Ty, span: Span) -> Result<(), TypeError> {
-        let a = self.find(a);
-        let b = self.find(b);
+    ///
+    /// BACKLOG item 196 — the two parameters are named, not just positional,
+    /// specifically because the overwhelming majority of the ~50 call sites
+    /// across `crates/typeck` were found passing (actual value's type,
+    /// declared/required type) in that order, but every `Mismatch`
+    /// construction below used to unconditionally label the *first*
+    /// argument "expected" — silently swapping every basic type-error
+    /// message's `expected`/`found` fields backwards. Renaming the params
+    /// to match what call sites already pass fixes ~44 of them for free,
+    /// with zero call-site changes; only the couple of outliers that
+    /// genuinely passed (expected, actual) needed their own two arguments
+    /// swapped to match this now-explicit convention.
+    pub fn unify(&mut self, found: Ty, expected: Ty, span: Span) -> Result<(), TypeError> {
+        let found = self.find(found);
+        let expected = self.find(expected);
 
-        match (a, b) {
+        match (found, expected) {
             // Same var — nothing to do.
             (Ty::Var(u), Ty::Var(v)) if u == v => Ok(()),
 
@@ -113,8 +125,8 @@ impl UnionFind {
                 if as_.len() != bs.len() {
                     return Err(TypeError {
                         kind: TypeErrorKind::Mismatch {
-                            expected: Ty::Tuple(as_),
-                            found:    Ty::Tuple(bs),
+                            expected: Ty::Tuple(bs),
+                            found:    Ty::Tuple(as_),
                         },
                         span,
                     });
@@ -129,8 +141,8 @@ impl UnionFind {
                 if na != nb || aa.len() != ab.len() {
                     return Err(TypeError {
                         kind: TypeErrorKind::Mismatch {
-                            expected: Ty::Named { name: na, args: aa },
-                            found:    Ty::Named { name: nb, args: ab },
+                            expected: Ty::Named { name: nb, args: ab },
+                            found:    Ty::Named { name: na, args: aa },
                         },
                         span,
                     });
@@ -146,8 +158,8 @@ impl UnionFind {
                 if afs.len() != bfs.len() {
                     return Err(TypeError {
                         kind: TypeErrorKind::Mismatch {
-                            expected: Ty::Record(afs),
-                            found:    Ty::Record(bfs),
+                            expected: Ty::Record(bfs),
+                            found:    Ty::Record(afs),
                         },
                         span,
                     });
@@ -204,8 +216,8 @@ impl UnionFind {
                 if ap.len() != bp.len() {
                     return Err(TypeError {
                         kind: TypeErrorKind::Mismatch {
-                            expected: Ty::Fn { params: ap, ret: ar },
-                            found:    Ty::Fn { params: bp, ret: br },
+                            expected: Ty::Fn { params: bp, ret: br },
+                            found:    Ty::Fn { params: ap, ret: ar },
                         },
                         span,
                     });
@@ -217,7 +229,7 @@ impl UnionFind {
             }
 
             // Everything else is a mismatch.
-            (expected, found) => Err(TypeError {
+            (found, expected) => Err(TypeError {
                 kind: TypeErrorKind::Mismatch { expected, found },
                 span,
             }),

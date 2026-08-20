@@ -1460,6 +1460,61 @@ fn bounded_text_param_display_shows_max_len() {
 }
 
 // ------------------------------------------------------------------ //
+// `E0200` expected/found direction — BACKLOG item 196. `unify()`'s own
+// ~50 call sites overwhelmingly pass (the value's actual/inferred type,
+// the declared/required type) in that order, but every `Mismatch`
+// construction used to unconditionally label the *first* argument
+// "expected" — silently swapping the two fields backwards on nearly
+// every basic type error. These pin the corrected, real-world-readable
+// direction: `expected` names what the surrounding context requires,
+// `found` names what the offending expression's own type actually is.
+// ------------------------------------------------------------------ //
+
+#[test]
+fn val_annotation_mismatch_reports_the_annotation_as_expected() {
+    let kind = first_error_kind("module A\nfn f(): Unit = {\n val x: Int = \"hello\"\n}");
+    let TypeErrorKind::Mismatch { expected, found } = kind else {
+        panic!("expected Mismatch, got {:?}", kind);
+    };
+    assert_eq!(expected.display(), "Int", "the val's own declared type must be `expected`, got: {}", expected.display());
+    assert_eq!(found.display(), "Text", "the literal's real type must be `found`, got: {}", found.display());
+}
+
+#[test]
+fn call_argument_mismatch_reports_the_parameter_type_as_expected() {
+    let kind = first_error_kind("module A\nfn addOne(x: Int): Int = x + 1\nfn f(): Unit = {\n val r = addOne(\"hello\")\n}");
+    let TypeErrorKind::Mismatch { expected, found } = kind else {
+        panic!("expected Mismatch, got {:?}", kind);
+    };
+    assert_eq!(expected.display(), "Int", "the parameter's declared type must be `expected`, got: {}", expected.display());
+    assert_eq!(found.display(), "Text", "the argument's real type must be `found`, got: {}", found.display());
+}
+
+#[test]
+fn named_type_mismatch_reports_the_required_type_as_expected() {
+    let kind = first_error_kind(
+        "module A\ntype Dog = { name: Text }\ntype Cat = { name: Text }\nfn petDog(d: Dog): Unit = {}\nfn f(): Unit = {\n val c: Cat = Cat { name: \"Tom\" }\n petDog(c)\n}"
+    );
+    let TypeErrorKind::Mismatch { expected, found } = kind else {
+        panic!("expected Mismatch, got {:?}", kind);
+    };
+    assert_eq!(expected.display(), "Dog", "the parameter's own declared type must be `expected`, got: {}", expected.display());
+    assert_eq!(found.display(), "Cat", "the argument's real type must be `found`, got: {}", found.display());
+}
+
+#[test]
+fn fn_arity_mismatch_reports_the_annotated_signature_as_expected() {
+    let kind = first_error_kind(
+        "module A\nfn twoParams(a: Int, b: Int): Int = a + b\nfn f(): Unit = {\n val g: (Int) => Int = twoParams\n}"
+    );
+    let TypeErrorKind::Mismatch { expected, found } = kind else {
+        panic!("expected Mismatch, got {:?}", kind);
+    };
+    assert_eq!(expected.display(), "(Int) => Int", "the val's own annotation must be `expected`, got: {}", expected.display());
+    assert_eq!(found.display(), "(Int, Int) => Int", "the referenced function's real type must be `found`, got: {}", found.display());
+}
+
+// ------------------------------------------------------------------ //
 // Secret<T> not-Loggable/Serializable check (BACKLOG item 78)
 // ------------------------------------------------------------------ //
 
