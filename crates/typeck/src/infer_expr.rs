@@ -22,9 +22,11 @@ impl<'e> Ctx<'e> {
         Ty::Var(*self.counter)
     }
 
-    /// Unify, recording errors instead of returning them.
-    pub fn unify(&mut self, a: Ty, b: Ty, span: Span) {
-        if let Err(e) = self.uf.unify(a, b, span) {
+    /// Unify, recording errors instead of returning them. `found` is the
+    /// value's actual/inferred type, `expected` the declared/required one —
+    /// see `UnionFind::unify`'s own doc comment (BACKLOG item 196).
+    pub fn unify(&mut self, found: Ty, expected: Ty, span: Span) {
+        if let Err(e) = self.uf.unify(found, expected, span) {
             self.errors.push(e);
         }
     }
@@ -763,7 +765,7 @@ pub fn infer(expr: &S<Expr>, ctx: &mut Ctx<'_>) -> Ty {
                     for (fname, found_ty) in &field_tys {
                         if let Some((_, expected_ty)) = declared.iter().find(|(n, _)| n == fname) {
                             let expected_ty = expected_ty.apply_subst(&subst);
-                            ctx.unify(expected_ty, found_ty.clone(), *span);
+                            ctx.unify(found_ty.clone(), expected_ty, *span);
                         }
                     }
                 }
