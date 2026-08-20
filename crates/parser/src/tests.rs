@@ -1726,3 +1726,28 @@ fn use_as_plain_identifier_is_rejected_since_use_is_now_reserved() {
     // used as an ordinary variable/parameter name.
     err("module A\nfn f(use: Int): Int = use + 1");
 }
+
+// ------------------------------------------------------------------ //
+// `form` declarations — BACKLOG item 166
+// ------------------------------------------------------------------ //
+
+#[test]
+fn form_target_arrow_syntax_still_works() {
+    // The real, working way to declare a form's target type — unaffected
+    // by rejecting the body-key spelling below.
+    let m = ok("module A\nform CreateCustomer -> Customer {\n name: Text\n}");
+    let Decl::Form(f) = &m.decls[0].node else { panic!("expected Decl::Form, got {:?}", m.decls[0].node) };
+    assert_eq!(f.target.segments.last().map(|s| s.node.as_str()), Some("Customer"));
+    assert_eq!(f.fields.len(), 1);
+}
+
+#[test]
+fn form_body_target_key_is_rejected_not_silently_a_bogus_field() {
+    // The spec's own example writes the target as a `target: Product` body
+    // key rather than `-> Product` — the real grammar doesn't support that
+    // spelling. Before this fix, "target" fell through to the generic
+    // field-declaration arm and silently became a bogus field named
+    // "target" instead of failing; it must now be a real parse error, not
+    // a silently-wrong AST.
+    err("module A\nform CreateProduct {\n target: Product\n name: Text\n}");
+}

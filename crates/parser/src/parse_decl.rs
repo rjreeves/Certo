@@ -1308,6 +1308,22 @@ fn parse_form(cur: &mut Cursor<'_>) -> Result<FormDecl, ParseError> {
                     cur.expect(&Token::Colon)?;
                     on_success = Some(parse_expr(cur)?);
                 }
+                "target" => {
+                    // BACKLOG item 166 — the spec's own example writes the
+                    // form's target as a `target: Product` body key, but the
+                    // real grammar only ever recognizes `-> Product` right
+                    // after the form name; a bare `target: Product` used to
+                    // silently fall into the generic field-declaration arm
+                    // below and become a bogus field literally named
+                    // "target". Reject it explicitly instead, pointing at
+                    // the syntax that's actually supported.
+                    return Err(ParseError {
+                        kind: ParseErrorKind::Custom(
+                            "`target: ...` is not supported inside a `form` body — write the target type after the form name instead, e.g. `form CreateCustomer -> Customer { ... }`".into()
+                        ),
+                        span: key_span,
+                    });
+                }
                 _ => {
                     // field declaration
                     cur.expect(&Token::Colon)?;
