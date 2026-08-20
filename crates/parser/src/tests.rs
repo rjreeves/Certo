@@ -1751,3 +1751,63 @@ fn form_body_target_key_is_rejected_not_silently_a_bogus_field() {
     // a silently-wrong AST.
     err("module A\nform CreateProduct {\n target: Product\n name: Text\n}");
 }
+
+#[test]
+fn nested_field_block_parses_every_key() {
+    // Spec §10.3's nested `field NAME { ... }` shape — `type` is checked
+    // against `Token::Type` directly since it's a reserved lexer token,
+    // not an ordinary identifier like the other keys.
+    let m = ok("module A\nform ProductForm -> Product {\n\
+        field price {\n\
+            label: \"Price\"\n\
+            placeholder: \"0.00\"\n\
+            type: CurrencyInput(USD)\n\
+            options: 1\n\
+            rows: 3\n\
+        }\n\
+    }");
+    let Decl::Form(f) = &m.decls[0].node else { panic!("expected Decl::Form, got {:?}", m.decls[0].node) };
+    assert_eq!(f.fields.len(), 1);
+    let field = &f.fields[0];
+    assert_eq!(field.name.node, "price");
+    assert_eq!(field.label.as_deref(), Some("Price"));
+    assert_eq!(field.placeholder.as_deref(), Some("0.00"));
+    assert!(field.field_type.is_some(), "expected `type: CurrencyInput(USD)` to populate field_type");
+    assert!(matches!(&field.field_type.as_ref().unwrap().node, Expr::App { .. }), "expected CurrencyInput(USD) to parse as a call, got {:?}", field.field_type.as_ref().unwrap().node);
+    assert!(field.options.is_some(), "expected `options: 1` to populate options");
+    assert_eq!(field.rows, Some(3));
+}
+
+#[test]
+fn nested_field_block_all_keys_optional() {
+    let m = ok("module A\nform ProductForm -> Product {\n field name {}\n}");
+    let Decl::Form(f) = &m.decls[0].node else { panic!("expected Decl::Form") };
+    let field = &f.fields[0];
+    assert_eq!(field.name.node, "name");
+    assert!(field.label.is_none());
+    assert!(field.placeholder.is_none());
+    assert!(field.field_type.is_none());
+    assert!(field.options.is_none());
+    assert!(field.rows.is_none());
+}
+
+#[test]
+fn flat_and_nested_form_fields_coexist_in_one_body() {
+    // A form body can freely mix the flat `fieldName: TypeExpr` shorthand
+    // and the nested `field NAME { ... }` block — both append to the same
+    // `fields` list, order doesn't matter.
+    let m = ok("module A\nform ProductForm -> Product {\n\
+        name: Text\n\
+        field price {\n label: \"Price\"\n }\n\
+        sku: Text\n\
+    }");
+    let Decl::Form(f) = &m.decls[0].node else { panic!("expected Decl::Form") };
+    let names: Vec<&str> = f.fields.iter().map(|fld| fld.name.node.as_str()).collect();
+    assert_eq!(names, vec!["name", "price", "sku"]);
+    assert_eq!(f.fields[1].label.as_deref(), Some("Price"));
+}
+
+#[test]
+fn nested_field_block_unknown_key_is_rejected() {
+    err("module A\nform ProductForm -> Product {\n field price {\n bogus: 1\n }\n}");
+}

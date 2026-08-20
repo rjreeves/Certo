@@ -352,3 +352,58 @@ fn form_idempotent() {
     let out2 = fmt(&out1);
     assert_eq!(out1, out2, "form formatting not idempotent");
 }
+
+// ------------------------------------------------------------------ //
+// Nested `field NAME { ... }` blocks — BACKLOG item 166. A field with any
+// nested-only metadata (label/placeholder/options/rows) must round-trip
+// through the real `field NAME { ... }` block, or that metadata would be
+// silently dropped every time `certo fmt` runs on it — the same class of
+// bug item 190 fixed for the form declaration as a whole.
+// ------------------------------------------------------------------ //
+
+#[test]
+fn nested_field_metadata_round_trips() {
+    let out = fmt(
+        "module A\nform ProductForm -> Product {\n    field price {\n        label: \"Price\"\n        placeholder: \"0.00\"\n        type: CurrencyInput(USD)\n        rows: 3\n    }\n}"
+    );
+    assert_contains(&out, "field price {");
+    assert_contains(&out, "label: \"Price\"");
+    assert_contains(&out, "placeholder: \"0.00\"");
+    assert_contains(&out, "type: CurrencyInput(USD)");
+    assert_contains(&out, "rows: 3");
+}
+
+#[test]
+fn flat_field_without_nested_metadata_still_prints_the_flat_shorthand() {
+    // No regression for the overwhelmingly common case: a field with only
+    // a bare type (no label/placeholder/options/rows) must keep printing
+    // as `name: Type`, not get needlessly wrapped in a `field { }` block.
+    let out = fmt("module A\nform CreateCustomer -> Customer {\n    custName: Text\n}");
+    assert_contains(&out, "custName: Text");
+    assert_not_contains(&out, "field custName");
+}
+
+#[test]
+fn flat_and_nested_form_fields_round_trip_together() {
+    let out = fmt(
+        "module A\nform ProductForm -> Product {\n    name: Text\n    field description {\n        type: RichText\n        rows: 6\n    }\n}"
+    );
+    assert_contains(&out, "name: Text");
+    assert_contains(&out, "field description {");
+    assert_contains(&out, "type: RichText");
+    assert_contains(&out, "rows: 6");
+}
+
+#[test]
+fn nested_field_with_no_keys_round_trips_to_empty_braces() {
+    let out = fmt("module A\nform ProductForm -> Product {\n    field name {}\n}");
+    assert_contains(&out, "field name {}");
+}
+
+#[test]
+fn nested_field_idempotent() {
+    let src  = "module A\nform ProductForm -> Product {\n    field price {\n        label: \"Price\"\n        type: CurrencyInput(USD)\n        rows: 3\n    }\n}";
+    let out1 = fmt(src);
+    let out2 = fmt(&out1);
+    assert_eq!(out1, out2, "nested field formatting not idempotent");
+}

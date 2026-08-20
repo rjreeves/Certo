@@ -95,15 +95,16 @@ fn render_field(f: &FormField) -> String {
     let placeholder = f.placeholder.as_deref().unwrap_or("");
     let rows        = f.rows;
 
-    // Determine field type: textarea for rows > 1, else input
+    // Determine field type: textarea for rows > 1 or an explicit `type:
+    // RichText`, `select`/`dropdown` for an explicit `type: Select`, else input.
     let input_type = infer_input_type(name, &f.field_type);
 
     let mut out = String::new();
     writeln!(out, "  <div class=\"field\">").unwrap();
     writeln!(out, "    <label for=\"{}\">{}</label>", html_escape(name), html_escape(label)).unwrap();
 
-    if rows.is_some_and(|r| r > 1) {
-        let r = rows.unwrap();
+    if rows.is_some_and(|r| r > 1) || input_type == "textarea" {
+        let r = rows.unwrap_or(3);
         if placeholder.is_empty() {
             writeln!(out, "    <textarea id=\"{}\" name=\"{}\" rows=\"{}\"></textarea>",
                 html_escape(name), html_escape(name), r).unwrap();
@@ -131,7 +132,10 @@ fn render_field(f: &FormField) -> String {
 
 /// Infer the HTML input type from the field name or explicit `field_type` expression.
 fn infer_input_type(name: &str, field_type: &Option<certo_ast::span::S<certo_ast::expr::Expr>>) -> &'static str {
-    // Check explicit field_type expression first (only string/var literals)
+    // Check explicit field_type expression first (string/bare-name literals,
+    // or a call-shaped widget descriptor like `CurrencyInput(USD)` —
+    // BACKLOG item 166 — whose own arguments aren't consulted, just its head
+    // name).
     if let Some(ft) = field_type {
         use certo_ast::expr::{Expr, Lit};
         match &ft.node {
@@ -139,6 +143,13 @@ fn infer_input_type(name: &str, field_type: &Option<certo_ast::span::S<certo_ast
             Expr::Path { path, .. } => {
                 if let Some(seg) = path.segments.last() {
                     return str_to_input_type(&seg.node);
+                }
+            }
+            Expr::App { func, .. } => {
+                if let Expr::Path { path, .. } = &func.node {
+                    if let Some(seg) = path.segments.last() {
+                        return str_to_input_type(&seg.node);
+                    }
                 }
             }
             _ => {}
@@ -170,6 +181,8 @@ fn str_to_input_type(s: &str) -> &'static str {
         "select" | "dropdown" => "select",
         "checkbox" => "checkbox",
         "range"    => "range",
+        "richtext" => "textarea",
+        "currencyinput" | "currency" | "money" => "number",
         _          => "text",
     }
 }
@@ -232,6 +245,31 @@ mod tests {
             placeholder: None,
             field_type: None, options: None,
             rows: Some(rows),
+            span: dummy_span(),
+        }
+    }
+
+    fn path_expr(name: &str) -> S<certo_ast::expr::Expr> {
+        S::new(certo_ast::expr::Expr::Path { path: path(&[name]), span: dummy_span() }, dummy_span())
+    }
+
+    fn call_expr(func: &str, arg: &str) -> S<certo_ast::expr::Expr> {
+        use certo_ast::expr::{Arg, Expr};
+        S::new(Expr::App {
+            func: Box::new(path_expr(func)),
+            args: vec![Arg { label: None, value: path_expr(arg), span: dummy_span() }],
+            span: dummy_span(),
+        }, dummy_span())
+    }
+
+    /// BACKLOG item 166 — a field whose `type:` names a widget kind
+    /// (`Select`, `RichText`, ...) rather than a real data type.
+    fn widget_field(name: &str, widget_type: &str) -> FormField {
+        FormField {
+            name: ident(name),
+            label: None, placeholder: None,
+            field_type: Some(path_expr(widget_type)),
+            options: None, rows: None,
             span: dummy_span(),
         }
     }
@@ -318,5 +356,39 @@ mod tests {
         let f = make_form("CreateUser", "User", vec![simple_field("name")], false);
         let html = generate_form(&f);
         assert!(html.contains("id=\"create-user-form\""), "wrong form id\n{}", html);
+    }
+
+    // ------------------------------------------------------------------ //
+    // BACKLOG item 166 — nested `field NAME { type: ... }` widget kinds
+    // ------------------------------------------------------------------ //
+
+    #[test]
+    fn explicit_type_select_renders_a_select_with_options_todo() {
+        let f = make_form("F", "T", vec![widget_field("categoryId", "Select")], false);
+        let html = generate_form(&f);
+        assert!(html.contains("<select id=\"categoryId\" name=\"categoryId\">"), "expected a <select>, got:\n{}", html);
+        assert!(html.contains("TODO: populate <select> options"), "expected the options TODO comment, got:\n{}", html);
+        assert!(!html.contains("<input"), "should not also render an <input> for a Select field, got:\n{}", html);
+    }
+
+    #[test]
+    fn explicit_type_richtext_renders_a_textarea_even_without_rows() {
+        // Unlike the pre-existing rows>1 path, `type: RichText` alone (no
+        // `rows` at all) must still produce a textarea, defaulting rows.
+        let f = make_form("F", "T", vec![widget_field("description", "RichText")], false);
+        let html = generate_form(&f);
+        assert!(html.contains("<textarea"), "expected a <textarea>, got:\n{}", html);
+        assert!(html.contains("rows=\"3\""), "expected the default rows=3, got:\n{}", html);
+    }
+
+    #[test]
+    fn explicit_type_currency_input_renders_a_number_input() {
+        let f = make_form("F", "T", vec![FormField {
+            name: ident("price"), label: None, placeholder: None,
+            field_type: Some(call_expr("CurrencyInput", "USD")),
+            options: None, rows: None, span: dummy_span(),
+        }], false);
+        let html = generate_form(&f);
+        assert!(html.contains("type=\"number\""), "expected a numeric <input>, got:\n{}", html);
     }
 }

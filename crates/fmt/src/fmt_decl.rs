@@ -318,8 +318,26 @@ fn fmt_form(f: &FormDecl, indent: usize) -> String {
     let body_ind = format!("{}    ", ind(indent));
     let mut lines = Vec::new();
     for field in &f.fields {
-        let ty = field.field_type.as_ref().map(|e| fmt_expr(&e.node, indent + 1)).unwrap_or_default();
-        lines.push(format!("{body_ind}{}: {ty}", field.name.node));
+        // BACKLOG item 166 — a field with any nested-only metadata
+        // (label/placeholder/options/rows) round-trips through the real
+        // `field NAME { ... }` block, not the flat shorthand, or that
+        // metadata would be silently dropped on every `certo fmt`. Also
+        // required whenever `field_type` is `None` (e.g. an empty `field
+        // name {}` block): the flat shorthand's own grammar requires a
+        // type after the colon (`cur.expect(&Token::Colon)?;
+        // parse_expr(cur)?`, no `None` case exists there at all), so
+        // printing `name: ` with nothing after the colon would emit
+        // invalid, unparseable source. A field using only the flat
+        // shorthand keeps printing exactly as before — idempotent for
+        // every form that predates this item.
+        let needs_nested_form = field.label.is_some() || field.placeholder.is_some()
+            || field.options.is_some() || field.rows.is_some() || field.field_type.is_none();
+        if needs_nested_form {
+            lines.push(format!("{body_ind}{}", fmt_form_field(field, indent + 1)));
+        } else {
+            let ty = field.field_type.as_ref().map(|e| fmt_expr(&e.node, indent + 1)).unwrap_or_default();
+            lines.push(format!("{body_ind}{}: {ty}", field.name.node));
+        }
     }
     if let Some(pk) = &f.pk {
         lines.push(format!("{body_ind}pk: {pk}"));
@@ -331,6 +349,34 @@ fn fmt_form(f: &FormDecl, indent: usize) -> String {
         lines.push(format!("{body_ind}onSuccess: {}", fmt_expr(&on_success.node, indent + 1)));
     }
     format!("form {}{} {{\n{}\n{}}}", f.name.node, target, lines.join("\n"), ind(indent))
+}
+
+/// Print one `field NAME { ... }` block — `field_indent` is the indent
+/// level the `field NAME {` line itself sits at (the same level a flat
+/// `name: Type` field line would use).
+fn fmt_form_field(field: &FormField, field_indent: usize) -> String {
+    let inner_ind = format!("{}    ", ind(field_indent));
+    let mut lines = Vec::new();
+    if let Some(label) = &field.label {
+        lines.push(format!("{inner_ind}label: \"{label}\""));
+    }
+    if let Some(placeholder) = &field.placeholder {
+        lines.push(format!("{inner_ind}placeholder: \"{placeholder}\""));
+    }
+    if let Some(ty) = &field.field_type {
+        lines.push(format!("{inner_ind}type: {}", fmt_expr(&ty.node, field_indent + 1)));
+    }
+    if let Some(options) = &field.options {
+        lines.push(format!("{inner_ind}options: {}", fmt_expr(&options.node, field_indent + 1)));
+    }
+    if let Some(rows) = field.rows {
+        lines.push(format!("{inner_ind}rows: {rows}"));
+    }
+    if lines.is_empty() {
+        format!("field {} {{}}", field.name.node)
+    } else {
+        format!("field {} {{\n{}\n{}}}", field.name.node, lines.join("\n"), ind(field_indent))
+    }
 }
 
 fn fmt_ui_generate(g: &certo_ast::decl::UiGenerateDecl, indent: usize) -> String {
