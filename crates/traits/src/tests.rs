@@ -262,6 +262,64 @@ fn main(): Unit = {
 }
 
 #[test]
+fn generic_call_via_ufcs_on_typed_param_is_checked() {
+    // BACKLOG item 178 — `c.callGreet(...)` where `c` is a declared
+    // parameter of type `Caller` must resolve exactly like
+    // `Caller.callGreet(...)` would, since Certo parameters are always
+    // explicitly typed. `callGreet` declares its receiver as an explicit
+    // leading param (`c: Caller`) — required for `c.callGreet(x)` to
+    // typecheck at all under real UFCS, since `certo-typeck` splices the
+    // receiver in as the call's first argument — so `check_generic_call_bounds`
+    // must mirror that same splice before matching params to args, or the
+    // bound on `x`'s `T` never lines up with the real `Robot { .. }` arg.
+    let errs = err("module A
+trait Greet {
+    fn greet(name: Text): Text
+}
+
+type Robot = { id: Int }
+
+type Caller = { id: Int }
+
+impl Caller {
+    fn callGreet<T: Greet>(c: Caller, x: T): Unit = {}
+}
+
+fn main(c: Caller): Unit = c.callGreet(Robot { id: 1 })");
+    assert!(has_kind(&errs, |k|
+        matches!(k, TraitErrorKind::UnsatisfiedBound { ty, trait_name } if ty == "Robot" && trait_name == "Greet")),
+        "expected E0305 for Robot not implementing Greet via UFCS on a typed param, got: {:?}",
+        errs.iter().map(|e| e.message()).collect::<Vec<_>>());
+}
+
+#[test]
+fn generic_call_via_ufcs_on_annotated_val_is_checked() {
+    // Same as above but the receiver is an explicitly-annotated `val`
+    // inside the body, not a parameter.
+    let errs = err("module A
+trait Greet {
+    fn greet(name: Text): Text
+}
+
+type Robot = { id: Int }
+
+type Caller = { id: Int }
+
+impl Caller {
+    fn callGreet<T: Greet>(c: Caller, x: T): Unit = {}
+}
+
+fn main(): Unit = {
+    val c: Caller = Caller { id: 1 }
+    c.callGreet(Robot { id: 1 })
+}");
+    assert!(has_kind(&errs, |k|
+        matches!(k, TraitErrorKind::UnsatisfiedBound { ty, trait_name } if ty == "Robot" && trait_name == "Greet")),
+        "expected E0305 for Robot not implementing Greet via UFCS on an annotated val, got: {:?}",
+        errs.iter().map(|e| e.message()).collect::<Vec<_>>());
+}
+
+#[test]
 fn same_named_methods_on_different_impls_do_not_collide() {
     // collect_generic_fns keys impl methods by "Type.method", not bare
     // method name — two impls with a same-named generic method must be

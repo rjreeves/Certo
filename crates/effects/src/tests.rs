@@ -195,6 +195,78 @@ fn compute(): Int [pure] = {
 }
 
 #[test]
+fn pure_fn_calling_impure_method_via_ufcs_on_typed_param_is_checked() {
+    // BACKLOG item 178 — `w.doIo()` where `w` is a declared parameter of type
+    // `Widget` must resolve exactly like `Widget.doIo()` would, since Certo
+    // parameters are always explicitly typed and `w`'s type is right there
+    // in the signature.
+    let module = parse("module A
+type Widget = { id: Int }
+impl Widget {
+    fn doIo(): Unit [io] = {}
+}
+fn compute(w: Widget): Int [pure] = {
+    w.doIo()
+    1
+}").expect("parse error");
+    let env = build_env(&module);
+    let errs = crate::check_effects::check_module(&module, &env);
+
+    assert_eq!(errs.len(), 1, "expected exactly one error, got: {:?}",
+        errs.iter().map(|e| e.message()).collect::<Vec<_>>());
+    assert!(matches!(&errs[0].kind,
+        EffectErrorKind::ImpureCallInPure { caller, callee, .. } if caller == "compute" && callee == "Widget.doIo"),
+        "expected ImpureCallInPure naming callee `Widget.doIo`, got: {}", errs[0].message());
+}
+
+#[test]
+fn pure_fn_calling_impure_method_via_ufcs_on_annotated_val_is_checked() {
+    // Same as above but the receiver is an explicitly-annotated `val`
+    // inside the body, not a parameter — both are "syntactically obvious"
+    // types per BACKLOG item 178's scoping.
+    let module = parse("module A
+type Widget = { id: Int }
+impl Widget {
+    fn doIo(): Unit [io] = {}
+}
+fn compute(): Int [pure] = {
+    val w: Widget = Widget { id: 1 }
+    w.doIo()
+    1
+}").expect("parse error");
+    let env = build_env(&module);
+    let errs = crate::check_effects::check_module(&module, &env);
+
+    assert_eq!(errs.len(), 1, "expected exactly one error, got: {:?}",
+        errs.iter().map(|e| e.message()).collect::<Vec<_>>());
+    assert!(matches!(&errs[0].kind,
+        EffectErrorKind::ImpureCallInPure { caller, callee, .. } if caller == "compute" && callee == "Widget.doIo"),
+        "expected ImpureCallInPure naming callee `Widget.doIo`, got: {}", errs[0].message());
+}
+
+#[test]
+fn pure_fn_calling_impure_method_via_ufcs_on_unannotated_val_still_unresolved() {
+    // An unannotated `val` has no syntactically-obvious type, so BACKLOG
+    // item 178's bounded fix must NOT resolve this receiver — no false
+    // positive, same conservative behavior as before this item.
+    let module = parse("module A
+type Widget = { id: Int }
+impl Widget {
+    fn doIo(): Unit [io] = {}
+}
+fn compute(): Int [pure] = {
+    val w = Widget { id: 1 }
+    w.doIo()
+    1
+}").expect("parse error");
+    let env = build_env(&module);
+    let errs = crate::check_effects::check_module(&module, &env);
+
+    assert_eq!(errs.len(), 0, "expected no errors (receiver type not syntactically known), got: {:?}",
+        errs.iter().map(|e| e.message()).collect::<Vec<_>>());
+}
+
+#[test]
 fn same_named_methods_on_different_impls_do_not_collide() {
     // collect_fn_effects keys impl methods by "Type.method", not bare method
     // name — two impls with a same-named method must have independent
