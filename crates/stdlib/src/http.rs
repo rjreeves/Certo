@@ -544,10 +544,182 @@ static void http_srv_send(certo_socket_t sock, CertoHttpResponse* resp) {
     if (blen > 0) send(sock, body, (int)blen, 0);
 }
 
+/* ---- live-query push channel (BACKLOG item 88, stage 2/3) --------
+   `/__certo_live` is a reserved path, intercepted before the user's own
+   handler ever sees it (a real, documented collision risk if a user's
+   own app happens to route that exact path — accepted for this first
+   version). A connecting client holds the connection open and blocks on
+   a shared generation counter; `certo_http_live_notify()` (called by
+   generated write-handler code after a successful DB write) bumps the
+   counter and broadcasts, waking every open `/__certo_live` connection
+   at once. No registry of open sockets is needed at all: a broadcast
+   wakes every waiter, and each waiter only ever touches the one socket
+   it already owns — reusing the exact mutex+condvar split (Win32
+   CRITICAL_SECTION+CONDITION_VARIABLE / POSIX pthread mutex+cond)
+   `crates/stdlib/src/channel.rs`'s `CertoChannel` already proves out.
+   A periodic timed wake (not just the broadcast) sends an SSE comment
+   (`: ping`) even with no real change — both a standard keep-alive and
+   the only way a thread ever notices its client disconnected, since
+   nothing else here polls the socket; a client that vanishes between
+   pings leaks its thread until the next ping/notify's failed `send()`
+   cleans it up — bounded, not unbounded, but not instant either, a
+   deliberate simplification for this first version. */
+#define CERTO_LIVE_PATH "/__certo_live"
+#define CERTO_LIVE_PING_MS 25000
+
+#if defined(_WIN32)
+static CRITICAL_SECTION g_live_lock;
+static CONDITION_VARIABLE g_live_cond;
+#else
+static pthread_mutex_t g_live_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t  g_live_cond = PTHREAD_COND_INITIALIZER;
+#endif
+static volatile int64_t g_live_generation = 0;
+
+/* Called once, synchronously, before `certo_http_serve`'s accept loop
+   starts spawning connection threads — Win32's CRITICAL_SECTION/
+   CONDITION_VARIABLE (unlike pthread's static initializer macros) have
+   no compile-time-initialized form, so this must run before any
+   connection thread could possibly reach the SSE code path below. */
+static void __certo_live_init(void) {
+#if defined(_WIN32)
+    InitializeCriticalSection(&g_live_lock);
+    InitializeConditionVariable(&g_live_cond);
+#endif
+}
+
+/* Public: called by generated write-handler code after a successful DB
+   write. A no-op (just an uncontended lock/unlock and a broadcast to
+   zero waiters) when no client is connected to `/__certo_live` at all.
+   Returns `int64_t` (always 0), not `void` — every stdlib function whose
+   Certo signature is `Unit` still compiles to a real `int64_t` return
+   (codegen always assigns a call's result to an `int64_t`-typed local
+   regardless of Certo-level Unit semantics), the exact bug item 192
+   already found and fixed once for `certo_file_close`. */
+int64_t certo_http_live_notify(void) {
+#if defined(_WIN32)
+    EnterCriticalSection(&g_live_lock);
+    g_live_generation++;
+    LeaveCriticalSection(&g_live_lock);
+    WakeAllConditionVariable(&g_live_cond);
+#else
+    pthread_mutex_lock(&g_live_lock);
+    g_live_generation++;
+    pthread_mutex_unlock(&g_live_lock);
+    pthread_cond_broadcast(&g_live_cond);
+#endif
+    return 0;
+}
+
+/* Runs on the connection's own thread — holds the connection open
+   indefinitely, so it must own closing the socket on every exit path
+   (the caller, `__certo_http_handle_connection`, must not also close it). */
+static void __certo_http_serve_sse(certo_socket_t client) {
+    static const char* headers =
+        "HTTP/1.1 200 OK\r\n"
+        "Content-Type: text/event-stream\r\n"
+        "Cache-Control: no-cache\r\n"
+        "Connection: keep-alive\r\n"
+        "\r\n";
+    if (send(client, headers, (int)strlen(headers), 0) <= 0) {
+        certo_closesocket(client);
+        return;
+    }
+
+#if defined(_WIN32)
+    EnterCriticalSection(&g_live_lock);
+#else
+    pthread_mutex_lock(&g_live_lock);
+#endif
+    int64_t last_seen = g_live_generation;
+    for (;;) {
+#if defined(_WIN32)
+        SleepConditionVariableCS(&g_live_cond, &g_live_lock, CERTO_LIVE_PING_MS);
+        LeaveCriticalSection(&g_live_lock);
+#else
+        struct timespec ts;
+        clock_gettime(CLOCK_REALTIME, &ts);
+        ts.tv_sec  += CERTO_LIVE_PING_MS / 1000;
+        pthread_cond_timedwait(&g_live_cond, &g_live_lock, &ts);
+        pthread_mutex_unlock(&g_live_lock);
+#endif
+        bool changed = (g_live_generation != last_seen);
+        last_seen = g_live_generation;
+        const char* frame = changed ? "data: refresh\n\n" : ": ping\n\n";
+        if (send(client, frame, (int)strlen(frame), 0) <= 0) {
+            certo_closesocket(client);
+            return;
+        }
+#if defined(_WIN32)
+        EnterCriticalSection(&g_live_lock);
+#else
+        pthread_mutex_lock(&g_live_lock);
+#endif
+    }
+}
+
+/* ---- concurrent connections (BACKLOG item 88, stage 1) -----------
+   Each accepted connection now runs on its own OS thread instead of
+   being handled inline in the accept loop — `__certo_thread_spawn`/
+   `__certo_thread_t` (Win32 threads / pthreads) already exist in
+   `RUNTIME_HEADER` (`crates/codegen/src/emit_module.rs`), emitted into
+   every compiled program *before* this stdlib module's own C, so they're
+   already visible here — no new concurrency primitive needed, just
+   reusing the one `spawn`/`parallel`/`withTimeout` already rely on.
+   Fire-and-forget: the server thread never joins a connection thread
+   (it must keep accepting new connections concurrently), so each
+   connection thread is detached immediately after spawning — otherwise
+   its OS resources (a Win32 HANDLE, a pthread's join state) would never
+   be reclaimed until process exit, a real leak under sustained traffic.
+   No concurrent-connection limit or backpressure exists yet — a
+   deliberate, documented simplification for this first version, the
+   same kind of accepted scope-limit already used elsewhere in this file
+   (e.g. `parallel(timeout)`'s own leaked-thread-on-timeout above). */
+typedef struct {
+    certo_socket_t client;
+    certo_fn_t     raw_handler;
+} __certo_http_conn_ctx_t;
+
+static void* __certo_http_handle_connection(void* arg) {
+    __certo_http_conn_ctx_t* ctx = (__certo_http_conn_ctx_t*)arg;
+    certo_socket_t   client  = ctx->client;
+    CertoHttpHandler handler = (CertoHttpHandler)ctx->raw_handler.fn;
+    void*            env     = ctx->raw_handler.env;
+    free(ctx);
+
+    char* raw = http_srv_read_request(client);
+    CertoHttpRequest* req = http_srv_parse(raw, client);
+    free(raw);
+
+    if (strcmp(req->path, CERTO_LIVE_PATH) == 0) {
+        __certo_http_serve_sse(client);   /* owns closing the socket itself */
+        return NULL;
+    }
+
+    CertoHttpResponse* resp = handler(env, req);
+    http_srv_send(client, resp);
+
+    certo_closesocket(client);
+    return NULL;
+}
+
+static void __certo_http_spawn_connection(certo_socket_t client, certo_fn_t raw_handler) {
+    __certo_http_conn_ctx_t* ctx = (__certo_http_conn_ctx_t*)malloc(sizeof(__certo_http_conn_ctx_t));
+    if (!ctx) certo_panic("out of memory");
+    ctx->client      = client;
+    ctx->raw_handler = raw_handler;
+    __certo_thread_t th = __certo_thread_spawn(__certo_http_handle_connection, ctx);
+#ifdef _WIN32
+    CloseHandle(th);       /* fire-and-forget: release the handle, the thread keeps running */
+#else
+    pthread_detach(th);    /* fire-and-forget: reclaim resources on exit without a join */
+#endif
+}
+
 #ifdef _WIN32
 /* ---- public: blocking serve loop (Windows / WinSock2) ------------ */
 int64_t certo_http_serve(int64_t port, certo_fn_t raw_handler) {
-    CertoHttpHandler handler = (CertoHttpHandler)raw_handler.fn;
+    __certo_live_init();
 
     WSADATA wsa;
     if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0)
@@ -575,14 +747,7 @@ int64_t certo_http_serve(int64_t port, certo_fn_t raw_handler) {
         SOCKET client = accept(srv, (struct sockaddr*)&client_addr, &addr_len);
         if (client == CERTO_INVALID_SOCKET) continue;
 
-        char* raw = http_srv_read_request(client);
-        CertoHttpRequest* req = http_srv_parse(raw, client);
-        free(raw);
-
-        CertoHttpResponse* resp = handler(raw_handler.env, req);
-        http_srv_send(client, resp);
-
-        certo_closesocket(client);
+        __certo_http_spawn_connection(client, raw_handler);
     }
     /* unreachable — server runs until process exits */
     return 0;
@@ -591,7 +756,7 @@ int64_t certo_http_serve(int64_t port, certo_fn_t raw_handler) {
 #else
 /* ---- public: blocking serve loop (POSIX / BSD sockets) ----------- */
 int64_t certo_http_serve(int64_t port, certo_fn_t raw_handler) {
-    CertoHttpHandler handler = (CertoHttpHandler)raw_handler.fn;
+    __certo_live_init();    /* no-op on POSIX — pthread's static initializers already ran */
 
     int srv = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (srv == CERTO_INVALID_SOCKET) certo_panic("socket() failed");
@@ -616,14 +781,7 @@ int64_t certo_http_serve(int64_t port, certo_fn_t raw_handler) {
         int client = accept(srv, (struct sockaddr*)&client_addr, &addr_len);
         if (client == CERTO_INVALID_SOCKET) continue;
 
-        char* raw = http_srv_read_request(client);
-        CertoHttpRequest* req = http_srv_parse(raw, client);
-        free(raw);
-
-        CertoHttpResponse* resp = handler(raw_handler.env, req);
-        http_srv_send(client, resp);
-
-        certo_closesocket(client);
+        __certo_http_spawn_connection(client, raw_handler);
     }
     /* unreachable — server runs until process exits */
     return 0;
