@@ -1,9 +1,19 @@
-use certo_ast::decl::Decl;
+use certo_ast::decl::{Decl, FnParam};
 use certo_ast::module::Module;
 use certo_ast::types::Effect;
 use crate::effect_env::{EffectEnv, DeclaredEffects};
-use crate::infer_effects::{infer_expr, InferredEffects};
+use crate::infer_effects::{infer_expr, type_expr_simple_name, InferredEffects, LocalTypes};
 use crate::error::{EffectError, EffectErrorKind};
+
+/// Parameters are always explicitly typed in Certo (`FnParam.ty` isn't
+/// optional) — BACKLOG item 178's own starting point: every parameter's
+/// type is known for free, no inference needed, just reading what's
+/// already in the signature.
+fn params_to_locals(params: &[FnParam]) -> LocalTypes {
+    params.iter()
+        .filter_map(|p| type_expr_simple_name(&p.ty.node).map(|ty| (p.name.node.clone(), ty)))
+        .collect()
+}
 
 pub fn check_module(module: &Module, env: &EffectEnv) -> Vec<EffectError> {
     let mut errors = Vec::new();
@@ -14,7 +24,8 @@ pub fn check_module(module: &Module, env: &EffectEnv) -> Vec<EffectError> {
                     let declared = env.get(&f.name.node)
                         .cloned()
                         .unwrap_or_default();
-                    check_fn_body(&f.name.node, &declared, body, env, &mut errors);
+                    let locals = params_to_locals(&f.params);
+                    check_fn_body(&f.name.node, &declared, body, env, &locals, &mut errors);
                 }
             }
             Decl::Impl(i) => {
@@ -25,7 +36,8 @@ pub fn check_module(module: &Module, env: &EffectEnv) -> Vec<EffectError> {
                         let declared = env.get(&qname)
                             .cloned()
                             .unwrap_or_default();
-                        check_fn_body(&qname, &declared, body, env, &mut errors);
+                        let locals = params_to_locals(&m.params);
+                        check_fn_body(&qname, &declared, body, env, &locals, &mut errors);
                     }
                 }
             }
@@ -40,10 +52,11 @@ fn check_fn_body(
     declared: &DeclaredEffects,
     body:     &certo_ast::span::S<certo_ast::expr::Expr>,
     env:      &EffectEnv,
+    locals:   &LocalTypes,
     errors:   &mut Vec<EffectError>,
 ) {
     let mut inferred = InferredEffects::default();
-    infer_expr(body, env, &mut inferred);
+    infer_expr(body, env, locals, &mut inferred);
 
     for (effect, span, callee) in &inferred.origins {
         // `?` is allowed in pure functions (pure = no side effects, not
