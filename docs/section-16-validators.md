@@ -38,7 +38,7 @@ validator <Name> for <EntityType>
         [overrides <rule_name>]
         [priority <Int>]
         require <condition>
-        else <Err(ErrorType.Variant(...))>
+        else <ErrorType.Variant(...)>
     }
 
     ...
@@ -51,7 +51,7 @@ Minimal example:
 validator InvoiceIssue for Invoice errors InvoiceError {
     rule invoice_is_draft {
         require invoice.status == Draft
-        else Err(InvoiceError.NotInDraftStatus(invoice.status))
+        else InvoiceError.NotInDraftStatus(invoice.status)
     }
 }
 ```
@@ -70,34 +70,34 @@ validator OrderSubmit for Order
 
     rule customer_active {
         require CustomerIsActive
-        else Err(OrderError.CustomerNotActive)
+        else OrderError.CustomerNotActive
     }
 
     rule has_lines {
         require order.lineCount > 0
-        else Err(OrderError.NoOrderLines)
+        else OrderError.NoOrderLines
     }
 
     rule has_shipping_address {
         require order.shippingAddressId.isSome()
             or  order.linesAllDigital
-        else Err(OrderError.NoShippingAddress)
+        else OrderError.NoShippingAddress
     }
 
     rule within_credit_limit {
         after customer_active
         require WithinCredit
-        else Err(OrderError.CreditLimitExceeded(
+        else OrderError.CreditLimitExceeded(
             customer.availableCredit,
             order.total
-        ))
+        )
     }
 
     rule credit_limit_admin_override {
         overrides within_credit_limit
         priority 110
         require UserIsAdmin
-        else Err(OrderError.NotAuthorised)
+        else OrderError.NotAuthorised
     }
 }
 ```
@@ -123,12 +123,12 @@ validator OrderSubmit for Order errors OrderError {
 
     rule has_lines {
         require order.lineCount > 0    // primary entity — always available
-        else Err(OrderError.NoOrderLines)
+        else OrderError.NoOrderLines
     }
 
     rule customer_active {
         require customer.status == Active    // from context
-        else Err(OrderError.CustomerNotActive)
+        else OrderError.CustomerNotActive
     }
 }
 ```
@@ -171,7 +171,7 @@ typed error value.
 rule payment_method_present {
     require user.paymentMethod.isSome()
         or  order.paymentMethod == Prepaid
-    else Err(OrderError.NoPaymentMethod)
+    else OrderError.NoPaymentMethod
 }
 ```
 
@@ -231,16 +231,16 @@ The compiler verifies this — a type mismatch is error E0703.
 // Correct — matches declared errors OrderError
 rule credit_limit {
     require order.total <= customer.availableCredit
-    else Err(OrderError.CreditLimitExceeded(
+    else OrderError.CreditLimitExceeded(
         customer.availableCredit,
         order.total
-    ))
+    )
 }
 
 // Compile error E0703 — BillingError does not match OrderError
 rule bad_error {
     require order.total <= customer.availableCredit
-    else Err(BillingError.CreditExceeded)    // Error: type mismatch
+    else BillingError.CreditExceeded    // Error: type mismatch
 }
 ```
 
@@ -248,10 +248,10 @@ Error variants can carry data — the values are evaluated in scope at
 the point of violation:
 
 ```certo
-else Err(OrderError.CreditLimitExceeded(
+else OrderError.CreditLimitExceeded(
     available: customer.availableCredit,
     required:  order.total
-))
+)
 ```
 
 ---
@@ -267,16 +267,16 @@ the dependent rule is not evaluated.
 ```certo
 rule customer_active {
     require customer.status == Active
-    else Err(OrderError.CustomerNotActive)
+    else OrderError.CustomerNotActive
 }
 
 rule within_credit_limit {
     after customer_active    // only evaluated if customer_active passed
     require order.total <= customer.availableCredit
-    else Err(OrderError.CreditLimitExceeded(
+    else OrderError.CreditLimitExceeded(
         customer.availableCredit,
         order.total
-    ))
+    )
 }
 ```
 
@@ -288,7 +288,7 @@ rule deep_check {
     after customer_active
     after has_lines
     require order.total > Money.zero(order.currency)
-    else Err(OrderError.InvalidTotal)
+    else OrderError.InvalidTotal
 }
 ```
 
@@ -305,10 +305,10 @@ cleanly — without conditional logic scattered through the validator.
 ```certo
 rule within_credit_limit {
     require order.total <= customer.availableCredit
-    else Err(OrderError.CreditLimitExceeded(
+    else OrderError.CreditLimitExceeded(
         customer.availableCredit,
         order.total
-    ))
+    )
 }
 
 // When this rule's condition passes (user is Admin),
@@ -317,7 +317,7 @@ rule credit_limit_admin_override {
     overrides within_credit_limit
     priority 110
     require user.role == Admin
-    else Err(OrderError.NotAuthorised)
+    else OrderError.NotAuthorised
 }
 ```
 
@@ -340,7 +340,7 @@ conditions and explicit `overrides` relationships would be verbose:
 rule standard_discount_limit {
     priority 0
     require orderLine.discountPercent <= 15
-    else Err(LineError.DiscountExceedsSalesLimit)
+    else LineError.DiscountExceedsSalesLimit
 }
 
 rule manager_discount_limit {
@@ -348,14 +348,14 @@ rule manager_discount_limit {
     overrides standard_discount_limit
     require user.role in [Admin, Sales]
         or  orderLine.discountPercent <= 15
-    else Err(LineError.DiscountExceedsManagerLimit)
+    else LineError.DiscountExceedsManagerLimit
 }
 
 rule admin_discount_unlimited {
     priority 100
     overrides manager_discount_limit
     require user.role == Admin
-    else Err(LineError.NotAuthorised)
+    else LineError.NotAuthorised
 }
 ```
 
@@ -661,7 +661,7 @@ validator OrderSubmit for Order errors OrderError {
 
     rule check_role {
         require UserIsAdmin
-        else Err(OrderError.NotAuthorised)
+        else OrderError.NotAuthorised
     }
 }
 ```
@@ -739,13 +739,13 @@ Temporals are used in `require` clauses via the `.age` property on
 rule within_void_window {
     require invoice.createdAt.age < VoidWindow
         and invoice.status not in [Paid, WrittenOff]
-    else Err(InvoiceError.VoidWindowExpired)
+    else InvoiceError.VoidWindowExpired
 }
 
 rule return_eligible {
     require order.deliveredAt.age < ReturnWindow
         and order.status == Delivered
-    else Err(OrderError.ReturnWindowExpired)
+    else OrderError.ReturnWindowExpired
 }
 ```
 
@@ -858,47 +858,47 @@ pub validator OrderSubmit for Order
 
     rule customer_active {
         require CustomerIsActive
-        else Err(OrderError.CustomerNotActive)
+        else OrderError.CustomerNotActive
     }
 
     rule has_lines {
         require order.lineCount > 0
-        else Err(OrderError.NoOrderLines)
+        else OrderError.NoOrderLines
     }
 
     rule has_shipping_address {
         require order.shippingAddressId.isSome()
             or  order.linesAllDigital
-        else Err(OrderError.NoShippingAddress)
+        else OrderError.NoShippingAddress
     }
 
     rule has_billing_address {
         require order.billingAddressId.isSome()
-        else Err(OrderError.NoBillingAddress)
+        else OrderError.NoBillingAddress
     }
 
     rule currency_matches_customer {
         require order.currency == customer.currency
-        else Err(OrderError.CurrencyMismatch(
+        else OrderError.CurrencyMismatch(
             order.currency,
             customer.currency
-        ))
+        )
     }
 
     rule within_credit_limit {
         after customer_active
         require WithinCreditLimit
-        else Err(OrderError.CreditLimitExceeded(
+        else OrderError.CreditLimitExceeded(
             customer.availableCredit,
             order.total
-        ))
+        )
     }
 
     rule credit_limit_admin_override {
         overrides within_credit_limit
         priority 110
         require UserIsAdmin
-        else Err(OrderError.NotAuthorised)
+        else OrderError.NotAuthorised
     }
 }
 
@@ -915,16 +915,16 @@ pub validator OrderApprove for Order
 
     rule order_is_submitted {
         require order.status == Submitted
-        else Err(OrderError.InvalidStatusTransition(
+        else OrderError.InvalidStatusTransition(
             order.status,
             Approved
-        ))
+        )
     }
 
     rule high_value_requires_admin {
         require order.total <= Money(d"10000.00", order.currency)
             or  user.role == Admin
-        else Err(OrderError.ApprovalRequired(order.total))
+        else OrderError.ApprovalRequired(order.total)
     }
 }
 
@@ -937,7 +937,7 @@ pub validator OrderCancel for Order
 {
     rule not_yet_shipped {
         require order.status not in [Shipped, Delivered, Returned]
-        else Err(OrderError.CannotCancelShippedOrder)
+        else OrderError.CannotCancelShippedOrder
     }
 }
 
@@ -950,13 +950,13 @@ pub validator OrderReturn for Order
 {
     rule is_delivered {
         require order.status == Delivered
-        else Err(OrderError.OrderNotDelivered)
+        else OrderError.OrderNotDelivered
     }
 
     rule within_return_window {
         after is_delivered
         require order.deliveredAt.age < ReturnWindow
-        else Err(OrderError.ReturnWindowExpired)
+        else OrderError.ReturnWindowExpired
     }
 }
 ```
@@ -985,20 +985,20 @@ pub validator InvoiceIssue for Invoice
 
     rule accounts_role_required {
         require UserIsAccounts
-        else Err(InvoiceError.NotAuthorised)
+        else InvoiceError.NotAuthorised
     }
 
     rule order_must_be_shipped {
         require order.status in [Shipped, Delivered]
-        else Err(InvoiceError.OrderNotShipped(order.status))
+        else InvoiceError.OrderNotShipped(order.status)
     }
 
     rule amount_matches_order {
         require invoice.total == order.total
-        else Err(InvoiceError.AmountMismatch(
+        else InvoiceError.AmountMismatch(
             invoice.total,
             order.total
-        ))
+        )
     }
 }
 
@@ -1016,14 +1016,14 @@ pub validator InvoiceVoid for Invoice
     rule within_void_window {
         require invoice.createdAt.age < VoidWindow
             and invoice.status not in [Paid, WrittenOff]
-        else Err(InvoiceError.VoidWindowExpired)
+        else InvoiceError.VoidWindowExpired
     }
 
     rule void_admin_override {
         overrides within_void_window
         priority 110
         require UserIsAdmin
-        else Err(InvoiceError.NotAuthorised)
+        else InvoiceError.NotAuthorised
     }
 }
 
@@ -1040,12 +1040,12 @@ pub validator InvoicePay for Invoice
 
     rule accounts_role_required {
         require UserIsAccounts
-        else Err(InvoiceError.NotAuthorised)
+        else InvoiceError.NotAuthorised
     }
 
     rule invoice_is_payable {
         require invoice.status in [Issued, PartiallyPaid, Overdue]
-        else Err(InvoiceError.NotPayable(invoice.status))
+        else InvoiceError.NotPayable(invoice.status)
     }
 }
 ```
@@ -1073,29 +1073,29 @@ pub validator PaymentCreate for Payment
 
     rule accounts_role_required {
         require UserIsAccounts
-        else Err(PaymentError.NotAuthorised)
+        else PaymentError.NotAuthorised
     }
 
     rule invoice_is_payable {
         require invoice.status in [Issued, PartiallyPaid, Overdue]
-        else Err(PaymentError.InvoiceNotPayable(invoice.status))
+        else PaymentError.InvoiceNotPayable(invoice.status)
     }
 
     rule amount_within_balance {
         after invoice_is_payable
         require payment.amount <= invoice.amountOutstanding
-        else Err(PaymentError.ExceedsOutstandingBalance(
+        else PaymentError.ExceedsOutstandingBalance(
             payment.amount,
             invoice.amountOutstanding
-        ))
+        )
     }
 
     rule currency_matches_invoice {
         require payment.currency == invoice.customer.currency
-        else Err(PaymentError.CurrencyMismatch(
+        else PaymentError.CurrencyMismatch(
             payment.currency,
             invoice.customer.currency
-        ))
+        )
     }
 }
 ```
@@ -1126,24 +1126,24 @@ pub validator OrderLineCreate for OrderLine
 
     rule order_is_editable {
         require OrderIsDraft
-        else Err(LineError.OrderNotEditable(order.status))
+        else LineError.OrderNotEditable(order.status)
     }
 
     rule product_is_available {
         require ProductIsAvailable
-        else Err(LineError.ProductNotAvailable(
+        else LineError.ProductNotAvailable(
             product.id,
             product.status
-        ))
+        )
     }
 
     rule quantity_within_stock {
         after product_is_available
         require orderLine.quantity <= product.stockCount
-        else Err(LineError.InsufficientStock(
+        else LineError.InsufficientStock(
             product.stockCount,
             orderLine.quantity
-        ))
+        )
     }
 }
 
@@ -1160,29 +1160,29 @@ pub validator OrderLineApplyDiscount for OrderLine
 
     rule discount_requires_reason {
         require orderLine.discountReason.isSome()
-        else Err(LineError.DiscountReasonRequired)
+        else LineError.DiscountReasonRequired
     }
 
     rule discount_within_sales_limit {
         require UserIsAdmin
             or  orderLine.discountPercent <= d"15.00"
-        else Err(LineError.DiscountExceedsSalesLimit(
+        else LineError.DiscountExceedsSalesLimit(
             orderLine.discountPercent,
             d"15.00"
-        ))
+        )
     }
 
     rule discount_not_below_zero {
         require orderLine.discountPercent >= d"0.00"
-        else Err(LineError.NegativeDiscount)
+        else LineError.NegativeDiscount
     }
 
     rule discount_not_exceed_line {
         require orderLine.discountAmount <= orderLine.unitPrice
-        else Err(LineError.DiscountExceedsLineValue(
+        else LineError.DiscountExceedsLineValue(
             orderLine.discountAmount,
             orderLine.unitPrice
-        ))
+        )
     }
 }
 ```
@@ -1204,17 +1204,17 @@ async fn submitOrder(orderId: UUID): Result<Order, OrderError> =
         let user     = currentUser()?
 
         guard customer.status == Active
-            else Err(OrderError.CustomerNotActive)
+            else OrderError.CustomerNotActive
 
         guard order.lineCount > 0
-            else Err(OrderError.NoOrderLines)
+            else OrderError.NoOrderLines
 
         guard order.total <= customer.availableCredit
                 or user.role == Admin
-            else Err(OrderError.CreditLimitExceeded(
+            else OrderError.CreditLimitExceeded(
                 customer.availableCredit,
                 order.total
-            ))
+            )
 
         db.orders.update(orderId, { status: Submitted })?
         Ok(order)
@@ -1232,27 +1232,27 @@ pub validator OrderSubmit for Order errors OrderError {
 
     rule customer_active {
         require customer.status == Active
-        else Err(OrderError.CustomerNotActive)
+        else OrderError.CustomerNotActive
     }
 
     rule has_lines {
         require order.lineCount > 0
-        else Err(OrderError.NoOrderLines)
+        else OrderError.NoOrderLines
     }
 
     rule within_credit_limit {
         require order.total <= customer.availableCredit
-        else Err(OrderError.CreditLimitExceeded(
+        else OrderError.CreditLimitExceeded(
             customer.availableCredit,
             order.total
-        ))
+        )
     }
 
     rule credit_limit_admin_override {
         overrides within_credit_limit
         priority 110
         require user.role == Admin
-        else Err(OrderError.NotAuthorised)
+        else OrderError.NotAuthorised
     }
 }
 
@@ -1386,7 +1386,7 @@ error[E0700]: cycle detected in rule dependency graph
 error[E0703]: `else` branch produces wrong error type
   → src/validators/order-validators.cto:28:14
    │
-28 │         else Err(BillingError.CreditExceeded)
+28 │         else BillingError.CreditExceeded
    │              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
    │
    = expected: OrderError  (declared on validator at line 12)

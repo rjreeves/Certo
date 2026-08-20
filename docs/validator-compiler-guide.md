@@ -298,7 +298,7 @@ error: expected `by` after `loaded`
 ```
 // Minimal validator parses
 parse("validator V for Order errors OrderError {
-    rule r { require true else Err(OrderError.X) }
+    rule r { require true else OrderError.X }
 }")
 
 // Full validator with all features parses
@@ -315,7 +315,7 @@ parse("pub validator OrderSubmit for Order
         overrides other_rule
         priority 100
         require customer.status == Active
-        else Err(OrderError.CustomerNotActive)
+        else OrderError.CustomerNotActive
     }
 }")
 
@@ -333,7 +333,7 @@ parse("rule r {
     after b
     after c
     require true
-    else Err(E.X)
+    else E.X
 }")
 
 // Trigger variants parse
@@ -437,28 +437,28 @@ resolve("validator V for Order errors OrderError { ... }")
 
 // after reference to existing rule resolves
 resolve_validator("
-    rule a { require true else Err(E.X) }
-    rule b { after a  require true else Err(E.X) }
+    rule a { require true else E.X }
+    rule b { after a  require true else E.X }
 ")
 // → b.after[0] resolved to rule 'a'
 
 // after reference to missing rule reports E0701
-resolve_error("rule b { after nonexistent require true else Err(E.X) }", E0701)
+resolve_error("rule b { after nonexistent require true else E.X }", E0701)
 
 // overrides reference to existing rule resolves
 resolve_validator("
-    rule a { require true else Err(E.X) }
-    rule b { overrides a  require true else Err(E.X) }
+    rule a { require true else E.X }
+    rule b { overrides a  require true else E.X }
 ")
 // → b.overrides resolved to rule 'a'
 
 // overrides reference to missing rule reports E0702
-resolve_error("rule b { overrides nonexistent require true else Err(E.X) }", E0702)
+resolve_error("rule b { overrides nonexistent require true else E.X }", E0702)
 
 // Cycle detected and reported as E0700
 resolve_error("
-    rule a { after b  require true else Err(E.X) }
-    rule b { after a  require true else Err(E.X) }
+    rule a { after b  require true else E.X }
+    rule b { after a  require true else E.X }
 ", E0700)
 
 // pub constraint importable from other module
@@ -585,7 +585,7 @@ typecheck_ok("
     pub constraint UserIsAdmin = user.role == Admin
     validator V for Order errors OE {
         context { user: User }
-        rule r { require UserIsAdmin else Err(OE.X) }
+        rule r { require UserIsAdmin else OE.X }
     }
 ")
 
@@ -594,7 +594,7 @@ typecheck_err("
     pub constraint UserIsAdmin = user.role == Admin
     validator V for Order errors OE {
         // no user in context
-        rule r { require UserIsAdmin else Err(OE.X) }
+        rule r { require UserIsAdmin else OE.X }
     }
 ", E0704)
 
@@ -603,7 +603,7 @@ typecheck_err("
     validator V for Order errors OrderError {
         rule r {
             require true
-            else Err(BillingError.X)    // wrong type
+            else BillingError.X    // wrong type
         }
     }
 ", E0703)
@@ -615,7 +615,7 @@ typecheck_err("
             customer: Customer loaded by db.users.find(order.customerId)
             // db.users.find returns User, not Customer
         }
-        rule r { require true else Err(OE.X) }
+        rule r { require true else OE.X }
     }
 ", E0705)
 
@@ -624,7 +624,7 @@ typecheck_ok("
     validator V for Invoice errors IE {
         rule r {
             require invoice.createdAt.age < VoidWindow
-            else Err(IE.X)
+            else IE.X
         }
     }
 ")
@@ -634,7 +634,7 @@ typecheck_err("
     validator V for Invoice errors IE {
         rule r {
             require invoice.status.age < VoidWindow   // status is not Timestamp
-            else Err(IE.X)
+            else IE.X
         }
     }
 ", E0709)
@@ -660,11 +660,11 @@ typecheck_err("
 // W0101 — unreachable rule (always-true override)
 typecheck_warn("
     validator V for Order errors OE {
-        rule base { require order.total > 0  else Err(OE.X) }
+        rule base { require order.total > 0  else OE.X }
         rule override_ {
             overrides base
             require true    // always true — base is permanently shadowed
-            else Err(OE.X)
+            else OE.X
         }
     }
 ", W0101)
