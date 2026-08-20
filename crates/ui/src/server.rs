@@ -67,9 +67,13 @@ pub fn emit_server(module: &Module) -> Result<String, UiError> {
     for v in &views {
         emit_view_handler(v, &forms, &views, &mut out);
     }
+    // BACKLOG item 88 (stage 3) — only wire the notify-on-write call when
+    // some view actually has a `live val` to notify; a module with none
+    // gets exactly the write-handler output it had before this item.
+    let has_live = views.iter().any(|v| !v.live.is_empty());
     for f in &forms {
         emit_form_get_handler(f, &mut out);
-        emit_form_post_handler(f, &mut out);
+        emit_form_post_handler(f, has_live, &mut out);
     }
 
     emit_main(&mut out);
@@ -207,20 +211,31 @@ fn emit_view_handler(v: &ViewDecl, forms: &[&FormDecl], _all_views: &[&ViewDecl]
 
     writeln!(out, "// ── {} ─────────────────────────────────────────────────────────────────────", name).unwrap();
 
+    // BACKLOG item 88 (stage 3): a view with `live val` bindings gets a
+    // tiny inline SSE client wired to the reserved `/__certo_live`
+    // endpoint (`crates/stdlib/src/http.rs`'s `certo_http_serve`) —
+    // `certo_live_notify()` (called by generated write handlers below)
+    // broadcasts on every successful DB write, and any connected page
+    // just reloads itself on that signal. Deliberately a whole-page
+    // reload, not a per-binding DOM patch or a per-table-scoped signal:
+    // this codegen path never used htmx client-side attributes at all
+    // before this (unlike `crates/ui/src/form.rs`'s legacy `--html`
+    // mode), and a plain `EventSource` needs no new script dependency —
+    // adding htmx's own SSE extension just to reload the page it's
+    // already on would be more machinery for the same result.
+    let live_script = if v.live.is_empty() {
+        String::new()
+    } else {
+        "<script>new EventSource('/__certo_live').onmessage=function(){location.reload();};</script>".to_string()
+    };
     if !v.live.is_empty() {
-        // BACKLOG item 88: `live val` parses into `ViewDecl.live` now, but
-        // there's no push/streaming transport for this codegen path to
-        // wire it to yet (see item 88's own investigation — a real SSE/
-        // WebSocket transport and a query-builder DSL are both separate,
-        // unbuilt gaps). Emit an honest comment naming what was declared
-        // rather than either silently dropping it or claiming it's live.
         let bindings: Vec<&str> = v.live.iter()
             .filter_map(|vd| match &vd.pattern.node {
                 certo_ast::pattern::Pattern::Ident { name, .. } => Some(name.node.as_str()),
                 _ => None,
             })
             .collect();
-        writeln!(out, "// live bindings declared but not yet wired to a transport: {}", bindings.join(", ")).unwrap();
+        writeln!(out, "// live bindings wired to SSE auto-refresh via /__certo_live: {}", bindings.join(", ")).unwrap();
     }
 
     let for_entity = find_for_entity(&v.layout.node);
@@ -280,17 +295,23 @@ fn emit_view_handler(v: &ViewDecl, forms: &[&FormDecl], _all_views: &[&ViewDecl]
 
         writeln!(out, "    val _tbl  = htmlTable(cols, rows)").unwrap();
 
+        let live_suffix = if live_script.is_empty() {
+            String::new()
+        } else {
+            format!(" ++ \"{}\"", escape_certo_str(&live_script))
+        };
+
         if v.pk.is_some() {
             let ra_fn = format!("rowActions{name}");
             writeln!(out, "    val _actions = {ra_fn}(cols, rows, 0, \"\")").unwrap();
             writeln!(out, "    val body = \"<h1>{title}</h1>\" ++").unwrap();
             writeln!(out, "        {nav_html}\"\" ++").unwrap();
             writeln!(out, "        _tbl ++").unwrap();
-            writeln!(out, "        \"<div class=\\\"actions-section\\\">\" ++ _actions ++ \"</div>\"").unwrap();
+            writeln!(out, "        \"<div class=\\\"actions-section\\\">\" ++ _actions ++ \"</div>\"{live_suffix}").unwrap();
         } else {
             writeln!(out, "    val body = \"<h1>{title}</h1>\" ++").unwrap();
             writeln!(out, "        {nav_html}\"\" ++").unwrap();
-            writeln!(out, "        _tbl").unwrap();
+            writeln!(out, "        _tbl{live_suffix}").unwrap();
         }
 
         writeln!(out, "    Http.ok(htmlPage(\"{title}\", body), \"text/html\")").unwrap();
@@ -306,7 +327,7 @@ fn emit_view_handler(v: &ViewDecl, forms: &[&FormDecl], _all_views: &[&ViewDecl]
                .collect::<Vec<_>>()
                .join("")
         };
-        let escaped = escape_certo_str(&format!("<h1>{title}</h1>{body_html}"));
+        let escaped = escape_certo_str(&format!("<h1>{title}</h1>{body_html}{live_script}"));
         writeln!(out, "fn {fn_name}(req: HttpRequest): HttpResponse =").unwrap();
         writeln!(out, "    Http.ok(htmlPage(\"{title}\", \"{escaped}\"), \"text/html\")").unwrap();
     }
@@ -499,7 +520,7 @@ fn emit_field_concat_tree(out: &mut String, n: usize, indent: &str) {
 
 // ── Form POST handler ─────────────────────────────────────────────────────────
 
-fn emit_form_post_handler(f: &FormDecl, out: &mut String) {
+fn emit_form_post_handler(f: &FormDecl, has_live: bool, out: &mut String) {
     let name    = &f.name.node;
     let fn_name = format!("handle{}Post", name);
     let target  = f.target.segments.last()
@@ -544,6 +565,9 @@ fn emit_form_post_handler(f: &FormDecl, out: &mut String) {
             let sql = format!("UPDATE {table} SET {set_clause} WHERE {pk_col} = ${}", n + 1);
             writeln!(out, "    val _rows = dbExec(conn, \"{sql}\", {last_p})").unwrap();
             writeln!(out, "    dbClose(conn)").unwrap();
+            if has_live {
+                writeln!(out, "    if _rows > 0 then Http.liveNotify() else ()").unwrap();
+            }
             writeln!(out, "    val msg = if _rows > 0 then \"Record updated.\" else \"Update failed — record not found.\"").unwrap();
             writeln!(out, "    val pg  = \"<h2>\" ++ msg ++ \"</h2><p><a href=\\\"/{list_slug}\\\">← Back to list</a></p>\"").unwrap();
             writeln!(out, "    Http.ok(htmlPage(\"Done\", pg), \"text/html\")").unwrap();
@@ -561,6 +585,9 @@ fn emit_form_post_handler(f: &FormDecl, out: &mut String) {
 
     writeln!(out, "    val _rows = dbExec(conn, \"{sql}\", {last_p})").unwrap();
     writeln!(out, "    dbClose(conn)").unwrap();
+    if has_live {
+        writeln!(out, "    if _rows > 0 then Http.liveNotify() else ()").unwrap();
+    }
     writeln!(out, "    val msg = if _rows > 0 then \"Record saved.\" else \"Save failed — check your input.\"").unwrap();
     writeln!(out, "    val pg  = \"<h2>\" ++ msg ++ \"</h2><p><a href=\\\"/{list_slug}\\\">← Back to list</a></p>\"").unwrap();
     writeln!(out, "    Http.ok(htmlPage(\"Done\", pg), \"text/html\")").unwrap();
@@ -859,12 +886,15 @@ mod tests {
     }
 
     #[test]
-    fn live_val_emits_honest_not_wired_comment() {
+    fn live_val_emits_wired_comment_naming_the_binding() {
+        // BACKLOG item 88 (stage 3) — a `live val` view is now genuinely
+        // wired to the SSE push channel, not just "declared but not yet
+        // wired" — the comment must reflect that.
         let out = server_source(
             "module M\nview Home {\n live val count = 0\n layout = Text(\"Hi\")\n}"
         );
         assert!(
-            out.contains("// live bindings declared but not yet wired to a transport: count"),
+            out.contains("// live bindings wired to SSE auto-refresh via /__certo_live: count"),
             "missing live-binding comment\n{}", out
         );
     }
@@ -875,6 +905,35 @@ mod tests {
             "module M\nview Home {\n live val a = 1\n live val b = \"x\"\n layout = Text(\"Hi\")\n}"
         );
         assert!(out.contains("a, b"), "missing both binding names\n{}", out);
+    }
+
+    #[test]
+    fn live_val_view_embeds_an_sse_event_source_script() {
+        let out = server_source(
+            "module M\nview Home {\n live val count = 0\n layout = Text(\"Hi\")\n}"
+        );
+        assert!(out.contains("EventSource('/__certo_live')"), "missing the SSE client script\n{}", out);
+        assert!(out.contains("location.reload()"), "missing the refresh-on-signal call\n{}", out);
+    }
+
+    #[test]
+    fn view_without_live_val_has_no_sse_script() {
+        let out = server_source("module M\nview Home {\n layout = Text(\"Hi\")\n}");
+        assert!(!out.contains("EventSource"), "unexpected SSE client script on a non-live view\n{}", out);
+    }
+
+    #[test]
+    fn form_post_handler_notifies_after_a_successful_write_when_a_live_view_exists() {
+        let out = server_source(
+            "module M\nview Home {\n live val count = 0\n layout = Text(\"Hi\")\n}\nform CreateWidget -> Widget {\n name: Text\n}"
+        );
+        assert!(out.contains("Http.liveNotify()"), "expected the create-form handler to notify on write\n{}", out);
+    }
+
+    #[test]
+    fn form_post_handler_does_not_notify_with_no_live_views_in_the_module() {
+        let out = server_source("module M\nform CreateWidget -> Widget {\n name: Text\n}");
+        assert!(!out.contains("Http.liveNotify"), "should not emit a notify call with no live val anywhere\n{}", out);
     }
 
     #[test]

@@ -1982,6 +1982,103 @@ fn full_c_runtime_includes_json_and_http() {
 }
 
 // ------------------------------------------------------------------ //
+// `certo_http_serve` concurrent connections (BACKLOG item 88, stage 1)
+// ------------------------------------------------------------------ //
+
+#[test]
+fn http_serve_spawns_a_thread_per_connection() {
+    // The accept loop (both platforms) must hand each connection off to
+    // `__certo_http_spawn_connection` — reusing `__certo_thread_spawn`,
+    // already emitted into every program's `RUNTIME_HEADER` before this
+    // stdlib module's own C — not handle it inline in the loop body.
+    assert!(HTTP_C.contains("__certo_http_spawn_connection"), "missing the per-connection spawn helper");
+    assert!(HTTP_C.contains("__certo_thread_spawn(__certo_http_handle_connection"), "connection handler not spawned via __certo_thread_spawn");
+}
+
+#[test]
+fn http_serve_detaches_spawned_connection_threads() {
+    // Fire-and-forget: the accept loop never joins a connection thread, so
+    // each one must be detached right after spawning or its OS resources
+    // (a Win32 HANDLE, a pthread's join state) leak under sustained traffic.
+    assert!(HTTP_C.contains("CloseHandle(th)"), "Windows connection thread not detached via CloseHandle");
+    assert!(HTTP_C.contains("pthread_detach(th)"), "POSIX connection thread not detached via pthread_detach");
+}
+
+#[test]
+fn http_serve_accept_loop_no_longer_handles_requests_inline() {
+    // Regression guard: the accept loop itself must not call the request
+    // handler directly any more — that work now happens on the spawned
+    // connection thread (`__certo_http_handle_connection`), not the
+    // single accept-loop thread, or connections would still serialize.
+    let windows_loop = HTTP_C.split("blocking serve loop (Windows").nth(1).expect("missing Windows serve loop");
+    let windows_loop = &windows_loop[..windows_loop.find("#else").unwrap_or(windows_loop.len())];
+    assert!(!windows_loop.contains("handler(raw_handler.env"), "Windows accept loop still calls the handler inline\n{windows_loop}");
+
+    let posix_loop = HTTP_C.split("blocking serve loop (POSIX").nth(1).expect("missing POSIX serve loop");
+    assert!(!posix_loop.contains("handler(raw_handler.env"), "POSIX accept loop still calls the handler inline\n{posix_loop}");
+}
+
+// ------------------------------------------------------------------ //
+// Live-query SSE push channel (BACKLOG item 88, stage 2/3)
+// ------------------------------------------------------------------ //
+
+#[test]
+fn http_c_declares_the_live_notify_function() {
+    // The C symbol name matters: `codegen::c_fn_name` mangles the Certo
+    // name `Http.liveNotify` to `certo_http_live_notify` (camelCase → snake
+    // case, `.` → `_`, `certo_` prefix) — a plain `certo_live_notify` would
+    // silently fail to link. Returns `int64_t`, not `void` — every stdlib
+    // function whose Certo signature is `Unit` still needs a real int
+    // return (the exact bug item 192 already found once for
+    // `certo_file_close`; caught here again before a real compile, not
+    // during one).
+    assert!(HTTP_C.contains("int64_t certo_http_live_notify(void)"), "missing certo_http_live_notify definition, or it's still returning void");
+}
+
+#[test]
+fn http_c_intercepts_the_reserved_live_path_before_the_user_handler() {
+    assert!(HTTP_C.contains("CERTO_LIVE_PATH"), "missing the reserved /__certo_live path constant");
+    assert!(HTTP_C.contains("__certo_http_serve_sse"), "missing the SSE connection handler");
+    // The interception must happen in `__certo_http_handle_connection`
+    // (every connection's own thread) *before* the user's `handler` is
+    // ever called, and must `return` so the user handler never also runs
+    // for that same connection.
+    let conn_handler = HTTP_C.split("static void* __certo_http_handle_connection").nth(1)
+        .expect("missing __certo_http_handle_connection");
+    let sse_pos = conn_handler.find("__certo_http_serve_sse(client)").expect("SSE dispatch not in the connection handler");
+    let handler_pos = conn_handler.find("handler(env, req)").expect("user handler call not found");
+    assert!(sse_pos < handler_pos, "SSE path check must come before the user handler call");
+}
+
+#[test]
+fn http_c_serve_initializes_live_state_before_the_accept_loop() {
+    // Win32's CRITICAL_SECTION/CONDITION_VARIABLE have no static
+    // initializer — unlike POSIX's PTHREAD_MUTEX_INITIALIZER — so this
+    // must run before any connection thread could reach the SSE path.
+    let windows_loop = HTTP_C.split("blocking serve loop (Windows").nth(1).expect("missing Windows serve loop");
+    let windows_loop = &windows_loop[..windows_loop.find("#else").unwrap_or(windows_loop.len())];
+    assert!(windows_loop.contains("__certo_live_init();"), "Windows serve loop missing __certo_live_init()\n{windows_loop}");
+
+    let posix_loop = HTTP_C.split("blocking serve loop (POSIX").nth(1).expect("missing POSIX serve loop");
+    assert!(posix_loop.contains("__certo_live_init();"), "POSIX serve loop missing __certo_live_init()\n{posix_loop}");
+}
+
+#[test]
+fn live_notify_is_seeded_in_the_type_environment() {
+    // Registered separately from HTTP_C's own C text — confirms the
+    // Certo-level binding exists so a program can actually call it.
+    let env = seeded_env();
+    let ty = env.lookup("Http.liveNotify").expect("Http.liveNotify not seeded");
+    match ty {
+        Ty::Fn { params, ret } => {
+            assert!(params.is_empty(), "expected zero params, got {:?}", params);
+            assert_eq!(ret.as_ref(), &Ty::Unit);
+        }
+        other => panic!("expected Fn, got {:?}", other),
+    }
+}
+
+// ------------------------------------------------------------------ //
 // seed_stdlib_effects
 // ------------------------------------------------------------------ //
 

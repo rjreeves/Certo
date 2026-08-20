@@ -1197,6 +1197,12 @@ pub fn seed_stdlib(env: &mut TypeEnv, counter: &mut u32) {
             ret:    Box::new(Ty::Unit),
         });
 
+        // Live-query push channel (BACKLOG item 88, stage 2/3) — broadcasts
+        // a refresh signal to every open `/__certo_live` SSE connection.
+        // Called by generated write-handler code after a successful DB
+        // write; a no-op when nothing is connected.
+        def!("Http.liveNotify", Ty::Fn { params: vec![], ret: Box::new(Ty::Unit) });
+
         // Response constructors
         def!("Http.respond",     Ty::Fn { params: vec![Ty::Int, Ty::Text, Ty::Text], ret: Box::new(hr()) });
         def!("Http.ok",          fn2(Ty::Text, Ty::Text, hr()));

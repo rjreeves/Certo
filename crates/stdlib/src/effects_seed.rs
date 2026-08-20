@@ -55,7 +55,7 @@ const IO_FUNCTIONS: &[&str] = &[
     "Mutation.run",
     // Http
     "Http.get", "Http.post", "Http.put", "Http.delete",
-    "Http.request", "Http.requestBytes", "Http.serve",
+    "Http.request", "Http.requestBytes", "Http.serve", "Http.liveNotify",
     // Credential
     "Credential.get", "Credential.getBytes", "Credential.set", "Credential.delete",
     // Process
