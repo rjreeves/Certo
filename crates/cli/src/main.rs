@@ -3353,6 +3353,20 @@ fn pg_type_to_certo(pg: &str, precision: Option<i64>, scale: Option<i64>, char_m
         "uuid"                                         => "UUID".to_string(),
         "date" | "timestamp" | "timestamp without time zone"
             | "timestamp with time zone" | "timestamptz" => "DateTime".to_string(),
+        // BACKLOG item 205 — `TIME`/`TIME WITH TIME ZONE` (a time-of-day
+        // value, distinct from `TIMESTAMP WITH TIME ZONE` above) fell
+        // through to the `other` catch-all, which naively PascalCases the
+        // raw multi-word Postgres type name via `snake_to_pascal` (splits
+        // only on `_`, so a space-containing name like "time with time
+        // zone" only gets its very first letter capitalized) — producing
+        // the literal, undeclared, unparseable field type `Time with time
+        // zone` in a real `certo db pull` run against any table with such
+        // a column. No dedicated time-of-day Certo type exists; `Text` is
+        // the correct, already-self-consistent choice — confirmed against
+        // the checked-in `examples/db/schema.cto`'s own `*FromRow`
+        // functions, which already read every such field as plain text
+        // with no date/time parsing at all, even before this fix.
+        "time" | "time with time zone" | "time without time zone" | "timetz" => "Text".to_string(),
         "json" | "jsonb"                               => "Text".to_string(),
         "bytea"                                        => "Text".to_string(),
         other => snake_to_pascal(other),
@@ -3797,6 +3811,28 @@ mod flag_tests {
         // end-to-end via `certo check --explain` on a real multi-error file).
         assert!(explain_code("E0100").is_some());
         assert!(explain_code("E0100").is_some());
+    }
+
+    #[test]
+    fn pg_type_to_certo_maps_time_with_time_zone_to_text() {
+        // BACKLOG item 205 — found while making a real `certo db pull`
+        // checked-in example compile: a `TIME WITH TIME ZONE` column fell
+        // through to the `other` catch-all, which naively PascalCases the
+        // raw multi-word Postgres type name (`snake_to_pascal` only splits
+        // on `_`, so a space-containing name only gets its first letter
+        // capitalized) — producing the literal, undeclared, unparseable
+        // field type `Time with time zone` in real `db pull` output.
+        for pg in ["time", "time with time zone", "time without time zone", "timetz"] {
+            assert_eq!(pg_type_to_certo(pg, None, None, None), "Text", "pg type `{pg}`");
+        }
+    }
+
+    #[test]
+    fn pg_type_to_certo_still_maps_timestamp_with_time_zone_to_datetime() {
+        // Regression guard: the new `time...` arm must not shadow the
+        // pre-existing, correct `timestamp with time zone` → `DateTime`
+        // mapping just above it.
+        assert_eq!(pg_type_to_certo("timestamp with time zone", None, None, None), "DateTime");
     }
 }
 

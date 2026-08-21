@@ -322,15 +322,15 @@ A table is represented by an ordinary `type` declaration plus an empty `impl DbR
 // Generated once by `certo db pull` — commit this file, then edit by hand as needed.
 module DbSchema
 
-type User {
+type Users = {
     id:    UUID   // PK
     name:  Text
     email: Text?
 }
 
-fn userFromRow(row: List<Text?>): User = ...
+fn usersFromRow(row: List<Text?>): Users = ...
 
-impl DbRow for User {}
+impl DbRow for Users {}
 ```
 
 Every `Query.from("Table")` / `Mutation.insertInto("Table")` call is checked against these declarations: an unknown table name, an unknown column name, or an unrecognized operator/direction literal is a compile error, not a runtime one.
@@ -509,14 +509,14 @@ fn transferStock(conn: Int, from: Text, to: Text, sku: Text, qty: Text): Result<
 When the query/mutation builders are insufficient, drop to `Stdlib.Db`'s parameterized functions directly — parameters are always positional (`$1`, `$2`, …) and bound separately from the SQL text, so raw SQL is never string-interpolated and is not a SQL-injection vector.
 
 ```certo
-uses Stdlib.Db
+import Stdlib.Db
 
 val rows = dbQueryTyped(
     conn,
-    "SELECT o.*, c.name AS customer_name FROM orders o \
-     JOIN customers c ON c.id = o.customer_id \
-     WHERE o.created_at > $1",
-    [cutoffDate],
+    """SELECT o.*, c.name AS customer_name FROM orders o
+       JOIN customers c ON c.id = o.customer_id
+       WHERE o.created_at > $1""",
+    [cutoffDate.toIso()],
     orderWithCustomerFromRow
 )
 ```
