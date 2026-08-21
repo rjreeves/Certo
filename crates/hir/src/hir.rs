@@ -323,6 +323,18 @@ pub enum HirPat {
     /// function body).
     Record { fields: Vec<HirPat>, field_names: Vec<String>, field_types: Vec<Ty> },
     Or(Box<HirPat>, Box<HirPat>),
+    /// `[head, ...tail]` — BACKLOG item 195. Unlike `Tuple` (a list's own
+    /// length isn't statically known the way a tuple's arity is), this is
+    /// a genuinely *fallible* structural pattern: MIR must emit a real
+    /// runtime length check and fall through to the next arm when the
+    /// scrutinee is too short, not just extract fields unconditionally.
+    /// `elem_ty` is the list's own element type — carried explicitly (like
+    /// `Constructor`/`Record`'s own `field_types`) so MIR can declare
+    /// `tail`'s bound local as the real `List<elem_ty>` (a `CertoList*` in
+    /// C) instead of the generic `Ty::Error` fallback (`int64_t`): tail is
+    /// itself a real list, not a scalar-ish value that happens to survive
+    /// an `int64_t` round-trip the way `Tuple`'s own elements do.
+    List { head: Vec<HirPat>, tail: Option<Box<HirPat>>, elem_ty: Ty },
 }
 
 #[derive(Debug, Clone)]

@@ -136,6 +136,78 @@ fn generic_call_unboxes_resolved_bare_return_via_unbox_some() {
 }
 
 // ------------------------------------------------------------------ //
+// List rest-pattern `[head, ...tail]` — BACKLOG item 195
+// ------------------------------------------------------------------ //
+
+fn has_global_call(mf: &crate::MirFn, name: &str) -> bool {
+    mf.blocks.iter().any(|bb| matches!(&bb.terminator,
+        Some(Terminator::Call { func: Operand::Global(g), .. }) if g == name))
+}
+
+#[test]
+fn list_pattern_with_tail_calls_len_get_and_slice() {
+    let mf = mir_fn("module A\nfn f(xs: List<Int>): Int = match xs {\n [a, b, ...rest] => a,\n _ => 0\n}");
+    assert!(has_global_call(&mf, "List.len"), "expected a List.len call for the runtime length check");
+    assert!(has_global_call(&mf, "List.getOrPanic"), "expected List.getOrPanic calls for the head elements");
+    assert!(has_global_call(&mf, "List.slice"), "expected a List.slice call for the tail binding");
+}
+
+#[test]
+fn list_pattern_without_tail_never_calls_slice() {
+    let mf = mir_fn("module A\nfn f(xs: List<Int>): Int = match xs {\n [a, b] => a,\n _ => 0\n}");
+    assert!(has_global_call(&mf, "List.len"), "expected a List.len call for the runtime length check");
+    assert!(!has_global_call(&mf, "List.slice"), "no `...rest` in the pattern — must not call List.slice at all");
+}
+
+#[test]
+fn list_pattern_with_tail_uses_gteq_length_check() {
+    // With `...tail`, any length >= head.len() must match (the rest becomes
+    // tail) — an exact-length `==` check here would wrongly reject a longer
+    // list instead of binding the extra elements to `rest`.
+    let mf = mir_fn("module A\nfn f(xs: List<Int>): Int = match xs {\n [a, ...rest] => a,\n _ => 0\n}");
+    let has_gteq = mf.blocks.iter().any(|bb| bb.stmts.iter().any(|s| matches!(s,
+        MirStmt::Assign { rvalue: Rvalue::BinOp { op: certo_hir::BinOp::GtEq, .. }, .. }
+    )));
+    assert!(has_gteq, "expected a >= length comparison when `...tail` is present");
+}
+
+#[test]
+fn list_pattern_without_tail_uses_exact_eq_length_check() {
+    let mf = mir_fn("module A\nfn f(xs: List<Int>): Int = match xs {\n [a, b] => a,\n _ => 0\n}");
+    let has_eq = mf.blocks.iter().any(|bb| bb.stmts.iter().any(|s| matches!(s,
+        MirStmt::Assign { rvalue: Rvalue::BinOp { op: certo_hir::BinOp::Eq, .. }, .. }
+    )));
+    let has_gteq = mf.blocks.iter().any(|bb| bb.stmts.iter().any(|s| matches!(s,
+        MirStmt::Assign { rvalue: Rvalue::BinOp { op: certo_hir::BinOp::GtEq, .. }, .. }
+    )));
+    assert!(has_eq, "expected an exact == length comparison with no `...tail`");
+    assert!(!has_gteq, "must not use >= when the pattern has no `...tail`");
+}
+
+#[test]
+fn list_pattern_float_head_element_gets_unboxed() {
+    // Regression for the confirmed crash: `certo_list_get_or_panic` always
+    // returns a raw `void*` — a `Float` element (too wide for a
+    // pointer-sized generic slot) needs a real `Rvalue::Unbox` afterward,
+    // not a direct assignment, or the C compiler rejects assigning `void*`
+    // straight into a `double`-typed local.
+    let mf = mir_fn("module A\nfn f(xs: List<Float>): Float = match xs {\n [a, ...rest] => a,\n _ => 0.0\n}");
+    let has_unbox = mf.blocks.iter().any(|bb| bb.stmts.iter().any(|s| matches!(s,
+        MirStmt::Assign { rvalue: Rvalue::Unbox { .. }, .. }
+    )));
+    assert!(has_unbox, "expected an Unbox for the Float head element");
+}
+
+#[test]
+fn list_pattern_int_head_element_does_not_get_unboxed() {
+    let mf = mir_fn("module A\nfn f(xs: List<Int>): Int = match xs {\n [a, ...rest] => a,\n _ => 0\n}");
+    let has_unbox = mf.blocks.iter().any(|bb| bb.stmts.iter().any(|s| matches!(s,
+        MirStmt::Assign { rvalue: Rvalue::Unbox { .. }, .. }
+    )));
+    assert!(!has_unbox, "Int is pointer-sized — no unbox should be needed");
+}
+
+// ------------------------------------------------------------------ //
 // Cooperative-cancellation checkpoint for spawn worker loops — BACKLOG item 186
 // ------------------------------------------------------------------ //
 

@@ -975,6 +975,104 @@ fn val_record_destructure_gives_each_field_its_real_declared_type() {
     assert_eq!(price_ty, Ty::Float);
 }
 
+// ------------------------------------------------------------------ //
+// List rest-pattern `[head, ...tail]` — BACKLOG item 195
+// ------------------------------------------------------------------ //
+
+#[test]
+fn val_list_rest_pattern_binds_each_head_element_and_tail_with_real_types() {
+    // Regression for the confirmed crash: this used to fall into the
+    // generic "complex pattern" stub, which dropped every binding —
+    // `head`/`tail` referenced further down had no local at all,
+    // producing an undeclared-identifier error in the generated C.
+    let m = lower(
+        "module A\n\
+         fn f(xs: List<Float>): Float = {\n\
+         \x20   val [head, ...tail] = xs\n\
+         \x20   head\n\
+         }"
+    );
+    let HirItem::Fn(f) = m.items.iter().find(|it| matches!(it, HirItem::Fn(f) if f.name == "f")).unwrap() else { unreachable!() };
+    let HirExprKind::Block { stmts, .. } = &f.body.as_ref().unwrap().kind else { panic!("expected a block body") };
+    let head_ty = stmts.iter().find_map(|s| match s {
+        crate::hir::HirStmt::Let { name, ty, .. } if name == "head" => Some(ty.clone()),
+        _ => None,
+    }).expect("expected a `head` binding");
+    let tail_ty = stmts.iter().find_map(|s| match s {
+        crate::hir::HirStmt::Let { name, ty, .. } if name == "tail" => Some(ty.clone()),
+        _ => None,
+    }).expect("expected a `tail` binding");
+    // `head`'s real element type (`Float`), not the generic `Ty::Error`
+    // fallback that would silently reinterpret its raw bits as an Int.
+    assert_eq!(head_ty, Ty::Float);
+    // `tail` is the *same* `List<Float>` type as the whole value, not a
+    // smaller/different type.
+    assert_eq!(tail_ty, Ty::List(Box::new(Ty::Float)));
+}
+
+#[test]
+fn val_list_pattern_with_no_tail_still_binds_head_elements() {
+    let m = lower(
+        "module A\n\
+         fn f(xs: List<Int>): Int = {\n\
+         \x20   val [a, b] = xs\n\
+         \x20   a + b\n\
+         }"
+    );
+    let HirItem::Fn(f) = m.items.iter().find(|it| matches!(it, HirItem::Fn(f) if f.name == "f")).unwrap() else { unreachable!() };
+    let HirExprKind::Block { stmts, .. } = &f.body.as_ref().unwrap().kind else { panic!("expected a block body") };
+    for name in ["a", "b"] {
+        let ty = stmts.iter().find_map(|s| match s {
+            crate::hir::HirStmt::Let { name: n, ty, .. } if n == name => Some(ty.clone()),
+            _ => None,
+        }).unwrap_or_else(|| panic!("expected a `{name}` binding"));
+        assert_eq!(ty, Ty::Int, "`{name}` should have Int's real type, not Ty::Error");
+    }
+}
+
+#[test]
+fn list_rest_pattern_in_match_arm_lowers_to_hirpat_list_with_real_elem_ty() {
+    let m = lower(
+        "module A\n\
+         fn f(xs: List<Float>): Float = match xs {\n\
+         \x20   [a, ...rest] => a,\n\
+         \x20   _ => 0.0\n\
+         }"
+    );
+    let HirItem::Fn(f) = m.items.iter().find(|it| matches!(it, HirItem::Fn(f) if f.name == "f")).unwrap() else { unreachable!() };
+    let HirExprKind::Match { arms, .. } = &f.body.as_ref().unwrap().kind else { panic!("expected a match expr") };
+    match &arms[0].pat {
+        crate::hir::HirPat::List { head, tail, elem_ty } => {
+            assert_eq!(elem_ty, &Ty::Float);
+            assert_eq!(head.len(), 1);
+            assert!(matches!(&head[0], crate::hir::HirPat::Bind { name, .. } if name == "a"));
+            let Some(tail_pat) = tail else { panic!("expected a bound tail pattern") };
+            assert!(matches!(tail_pat.as_ref(), crate::hir::HirPat::Bind { name, .. } if name == "rest"));
+        }
+        other => panic!("expected HirPat::List, got {other:?}"),
+    }
+}
+
+#[test]
+fn list_pattern_with_no_rest_lowers_with_no_tail() {
+    let m = lower(
+        "module A\n\
+         fn f(xs: List<Int>): Int = match xs {\n\
+         \x20   [a, b] => a + b,\n\
+         \x20   _ => 0\n\
+         }"
+    );
+    let HirItem::Fn(f) = m.items.iter().find(|it| matches!(it, HirItem::Fn(f) if f.name == "f")).unwrap() else { unreachable!() };
+    let HirExprKind::Match { arms, .. } = &f.body.as_ref().unwrap().kind else { panic!("expected a match expr") };
+    match &arms[0].pat {
+        crate::hir::HirPat::List { head, tail, .. } => {
+            assert_eq!(head.len(), 2);
+            assert!(tail.is_none(), "no `...rest` in the pattern — tail must be None");
+        }
+        other => panic!("expected HirPat::List, got {other:?}"),
+    }
+}
+
 #[test]
 fn type_prefixed_record_pattern_in_match_arm_lowers_to_hirpat_record() {
     let m = lower(
