@@ -770,6 +770,13 @@ pub fn seed_stdlib(env: &mut TypeEnv, counter: &mut u32) {
     def!("Timestamp.parse",      fn1(Ty::Text, ts()));
     def!("Timestamp.inTimezone", fn2(ts(), tz(), Ty::Text));
     def!("Timestamp.formatTz",   Ty::Fn { params: vec![ts(), Ty::Text, tz()], ret: Box::new(Ty::Text) });
+    // BACKLOG item 214 — `Timestamp` had no path to a `Duration` at all
+    // (bare `timestamp - timestamp` is now rejected, see
+    // `OpaqueTemporalArithmetic`/E0218); mirrors `DateTime.diff` exactly,
+    // reusing its already-correct C implementation via the same
+    // `certo_timestamp_*` → `certo_datetime_*` bridge every other
+    // `Timestamp.*` function above already uses.
+    def!("Timestamp.diff",       fn2(ts(), ts(), dur()));
     def!("Date.of",              Ty::Fn { params: vec![Ty::Int, Ty::Int, Ty::Int], ret: Box::new(date()) });
 
     // ---------------------------------------------------------------- //

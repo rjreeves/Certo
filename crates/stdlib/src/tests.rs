@@ -1,7 +1,7 @@
 use certo_typeck::{Ty, TypeEnv};
 use crate::seed::seed_stdlib;
 use crate::{CORE_C, BYTES_C, CREDENTIAL_C, COLLECTIONS_C, CHANNEL_C, RESULT_C, TEXT_C, DATETIME_C, MONEY_C,
-            ENV_C, FILE_C, PATH_C, PROCESS_C, JSON_C, HTTP_C, DB_C,
+            ENV_C, FILE_C, PATH_C, PROCESS_C, JSON_C, HTTP_C, DB_C, REGEX_C,
             full_c_runtime};
 
 fn seeded_env() -> TypeEnv {
@@ -593,6 +593,57 @@ fn datetime_c_contains_timestamp_bridge_and_constructors() {
         "missing Timestamp.inTimezone bridge");
     assert!(DATETIME_C.contains("#define certo_timestamp_format_tz   certo_date_time_format_tz"),
         "missing Timestamp.formatTz bridge");
+}
+
+#[test]
+fn datetime_c_contains_timestamp_diff_bridge() {
+    // BACKLOG item 214 — Timestamp had no path to a Duration at all before
+    // this; Timestamp.diff reuses DateTime.diff's real implementation via
+    // the same bridge pattern as the other Timestamp.* functions above.
+    assert!(DATETIME_C.contains("#define certo_timestamp_diff        certo_datetime_diff"),
+        "missing Timestamp.diff bridge");
+}
+
+#[test]
+fn regex_captures_reassigns_the_pushed_list() {
+    // BACKLOG item 213 — certo_list_push returns a *new* list (functional
+    // update, see certo_list_flat_map's own identical convention); the
+    // previous code called it as a bare statement and discarded the
+    // result, so certo_regex_captures always returned the original empty
+    // list regardless of real matches.
+    assert!(REGEX_C.contains("list = certo_list_push(list, s);"),
+        "certo_regex_captures must reassign list = certo_list_push(...), not discard it");
+}
+
+#[test]
+fn regex_split_reassigns_every_pushed_list() {
+    let n = REGEX_C.matches("list = certo_list_push(list, seg);").count();
+    assert_eq!(n, 4, "certo_regex_split has 4 push call sites, all must reassign `list`");
+}
+
+#[test]
+fn regex_c_no_longer_discards_list_push_results() {
+    // Every `certo_list_push(list, ...)` call site in this file must be
+    // reassigned (`list = certo_list_push(list, ...)`) — a bare,
+    // non-reassigning call would mean this bug is still present somewhere.
+    let total = REGEX_C.matches("certo_list_push(list,").count();
+    let reassigned = REGEX_C.matches("list = certo_list_push(list,").count();
+    assert_eq!(total, reassigned, "found a certo_list_push(list, ...) call whose result is discarded");
+    assert_eq!(total, 5, "expected exactly 5 certo_list_push call sites (1 in captures, 4 in split)");
+}
+
+#[test]
+fn timestamp_diff_returns_duration() {
+    let env = seeded_env();
+    let ts  = Ty::Named { name: "Timestamp".into(), args: vec![] };
+    let dur = Ty::Named { name: "Duration".into(), args: vec![] };
+    match env.lookup("Timestamp.diff").unwrap() {
+        Ty::Fn { params, ret } => {
+            assert_eq!(params, &[ts.clone(), ts]);
+            assert_eq!(ret.as_ref(), &dur);
+        }
+        other => panic!("expected Fn, got {:?}", other),
+    }
 }
 
 #[test]
