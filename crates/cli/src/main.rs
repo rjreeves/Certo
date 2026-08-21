@@ -1492,6 +1492,16 @@ pub(crate) fn type_error_to_diagnostic(e: &TypeError) -> Diagnostic {
                 .with_note(format!("remove `{field}: ...` — it's computed automatically from `{type_name}`'s other fields"))
         }
 
+        TypeErrorKind::ElseTypeMismatch { rule_name, expected, found } => {
+            let names = assign_var_names(&[expected, found]);
+            Diagnostic::error("E0703",
+                format!("rule `{}`'s `else` branch produces `{}`, but this validator declares `errors {}`",
+                    rule_name, found.display_named(&names), expected.display_named(&names)))
+                .with_span(e.span)
+                .with_label(format!("this has type `{}`", found.display_named(&names)))
+                .with_note(format!("change the error variant to one of `{}`, or change the validator's `errors` declaration", expected.display_named(&names)))
+        }
+
         TypeErrorKind::TemporalNotDuration { found } => {
             let names = assign_var_names(&[found]);
             Diagnostic::error("E0708",

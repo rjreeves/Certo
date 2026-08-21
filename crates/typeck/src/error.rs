@@ -74,6 +74,15 @@ pub enum TypeErrorKind {
     /// instead.
     SqlInjectionRisk { fn_name: String },
 
+    /// E0703 — a validator rule's `else` clause produces a type other than
+    /// the validator's own declared `errors` type (BACKLOG item 219).
+    /// Deliberately its own variant, not a reuse of `Mismatch`/E0200 —
+    /// matches this codebase's established convention for validator-
+    /// specific diagnostics (E0700-E0702 in `crates/resolve`, E0708-E0710
+    /// below), and names the offending rule for a more actionable message
+    /// than a bare type mismatch would.
+    ElseTypeMismatch { rule_name: String, expected: Ty, found: Ty },
+
     /// E0708 — temporal declaration body does not resolve to Duration.
     TemporalNotDuration { found: Ty },
 
@@ -126,6 +135,9 @@ impl TypeError {
                 format!("E0215: `{}` is not Loggable/Serializable — passed to `{}`", ty.display(), fn_name),
             TypeErrorKind::SqlInjectionRisk { fn_name } =>
                 format!("E0216: an interpolated f-string was passed directly as the `sql` argument to `{}` — use `?` placeholders and pass values via `params` instead", fn_name),
+            TypeErrorKind::ElseTypeMismatch { rule_name, expected, found } =>
+                format!("E0703: rule `{}`'s `else` branch produces `{}`, but this validator declares `errors {}`",
+                    rule_name, found.display(), expected.display()),
             TypeErrorKind::TemporalNotDuration { found } =>
                 format!("E0708: temporal body must resolve to Duration, found `{}`", found.display()),
             TypeErrorKind::AgeOnNonTimestamp { found } =>
