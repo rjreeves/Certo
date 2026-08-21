@@ -34,6 +34,20 @@ pub fn emit_module(module: &Module, opts: &CodegenOptions) -> String {
     // value compiles to the value itself. Populated during type emission below.
     let mut nullary_enums: std::collections::HashSet<String> = std::collections::HashSet::new();
 
+    // BACKLOG item 201 — type names that got a real, generated
+    // `certo_eq_<Name>` structural-equality function (see `build_type_shapes`/
+    // `ty_is_comparable` below); `emit_binop`'s `BinOp::Eq`/`NotEq` consult
+    // this to call it instead of emitting an invalid bare C `==` on a struct.
+    let mut eq_types: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    // A nullary variant's own name → its parent sum type's name, for every
+    // variant of every sum type (not just mixed ones) — BACKLOG item 201.
+    // A bare nullary-variant *constant* reference (`Origin == Origin`) is
+    // `Operand::Global`, which has no `MirLocalDecl` to recover a type
+    // from; `emit_binop` consults this to find the parent type (and from
+    // there, whether it's in `eq_types`) when that happens.
+    let mut variant_parent: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+
     // Build set of pub function names for export annotation.
     let pub_fns: std::collections::HashSet<&str> = module.decls.iter()
         .filter_map(|d| if let Decl::Fn(f) = &d.node { Some(f) } else { None })
@@ -71,6 +85,12 @@ pub fn emit_module(module: &Module, opts: &CodegenOptions) -> String {
 
     writeln!(out).unwrap();
 
+    // BACKLOG item 201 — which types can get a real, generated
+    // `certo_eq_<Name>` structural-equality function, computed once up
+    // front so field comparability can look *forward* too, not just
+    // backward through already-emitted types.
+    let type_shapes = build_type_shapes(module);
+
     // --- Struct definitions from `type` declarations ---
     for sdecl in &module.decls {
         if let Decl::Type(t) = &sdecl.node {
@@ -84,10 +104,41 @@ pub fn emit_module(module: &Module, opts: &CodegenOptions) -> String {
                     }
                     writeln!(out, "}} {};", c_ident(&t.name.node)).unwrap();
                     writeln!(out).unwrap();
+
+                    // BACKLOG item 201 — a plain-value struct's `==`/`!=`
+                    // don't compile in C at all (`invalid operands to
+                    // binary expression`), directly contradicting the
+                    // spec's own §8.4 "equality is structural" claim.
+                    // Only emitted when every field (recursively) is one
+                    // this function knows how to compare correctly —
+                    // generic type params, and List/Option/Map/Tuple/Fn-
+                    // typed fields, are deliberately excluded (a `void*`
+                    // slot has no single correct comparison without the
+                    // same generic-erasure machinery item 200's own design
+                    // sketch describes) — `==` on such a type is left
+                    // exactly as broken as before, a clean C compile
+                    // error, not a silently wrong comparison.
+                    if type_params.is_empty() && rec.fields.iter().all(|f| !f.optional && ty_is_comparable(&f.ty.node, &type_shapes)) {
+                        let tname = c_ident(&t.name.node);
+                        writeln!(out, "static inline bool certo_eq_{tname}({tname} a, {tname} b) {{").unwrap();
+                        let parts: Vec<String> = rec.fields.iter()
+                            .map(|f| emit_field_cmp(&format!("a.{}", f.name.node), &format!("b.{}", f.name.node), &f.ty.node, &type_shapes))
+                            .collect();
+                        let body = if parts.is_empty() { "true".to_string() } else { parts.join(" && ") };
+                        writeln!(out, "    return {body};").unwrap();
+                        writeln!(out, "}}").unwrap();
+                        writeln!(out).unwrap();
+                        eq_types.insert(t.name.node.clone());
+                    }
                 }
                 TypeBody::Sum(variants) => {
                     let tname = c_ident(&t.name.node);
                     let has_payload = variants.iter().any(|v| !v.fields.is_empty());
+                    for v in variants {
+                        if v.fields.is_empty() {
+                            variant_parent.insert(v.name.node.clone(), t.name.node.clone());
+                        }
+                    }
                     if has_payload {
                         // Tagged union: a tag enum plus a struct with a payload union.
                         writeln!(out, "typedef enum {{").unwrap();
@@ -112,6 +163,37 @@ pub fn emit_module(module: &Module, opts: &CodegenOptions) -> String {
                         }
                         writeln!(out, "    }};").unwrap();
                         writeln!(out, "}} {};", tname).unwrap();
+
+                        // BACKLOG item 201 — same structural-equality
+                        // treatment as records, just tag-then-payload:
+                        // two values only compare equal when the active
+                        // variant matches *and* that variant's own fields
+                        // (recursively) do. A variant with no fields needs
+                        // nothing further once the tag already matched.
+                        let comparable = type_params.is_empty()
+                            && variants.iter().all(|v| v.fields.iter().all(|f| ty_is_comparable(&f.ty.node, &type_shapes)));
+                        if comparable {
+                            writeln!(out, "static inline bool certo_eq_{tname}({tname} a, {tname} b) {{").unwrap();
+                            writeln!(out, "    if (a.tag != b.tag) return false;").unwrap();
+                            writeln!(out, "    switch (a.tag) {{").unwrap();
+                            for v in variants {
+                                let member = c_ident(&v.name.node).to_lowercase();
+                                let cmp = if v.fields.is_empty() {
+                                    "true".to_string()
+                                } else {
+                                    v.fields.iter().enumerate().map(|(i, f)| {
+                                        let fname = f.name.as_ref().map(|n| n.node.clone()).unwrap_or_else(|| format!("f{i}"));
+                                        emit_field_cmp(&format!("a.{member}.{fname}"), &format!("b.{member}.{fname}"), &f.ty.node, &type_shapes)
+                                    }).collect::<Vec<_>>().join(" && ")
+                                };
+                                writeln!(out, "        case {tname}_{}: return {cmp};", c_ident(&v.name.node)).unwrap();
+                            }
+                            writeln!(out, "        default: return true;").unwrap();
+                            writeln!(out, "    }}").unwrap();
+                            writeln!(out, "}}").unwrap();
+                            writeln!(out).unwrap();
+                            eq_types.insert(t.name.node.clone());
+                        }
                     } else {
                         // All-nullary: a plain integer enum, so values are pointer-sized
                         // and can flow through Result / List / tuple slots unchanged.
@@ -332,7 +414,7 @@ pub fn emit_module(module: &Module, opts: &CodegenOptions) -> String {
 
     // Emit lifted lambda bodies before user functions.
     for mir in &lifted_fns {
-        emit_fn_with_prefix(mir, "static ", &nullary_enums, line_map.as_ref(), &mut out);
+        emit_fn_with_prefix(mir, "static ", &nullary_enums, &eq_types, &variant_parent, line_map.as_ref(), &mut out);
         writeln!(out).unwrap();
     }
     // `__certo_init_<name>` function *bodies* are deliberately NOT emitted
@@ -360,7 +442,7 @@ pub fn emit_module(module: &Module, opts: &CodegenOptions) -> String {
             HirItem::Fn(_) => {
                 if let Some((mir, name)) = mir_iter.next() {
                     let pfx = if pub_fns.contains(name) { export(name) } else { "" };
-                    emit_fn_with_prefix(&mir, pfx, &nullary_enums, line_map.as_ref(), &mut out);
+                    emit_fn_with_prefix(&mir, pfx, &nullary_enums, &eq_types, &variant_parent, line_map.as_ref(), &mut out);
                     writeln!(out).unwrap();
                 }
             }
@@ -379,7 +461,7 @@ pub fn emit_module(module: &Module, opts: &CodegenOptions) -> String {
                     // The init function's own body, emitted here (not in one
                     // early batch) so any *other* global it references has
                     // already been declared, per the doc comment above.
-                    emit_fn_with_prefix(*init_mir, "static ", &nullary_enums, line_map.as_ref(), &mut out);
+                    emit_fn_with_prefix(*init_mir, "static ", &nullary_enums, &eq_types, &variant_parent, line_map.as_ref(), &mut out);
                     writeln!(out).unwrap();
                 } else {
                     // Use the expression type when the declared type is unknown (Ty::Error).
@@ -556,8 +638,99 @@ fn emit_statemachine(sm: &StateMachineDecl, out: &mut String) {
 }
 
 // ------------------------------------------------------------------ //
-// Helpers
+// Structural equality (`==`/`!=` on records/enums) — BACKLOG item 201
 // ------------------------------------------------------------------ //
+
+/// The shape of a user-declared `type` needed to decide whether its own
+/// values can be compared with `==`, and if so, how.
+enum TypeShape<'a> {
+    Record(&'a [certo_ast::decl::RecordFieldDef]),
+    NullaryEnum,
+    PayloadEnum(&'a [certo_ast::decl::SumVariant]),
+}
+
+/// One pass over every `type` declaration, before any C is emitted, so
+/// `ty_is_comparable` can look *forward* to a type declared later in the
+/// file too, not just backward through whatever's already been emitted —
+/// deliberately not memoized/depth-guarded against a cyclic type
+/// referencing itself by value (`type A = { b: B }`, `type B = { a: A }`):
+/// such a type would already be an infinite-size C struct and fail to
+/// compile at the struct-definition stage above, before this code ever
+/// runs, so it isn't a real case this needs to defend against.
+fn build_type_shapes(module: &Module) -> std::collections::HashMap<String, TypeShape<'_>> {
+    let mut shapes = std::collections::HashMap::new();
+    for sdecl in &module.decls {
+        if let Decl::Type(t) = &sdecl.node {
+            if !t.type_params.is_empty() { continue; } // generic — not comparable, see ty_is_comparable
+            match &t.body {
+                TypeBody::Record(rec) => { shapes.insert(t.name.node.clone(), TypeShape::Record(&rec.fields)); }
+                TypeBody::Sum(variants) => {
+                    let has_payload = variants.iter().any(|v| !v.fields.is_empty());
+                    shapes.insert(t.name.node.clone(),
+                        if has_payload { TypeShape::PayloadEnum(variants) } else { TypeShape::NullaryEnum });
+                }
+                TypeBody::Alias(_) => {}
+            }
+        }
+    }
+    shapes
+}
+
+/// Can a value of this type be compared with `==`/`!=` at all, given this
+/// codebase's current C representation? Scalars/Text/Decimal/UUID always
+/// can; a user record/enum can when every one of its own fields
+/// (recursively) can. Deliberately conservative — an `optional` field, a
+/// generic type param slot (erased to `void*`), and every
+/// List/Option/Map/Tuple/Fn-typed field are all "no": each is stored as an
+/// opaque pointer with no single correct comparison without the same
+/// generic-erasure machinery item 200's own design sketch describes.
+fn ty_is_comparable(te: &certo_ast::types::TypeExpr, shapes: &std::collections::HashMap<String, TypeShape<'_>>) -> bool {
+    use certo_ast::types::TypeExpr;
+    match te {
+        TypeExpr::Named { path, args, .. } => {
+            if !args.is_empty() { return false; } // List<T>/Map<K,V>/a user generic instantiation
+            let name = path.segments.last().map(|s| s.node.as_str()).unwrap_or("");
+            match name {
+                "Int" | "Float" | "Bool" | "Unit" | "Text" | "BoundedText" | "Decimal" | "UUID" => true,
+                _ => match shapes.get(name) {
+                    Some(TypeShape::Record(fields)) =>
+                        fields.iter().all(|f| !f.optional && ty_is_comparable(&f.ty.node, shapes)),
+                    Some(TypeShape::NullaryEnum) => true,
+                    Some(TypeShape::PayloadEnum(variants)) =>
+                        variants.iter().all(|v| v.fields.iter().all(|f| ty_is_comparable(&f.ty.node, shapes))),
+                    None => false, // unknown name (a stdlib opaque type like DateTime, or truly undeclared)
+                }
+            }
+        }
+        TypeExpr::DecimalParam { .. } => true,
+        TypeExpr::BoundedTextParam { .. } => true,
+        _ => false, // Option/Tuple/Fn/anonymous Record/Ptr/Param — not comparable
+    }
+}
+
+/// The C expression comparing `a`/`b` of this type — only ever called
+/// after `ty_is_comparable` has already confirmed it's possible.
+fn emit_field_cmp(a: &str, b: &str, te: &certo_ast::types::TypeExpr, shapes: &std::collections::HashMap<String, TypeShape<'_>>) -> String {
+    use certo_ast::types::TypeExpr;
+    match te {
+        TypeExpr::Named { path, .. } => {
+            let name = path.segments.last().map(|s| s.node.as_str()).unwrap_or("");
+            match name {
+                "Text" | "BoundedText" => format!("certo_text_eq({a}, {b})"),
+                "UUID" => format!("certo_uuid_eq({a}, {b})"),
+                "Decimal" => format!("certo_decimal_eq({a}, {b})"),
+                _ => match shapes.get(name) {
+                    Some(TypeShape::Record(_)) | Some(TypeShape::PayloadEnum(_)) =>
+                        format!("certo_eq_{}({a}, {b})", c_ident(name)),
+                    _ => format!("({a} == {b})"), // Int/Float/Bool/Unit, or a nullary enum (already a plain int)
+                }
+            }
+        }
+        TypeExpr::DecimalParam { .. } => format!("certo_decimal_eq({a}, {b})"),
+        TypeExpr::BoundedTextParam { .. } => format!("certo_text_eq({a}, {b})"),
+        _ => unreachable!("emit_field_cmp called on a type ty_is_comparable rejected"),
+    }
+}
 
 fn ast_ty_to_c_str(te: &certo_ast::types::TypeExpr) -> String {
     use certo_ast::types::TypeExpr;

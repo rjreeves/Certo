@@ -707,6 +707,14 @@ fn uuid_c_contains_real_bodies_not_just_forward_declarations() {
     assert!(UUID_C.contains("certo_uuid_t certo_uuid_new(void) {"), "missing certo_uuid_new body");
 }
 
+#[test]
+fn uuid_c_contains_eq_body() {
+    // BACKLOG item 201 — certo_uuid_t had no `==` wiring at all before
+    // this; found while scoping structural equality for records (Money
+    // has a UUID-shaped sibling gap: Decimal).
+    assert!(UUID_C.contains("bool certo_uuid_eq(certo_uuid_t a, certo_uuid_t b) {"), "missing certo_uuid_eq body");
+}
+
 // ------------------------------------------------------------------ //
 // Counter advances: seed_stdlib doesn't trample the caller's counter
 // ------------------------------------------------------------------ //

@@ -1,9 +1,9 @@
-use std::collections::HashSet;
+use std::collections::{HashSet, HashMap};
 use std::fmt::Write as FmtWrite;
 use certo_mir::{MirFn, MirStmt, MirLocalDecl, Rvalue, Operand, MirConst, Terminator, AggregateKind};
 use certo_hir::{BinOp, UnOp};
 use certo_typeck::Ty;
-use crate::ty_to_c::{ty_to_c, ret_ty_to_c, mangle};
+use crate::ty_to_c::{ty_to_c, ret_ty_to_c, mangle, c_ident};
 
 // ------------------------------------------------------------------ //
 // Source-mapped `#line` directives for `certo test --coverage` (BACKLOG
@@ -234,14 +234,14 @@ fn unbox_value(slot: &str, ty: &Ty) -> String {
 /// (e.g. `"CERTO_EXPORT "` for shared library builds). `line_map` is `Some`
 /// only for `certo test --coverage` builds (BACKLOG item 126) — see the
 /// `LineMap` doc comment above.
-pub fn emit_fn_with_prefix(f: &MirFn, prefix: &str, nullary_enums: &HashSet<String>, line_map: Option<&LineMap>, out: &mut String) {
+pub fn emit_fn_with_prefix(f: &MirFn, prefix: &str, nullary_enums: &HashSet<String>, eq_types: &HashSet<String>, variant_parent: &HashMap<String, String>, line_map: Option<&LineMap>, out: &mut String) {
     // Temporarily intercept the signature line to inject the prefix.
     let mut body = String::new();
-    emit_fn_inner(f, prefix, nullary_enums, line_map, &mut body);
+    emit_fn_inner(f, prefix, nullary_enums, eq_types, variant_parent, line_map, &mut body);
     out.push_str(&body);
 }
 
-fn emit_fn_inner(f: &MirFn, prefix: &str, nullary_enums: &HashSet<String>, line_map: Option<&LineMap>, out: &mut String) {
+fn emit_fn_inner(f: &MirFn, prefix: &str, nullary_enums: &HashSet<String>, eq_types: &HashSet<String>, variant_parent: &HashMap<String, String>, line_map: Option<&LineMap>, out: &mut String) {
     // Determine return type from the _ret local (index 0).
     let ret_ty = f.locals.first().map(|l| &l.ty).unwrap_or(&Ty::Unit);
     let ret_c  = ret_ty_to_c(ret_ty);
@@ -291,7 +291,7 @@ fn emit_fn_inner(f: &MirFn, prefix: &str, nullary_enums: &HashSet<String>, line_
                     last_line = None;
                 }
             }
-            emit_stmt(stmt, &f.locals, &fn_cname, &mut spawn_idx, nullary_enums, out);
+            emit_stmt(stmt, &f.locals, &fn_cname, &mut spawn_idx, nullary_enums, eq_types, variant_parent, out);
         }
         if let Some(term) = &bb.terminator {
             emit_terminator(term, ret_ty, &f.locals, out);
@@ -311,7 +311,7 @@ fn emit_fn_inner(f: &MirFn, prefix: &str, nullary_enums: &HashSet<String>, line_
     writeln!(out, "}}").unwrap();
 }
 
-fn emit_stmt(stmt: &MirStmt, locals: &[MirLocalDecl], fn_cname: &str, spawn_idx: &mut u32, nullary_enums: &HashSet<String>, out: &mut String) {
+fn emit_stmt(stmt: &MirStmt, locals: &[MirLocalDecl], fn_cname: &str, spawn_idx: &mut u32, nullary_enums: &HashSet<String>, eq_types: &HashSet<String>, variant_parent: &HashMap<String, String>, out: &mut String) {
     let MirStmt::Assign { dest, rvalue, .. } = stmt;
     let lhs = local_name(*dest);
     match rvalue {
@@ -326,7 +326,7 @@ fn emit_stmt(stmt: &MirStmt, locals: &[MirLocalDecl], fn_cname: &str, spawn_idx:
                 let rop = emit_operand(r);
                 writeln!(out, "    {lhs} = (({lop}) != 0) ? *(__typeof__({lhs})*)({lop}) : ({rop});").unwrap();
             } else {
-                writeln!(out, "    {} = {};", lhs, emit_binop(op, l, r, locals)).unwrap();
+                writeln!(out, "    {} = {};", lhs, emit_binop(op, l, r, locals, eq_types, variant_parent)).unwrap();
             }
         }
         Rvalue::UnOp { op, arg } => {
@@ -664,7 +664,73 @@ fn coerce_to_text(op: &Operand, expr: String, locals: &[MirLocalDecl]) -> String
     }
 }
 
-fn emit_binop(op: &BinOp, l: &Operand, r: &Operand, locals: &[MirLocalDecl]) -> String {
+/// The Certo-level type *name* of an operand, when it's a plain named type
+/// (record or enum) — used only to decide whether `emit_eq` should call a
+/// generated `certo_eq_<Name>` function. Handles one case `operand_ty`
+/// itself can't: a bare nullary-variant *constant* of a mixed (some
+/// variants carry a payload, some don't) sum type is `Operand::Global`,
+/// not `Operand::Local`, so it has no `MirLocalDecl` to look its type up
+/// from at all — confirmed by direct testing (`Origin == Origin`, where
+/// `Origin` is a payload-free variant of a `Shape` that also has
+/// `Circle(radius: Float)`, failed to compile: `certo_origin`'s own
+/// static type is the *full* `Shape` struct, since a mixed enum's values
+/// are never the plain-int representation an *all*-nullary enum gets, but
+/// nothing recovered that). `variant_parent` (built in
+/// `crates/codegen/src/emit_module.rs` from the same sum-type declarations
+/// `eq_types` itself is derived from) closes that gap.
+fn operand_type_name(op: &Operand, locals: &[MirLocalDecl], variant_parent: &HashMap<String, String>) -> Option<String> {
+    if let Ty::Named { name, args } = operand_ty(op, locals) {
+        if args.is_empty() { return Some(name); }
+    }
+    if let Operand::Global(name) = op {
+        if let Some(parent) = variant_parent.get(name) {
+            return Some(parent.clone());
+        }
+    }
+    None
+}
+
+/// The real equality-comparison C expression for two operands of the same
+/// type, given what's known about it — BACKLOG item 201. `Text` was
+/// already handled this way (`certo_text_eq`); `Decimal`/`UUID` are both
+/// plain-value C structs that don't compile with a bare `==` either
+/// (confirmed: `d1 == d2` alone fails to compile, a separate pre-existing
+/// gap this closes too, found while scoping this item), and a
+/// user record/payload-enum gets its own generated `certo_eq_<Name>`
+/// (`eq_types`, built in `crates/codegen/src/emit_module.rs`) — anything
+/// else (scalars, nullary enums, and anything `eq_types` doesn't know
+/// about — List/Option/Map/Tuple/Fn-typed values, deliberately out of
+/// this item's scope, see item 200's own design sketch) falls back to the
+/// original bare `==`, unchanged.
+fn emit_eq(
+    l: &Operand, r: &Operand, locals: &[MirLocalDecl],
+    eq_types: &HashSet<String>, variant_parent: &HashMap<String, String>,
+    lhs: &str, rhs: &str,
+) -> String {
+    let ty = match operand_ty(l, locals) {
+        Ty::Error => operand_ty(r, locals),
+        other => other,
+    };
+    match &ty {
+        Ty::Text => return format!("certo_text_eq({lhs}, {rhs})"),
+        Ty::Decimal(_) => return format!("certo_decimal_eq({lhs}, {rhs})"),
+        Ty::Uuid => return format!("certo_uuid_eq({lhs}, {rhs})"),
+        _ => {}
+    }
+    let name = operand_type_name(l, locals, variant_parent)
+        .or_else(|| operand_type_name(r, locals, variant_parent));
+    if let Some(name) = name {
+        if eq_types.contains(&name) {
+            return format!("certo_eq_{}({lhs}, {rhs})", c_ident(&name));
+        }
+    }
+    format!("({lhs} == {rhs})")
+}
+
+fn emit_binop(
+    op: &BinOp, l: &Operand, r: &Operand, locals: &[MirLocalDecl],
+    eq_types: &HashSet<String>, variant_parent: &HashMap<String, String>,
+) -> String {
     let lhs = emit_operand(l);
     let rhs = emit_operand(r);
     match op {
@@ -674,20 +740,8 @@ fn emit_binop(op: &BinOp, l: &Operand, r: &Operand, locals: &[MirLocalDecl]) -> 
         BinOp::Div  => format!("({} / {})", lhs, rhs),
         BinOp::Rem  => format!("({} % {})", lhs, rhs),
         BinOp::Pow  => format!("certo_pow({}, {})", lhs, rhs),
-        BinOp::Eq   => {
-            if operand_is_text(l, locals) || operand_is_text(r, locals) {
-                format!("(certo_text_eq({}, {}))", lhs, rhs)
-            } else {
-                format!("({} == {})", lhs, rhs)
-            }
-        }
-        BinOp::NotEq => {
-            if operand_is_text(l, locals) || operand_is_text(r, locals) {
-                format!("(!certo_text_eq({}, {}))", lhs, rhs)
-            } else {
-                format!("({} != {})", lhs, rhs)
-            }
-        }
+        BinOp::Eq   => emit_eq(l, r, locals, eq_types, variant_parent, &lhs, &rhs),
+        BinOp::NotEq => format!("(!{})", emit_eq(l, r, locals, eq_types, variant_parent, &lhs, &rhs)),
         BinOp::Lt   => format!("({} < {})", lhs, rhs),
         BinOp::LtEq => format!("({} <= {})", lhs, rhs),
         BinOp::Gt   => format!("({} > {})", lhs, rhs),
