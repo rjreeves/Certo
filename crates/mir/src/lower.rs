@@ -1921,6 +1921,111 @@ fn lower_expr(expr: &HirExpr, b: &mut Builder) -> Operand {
                         b.terminate(Terminator::Goto(after_pat));
                         if arm.guard.is_some() { b.switch_to(after_pat); }
                     }
+                    HirPat::List { head, tail, elem_ty } => {
+                        // BACKLOG item 195 — `[head, ...tail]`. Unlike `Tuple`
+                        // (fixed arity, always matches) a list's length isn't
+                        // known statically, so this is the first genuinely
+                        // *fallible* structural pattern in this match
+                        // compiler: a real runtime length check, branching to
+                        // `next_arm_bb` (try the next arm) on failure, not
+                        // just unconditional field extraction.
+                        let len_local = b.declare_local("_len", Ty::Int);
+                        let after_len_bb = b.new_block();
+                        b.terminate(Terminator::Call {
+                            func: Operand::Global("List.len".into()),
+                            args: vec![scrut_op.clone()],
+                            dest: len_local,
+                            next: after_len_bb,
+                        });
+                        b.switch_to(after_len_bb);
+
+                        // With a `...tail`, any length >= head.len() matches
+                        // (the rest becomes tail); with no `...tail`, the
+                        // length must match exactly.
+                        let cmp = b.declare_local("_cmp", Ty::Bool);
+                        b.assign(cmp, Rvalue::BinOp {
+                            op:  if tail.is_some() { certo_hir::BinOp::GtEq } else { certo_hir::BinOp::Eq },
+                            lhs: Operand::Local(len_local),
+                            rhs: Operand::Const(MirConst::Int(head.len() as i64)),
+                        });
+                        let bind_bb = b.new_block();
+                        b.terminate(Terminator::If { cond: Operand::Local(cmp), true_bb: bind_bb, false_bb: next_arm_bb });
+                        b.switch_to(bind_bb);
+
+                        for (i, field_pat) in head.iter().enumerate() {
+                            if let HirPat::Bind { local, name: fname } = field_pat {
+                                // Declared as the real element type, not
+                                // `Ty::Error` — an `int64_t`-typed local
+                                // holding e.g. a raw `Int` value is fine for
+                                // arithmetic, but f-string interpolation and
+                                // other type-directed codegen need to *know*
+                                // it's `Int` to call `certo_int_to_text`
+                                // rather than passing the raw value straight
+                                // into a function expecting a real `Text`
+                                // pointer — the exact "known type thrown
+                                // away" bug class items 179/180/182/189/191
+                                // already fixed elsewhere, caught here by a
+                                // real end-to-end run before this shipped.
+                                //
+                                // A `Float` (or anything else too wide for a
+                                // pointer-sized generic slot) additionally
+                                // needs a real unbox after `getOrPanic`
+                                // returns its raw `void*` — the exact same
+                                // `List.getOrPanic`-then-`Rvalue::Unbox` idiom
+                                // `HirExprKind::For`'s own MIR lowering
+                                // already uses just above for this identical
+                                // reason (see its own comment, ~line 888).
+                                let elem_needs_unbox = matches!(elem_ty, Ty::Float) || elem_ty.needs_heap_box();
+                                let raw_ty = if elem_needs_unbox { Ty::Var(0) } else { elem_ty.clone() };
+                                let elem_raw = b.declare_local("_elem_raw", raw_ty);
+                                let next_bb = b.new_block();
+                                b.terminate(Terminator::Call {
+                                    func: Operand::Global("List.getOrPanic".into()),
+                                    args: vec![scrut_op.clone(), Operand::Const(MirConst::Int(i as i64))],
+                                    dest: elem_raw,
+                                    next: next_bb,
+                                });
+                                b.switch_to(next_bb);
+
+                                let elem_local = b.map_hir_local(*local, fname, elem_ty.clone());
+                                if elem_needs_unbox {
+                                    b.assign(elem_local, Rvalue::Unbox { value: Operand::Local(elem_raw), ty: elem_ty.clone() });
+                                } else {
+                                    b.assign(elem_local, Rvalue::Use(Operand::Local(elem_raw)));
+                                }
+                            }
+                        }
+                        if let Some(tail_pat) = tail {
+                            if let HirPat::Bind { local, name: fname } = tail_pat.as_ref() {
+                                // Declared as the real `List<elem_ty>` (a
+                                // `CertoList*` in C), not `Ty::Error`
+                                // (`int64_t`) — `tail` is itself a real list,
+                                // and an unsafe int64_t/pointer round-trip
+                                // through a mis-declared local segfaulted the
+                                // moment `tail` was passed to another List
+                                // function, caught by a real end-to-end run
+                                // before this shipped.
+                                let list_ty = Ty::List(Box::new(elem_ty.clone()));
+                                let tail_local = b.map_hir_local(*local, fname, list_ty);
+                                let next_bb = b.new_block();
+                                b.terminate(Terminator::Call {
+                                    func: Operand::Global("List.slice".into()),
+                                    args: vec![
+                                        scrut_op.clone(),
+                                        Operand::Const(MirConst::Int(head.len() as i64)),
+                                        Operand::Local(len_local),
+                                    ],
+                                    dest: tail_local,
+                                    next: next_bb,
+                                });
+                                b.switch_to(next_bb);
+                            }
+                        }
+
+                        let after_pat = if arm.guard.is_some() { b.new_block() } else { arm_bb };
+                        b.terminate(Terminator::Goto(after_pat));
+                        if arm.guard.is_some() { b.switch_to(after_pat); }
+                    }
                     _ => {
                         let after_pat = if arm.guard.is_some() { b.new_block() } else { arm_bb };
                         b.terminate(Terminator::Goto(after_pat));

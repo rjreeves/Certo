@@ -1958,6 +1958,68 @@ fn lower_block(stmts: &[Stmt], span: Span, cx: &mut Cx) -> HirExpr {
                             hir_stmts.push(HirStmt::Let { local, name: binding_name, ty: field_ty, init: field_expr });
                         }
                     }
+                    Pattern::List { head, tail, .. } => {
+                        // BACKLOG item 195 — `val [head, ...tail] = items`.
+                        // Mirrors the `Tuple` arm above: bind a temp to the
+                        // whole list, then each `head` element via
+                        // `List.getOrPanic` (a real runtime panic if the list
+                        // is shorter than `head.len()` — `val` destructuring
+                        // is irrefutable, so there's no fallback arm to fall
+                        // through to the way a `match` arm has one), and
+                        // `tail` (if bound) via `List.slice(list, head.len(),
+                        // List.len(list))` — the same `List<T>` type as the
+                        // whole value, not a smaller one.
+                        let elem_ty = match &init.ty {
+                            Ty::List(t) => (**t).clone(),
+                            _ => Ty::Error,
+                        };
+                        let list_ty = init.ty.clone();
+                        let tmp = cx.fresh_local();
+                        if !matches!(list_ty, Ty::Error) { cx.local_types.insert(tmp, list_ty.clone()); }
+                        hir_stmts.push(HirStmt::Let { local: tmp, name: "_lst".into(), ty: list_ty.clone(), init });
+
+                        for (i, h) in head.iter().enumerate() {
+                            if let Pattern::Ident { name, .. } = &h.node {
+                                let local = cx.define_local(&name.node);
+                                if !matches!(elem_ty, Ty::Error) { cx.local_types.insert(local, elem_ty.clone()); }
+                                let list_ref = HirExpr { kind: HirExprKind::Local(tmp), ty: list_ty.clone(), span };
+                                let idx = HirExpr { kind: HirExprKind::Int(i as i64), ty: Ty::Int, span };
+                                let get_expr = HirExpr {
+                                    kind: HirExprKind::Call {
+                                        func: Box::new(HirExpr { kind: HirExprKind::Global("List.getOrPanic".into()), ty: Ty::Error, span }),
+                                        args: vec![list_ref, idx],
+                                    },
+                                    ty: elem_ty.clone(), span,
+                                };
+                                hir_stmts.push(HirStmt::Let { local, name: name.node.clone(), ty: elem_ty.clone(), init: get_expr });
+                            }
+                        }
+
+                        if let Some(t) = tail {
+                            if let Pattern::Ident { name, .. } = &t.node {
+                                let local = cx.define_local(&name.node);
+                                if !matches!(list_ty, Ty::Error) { cx.local_types.insert(local, list_ty.clone()); }
+                                let list_ref_for_len = HirExpr { kind: HirExprKind::Local(tmp), ty: list_ty.clone(), span };
+                                let len_call = HirExpr {
+                                    kind: HirExprKind::Call {
+                                        func: Box::new(HirExpr { kind: HirExprKind::Global("List.len".into()), ty: Ty::Error, span }),
+                                        args: vec![list_ref_for_len],
+                                    },
+                                    ty: Ty::Int, span,
+                                };
+                                let list_ref = HirExpr { kind: HirExprKind::Local(tmp), ty: list_ty.clone(), span };
+                                let from = HirExpr { kind: HirExprKind::Int(head.len() as i64), ty: Ty::Int, span };
+                                let slice_expr = HirExpr {
+                                    kind: HirExprKind::Call {
+                                        func: Box::new(HirExpr { kind: HirExprKind::Global("List.slice".into()), ty: Ty::Error, span }),
+                                        args: vec![list_ref, from, len_call],
+                                    },
+                                    ty: list_ty.clone(), span,
+                                };
+                                hir_stmts.push(HirStmt::Let { local, name: name.node.clone(), ty: list_ty.clone(), init: slice_expr });
+                            }
+                        }
+                    }
                     _ => {
                         // Complex patterns: lower to match + let
                         let tmp = cx.fresh_local();
@@ -2042,6 +2104,19 @@ fn lower_pat(pat: &S<certo_ast::pattern::Pattern>, scrut_ty: &Ty, cx: &mut Cx) -
                 HirPat::Wildcard
             }
         },
+        Pattern::List { head, tail, .. } => {
+            // BACKLOG item 195 — `elem_ty` for each `head` binding is the
+            // list's own element type; `tail` (if bound) gets the *same*
+            // `List<T>` type as the scrutinee itself, matching typeck's own
+            // `check_pattern` (`crates/typeck/src/infer_expr.rs`).
+            let elem_ty = match scrut_ty {
+                Ty::List(t) => (**t).clone(),
+                _ => Ty::Error,
+            };
+            let head_pats = head.iter().map(|h| lower_pat(h, &elem_ty, cx)).collect();
+            let tail_pat = tail.as_ref().map(|t| Box::new(lower_pat(t, scrut_ty, cx)));
+            HirPat::List { head: head_pats, tail: tail_pat, elem_ty }
+        }
         Pattern::Tuple { elements, .. } => {
             let elem_tys: Vec<Ty> = match scrut_ty {
                 Ty::Tuple(ts) => ts.clone(),
