@@ -721,10 +721,35 @@ fn check_decl(decl: &Decl, ctx: &mut Ctx<'_>) {
             }
 
             // Type-check each rule
+            let errors_ty = type_expr_to_ty(&v.errors.node, ctx);
             for rule in &v.rules {
                 let req_ty = infer(&rule.require, ctx);
                 ctx.unify(req_ty, Ty::Bool, rule.require.span);
-                infer(&rule.else_, ctx); // deferred strict check (E0703)
+
+                // BACKLOG item 219 (E0703) — the `else` clause must produce
+                // a value of the validator's own declared `errors` type.
+                // Compares already-resolved types directly (mirroring
+                // `Decl::Temporal`'s identical pattern above) rather than
+                // going through `ctx.unify`, which would only ever report
+                // the generic E0200 `Mismatch` — this needs its own
+                // dedicated diagnostic naming the offending rule.
+                let else_ty = infer(&rule.else_, ctx);
+                let else_ty_resolved = ctx.uf.apply(&else_ty);
+                let errors_ty_resolved = ctx.uf.apply(&errors_ty);
+                match &else_ty_resolved {
+                    Ty::Var(_) | Ty::Error => {} // unresolved or already errored
+                    other if other != &errors_ty_resolved => {
+                        ctx.errors.push(TypeError {
+                            kind: TypeErrorKind::ElseTypeMismatch {
+                                rule_name: rule.name.node.clone(),
+                                expected:  errors_ty_resolved.clone(),
+                                found:     else_ty_resolved.clone(),
+                            },
+                            span: rule.else_.span,
+                        });
+                    }
+                    _ => {}
+                }
             }
 
             ctx.env.pop();

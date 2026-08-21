@@ -167,7 +167,7 @@ type Invoice = { createdAt: Timestamp }
 type IE = | X
 temporal VoidWindow = Duration.days(30)
 validator V for Invoice errors IE {
-    rule r { require invoice.createdAt.age < VoidWindow else true }
+    rule r { require invoice.createdAt.age < VoidWindow else IE.X }
 }").unwrap();
 }
 
@@ -604,9 +604,10 @@ fn full_literal_construction_with_only_real_fields_is_still_ok() {
 #[test]
 fn constraint_name_is_bool() {
     check("module A
+type OE = | X
 constraint Active = status == active
 validator V for Order errors OE {
-    rule r { require Active else true }
+    rule r { require Active else OE.X }
 }").unwrap();
 }
 
@@ -615,8 +616,9 @@ validator V for Order errors OE {
 #[test]
 fn validator_require_true_ok() {
     check("module A
+type OE = | X
 validator V for Order errors OE {
-    rule r { require true else true }
+    rule r { require true else OE.X }
 }").unwrap();
 }
 
@@ -624,8 +626,9 @@ validator V for Order errors OE {
 fn validator_require_entity_field_ok() {
     check("module A
 type Order = { total: Int }
+type OE = | X
 validator V for Order errors OE {
-    rule r { require order.total > 0 else true }
+    rule r { require order.total > 0 else OE.X }
 }").unwrap();
 }
 
@@ -639,14 +642,80 @@ validator V for Order errors OE {
     assert!(errs[0].message().contains("E020"), "expected E020x, got: {}", errs[0].message());
 }
 
+// ------------------------------------------------------------------ //
+// `else` branch error-type mismatch (E0703) — BACKLOG item 219
+// ------------------------------------------------------------------ //
+
+#[test]
+fn else_producing_the_declared_errors_type_is_ok() {
+    check("module A
+type OE = | TooHigh
+validator V for Order errors OE {
+    rule r { require order.total > 0 else OE.TooHigh }
+}").unwrap();
+}
+
+#[test]
+fn else_producing_a_different_type_is_e0703() {
+    let kind = first_error_kind("module A
+type OE = | TooHigh
+type BillingError = | CreditExceeded
+validator V for Order errors OE {
+    rule r { require order.total > 0 else BillingError.CreditExceeded }
+}");
+    assert!(matches!(kind, TypeErrorKind::ElseTypeMismatch { .. }), "expected ElseTypeMismatch (E0703), got {kind:?}");
+}
+
+#[test]
+fn else_type_mismatch_names_the_offending_rule() {
+    let kind = first_error_kind("module A
+type OE = | TooHigh
+type BillingError = | CreditExceeded
+validator V for Order errors OE {
+    rule creditCheck { require order.total > 0 else BillingError.CreditExceeded }
+}");
+    let TypeErrorKind::ElseTypeMismatch { rule_name, .. } = kind else {
+        panic!("expected ElseTypeMismatch, got {kind:?}");
+    };
+    assert_eq!(rule_name, "creditCheck");
+}
+
+#[test]
+fn else_type_mismatch_message_names_both_types() {
+    let errs = check_err("module A
+type OE = | TooHigh
+type BillingError = | CreditExceeded
+validator V for Order errors OE {
+    rule r { require order.total > 0 else BillingError.CreditExceeded }
+}");
+    let msg = errs[0].message();
+    assert!(msg.contains("E0703"), "expected E0703, got: {msg}");
+    assert!(msg.contains("OE"), "expected the declared errors type named, got: {msg}");
+    assert!(msg.contains("BillingError"), "expected the actual else-type named, got: {msg}");
+}
+
+#[test]
+fn a_bool_else_placeholder_is_also_e0703_not_silently_accepted() {
+    // The exact gap this item closes: before this fix, `else true` (a
+    // bare Bool, not a real error variant) compiled clean against any
+    // declared `errors` type.
+    let kind = first_error_kind("module A
+type OE = | TooHigh
+validator V for Order errors OE {
+    rule r { require order.total > 0 else true }
+}");
+    assert!(matches!(kind, TypeErrorKind::ElseTypeMismatch { .. }), "expected ElseTypeMismatch (E0703), got {kind:?}");
+}
+
 #[test]
 fn validator_context_field_in_scope() {
     check("module A
 type Order = { id: Int }
 type Customer = { active: Bool }
+type OE = | X
 validator V for Order errors OE {
     context { customer: Customer }
-    rule r { require customer.active else true }
+    rule r { require customer.active else OE.X }
 }").unwrap();
 }
 
@@ -654,9 +723,10 @@ validator V for Order errors OE {
 fn validator_multiple_rules_ok() {
     check("module A
 type Order = { total: Int, valid: Bool }
+type OE = | X
 validator V for Order errors OE {
-    rule a { require order.total > 0 else true }
-    rule b { require order.valid else true }
+    rule a { require order.total > 0 else OE.X }
+    rule b { require order.valid else OE.X }
 }").unwrap();
 }
 
@@ -664,8 +734,9 @@ validator V for Order errors OE {
 fn validator_validate_fn_registered() {
     // After hoisting, V.validate should be callable.
     check("module A
+type OE = | X
 validator V for Order errors OE {
-    rule r { require true else true }
+    rule r { require true else OE.X }
 }
 fn callIt(o: Order): Result<Unit, OE> = V.validate(o)").unwrap();
 }
