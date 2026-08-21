@@ -48,4 +48,18 @@ certo_uuid_t certo_uuid_new(void) {
     u.bytes[8] = (uint8_t)((u.bytes[8] & 0x3F) | 0x80); /* variant 10xx */
     return u;
 }
+
+/* BACKLOG item 201 — certo_uuid_t is a 16-byte plain-value struct with no
+   `==` wiring at all before this: `a == b` on two UUIDs failed to compile
+   in C (a struct isn't a scalar), the same gap record/enum equality had —
+   confirmed while scoping that item. A real byte-wise comparison, not a
+   raw memcmp of the whole struct (which would happen to be correct here
+   since certo_uuid_t has no padding, but this is more obviously correct
+   and doesn't depend on that). */
+bool certo_uuid_eq(certo_uuid_t a, certo_uuid_t b) {
+    for (int i = 0; i < 16; i++) {
+        if (a.bytes[i] != b.bytes[i]) return false;
+    }
+    return true;
+}
 "##;

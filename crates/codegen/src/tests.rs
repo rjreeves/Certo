@@ -871,6 +871,125 @@ fn and_op_emits_double_ampersand() {
 }
 
 // ------------------------------------------------------------------ //
+// Structural equality on records/enums — BACKLOG item 201
+// ------------------------------------------------------------------ //
+
+#[test]
+fn record_equality_generates_and_calls_a_field_by_field_eq_function() {
+    // Previously `a == b` on any record emitted a bare C `==`, which
+    // doesn't compile for a struct at all (`invalid operands to binary
+    // expression`) — directly contradicting spec §8.4's "equality is
+    // structural" claim.
+    let c = codegen(
+        "module A\ntype Point = { x: Int, y: Int }\n\
+         fn eq(a: Point, b: Point): Bool = a == b");
+    assert_contains(&c, "static inline bool certo_eq_Point(Point a, Point b)");
+    assert_contains(&c, "(a.x == b.x) && (a.y == b.y)");
+    assert_contains(&c, "certo_eq_Point(");
+}
+
+#[test]
+fn not_eq_reuses_the_same_generated_function() {
+    let c = codegen(
+        "module A\ntype Point = { x: Int, y: Int }\n\
+         fn neq(a: Point, b: Point): Bool = a != b");
+    assert_contains(&c, "(!certo_eq_Point(");
+}
+
+#[test]
+fn record_with_text_and_decimal_fields_dispatches_to_the_right_helpers() {
+    let c = codegen(
+        "module A\ntype Currency = | USD | GBP\n\
+         type Money = { amount: Decimal(19, 4), currency: Currency }\n\
+         fn eq(a: Money, b: Money): Bool = a == b");
+    assert_contains(&c, "certo_decimal_eq(a.amount, b.amount)");
+    // Currency is a nullary enum (plain int) — native `==` is already
+    // correct for it, no certo_eq_Currency needed.
+    assert_contains(&c, "a.currency == b.currency");
+}
+
+#[test]
+fn nested_record_equality_recurses_into_the_inner_type() {
+    let c = codegen(
+        "module A\ntype Address = { city: Text }\ntype Person = { name: Text, address: Address }\n\
+         fn eq(a: Person, b: Person): Bool = a == b");
+    assert_contains(&c, "static inline bool certo_eq_Address(Address a, Address b)");
+    assert_contains(&c, "certo_eq_Address(a.address, b.address)");
+}
+
+#[test]
+fn payload_enum_equality_compares_tag_then_active_variant_fields() {
+    let c = codegen(
+        "module A\ntype Shape =\n    | Circle(radius: Float)\n    | Rectangle(width: Float, height: Float)\n\
+         fn eq(a: Shape, b: Shape): Bool = a == b");
+    assert_contains(&c, "static inline bool certo_eq_Shape(Shape a, Shape b)");
+    assert_contains(&c, "if (a.tag != b.tag) return false;");
+    assert_contains(&c, "a.circle.radius == b.circle.radius");
+    assert_contains(&c, "(a.rectangle.width == b.rectangle.width) && (a.rectangle.height == b.rectangle.height)");
+}
+
+#[test]
+fn nullary_variant_of_a_mixed_enum_compares_correctly_as_a_global_constant() {
+    // The real bug found while verifying end-to-end: `Origin == Origin`
+    // (a payload-free variant of an otherwise-payload-carrying enum) is
+    // `Operand::Global`, not `Operand::Local` — `operand_ty` alone can't
+    // recover its type, so this needs the `variant_parent` registry.
+    let c = codegen(
+        "module A\ntype Shape =\n    | Circle(radius: Float)\n    | Origin\n\
+         fn eq(): Bool = Origin == Origin");
+    assert_contains(&c, "certo_eq_Shape(certo_origin, certo_origin)");
+}
+
+#[test]
+fn record_with_a_list_field_is_not_given_an_eq_function() {
+    // Deliberately out of scope (item 200's own generic-erasure territory,
+    // not silently wrong): `==` on such a type stays exactly as broken as
+    // before, a clean C compile error, not a bare pointer comparison.
+    let c = codegen(
+        "module A\nimport Stdlib.Collections.{ List }\ntype Basket = { items: List<Int> }\n\
+         fn eq(a: Basket, b: Basket): Bool = a == b");
+    assert_not_contains(&c, "certo_eq_Basket");
+}
+
+#[test]
+fn generic_record_is_not_given_an_eq_function() {
+    let c = codegen(
+        "module A\ntype Box<T> = { value: T }\n\
+         fn eq(a: Box<Int>, b: Box<Int>): Bool = a == b");
+    assert_not_contains(&c, "certo_eq_Box");
+}
+
+#[test]
+fn optional_field_is_not_given_an_eq_function() {
+    let c = codegen(
+        "module A\ntype Profile = { bio: Text? }\n\
+         fn eq(a: Profile, b: Profile): Bool = a == b");
+    assert_not_contains(&c, "certo_eq_Profile");
+}
+
+#[test]
+fn plain_scalar_equality_is_unaffected() {
+    let c = codegen("module A\nfn is_zero(n: Int): Bool = n == 0");
+    assert_contains(&c, "== 0");
+    assert_not_contains(&c, "certo_eq_");
+}
+
+#[test]
+fn decimal_equality_uses_certo_decimal_eq_not_bare_c_equals() {
+    // Decimal is itself a plain-value C struct with zero `==` wiring
+    // before this — `d1 == d2` alone failed to compile, a separate
+    // pre-existing gap found while scoping this item, fixed alongside it.
+    let c = codegen("module A\nfn eq(a: Decimal(19,4), b: Decimal(19,4)): Bool = a == b");
+    assert_contains(&c, "certo_decimal_eq(");
+}
+
+#[test]
+fn uuid_equality_uses_certo_uuid_eq_not_bare_c_equals() {
+    let c = codegen("module A\nfn eq(a: UUID, b: UUID): Bool = a == b");
+    assert_contains(&c, "certo_uuid_eq(");
+}
+
+// ------------------------------------------------------------------ //
 // Phase 5 — Validator source generation
 // ------------------------------------------------------------------ //
 
