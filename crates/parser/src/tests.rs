@@ -2025,3 +2025,73 @@ fn bare_self_outside_impl_or_type_context_parses_with_an_unresolved_sentinel() {
     };
     assert_eq!(path.segments[0].node, "Self");
 }
+
+// ------------------------------------------------------------------ //
+// Capitalized record field access — BACKLOG item 205
+// ------------------------------------------------------------------ //
+
+#[test]
+fn field_access_with_a_capitalized_field_name_parses_as_a_field_not_a_path() {
+    // Found while fixing a large checked-in DB-schema example whose
+    // Postgres columns are literally named "Name"/"Address"/etc: `f.Name`
+    // previously typechecked as `E0206: undefined name 'Name'` — parsed as
+    // a bogus 2-segment `Expr::Path(["f", "Name"])` instead of a field
+    // access, because `parse_module_path`'s own greedy continuation only
+    // checked whether *each subsequent* segment started uppercase, never
+    // whether the *first* one did — so a lowercase local (`f`) followed by
+    // a capitalized field (`Name`) was wrongly swallowed whole as if `f`
+    // were itself a module/type name. Affects any record with a
+    // capitalized field, not just this one example.
+    let m = ok("module A\nval x = f.Name");
+    let Decl::Val(v) = &m.decls[0].node else { panic!("expected Decl::Val") };
+    let Expr::Field { expr, field, .. } = &v.value.node else {
+        panic!("expected Expr::Field, got {:?}", v.value.node)
+    };
+    assert_eq!(field.node, "Name");
+    let Expr::Path { path, .. } = &expr.node else { panic!("expected Path(\"f\")") };
+    assert_eq!(path.segments.len(), 1);
+    assert_eq!(path.segments[0].node, "f");
+}
+
+#[test]
+fn chained_capitalized_field_access_parses_correctly() {
+    let m = ok("module A\nval x = f.Name.Address");
+    let Decl::Val(v) = &m.decls[0].node else { panic!("expected Decl::Val") };
+    let Expr::Field { expr, field, .. } = &v.value.node else {
+        panic!("expected outer Expr::Field, got {:?}", v.value.node)
+    };
+    assert_eq!(field.node, "Address");
+    assert!(matches!(&expr.node, Expr::Field { .. }), "expected inner Expr::Field, got {:?}", expr.node);
+}
+
+#[test]
+fn real_module_qualified_path_is_unaffected() {
+    // A genuine multi-segment module/type path — first segment uppercase
+    // — must still parse as one `Expr::Path`, not be broken up.
+    let m = ok("module A\nval x = Stdlib.Result.Ok");
+    let Decl::Val(v) = &m.decls[0].node else { panic!("expected Decl::Val") };
+    let Expr::Path { path, .. } = &v.value.node else { panic!("expected Expr::Path, got {:?}", v.value.node) };
+    assert_eq!(path.segments.len(), 3);
+}
+
+#[test]
+fn type_qualified_dot_call_is_unaffected() {
+    // `List.map` (uppercase base, lowercase field) is the *other* existing
+    // case — must keep parsing as `Expr::Field{Path(["List"]), "map"}`,
+    // matching the established UFCS dot-call shape, not a 1-segment Path
+    // consuming past the dot.
+    let m = ok("module A\nval x = List.map");
+    let Decl::Val(v) = &m.decls[0].node else { panic!("expected Decl::Val") };
+    let Expr::Field { expr, field, .. } = &v.value.node else {
+        panic!("expected Expr::Field, got {:?}", v.value.node)
+    };
+    assert_eq!(field.node, "map");
+    assert!(matches!(&expr.node, Expr::Path { .. }), "expected Path(\"List\")");
+}
+
+#[test]
+fn lowercase_field_access_is_unaffected() {
+    let m = ok("module A\nval x = order.status");
+    let Decl::Val(v) = &m.decls[0].node else { panic!("expected Decl::Val") };
+    assert!(matches!(&v.value.node, Expr::Field { .. }), "expected Expr::Field, got {:?}", v.value.node);
+}

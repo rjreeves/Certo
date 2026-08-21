@@ -249,11 +249,25 @@ fn parse_u32_literal(cur: &mut Cursor<'_>) -> Result<u32, ParseError> {
 /// `Stdlib.Collections.List`  or just `List`
 pub fn parse_module_path(cur: &mut Cursor<'_>) -> Result<ModulePath, ParseError> {
     let (first, first_span) = cur.expect_ident()?;
+    // A real multi-segment module/type path (`Stdlib.Result.Ok`, `List.map`)
+    // always starts with an uppercase segment — a lowercase first segment is
+    // a local variable/parameter, never a module. BACKLOG item 205's own
+    // investigation found this the hard way: `first`'s own case was never
+    // checked here, only each *subsequent* segment's — so `f.Zebra` (a
+    // lowercase local followed by a capitalized field, e.g. from a
+    // database-derived record whose columns happen to be capitalized) was
+    // greedily swallowed whole as a bogus 2-segment path `["f", "Zebra"]`
+    // by the loop below, never reaching `parse_postfix`'s own field-access
+    // handling at all — confirmed directly: `f.Zebra` typechecked as
+    // `E0206: undefined name 'Zebra'` (a bare-name lookup on the path's
+    // *last* segment) instead of a real field access on `f`, for *any*
+    // record with a capitalized field name, not just this one example.
+    let first_is_upper = first.chars().next().map(|c| c.is_uppercase()).unwrap_or(false);
     let mut segments = vec![S::new(first, first_span)];
     let mut span = first_span;
 
     // Look ahead: `Ident.Ident` — but not `Ident.field` (lowercase after dot)
-    while cur.peek() == Some(&Token::Dot) {
+    while first_is_upper && cur.peek() == Some(&Token::Dot) {
         if let Some(Token::Ident(next)) = cur.peek2() {
             let starts_upper = next.chars().next().map(|c| c.is_uppercase()).unwrap_or(false);
             if !starts_upper { break; }
