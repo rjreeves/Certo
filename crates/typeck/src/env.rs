@@ -161,13 +161,32 @@ impl TypeEnv {
             self.define(*name, ty.clone());
         }
 
-        // panic / unreachable / todo :: ∀a. Text -> a
-        for name in &["panic", "unreachable", "todo"] {
+        // panic :: ∀a. Text -> a
+        {
+            *counter += 1;
+            let ret = Ty::Var(*counter);
+            self.define("panic", Ty::Forall {
+                vars: vec![*counter],
+                body: Box::new(Ty::Fn { params: vec![Ty::Text], ret: Box::new(ret) }),
+            });
+        }
+
+        // unreachable / todo :: ∀a. () -> a — BACKLOG item 210. Previously
+        // registered identically to `panic` (`Text -> a`), but the spec's
+        // own table (§9.1) documents both as zero-arg (`fn(): Nothing`),
+        // matching what `crates/codegen/src/emit_module.rs` already emits
+        // (`#define certo_unreachable() certo_panic("unreachable")` —
+        // a zero-arg C macro). The 1-arg typeck signature meant the *only*
+        // call form that typechecked (`unreachable("msg")`) failed to
+        // compile ("too many arguments provided to function-like macro
+        // invocation"), while the form that *would* compile (`unreachable()`)
+        // never passed typeck.
+        for name in &["unreachable", "todo"] {
             *counter += 1;
             let ret = Ty::Var(*counter);
             self.define(*name, Ty::Forall {
                 vars: vec![*counter],
-                body: Box::new(Ty::Fn { params: vec![Ty::Text], ret: Box::new(ret) }),
+                body: Box::new(Ty::Fn { params: vec![], ret: Box::new(ret) }),
             });
         }
 

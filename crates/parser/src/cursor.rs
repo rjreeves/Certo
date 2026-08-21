@@ -159,6 +159,23 @@ impl<'src> Cursor<'src> {
         }
     }
 
+    /// Consume a field/method name after `.`/`?.` — an ordinary identifier,
+    /// or one of a small allow-list of lexer keywords that are also real
+    /// stdlib method names (BACKLOG item 212: `Regex.match(pattern, text)`,
+    /// the spec's own literal example, otherwise can never be written —
+    /// `match` lexes to `Token::Match`, not `Token::Ident`, with no escape
+    /// hatch). Deliberately not a blanket "any keyword after `.`" rule —
+    /// only keywords with a confirmed real stdlib collision are allowed
+    /// here, to avoid silently swallowing what would otherwise be a real
+    /// syntax error at every other `.` call site in the grammar.
+    pub fn expect_field_name(&mut self) -> Result<(String, Span), ParseError> {
+        if let Some(Token::Match) = self.peek() {
+            let (_, span) = self.bump().unwrap();
+            return Ok(("match".to_string(), span));
+        }
+        self.expect_ident()
+    }
+
 }
 
 /// Structural token equality ignoring payload.

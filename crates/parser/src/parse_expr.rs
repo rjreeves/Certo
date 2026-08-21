@@ -211,7 +211,7 @@ fn parse_postfix(cur: &mut Cursor<'_>) -> Result<S<Expr>, ParseError> {
             }
             Some(Token::Dot) => {
                 cur.bump();
-                let (field, field_span) = cur.expect_ident()?;
+                let (field, field_span) = cur.expect_field_name()?;
                 let span = expr.span.to(field_span);
                 if field == "age" {
                     expr = S::new(Expr::Age { expr: Box::new(expr), span }, span);
@@ -254,7 +254,7 @@ fn parse_postfix(cur: &mut Cursor<'_>) -> Result<S<Expr>, ParseError> {
             // `expr?.field`
             Some(Token::SafeDot) => {
                 cur.bump();
-                let (field, field_span) = cur.expect_ident()?;
+                let (field, field_span) = cur.expect_field_name()?;
                 let span = expr.span.to(field_span);
                 expr = S::new(Expr::SafeField {
                     expr: Box::new(expr),
