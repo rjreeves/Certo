@@ -286,7 +286,8 @@ fn generic_container_ret(full: Option<&str>, args: &[HirExpr]) -> Option<Ty> {
         }
         Some("List.getOrPanic") => args.first().and_then(list_elem),
         Some("List.filter") | Some("List.sort") | Some("List.reverse") | Some("List.distinct")
-        | Some("List.slice") | Some("List.concat") | Some("List.push") | Some("List.sortBy") => {
+        | Some("List.slice") | Some("List.concat") | Some("List.push") | Some("List.sortBy")
+        | Some("List.upsert") => {
             args.first().map(|a| a.ty.clone())
         }
         // `List.minBy`/`maxBy` (BACKLOG item 162b) — same shape as
@@ -315,6 +316,17 @@ fn generic_container_ret(full: Option<&str>, args: &[HirExpr]) -> Option<Ty> {
             args.get(1).and_then(callback_ret_ty)
                 .map(|key_ty| Ty::Map(Box::new(key_ty), Box::new(Ty::List(Box::new(elem)))))
         }
+        // `List.fold`/`List.reduce` (BACKLOG item 211) — the accumulator's
+        // own type (args[1], the `init` value) *is* the return type here,
+        // by definition (`fold(list, init, f): acc` — `f`'s own signature
+        // is `(acc, T) -> acc`, so there's no need to inspect the combiner
+        // lambda at all, unlike `sumBy`'s callback-return-type recovery
+        // above). Without this arm, `xs.reduce(0, (a,b)=>a+b)`'s call type
+        // fell through to `Ty::Error`; harmless until something downstream
+        // needed to know it was really an `Int` (an f-string interpolation,
+        // say) — the same "known type thrown away" crash items 179/180/182/
+        // 189/191 already fixed elsewhere, missed for `fold`/`reduce`.
+        Some("List.fold") | Some("List.reduce") => args.get(1).map(|a| a.ty.clone()),
         Some("Map.get") => args.first().and_then(map_kv).map(|(_, v)| Ty::Option(Box::new(v))),
         Some("Map.remove") | Some("Map.insert") => args.first().map(|a| a.ty.clone()),
         Some("Map.keys") => args.first().and_then(map_kv).map(|(k, _)| Ty::List(Box::new(k))),
@@ -524,6 +536,7 @@ fn stdlib_param_names() -> HashMap<&'static str, &'static [&'static str]> {
     // C-level argument-order mismatch (`certo_list_group_by` called with
     // the key closure and list swapped).
     m.insert("List.groupBy",    &["list", "key"]);
+    m.insert("List.upsert",     &["list", "item", "on"]);
 
     // Map
     m.insert("Map.insert",      &["map", "key", "value"]);
@@ -1019,7 +1032,13 @@ fn lower_expr(expr: &S<Expr>, cx: &mut Cx) -> HirExpr {
                 // *and* live outside `BOXED_ABI_CALLEES` before now.
                 let needs_lambda_hint = matches!(fn_full_path.as_deref(),
                     Some("List.map") | Some("List.groupBy")
-                    | Some("List.sortBy") | Some("List.minBy") | Some("List.maxBy") | Some("List.sumBy"));
+                    | Some("List.sortBy") | Some("List.minBy") | Some("List.maxBy") | Some("List.sumBy")
+                    | Some("List.upsert"));
+                // Every one of the above takes its lambda as the 2nd
+                // positional argument (index 1) — except `List.upsert`
+                // (BACKLOG item 209), whose signature is `(list, item, on)`,
+                // putting the key-projection lambda at index 2 instead.
+                let lambda_pos: usize = if fn_full_path.as_deref() == Some("List.upsert") { 2 } else { 1 };
                 // Stdlib function: only labeled reordering (no defaults).
                 if has_labels {
                     // Determine each arg's target slot without lowering yet
@@ -1051,7 +1070,7 @@ fn lower_expr(expr: &S<Expr>, cx: &mut Cx) -> HirExpr {
 
                     let list_slot_idx = if needs_lambda_hint { snames.iter().position(|&n| n == "list") } else { None };
                     let lambda_slot_idx = if needs_lambda_hint {
-                        snames.iter().position(|&n| n == "f" || n == "key")
+                        snames.iter().position(|&n| n == "f" || n == "key" || n == "on")
                     } else { None };
 
                     let mut slots: Vec<Option<HirExpr>> = vec![None; snames.len()];
@@ -1115,7 +1134,7 @@ fn lower_expr(expr: &S<Expr>, cx: &mut Cx) -> HirExpr {
                 } else {
                     let mut out: Vec<HirExpr> = Vec::with_capacity(args.len());
                     for (i, arg) in args.iter().enumerate() {
-                        if needs_lambda_hint && i == 1 {
+                        if needs_lambda_hint && i == lambda_pos {
                             if let Expr::Lambda { params, body, .. } = &arg.value.node {
                                 let hint = out.first().and_then(|a: &HirExpr| match &a.ty {
                                     Ty::List(inner) => Some((**inner).clone()),

@@ -159,23 +159,41 @@ impl<'src> Cursor<'src> {
         }
     }
 
-    /// Consume a field/method name after `.`/`?.` — an ordinary identifier,
-    /// or one of a small allow-list of lexer keywords that are also real
-    /// stdlib method names (BACKLOG item 212: `Regex.match(pattern, text)`,
-    /// the spec's own literal example, otherwise can never be written —
-    /// `match` lexes to `Token::Match`, not `Token::Ident`, with no escape
-    /// hatch). Deliberately not a blanket "any keyword after `.`" rule —
-    /// only keywords with a confirmed real stdlib collision are allowed
-    /// here, to avoid silently swallowing what would otherwise be a real
-    /// syntax error at every other `.` call site in the grammar.
+    /// Consume a field/method name after `.`/`?.`, or a named-call-argument
+    /// label — an ordinary identifier, or one of a small allow-list of
+    /// lexer keywords that are also real stdlib names (BACKLOG item 212:
+    /// `Regex.match(pattern, text)`; BACKLOG item 209: `list.upsert(item,
+    /// on: key)` — both spec's own literal examples, otherwise unwritable,
+    /// since `match`/`on` lex to their own keyword tokens, not `Ident`, with
+    /// no escape hatch). Deliberately not a blanket "any keyword here" rule
+    /// — only keywords with a confirmed real stdlib collision are allowed,
+    /// to avoid silently swallowing what would otherwise be a real syntax
+    /// error at every other place this is called.
     pub fn expect_field_name(&mut self) -> Result<(String, Span), ParseError> {
-        if let Some(Token::Match) = self.peek() {
+        if let Some(name) = self.peek().and_then(keyword_as_name) {
             let (_, span) = self.bump().unwrap();
-            return Ok(("match".to_string(), span));
+            return Ok((name.to_string(), span));
         }
         self.expect_ident()
     }
 
+    /// True if the current token could start a field/method name or a
+    /// named-argument label — see `expect_field_name`'s own doc comment.
+    pub fn peek_is_field_name(&self) -> bool {
+        matches!(self.peek(), Some(Token::Ident(_))) || self.peek().and_then(keyword_as_name).is_some()
+    }
+
+}
+
+/// A lexer keyword that's also a real stdlib name — see
+/// `Cursor::expect_field_name`'s own doc comment for why this exists and
+/// why it's a small, explicit allow-list rather than every keyword.
+fn keyword_as_name(tok: &Token<'_>) -> Option<&'static str> {
+    match tok {
+        Token::Match => Some("match"),
+        Token::On    => Some("on"),
+        _ => None,
+    }
 }
 
 /// Structural token equality ignoring payload.

@@ -270,6 +270,14 @@ const BOXED_ABI_CALLEES: &[&str] = &[
     // type, same shape as `List.map` immediately above; needs the identical
     // boxed-ABI treatment for the same reason.
     "List.flatMap",
+    // `List.upsert` (BACKLOG item 209) — its `on` key-projection function is
+    // the same shape as `groupBy`'s `key` (called to extract a value used
+    // only for equality, never compared via `</>`), so it needs the same
+    // ordinary boxed-closure treatment, not `sortBy`/`minBy`/`maxBy`/
+    // `sumBy`'s specialized numeric-comparator synthesis (a different
+    // mechanism entirely, for a numeric-only key restriction that doesn't
+    // apply here).
+    "List.upsert",
     "dbQueryTyped", "Query.list", "Query.first", "Query.groupedList",
 ];
 

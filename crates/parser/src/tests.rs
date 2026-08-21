@@ -1118,6 +1118,44 @@ fn ordinary_match_expression_is_unaffected() {
     assert!(matches!(body, Expr::Match { .. }), "expected Expr::Match, got {:?}", body);
 }
 
+// ------------------------------------------------------------------ //
+// `on:` as a named-argument label — BACKLOG item 209
+// ------------------------------------------------------------------ //
+
+#[test]
+fn on_keyword_label_parses_as_a_named_argument() {
+    // `on` lexes to its own keyword token (used by `trigger on ...`), not
+    // `Ident` — `list.upsert(item, on: key)`, the spec's own literal
+    // shape (spec §8.5), previously could not be written at all
+    // (`expected expression, found On`).
+    let m = ok("module A\nval x = xs.upsert(item, on: key)");
+    let Decl::Val(v) = &m.decls[0].node else { panic!("expected Decl::Val") };
+    let Expr::App { args, .. } = &v.value.node else {
+        panic!("expected Expr::App, got {:?}", v.value.node)
+    };
+    assert_eq!(args.len(), 2);
+    assert!(args[1].label.is_some(), "expected a label on the 2nd argument");
+    assert_eq!(args[1].label.as_ref().unwrap().node, "on");
+}
+
+#[test]
+fn trigger_on_clause_is_unaffected_by_the_label_fix() {
+    // The fix only applies when `on`/`match` is immediately followed by
+    // `:` inside a call's argument list — a real `trigger on ...` clause
+    // must still parse exactly as before.
+    let m = ok("module A\nvalidator V for Order errors OE\n    trigger on Update when status == Submitted\n{\n    rule r { require true else Err(OE.X) }\n}");
+    let Decl::Validator(v) = &m.decls[0].node else { panic!("expected Decl::Validator") };
+    assert!(v.trigger.is_some(), "expected a trigger clause");
+}
+
+#[test]
+fn bare_on_identifier_without_a_colon_is_still_an_error() {
+    // `on` used as a plain value (not `on:` inside a call) is not a real
+    // identifier anywhere in the grammar — this fix must not turn it into
+    // a silently-accepted bare name outside the narrow label position.
+    err("module A\nval x = on");
+}
+
 #[test]
 fn to_be_requires_exactly_one_argument() {
     err("module A\nval x = expect(1).toBe()");

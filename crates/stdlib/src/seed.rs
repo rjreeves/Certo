@@ -386,6 +386,28 @@ pub fn seed_stdlib(env: &mut TypeEnv, counter: &mut u32) {
             )),
         });
     }
+    // `List.upsert` (BACKLOG item 209, spec §8.5) — replaces the element
+    // whose key matches `item`'s own key, or appends it if none matches.
+    // The spec's own literal example (`self.items.upsert(CartItem(item,
+    // qty), on: .productId)`) uses the leading-dot property shorthand
+    // (item 203, not built), so `on` here takes a real key-projection
+    // *function* instead — the same, already-established idiom
+    // `groupBy`/`sortBy`/`sumBy`/`minBy`/`maxBy` all use, not a field-name
+    // string (this runtime has no reflection to look a field up by name on
+    // an arbitrary type). Callers write `on: (x) => x.productId` — the
+    // shorthand, once it exists, would just be sugar for exactly this.
+    {
+        let a = fresh(); let k = fresh();
+        let key = fn1(Ty::Var(a), Ty::Var(k));
+        let list_a = Ty::List(Box::new(Ty::Var(a)));
+        env.define("List.upsert", Ty::Forall {
+            vars: vec![a, k],
+            body: Box::new(Ty::Fn {
+                params: vec![list_a.clone(), Ty::Var(a), key],
+                ret: Box::new(list_a),
+            }),
+        });
+    }
     // `List.flatMap`/`List.reduce` (BACKLOG item 162, bounded half — the
     // other four spec-listed functions, `sortBy`/`sumBy`/`minBy`/`maxBy`,
     // all need real per-call-site MIR synthesis to compare/add a generic
@@ -1342,6 +1364,7 @@ pub fn seed_stdlib(env: &mut TypeEnv, counter: &mut u32) {
     pm!("List.partition",  "list", "pred");
     pm!("List.chunked",    "list", "size");
     pm!("List.groupBy",    "list", "key");
+    pm!("List.upsert",     "list", "item", "on");
     pm!("List.flatMap",    "list", "f");
     pm!("List.reduce",     "list", "init", "f");
     pm!("List.sortBy",     "list", "key");

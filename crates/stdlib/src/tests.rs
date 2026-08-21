@@ -129,6 +129,34 @@ fn collections_c_contains_flat_map_and_reduce_bridge() {
 }
 
 #[test]
+fn collections_c_contains_list_upsert() {
+    // BACKLOG item 209. Also guards against the exact regression found
+    // while implementing this: a stray `*/` inside this function's own
+    // doc comment (from "certo_map_*/certo_list_group_by") prematurely
+    // closed the C comment block, corrupting everything after it — a
+    // clean parse of the whole runtime string is the simplest real check.
+    assert!(COLLECTIONS_C.contains("CertoList* certo_list_upsert(CertoList* l, void* item, certo_fn_t f)"),
+        "missing certo_list_upsert");
+}
+
+#[test]
+fn list_upsert_is_registered_with_a_key_function_and_returns_the_list_type() {
+    let env = seeded_env();
+    match env.lookup("List.upsert").unwrap() {
+        Ty::Forall { body, .. } => match body.as_ref() {
+            Ty::Fn { params, ret } => {
+                assert_eq!(params.len(), 3);
+                assert!(matches!(&params[0], Ty::List(_)));
+                assert!(matches!(&params[2], Ty::Fn { .. }), "expected a key-projection function, got {:?}", params[2]);
+                assert!(matches!(ret.as_ref(), Ty::List(_)));
+            }
+            other => panic!("expected Fn, got {:?}", other),
+        },
+        other => panic!("expected Forall, got {:?}", other),
+    }
+}
+
+#[test]
 fn map_empty_is_polymorphic() {
     let env = seeded_env();
     assert!(matches!(env.lookup("Map.empty").unwrap(), Ty::Forall { .. }));

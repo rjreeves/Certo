@@ -318,15 +318,14 @@ fn parse_arg_list(cur: &mut Cursor<'_>) -> Result<(Vec<Arg>, Span), ParseError> 
     let mut args = Vec::new();
 
     while cur.peek() != Some(&Token::RParen) && !cur.at_end() {
-        // Named arg: `name: expr`
-        let label = if let Some(Token::Ident(_)) = cur.peek() {
-            if cur.peek2() == Some(&Token::Colon) {
-                let (name, name_span) = cur.expect_ident()?;
-                cur.bump(); // eat `:`
-                Some(S::new(name, name_span))
-            } else {
-                None
-            }
+        // Named arg: `name: expr` — `name` is an ordinary identifier, or
+        // one of a small allow-list of keywords that are also real stdlib
+        // parameter names (BACKLOG item 209: `on:`, e.g. `list.upsert(item,
+        // on: key)` — `on` lexes to its own keyword token, not `Ident`).
+        let label = if cur.peek_is_field_name() && cur.peek2() == Some(&Token::Colon) {
+            let (name, name_span) = cur.expect_field_name()?;
+            cur.bump(); // eat `:`
+            Some(S::new(name, name_span))
         } else {
             None
         };

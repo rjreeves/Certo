@@ -324,6 +324,33 @@ CertoList* certo_list_chunked(CertoList* l, int64_t size) {
     return out;
 }
 
+/* Replaces the first element whose key (via f, the same key-projection-
+ * lambda convention certo_list_group_by/sortBy/sumBy already use, rather
+ * than a field-name string — this runtime has no reflection to look a
+ * field up by name on an arbitrary type) matches the new item's own key,
+ * or appends the item if no element matches — BACKLOG item 209. Same
+ * pointer-equality key convention certo_map_get/certo_list_group_by already
+ * use (see their own note re: Text keys); O(n), one pass, matching this
+ * runtime's existing unoptimized style. */
+CertoList* certo_list_upsert(CertoList* l, void* item, certo_fn_t f) {
+    CertoFn1 key = (CertoFn1)f.fn;
+    void* item_key = key(f.env, item);
+    int64_t len = l ? l->len : 0;
+    CertoList* n = list_alloc(len > 0 ? len : 1);
+    bool replaced = false;
+    for (int64_t i = 0; i < len; i++) {
+        void* k = key(f.env, l->data[i]);
+        if (!replaced && k == item_key) {
+            n->data[n->len++] = item;
+            replaced = true;
+        } else {
+            n->data[n->len++] = l->data[i];
+        }
+    }
+    if (!replaced) n->data[n->len++] = item;
+    return n;
+}
+
 /* ---- zip (pairs stored as heap-allocated {fst, snd}) ---- */
 
 typedef struct { void* fst; void* snd; } CertoPair;
