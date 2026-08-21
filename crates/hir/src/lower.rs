@@ -257,6 +257,7 @@ fn stdlib_param_types() -> &'static HashMap<String, Vec<Ty>> {
 fn generic_container_ret(full: Option<&str>, args: &[HirExpr]) -> Option<Ty> {
     let list_elem = |a: &HirExpr| match &a.ty { Ty::List(inner) => Some((**inner).clone()), _ => None };
     let map_kv = |a: &HirExpr| match &a.ty { Ty::Map(k, v) => Some(((**k).clone(), (**v).clone())), _ => None };
+    let result_ok_err = |a: &HirExpr| match &a.ty { Ty::Result(ok, err) => Some(((**ok).clone(), (**err).clone())), _ => None };
     // A callback argument's own return type, recovered two ways: an inline
     // lambda whose param-hinted body actually resolved (the original path,
     // e.g. `(x) => x * 2`), or — BACKLOG item 180 — a bare reference to a
@@ -327,6 +328,26 @@ fn generic_container_ret(full: Option<&str>, args: &[HirExpr]) -> Option<Ty> {
         // say) — the same "known type thrown away" crash items 179/180/182/
         // 189/191 already fixed elsewhere, missed for `fold`/`reduce`.
         Some("List.fold") | Some("List.reduce") => args.get(1).map(|a| a.ty.clone()),
+        // `flatMap`/`mapErr`/`getOrElse`/`recover` and their `Result.`-
+        // qualified aliases (BACKLOG item 199) — registered as `Forall`
+        // generics whose return type has vars, so (like every other arm in
+        // this table) they fall through `stdlib_ret_types()` and land here.
+        // Confirmed by direct testing: even the long-working *bare*-call
+        // form (`flatMap(r, f)`) segfaulted the moment its result was
+        // actually consumed (e.g. `match result { ... }`) — the call's own
+        // type silently stayed `Ty::Error`, the exact "known type thrown
+        // away" crash items 179/180/182/189/191/211 already fixed
+        // elsewhere, just never caught here since dot-call reachability
+        // (this same item) was the only thing previously exercising these
+        // functions at all.
+        Some("flatMap") | Some("Result.flatMap")
+        | Some("recover") | Some("Result.recover") => args.get(1).and_then(callback_ret_ty),
+        Some("mapErr") | Some("Result.mapErr") => {
+            let ok_ty = args.first().and_then(result_ok_err).map(|(ok, _)| ok)?;
+            let err_ty = args.get(1).and_then(callback_ret_ty)?;
+            Some(Ty::Result(Box::new(ok_ty), Box::new(err_ty)))
+        }
+        Some("getOrElse") | Some("Result.getOrElse") => args.get(1).map(|a| a.ty.clone()),
         Some("Map.get") => args.first().and_then(map_kv).map(|(_, v)| Ty::Option(Box::new(v))),
         Some("Map.remove") | Some("Map.insert") => args.first().map(|a| a.ty.clone()),
         Some("Map.keys") => args.first().and_then(map_kv).map(|(k, _)| Ty::List(Box::new(k))),

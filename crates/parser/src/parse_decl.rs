@@ -389,6 +389,32 @@ pub fn parse_extern_block(cur: &mut Cursor<'_>) -> Result<Vec<S<Decl>>, ParseErr
 
 fn parse_fn_param(cur: &mut Cursor<'_>) -> Result<FnParam, ParseError> {
     let (name, name_span) = cur.expect_ident()?;
+
+    // Bare `self` with no type annotation (BACKLOG item 202) — the spec's
+    // own aggregate-root example (§8.5: `fn addItem(self, item: Product,
+    // qty: Int)`) uses this form, which previously failed to parse at all
+    // (`expected Colon, found Comma`); `self: ShoppingCart` (explicit type)
+    // already worked as an ordinary annotated param, no special casing.
+    // `parse_fn_param` has no notion of the enclosing `impl`/type's own
+    // name, so a bare `self` here gets a `Self` sentinel type, filled in
+    // with the real concrete type by whichever caller knows it
+    // (`parse_impl_decl`/`parse_type_decl`'s in-body-fn handling) right
+    // after parsing the method — a trait method's `self` (no concrete
+    // type to fill in) is deliberately left as the sentinel, same as
+    // before this fix in spirit: unresolvable, just discovered at
+    // typecheck now instead of at parse time.
+    if name == "self" && cur.peek() != Some(&Token::Colon) {
+        let self_ty = S::new(
+            TypeExpr::Named {
+                path: ModulePath { segments: vec![S::new("Self".to_string(), name_span)], span: name_span },
+                args: vec![],
+                span: name_span,
+            },
+            name_span,
+        );
+        return Ok(FnParam { name: S::new(name, name_span), ty: self_ty, default: None, span: name_span });
+    }
+
     cur.expect(&Token::Colon)?;
     let ty = parse_type(cur)?;
     let default = if cur.eat(|t| matches!(t, Token::Eq)).is_some() {
@@ -398,6 +424,29 @@ fn parse_fn_param(cur: &mut Cursor<'_>) -> Result<FnParam, ParseError> {
     };
     let span = name_span.to(ty.span);
     Ok(FnParam { name: S::new(name, name_span), ty, default, span })
+}
+
+/// If `method`'s first parameter is a bare, untyped `self` (the `Self`
+/// sentinel `parse_fn_param` produces), rewrite it to the real concrete
+/// type — BACKLOG item 202. Used by both `parse_impl_decl` and
+/// `parse_type_decl`'s in-body `fn` methods (item 150), the two contexts
+/// where the enclosing type is a real, concrete name known to the caller.
+fn resolve_self_param(method: &mut FnDecl, concrete_type_name: &str) {
+    if let Some(p) = method.params.first_mut() {
+        let is_self_sentinel = p.name.node == "self" && matches!(&p.ty.node,
+            TypeExpr::Named { path, args, .. } if args.is_empty() && path.segments.len() == 1 && path.segments[0].node == "Self");
+        if is_self_sentinel {
+            let span = p.ty.span;
+            p.ty = S::new(
+                TypeExpr::Named {
+                    path: ModulePath { segments: vec![S::new(concrete_type_name.to_string(), span)], span },
+                    args: vec![],
+                    span,
+                },
+                span,
+            );
+        }
+    }
 }
 
 // ------------------------------------------------------------------ //
@@ -427,6 +476,12 @@ fn parse_type_decl(cur: &mut Cursor<'_>, is_pub: bool, annotations: Vec<String>)
     } else if cur.peek() == Some(&Token::LBrace) {
         let (rec, ms) = parse_record_type_def(cur)?;
         methods = ms;
+        // BACKLOG item 202 — fill in a bare `self` param's real concrete
+        // type for item 150's in-body `fn` methods too, same as `impl`
+        // blocks: this record's own name is right here.
+        for m in &mut methods {
+            resolve_self_param(m, &name);
+        }
         // `computed name: Ty = expr` (BACKLOG item 143) — desugared here
         // into a real method on the same synthesized `impl` block item
         // 150's in-body `fn`s already use, so field-access resolution
@@ -447,10 +502,27 @@ fn parse_type_decl(cur: &mut Cursor<'_>, is_pub: bool, annotations: Vec<String>)
         // `type T = | Variant1 | Variant2` — leading bar present
         TypeBody::Sum(parse_sum_variants(cur)?)
     } else {
-        // Peek ahead: if this looks like `Ident | ...` it's a sum type without leading bar.
-        // Detect: first token is uppercase Ident and second is Bar.
+        // Peek ahead: if this looks like `Ident | ...` it's a multi-variant
+        // sum type without a leading bar, and if it looks like `Ident(...)`
+        // (BACKLOG item 198) it's a *single*-variant sum type without one —
+        // the spec's own literal Newtype example (§3.3: `type Email =
+        // Email(BoundedText(255))`) is exactly this shape, previously
+        // unparseable (`expected declaration, found LParen`) since only the
+        // `Ident | Bar` form was ever recognized here, so a lone variant
+        // with no `|` anywhere fell through to the type-alias path, which
+        // chokes on the constructor's own `(`. Both cases hand off to the
+        // identical `parse_sum_variants_no_leading_bar` below, which
+        // already handles a single trailing variant correctly (it only
+        // continues the loop when a `|` actually follows) — confirmed via
+        // the working `type Email = | Email(BoundedText(255))` workaround,
+        // which goes through the *same* function via the leading-bar arm
+        // above; this only fixes which arm gets chosen when there's no `|`
+        // anywhere at all. No ambiguity with a real type alias: parens
+        // immediately after a type name are never valid alias syntax on
+        // their own in this grammar (generic instantiation uses `<...>`,
+        // never `(...)`) — only a sum-variant constructor's field list.
         let is_sum = matches!(cur.peek(), Some(Token::Ident(s)) if s.chars().next().map(|c| c.is_uppercase()).unwrap_or(false))
-            && cur.peek2() == Some(&Token::Bar);
+            && matches!(cur.peek2(), Some(Token::Bar) | Some(Token::LParen));
         if is_sum {
             TypeBody::Sum(parse_sum_variants_no_leading_bar(cur)?)
         } else {
@@ -859,6 +931,13 @@ fn parse_impl_decl(cur: &mut Cursor<'_>) -> Result<ImplDecl, ParseError> {
     }
     let end = cur.expect(&Token::RBrace)?;
     let span = start.to(end);
+    // BACKLOG item 202 — fill in a bare `self` param's real concrete type
+    // now that it's known (`impl Trait for Type`/`impl Type`'s own `Type`).
+    if let Some(concrete_name) = type_path.segments.last().map(|s| s.node.as_str()) {
+        for m in &mut methods {
+            resolve_self_param(m, concrete_name);
+        }
+    }
     Ok(ImplDecl { trait_path, type_path, type_params, methods, is_synthesized: false, span })
 }
 

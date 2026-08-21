@@ -147,12 +147,25 @@ pub fn seed_stdlib(env: &mut TypeEnv, counter: &mut u32) {
     // ---------------------------------------------------------------- //
 
     // flatMap :: ∀T U E. Result<T,E> → (T → Result<U,E>) → Result<U,E>
+    //
+    // BACKLOG item 199 — also registered as `Result.flatMap` (and its three
+    // siblings below), since UFCS dot-call resolution (`Ty::qualifying_name`,
+    // `crates/typeck/src/ty.rs`) only ever looks up the qualified
+    // `"Result.<method>"` name, never the bare one. Before this, the exact
+    // dot-call syntax spec §5.4's own pattern table shows
+    // (`result.flatMap(...)`) failed with `E0205: no field 'flatMap'`, even
+    // though the bare-call form `flatMap(result, ...)` already worked —
+    // confirmed directly against `Result.isOk`, which *is* namespaced and
+    // *does* dot-call correctly. The bare names stay registered too (real,
+    // working, pre-existing call sites may already use them) — this only
+    // adds the missing alias, it doesn't replace anything.
     {
         let t = fresh(); let u = fresh(); let e = fresh();
         let result_te = Ty::Result(Box::new(Ty::Var(t)), Box::new(Ty::Var(e)));
         let result_ue = Ty::Result(Box::new(Ty::Var(u)), Box::new(Ty::Var(e)));
         let f_ty = fn1(Ty::Var(t), result_ue.clone());
-        env.define("flatMap", poly3(t, u, e, fn2(result_te, f_ty, result_ue)));
+        env.define("flatMap", poly3(t, u, e, fn2(result_te.clone(), f_ty.clone(), result_ue.clone())));
+        env.define("Result.flatMap", poly3(t, u, e, fn2(result_te, f_ty, result_ue)));
     }
     // mapErr :: ∀T E F. Result<T,E> → (E → F) → Result<T,F>
     {
@@ -160,20 +173,23 @@ pub fn seed_stdlib(env: &mut TypeEnv, counter: &mut u32) {
         let result_te = Ty::Result(Box::new(Ty::Var(t)), Box::new(Ty::Var(e)));
         let result_tf = Ty::Result(Box::new(Ty::Var(t)), Box::new(Ty::Var(f)));
         let f_ty = fn1(Ty::Var(e), Ty::Var(f));
-        env.define("mapErr", poly3(t, e, f, fn2(result_te, f_ty, result_tf)));
+        env.define("mapErr", poly3(t, e, f, fn2(result_te.clone(), f_ty.clone(), result_tf.clone())));
+        env.define("Result.mapErr", poly3(t, e, f, fn2(result_te, f_ty, result_tf)));
     }
     // getOrElse :: ∀T E. Result<T,E> → T → T
     {
         let t = fresh(); let e = fresh();
         let result_te = Ty::Result(Box::new(Ty::Var(t)), Box::new(Ty::Var(e)));
-        env.define("getOrElse", poly2(t, e, fn2(result_te, Ty::Var(t), Ty::Var(t))));
+        env.define("getOrElse", poly2(t, e, fn2(result_te.clone(), Ty::Var(t), Ty::Var(t))));
+        env.define("Result.getOrElse", poly2(t, e, fn2(result_te, Ty::Var(t), Ty::Var(t))));
     }
     // recover :: ∀T E. Result<T,E> → (E → T) → T
     {
         let t = fresh(); let e = fresh();
         let result_te = Ty::Result(Box::new(Ty::Var(t)), Box::new(Ty::Var(e)));
         let f_ty = fn1(Ty::Var(e), Ty::Var(t));
-        env.define("recover", poly2(t, e, fn2(result_te, f_ty, Ty::Var(t))));
+        env.define("recover", poly2(t, e, fn2(result_te.clone(), f_ty.clone(), Ty::Var(t))));
+        env.define("Result.recover", poly2(t, e, fn2(result_te, f_ty, Ty::Var(t))));
     }
     // Result.all :: ∀T E. List<Result<T,E>> → Result<List<T>, E>
     {

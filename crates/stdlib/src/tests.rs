@@ -1,7 +1,7 @@
 use certo_typeck::{Ty, TypeEnv};
 use crate::seed::seed_stdlib;
 use crate::{CORE_C, BYTES_C, CREDENTIAL_C, COLLECTIONS_C, CHANNEL_C, RESULT_C, TEXT_C, DATETIME_C, MONEY_C,
-            ENV_C, FILE_C, PATH_C, PROCESS_C, JSON_C, HTTP_C, DB_C, REGEX_C,
+            ENV_C, FILE_C, PATH_C, PROCESS_C, JSON_C, HTTP_C, DB_C, REGEX_C, UUID_C,
             full_c_runtime};
 
 fn seeded_env() -> TypeEnv {
@@ -690,6 +690,21 @@ fn full_c_runtime_combines_all_modules() {
     assert!(rt.contains("certo_text_concat"),   "missing text");
     assert!(rt.contains("certo_datetime_now"),  "missing datetime");
     assert!(rt.contains("certo_decimal_add"),   "missing money");
+    assert!(rt.contains("certo_uuid_parse"),    "missing uuid");
+}
+
+// ------------------------------------------------------------------ //
+// Stdlib.Uuid — BACKLOG item 197
+// ------------------------------------------------------------------ //
+
+#[test]
+fn uuid_c_contains_real_bodies_not_just_forward_declarations() {
+    // `certo_uuid_parse`/`certo_uuid_new` were forward-declared in
+    // RUNTIME_HEADER (`crates/codegen/src/emit_module.rs`) but had no body
+    // anywhere — a real link failure (`undefined symbol: certo_uuid_parse`)
+    // for the exact `uuid"..."` literal spec 2.4's own table shows.
+    assert!(UUID_C.contains("certo_uuid_t certo_uuid_parse(const char* s) {"), "missing certo_uuid_parse body");
+    assert!(UUID_C.contains("certo_uuid_t certo_uuid_new(void) {"), "missing certo_uuid_new body");
 }
 
 // ------------------------------------------------------------------ //
