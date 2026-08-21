@@ -1073,12 +1073,45 @@ fn infer_lit(lit: &Lit) -> Ty {
     }
 }
 
+/// Render a `BinOp` as its real Certo source symbol, for diagnostic messages.
+fn binop_symbol(op: &BinOp) -> &'static str {
+    match op {
+        BinOp::Add => "+", BinOp::Sub => "-", BinOp::Mul => "*",
+        BinOp::Div => "/", BinOp::Rem => "%", BinOp::Pow => "**",
+        BinOp::Eq => "==", BinOp::NotEq => "!=",
+        BinOp::Lt => "<", BinOp::LtEq => "<=", BinOp::Gt => ">", BinOp::GtEq => ">=",
+        BinOp::And => "and", BinOp::Or => "or",
+        BinOp::RangeInclusive => "..", BinOp::RangeExclusive => "...",
+        BinOp::NullCoalesce => "??", BinOp::Concat => "++",
+    }
+}
+
 fn infer_binop(op: &BinOp, left: &S<Expr>, right: &S<Expr>, span: Span, ctx: &mut Ctx<'_>) -> Ty {
     let lt = infer(left, ctx);
     let rt = infer(right, ctx);
     match op {
         BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem | BinOp::Pow => {
             ctx.unify(lt.clone(), rt, span);
+            // BACKLOG item 214 — `Timestamp`/`DateTime`/`Date` are opaque,
+            // non-unifying nominal types with no operator overloading (see
+            // item 85); same-type arithmetic between them previously
+            // unified fine and silently returned that same type, e.g.
+            // `timestamp - timestamp` "worked" and produced another
+            // `Timestamp`, not a `Duration`. `Duration` itself is
+            // deliberately excluded — see `OpaqueTemporalArithmetic`'s own
+            // doc comment for why.
+            let resolved = ctx.uf.apply(&lt);
+            if let Ty::Named { name, args } = &resolved {
+                if args.is_empty() && matches!(name.as_str(), "Timestamp" | "DateTime" | "Date") {
+                    ctx.errors.push(TypeError {
+                        kind: TypeErrorKind::OpaqueTemporalArithmetic {
+                            ty: resolved.clone(),
+                            op: binop_symbol(op).to_string(),
+                        },
+                        span,
+                    });
+                }
+            }
             lt
         }
         BinOp::Eq | BinOp::NotEq => {

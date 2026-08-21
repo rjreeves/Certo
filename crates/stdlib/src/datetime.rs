@@ -453,4 +453,6 @@ CertoDate certo_date_today_in(CertoTimezone tz) {
 #define certo_timestamp_parse       certo_datetime_parse_iso
 #define certo_timestamp_in_timezone certo_date_time_in_timezone
 #define certo_timestamp_format_tz   certo_date_time_format_tz
+/* BACKLOG item 214 — Timestamp.diff, same bridge pattern as the four above. */
+#define certo_timestamp_diff        certo_datetime_diff
 "#;

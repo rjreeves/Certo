@@ -1613,6 +1613,14 @@ pub(crate) fn type_error_to_diagnostic(e: &TypeError) -> Diagnostic {
                 .with_label("SQL injection risk")
                 .with_note("use `?` placeholders in the SQL text and pass values via `params` instead")
         }
+
+        TypeErrorKind::OpaqueTemporalArithmetic { ty, op } => {
+            Diagnostic::error("E0218",
+                format!("`{}` does not support the `{}` operator", ty.display(), op))
+                .with_span(e.span)
+                .with_label(format!("`{}` has no operator overloading", ty.display()))
+                .with_note("use a named function instead, e.g. `.diff(...)` or `.addDuration(...)`")
+        }
     }
 }
 

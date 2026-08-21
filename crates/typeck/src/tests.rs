@@ -2017,3 +2017,64 @@ fn non_generic_record_pattern_is_unaffected_by_the_generic_fix() {
     ).unwrap();
 }
 
+// ------------------------------------------------------------------ //
+// Opaque date/time arithmetic operators (E0218) — BACKLOG item 214
+// ------------------------------------------------------------------ //
+
+#[test]
+fn timestamp_minus_timestamp_is_e0218() {
+    let kind = first_error_kind(
+        "module A\nfn f(a: Timestamp, b: Timestamp): Timestamp = a - b"
+    );
+    assert!(matches!(kind, TypeErrorKind::OpaqueTemporalArithmetic { .. }),
+        "expected OpaqueTemporalArithmetic (E0218), got {kind:?}");
+}
+
+#[test]
+fn datetime_plus_datetime_is_e0218() {
+    let kind = first_error_kind(
+        "module A\nfn f(a: DateTime, b: DateTime): DateTime = a + b"
+    );
+    assert!(matches!(kind, TypeErrorKind::OpaqueTemporalArithmetic { .. }),
+        "expected OpaqueTemporalArithmetic (E0218), got {kind:?}");
+}
+
+#[test]
+fn date_times_date_is_e0218() {
+    let kind = first_error_kind(
+        "module A\nfn f(a: Date, b: Date): Date = a * b"
+    );
+    assert!(matches!(kind, TypeErrorKind::OpaqueTemporalArithmetic { .. }),
+        "expected OpaqueTemporalArithmetic (E0218), got {kind:?}");
+}
+
+#[test]
+fn e0218_message_names_the_type_and_operator() {
+    let errs = check_err("module A\nfn f(a: Timestamp, b: Timestamp): Timestamp = a - b");
+    let msg = errs[0].message();
+    assert!(msg.contains("E0218"), "expected E0218, got: {msg}");
+    assert!(msg.contains("Timestamp"), "expected the type named, got: {msg}");
+    assert!(msg.contains('-'), "expected the operator named, got: {msg}");
+}
+
+#[test]
+fn duration_arithmetic_is_not_flagged() {
+    // Distinct from Timestamp/DateTime/Date — summing two spans is sensible;
+    // only exposed via `.add`/`.sub` rather than an operator, but the bare
+    // operator isn't the "nonsensical same-type result" bug this item is
+    // about, so it's deliberately not rejected here.
+    check("module A\nfn f(a: Duration, b: Duration): Duration = a - b").unwrap();
+}
+
+#[test]
+fn ordinary_int_arithmetic_is_unaffected() {
+    check("module A\nfn f(a: Int, b: Int): Int = a - b").unwrap();
+}
+
+#[test]
+fn timestamp_comparison_is_not_flagged() {
+    // E0218 is specifically about arithmetic (+/-/*//%/**) producing a
+    // nonsensical same-typed result — comparisons return Bool and are fine.
+    check("module A\nfn f(a: Timestamp, b: Timestamp): Bool = a == b").unwrap();
+}
+

@@ -135,7 +135,7 @@ static CertoList* certo_regex_captures(certo_text_t pat, certo_text_t str) {
         if (!caps[i].start) break;
         char *s = (char*)malloc(caps[i].len+1);
         strncpy(s, caps[i].start, caps[i].len); s[caps[i].len]=0;
-        certo_list_push(list, s);
+        list = certo_list_push(list, s);
     }
     return list;
 }
@@ -171,14 +171,14 @@ static CertoList* certo_regex_split(certo_text_t pat, certo_text_t str) {
         const char *ms, *me;
         if (_re_find(pat, s, caps, CERTO_RE_NCAP, &ms, &me) && ms == s) {
             /* zero-length match guard */
-            if (me == ms) { char *seg = (char*)malloc(2); seg[0]=*s; seg[1]=0; certo_list_push(list, seg); s++; continue; }
-            char *seg = (char*)malloc(1); seg[0]=0; certo_list_push(list, seg);
+            if (me == ms) { char *seg = (char*)malloc(2); seg[0]=*s; seg[1]=0; list = certo_list_push(list, seg); s++; continue; }
+            char *seg = (char*)malloc(1); seg[0]=0; list = certo_list_push(list, seg);
             s = me;
         } else if (_re_find(pat, s, caps, CERTO_RE_NCAP, &ms, &me)) {
             int len = (int)(ms - s); char *seg = (char*)malloc(len+1); strncpy(seg, s, len); seg[len]=0;
-            certo_list_push(list, seg); s = me;
+            list = certo_list_push(list, seg); s = me;
         } else {
-            char *seg = (char*)malloc(strlen(s)+1); strcpy(seg, s); certo_list_push(list, seg);
+            char *seg = (char*)malloc(strlen(s)+1); strcpy(seg, s); list = certo_list_push(list, seg);
             break;
         }
     }

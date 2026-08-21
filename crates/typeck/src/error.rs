@@ -74,6 +74,23 @@ pub enum TypeErrorKind {
     /// instead.
     SqlInjectionRisk { fn_name: String },
 
+    /// E0218 — a bare arithmetic operator (`+`/`-`/`*`/`/`/`%`/`**`) was used
+    /// between two values of the same opaque date/time type (`Timestamp`,
+    /// `DateTime`, `Date`) — BACKLOG item 214. These types deliberately have
+    /// no operator overloading (this codebase's own established convention —
+    /// see item 85's own note: named functions like `.diff(...)`/
+    /// `.addDuration(...)` instead), but the generic same-type arithmetic
+    /// rule previously let this through silently, unifying fine and
+    /// producing a nonsensical same-typed result — `timestamp - timestamp`
+    /// "worked" and produced another `Timestamp`, not a `Duration`, with no
+    /// error at all. `Duration` itself is deliberately not included here —
+    /// summing/differencing two spans is a real, sensible operation (unlike
+    /// two absolute points in time), it's just also only exposed via
+    /// `.add`/`.sub` rather than operators; nothing about that is wrong or
+    /// silently nonsensical the way same-type `Timestamp`/`DateTime`/`Date`
+    /// arithmetic is, so it's out of this check's scope.
+    OpaqueTemporalArithmetic { ty: Ty, op: String },
+
     /// E0703 — a validator rule's `else` clause produces a type other than
     /// the validator's own declared `errors` type (BACKLOG item 219).
     /// Deliberately its own variant, not a reuse of `Mismatch`/E0200 —
@@ -150,6 +167,8 @@ impl TypeError {
                 format!("E0215: `{}` is not Loggable/Serializable — passed to `{}`", ty.display(), fn_name),
             TypeErrorKind::SqlInjectionRisk { fn_name } =>
                 format!("E0216: an interpolated f-string was passed directly as the `sql` argument to `{}` — use `?` placeholders and pass values via `params` instead", fn_name),
+            TypeErrorKind::OpaqueTemporalArithmetic { ty, op } =>
+                format!("E0218: `{}` does not support the `{}` operator — it has no operator overloading, use a named function instead (e.g. `.diff(...)`, `.addDuration(...)`)", ty.display(), op),
             TypeErrorKind::ElseTypeMismatch { rule_name, expected, found } =>
                 format!("E0703: rule `{}`'s `else` branch produces `{}`, but this validator declares `errors {}`",
                     rule_name, found.display(), expected.display()),
