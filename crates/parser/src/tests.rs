@@ -655,6 +655,75 @@ fn priv_constructor_with_named_field() {
     }
 }
 
+// ------------------------------------------------------------------ //
+// Single-variant Newtype with no leading `|` — BACKLOG item 198
+// ------------------------------------------------------------------ //
+
+#[test]
+fn newtype_single_variant_no_leading_bar_parses_as_sum() {
+    // The spec's own literal Newtype example (§3.3), copied verbatim:
+    // previously failed with `expected declaration, found LParen` — only
+    // a multi-variant `Ident | Ident` shape (2+ variants) was ever
+    // recognized as a no-leading-bar sum type; a single variant with no
+    // `|` anywhere fell through to the type-alias path instead, which
+    // chokes on the constructor's own `(`.
+    let m = ok("module A\ntype Email = Email(BoundedText(255))");
+    match &m.decls[0].node {
+        Decl::Type(t) => match &t.body {
+            certo_ast::decl::TypeBody::Sum(variants) => {
+                assert_eq!(variants.len(), 1);
+                assert_eq!(variants[0].name.node, "Email");
+                assert_eq!(variants[0].fields.len(), 1);
+            }
+            other => panic!("expected sum type, got {other:?}"),
+        },
+        _ => panic!("expected Decl::Type"),
+    }
+}
+
+#[test]
+fn newtype_single_variant_matches_the_explicit_leading_bar_workaround() {
+    // The pre-fix workaround (`| Email(...)`) and the newly-fixed no-bar
+    // form must produce the identical AST shape — confirming this is
+    // purely about which parser arm gets chosen, not a different feature.
+    let with_bar = ok("module A\ntype Email = | Email(BoundedText(255))");
+    let without_bar = ok("module A\ntype Email = Email(BoundedText(255))");
+    let variants = |m: &certo_ast::module::Module| match &m.decls[0].node {
+        Decl::Type(t) => match &t.body {
+            certo_ast::decl::TypeBody::Sum(v) => v.len(),
+            _ => panic!("expected sum type"),
+        },
+        _ => panic!("expected Decl::Type"),
+    };
+    assert_eq!(variants(&with_bar), variants(&without_bar));
+}
+
+#[test]
+fn plain_type_alias_is_unaffected() {
+    // No regression: a real alias with no parens at all must still parse
+    // as `TypeBody::Alias`, not be swallowed by the new `Ident(` detection.
+    let m = ok("module A\ntype UserId = UUID");
+    match &m.decls[0].node {
+        Decl::Type(t) => assert!(matches!(t.body, certo_ast::decl::TypeBody::Alias(_)), "expected Alias"),
+        _ => panic!(),
+    }
+}
+
+#[test]
+fn multi_variant_no_leading_bar_is_unaffected() {
+    // The pre-existing 2+-variant no-bar form must still work exactly as
+    // before — the fix only changes what happens when there's no `|` at
+    // all, not this case.
+    let m = ok("module A\ntype Color = Red | Green | Blue");
+    match &m.decls[0].node {
+        Decl::Type(t) => match &t.body {
+            certo_ast::decl::TypeBody::Sum(variants) => assert_eq!(variants.len(), 3),
+            other => panic!("expected sum type, got {other:?}"),
+        },
+        _ => panic!(),
+    }
+}
+
 #[test]
 fn non_priv_type_has_is_priv_ctor_false() {
     let m = ok("module A\ntype Point = { x: Int, y: Int }");
@@ -1888,4 +1957,71 @@ fn flat_and_nested_form_fields_coexist_in_one_body() {
 #[test]
 fn nested_field_block_unknown_key_is_rejected() {
     err("module A\nform ProductForm -> Product {\n field price {\n bogus: 1\n }\n}");
+}
+
+// ------------------------------------------------------------------ //
+// Bare, untyped `self` as a method's first parameter — BACKLOG item 202
+// ------------------------------------------------------------------ //
+
+#[test]
+fn bare_self_in_impl_block_resolves_to_the_impl_type() {
+    // The spec's own aggregate-root example (§8.5:
+    // `fn addItem(self, item: Product, qty: Int)`), copied verbatim —
+    // previously failed with `expected Colon, found Comma`.
+    let m = ok("module A\nimpl ShoppingCart {\n    fn addItem(self, item: Product, qty: Int): ShoppingCart = self\n}");
+    let Decl::Impl(i) = &m.decls[0].node else { panic!("expected Decl::Impl") };
+    let self_param = &i.methods[0].params[0];
+    assert_eq!(self_param.name.node, "self");
+    let certo_ast::types::TypeExpr::Named { path, args, .. } = &self_param.ty.node else {
+        panic!("expected Named type, got {:?}", self_param.ty.node)
+    };
+    assert!(args.is_empty());
+    assert_eq!(path.segments.len(), 1);
+    assert_eq!(path.segments[0].node, "ShoppingCart", "bare self must resolve to the impl's own type, not a placeholder");
+}
+
+#[test]
+fn bare_self_in_record_in_body_fn_resolves_to_the_record_type() {
+    // Item 150's in-body `fn` methods are the *other* real context where
+    // the enclosing type is concrete and known — same fix must apply there.
+    let m = ok("module A\ntype Counter = {\n    count: Int\n\n    fn increment(self): Counter = self\n}");
+    let Decl::Impl(i) = &m.decls[1].node else { panic!("expected synthesized impl decl second") };
+    let self_param = &i.methods[0].params[0];
+    assert_eq!(self_param.name.node, "self");
+    let certo_ast::types::TypeExpr::Named { path, .. } = &self_param.ty.node else {
+        panic!("expected Named type, got {:?}", self_param.ty.node)
+    };
+    assert_eq!(path.segments[0].node, "Counter");
+}
+
+#[test]
+fn explicit_self_type_annotation_is_unaffected() {
+    // No regression: `self: Type` (already working before this fix) must
+    // parse identically to before — an ordinary annotated param, not
+    // routed through the new bare-self sentinel/rewrite path at all.
+    let m = ok("module A\nimpl ShoppingCart {\n    fn addItem(self: ShoppingCart, item: Product, qty: Int): ShoppingCart = self\n}");
+    let Decl::Impl(i) = &m.decls[0].node else { panic!("expected Decl::Impl") };
+    let self_param = &i.methods[0].params[0];
+    let certo_ast::types::TypeExpr::Named { path, .. } = &self_param.ty.node else {
+        panic!("expected Named type, got {:?}", self_param.ty.node)
+    };
+    assert_eq!(path.segments[0].node, "ShoppingCart");
+}
+
+#[test]
+fn bare_self_outside_impl_or_type_context_parses_with_an_unresolved_sentinel() {
+    // `parse_fn_param` itself has no notion of "am I inside an impl/type
+    // body" — a bare `self` on a plain top-level `fn` still parses (no new
+    // parse error introduced), it just has nothing to rewrite the `Self`
+    // sentinel to, since there's no enclosing concrete type. Whether that
+    // sentinel is ever a real usable type is a typecheck concern, not
+    // this fix's — same as a bare `self` inside a `trait` method (also
+    // never rewritten, deliberately, since a trait has no single concrete
+    // type either).
+    let m = ok("module A\nfn f(self): Int = 0");
+    let Decl::Fn(f) = &m.decls[0].node else { panic!("expected Decl::Fn") };
+    let certo_ast::types::TypeExpr::Named { path, .. } = &f.params[0].ty.node else {
+        panic!("expected Named type, got {:?}", f.params[0].ty.node)
+    };
+    assert_eq!(path.segments[0].node, "Self");
 }

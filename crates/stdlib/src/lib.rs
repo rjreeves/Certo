@@ -20,6 +20,7 @@ mod math;
 mod crypto;
 mod regex;
 mod csv;
+mod uuid;
 pub mod seed;
 mod effects_seed;
 
@@ -48,12 +49,13 @@ pub use math::MATH_C;
 pub use crypto::CRYPTO_C;
 pub use regex::REGEX_C;
 pub use csv::CSV_C;
+pub use uuid::UUID_C;
 
 /// The full C runtime header: base types + all stdlib implementations.
 pub fn full_c_runtime() -> String {
     [CORE_C, BYTES_C, CREDENTIAL_C, COLLECTIONS_C, CHANNEL_C, RESULT_C, TEXT_C, DATETIME_C, MONEY_C,
      ENV_C, FILE_C, PATH_C, PROCESS_C, JSON_C, HTTP_C, MATH_C,
-     CRYPTO_C, REGEX_C, CSV_C].concat()
+     CRYPTO_C, REGEX_C, CSV_C, UUID_C].concat()
 }
 
 /// Full C runtime including optional PostgreSQL support.

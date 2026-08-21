@@ -38,6 +38,18 @@ intptr_t certo_recover(void* r, certo_fn_t f) {
     return (intptr_t)((CertoFn1)f.fn)(f.env, (void*)__result_unwrap(r));
 }
 
+/* Bridge codegen's `Result.flatMap`/`.mapErr`/`.getOrElse`/`.recover` names
+   (BACKLOG item 199 — needed so the dot-call form spec 5.4's own pattern
+   table shows actually resolves, see `crates/stdlib/src/seed.rs`'s own
+   note) to the identical implementations above, the same `#define`
+   bridge pattern `List.reduce`/`Timestamp.*` already use elsewhere in this
+   codebase — the qualified names mangle to different C symbols
+   (`certo_result_flat_map`, etc.) than the bare ones already implemented. */
+#define certo_result_flat_map    certo_flat_map
+#define certo_result_map_err     certo_map_err
+#define certo_result_get_or_else certo_get_or_else
+#define certo_result_recover     certo_recover
+
 /* Result.isOk/isErr (BACKLOG item 165) — thin wrappers over the existing
    __result_is_ok primitive every combinator above already uses. Real,
    independently useful predicates, not just plumbing for

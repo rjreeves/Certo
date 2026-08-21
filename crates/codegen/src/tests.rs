@@ -475,6 +475,70 @@ fn callback_to_list_flat_map_is_boxed() {
     assert_contains(&c, "certo_list_flat_map");
 }
 
+// ------------------------------------------------------------------ //
+// Result combinator dot-call reachability — BACKLOG item 199
+// ------------------------------------------------------------------ //
+
+#[test]
+fn result_flat_map_dot_call_reaches_the_real_function() {
+    // Previously `E0205: no field 'flatMap'` — only the bare-call form
+    // typechecked at all, since UFCS dot-call resolution only ever looks
+    // up the qualified `Result.flatMap` name, which didn't exist.
+    let c = codegen(
+        "module A\ntype E = | Bad\nfn addOne(x: Int): Result<Int, E> = Ok(x + 1)\n\
+         fn f(r: Result<Int, E>): Result<Int, E> = r.flatMap(addOne)");
+    assert_contains(&c, "certo_result_flat_map(");
+}
+
+#[test]
+fn result_map_err_dot_call_reaches_the_real_function() {
+    let c = codegen(
+        "module A\ntype E = | Bad\ntype F = | Worse\nfn toF(e: E): F = F.Worse\n\
+         fn f(r: Result<Int, E>): Result<Int, F> = r.mapErr(toF)");
+    assert_contains(&c, "certo_result_map_err(");
+}
+
+#[test]
+fn result_get_or_else_dot_call_reaches_the_real_function() {
+    let c = codegen(
+        "module A\ntype E = | Bad\nfn f(r: Result<Int, E>): Int = r.getOrElse(0)");
+    assert_contains(&c, "certo_result_get_or_else(");
+}
+
+#[test]
+fn result_recover_dot_call_reaches_the_real_function() {
+    let c = codegen(
+        "module A\ntype E = | Bad\nfn fallback(e: E): Int = 0\n\
+         fn f(r: Result<Int, E>): Int = r.recover(fallback)");
+    assert_contains(&c, "certo_result_recover(");
+}
+
+#[test]
+fn result_flat_map_result_type_is_known_downstream_not_ty_error() {
+    // BACKLOG item 199's own deeper finding: even the long-working *bare*-
+    // call form segfaulted the moment its result was actually consumed —
+    // the call's own type silently stayed `Ty::Error` (no
+    // `generic_container_ret` arm existed for `flatMap`/`Result.flatMap`).
+    // Confirmed fixed for the spec's own real usage pattern (a named-
+    // function callback, spec §5.4) — an f-string interpolating the
+    // unwrapped payload must emit a real conversion call.
+    let c = codegen(
+        "module A\ntype E = | Bad\nfn addOne(x: Int): Result<Int, E> = Ok(x + 1)\n\
+         fn f(r: Result<Int, E>): Text = {\n\
+         \x20   val r2 = r.flatMap(addOne)\n\
+         \x20   match r2 { Ok(v) => f\"{v}\", Err(_) => \"err\" }\n\
+         }");
+    assert_contains(&c, "certo_int_to_text(");
+}
+
+#[test]
+fn result_recover_result_type_is_known_downstream_not_ty_error() {
+    let c = codegen(
+        "module A\ntype E = | Bad\nfn fallback(e: E): Int = 0\n\
+         fn f(r: Result<Int, E>): Text = f\"{r.recover(fallback)}\"");
+    assert_contains(&c, "certo_int_to_text(");
+}
+
 #[test]
 fn list_reduce_compiles_to_the_real_fold_call() {
     // BACKLOG item 162: List.reduce is a pure name bridge to List.fold's
