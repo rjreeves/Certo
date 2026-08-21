@@ -709,15 +709,105 @@ fn check_decl(decl: &Decl, ctx: &mut Ctx<'_>) {
             ctx.env.push();
 
             // Bind entity variable: `Order` → `order: Order`
-            if let Some(entity_name) = type_expr_simple_name(&v.entity.node) {
+            let entity_name = type_expr_simple_name(&v.entity.node);
+            if let Some(entity_name) = &entity_name {
                 let entity_ty = type_expr_to_ty(&v.entity.node, ctx);
-                ctx.env.define(lowercase_first(&entity_name), entity_ty);
+                ctx.env.define(lowercase_first(entity_name), entity_ty);
             }
 
             // Bind context fields
             for field in &v.context {
                 let field_ty = type_expr_to_ty(&field.type_ref.node, ctx);
-                ctx.env.define(field.name.node.clone(), field_ty);
+                ctx.env.define(field.name.node.clone(), field_ty.clone());
+
+                // BACKLOG item 220 (E0705) — a `loaded by` expression must
+                // itself produce the field's own declared type; nothing
+                // checked this before. Compares resolved types directly
+                // (mirrors E0703's own pattern above) rather than
+                // `ctx.unify`, which would only ever report the generic
+                // E0200. NOTE: found while implementing this that the
+                // `db.<table>.find(...)` accessor syntax every spec example
+                // of `loaded by` actually uses doesn't type-check at all
+                // anywhere in this codebase (`db` is never a bound name) —
+                // a separate, much larger, pre-existing gap (filed as its
+                // own item, not attempted here). Until that exists, this
+                // check can only ever fire for a `loaded by` expression that
+                // avoids that syntax; it's still real, correct, forward-
+                // compatible code, just not yet exercisable end-to-end by
+                // the spec's own examples.
+                if let Some(lb) = &field.loaded_by {
+                    let lb_ty = infer(lb, ctx);
+                    let lb_ty_resolved = ctx.uf.apply(&lb_ty);
+                    let field_ty_resolved = ctx.uf.apply(&field_ty);
+                    match &lb_ty_resolved {
+                        Ty::Var(_) | Ty::Error => {}
+                        other if other != &field_ty_resolved => {
+                            ctx.errors.push(TypeError {
+                                kind: TypeErrorKind::LoadedByTypeMismatch {
+                                    field_name: field.name.node.clone(),
+                                    expected:   field_ty_resolved.clone(),
+                                    found:      lb_ty_resolved.clone(),
+                                },
+                                span: lb.span,
+                            });
+                        }
+                        _ => {}
+                    }
+                }
+            }
+
+            // BACKLOG item 220 (E0706/E0707) — a `trigger on ... when
+            // <field> == <value>` condition previously had its field/value
+            // never checked against the entity type at all: an undeclared
+            // field or a value that isn't a real variant of the field's own
+            // type both passed `certo check` silently.
+            if let (Some(trigger), Some(entity_name)) = (&v.trigger, &entity_name) {
+                if let Some(cond) = &trigger.condition {
+                    // Only checked when the entity resolves to a known local
+                    // record — an entity type we can't see the fields of
+                    // (imported, or the "declared" but not `type X = {...}`-
+                    // backed convention some tests/forward-refs rely on)
+                    // can't be verified either way, so it's silently skipped
+                    // rather than risking a false positive.
+                    if let Some(fields) = ctx.env.record_fields.get(entity_name.as_str()).cloned() {
+                    match fields.iter().find(|(n, _)| n == &cond.field.node) {
+                        None => {
+                            ctx.errors.push(TypeError {
+                                kind: TypeErrorKind::TriggerFieldNotFound {
+                                    field:  cond.field.node.clone(),
+                                    entity: entity_name.clone(),
+                                },
+                                span: cond.span,
+                            });
+                        }
+                        Some((_, field_ty)) => {
+                            // Only a bare identifier value (`status == Submitted`)
+                            // names a literal variant to check; other shapes
+                            // (`status != OLD.status`) reference a runtime value,
+                            // not a variant literal, and aren't checked here.
+                            if let Expr::Path { path, .. } = &cond.value.node {
+                                if path.segments.len() == 1 {
+                                    let value_name = &path.segments[0].node;
+                                    if let Ty::Named { name: ty_name, .. } = field_ty {
+                                        if let Some(variants) = ctx.env.sum_variants.get(ty_name) {
+                                            if !variants.iter().any(|v| v == value_name) {
+                                                ctx.errors.push(TypeError {
+                                                    kind: TypeErrorKind::TriggerValueNotVariant {
+                                                        value:    value_name.clone(),
+                                                        field:    cond.field.node.clone(),
+                                                        field_ty: field_ty.clone(),
+                                                    },
+                                                    span: cond.value.span,
+                                                });
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    }
+                }
             }
 
             // Type-check each rule

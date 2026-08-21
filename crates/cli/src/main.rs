@@ -721,10 +721,14 @@ fn parse_file_or_exit(path: &Path, colour: bool) -> (Module, String) {
 /// Call sites use `V.validate(...)`, which links to `V_validate` via `c_fn_name`.
 fn expand_validators(module: &mut Module, colour: bool) {
     use certo_ast::decl::Decl;
+    let constraints: Vec<&certo_ast::decl::ConstraintDecl> = module.decls.iter()
+        .filter_map(|d| if let Decl::Constraint(c) = &d.node { Some(c) } else { None })
+        .collect();
+    let constraint_bodies = certo_codegen::build_constraint_bodies(&constraints);
     let mut generated = String::new();
     for d in &module.decls {
         if let Decl::Validator(v) = &d.node {
-            generated.push_str(&certo_codegen::emit_validator(v).to_source());
+            generated.push_str(&certo_codegen::emit_validator(v, &constraint_bodies).to_source());
             generated.push('\n');
         }
     }
@@ -1500,6 +1504,30 @@ pub(crate) fn type_error_to_diagnostic(e: &TypeError) -> Diagnostic {
                 .with_span(e.span)
                 .with_label(format!("this has type `{}`", found.display_named(&names)))
                 .with_note(format!("change the error variant to one of `{}`, or change the validator's `errors` declaration", expected.display_named(&names)))
+        }
+
+        TypeErrorKind::LoadedByTypeMismatch { field_name, expected, found } => {
+            let names = assign_var_names(&[expected, found]);
+            Diagnostic::error("E0705",
+                format!("context field `{}`'s `loaded by` expression produces `{}`, but the field is declared `{}`",
+                    field_name, found.display_named(&names), expected.display_named(&names)))
+                .with_span(e.span)
+                .with_label(format!("this has type `{}`", found.display_named(&names)))
+                .with_note(format!("`loaded by` must produce `{}` — the field's own declared type", expected.display_named(&names)))
+        }
+
+        TypeErrorKind::TriggerFieldNotFound { field, entity } => {
+            Diagnostic::error("E0706",
+                format!("trigger condition references field `{}`, which does not exist on `{}`", field, entity))
+                .with_span(e.span)
+                .with_note(format!("check the field name against `{}`'s declared fields", entity))
+        }
+
+        TypeErrorKind::TriggerValueNotVariant { value, field, field_ty } => {
+            Diagnostic::error("E0707",
+                format!("`{}` is not a variant of `{}` (the type of field `{}`)", value, field_ty.display(), field))
+                .with_span(e.span)
+                .with_note(format!("use one of `{}`'s real variants", field_ty.display()))
         }
 
         TypeErrorKind::TemporalNotDuration { found } => {
