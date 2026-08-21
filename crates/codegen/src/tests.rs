@@ -383,6 +383,30 @@ fn new_collection_functions_emit_expected_call_names() {
 }
 
 #[test]
+fn list_upsert_emits_expected_call_name() {
+    // BACKLOG item 209.
+    let c = codegen(
+        "module A\nimport Stdlib.Collections.{ List }\n\
+         fn f(xs: List<Int>): List<Int> = xs.upsert(9, on: (x) => x)");
+    assert_contains(&c, "certo_list_upsert(");
+}
+
+#[test]
+fn list_upsert_boxes_a_struct_item_like_list_push_does() {
+    // The generic `item` param is a `void*` slot at the C level (BACKLOG
+    // item 134's own fix for `List.push`) — a struct-typed item needs the
+    // identical real heap-boxing, not a cast that won't even compile for a
+    // struct. Confirmed via repro: without this, `certo_list_upsert(_l4,
+    // _l5, _l7)` failed with "passing 'Item' to parameter of incompatible
+    // type 'void *'".
+    let c = codegen(
+        "module A\nimport Stdlib.Collections.{ List }\ntype Item = { id: Int }\n\
+         fn f(xs: List<Item>, it: Item): List<Item> = xs.upsert(it, on: (x) => x.id)");
+    assert_contains(&c, "certo_list_upsert(");
+    assert_contains(&c, "malloc(sizeof(Item))");
+}
+
+#[test]
 fn list_get_or_panic_on_float_list_unboxes_return_value() {
     // List.getOrPanic always returns a raw void* at the C level, but HIR now
     // recovers its logical return type as the list's element type (BACKLOG
@@ -459,6 +483,34 @@ fn list_reduce_compiles_to_the_real_fold_call() {
         "module A\nimport Stdlib.Collections.{ List }\n\
          fn f(xs: List<Int>): Int = List.reduce(xs, 0, (acc, x) => acc + x)");
     assert_contains(&c, "certo_list_reduce");
+}
+
+#[test]
+fn list_reduce_result_type_is_known_downstream_not_ty_error() {
+    // BACKLOG item 211 — before HIR's `generic_container_ret` had an arm
+    // for `List.fold`/`List.reduce`, the call's own type fell through to
+    // `Ty::Error`, so an f-string interpolating the result skipped
+    // `certo_int_to_text` entirely and read the raw `int64_t` bits as a
+    // `Text` pointer — a segfault, not a compile error. Confirmed fixed:
+    // the interpolation must now emit a real conversion call.
+    let c = codegen(
+        "module A\nimport Stdlib.Collections.{ List }\n\
+         fn f(xs: List<Int>): Text = {\n\
+         \x20   val total = List.reduce(xs, 0, (a, b) => a + b)\n\
+         \x20   f\"{total}\"\n\
+         }");
+    assert_contains(&c, "certo_int_to_text(");
+}
+
+#[test]
+fn list_fold_result_type_is_known_downstream_not_ty_error() {
+    let c = codegen(
+        "module A\nimport Stdlib.Collections.{ List }\n\
+         fn f(xs: List<Int>): Text = {\n\
+         \x20   val total = List.fold(xs, 0, (a, b) => a + b)\n\
+         \x20   f\"{total}\"\n\
+         }");
+    assert_contains(&c, "certo_int_to_text(");
 }
 
 #[test]
