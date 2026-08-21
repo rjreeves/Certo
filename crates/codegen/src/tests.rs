@@ -57,6 +57,25 @@ fn panic_call_in_if_branch_is_a_bare_statement() {
     assert_not_contains(&c, "= certo_panic(");
 }
 
+#[test]
+fn unreachable_call_is_a_bare_statement_not_an_assignment() {
+    // BACKLOG item 210 — once `unreachable()`'s own arity bug was fixed
+    // (typeck previously required a Text arg its C macro doesn't accept),
+    // it reaches this exact codegen path too: `certo_unreachable()` expands
+    // to a genuinely `noreturn void` call, same as `certo_panic`, so
+    // assigning its result is a C compile error.
+    let c = codegen("module A\nfn f(): Int = unreachable()");
+    assert_contains(&c, "certo_unreachable(");
+    assert_not_contains(&c, "= certo_unreachable(");
+}
+
+#[test]
+fn todo_call_is_a_bare_statement_not_an_assignment() {
+    let c = codegen("module A\nfn f(): Int = todo()");
+    assert_contains(&c, "certo_todo(");
+    assert_not_contains(&c, "= certo_todo(");
+}
+
 // ------------------------------------------------------------------ //
 // Struct emission
 // ------------------------------------------------------------------ //

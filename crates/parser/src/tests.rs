@@ -1078,6 +1078,46 @@ fn ordinary_field_named_to_something_but_not_a_matcher_name_is_unaffected() {
     }
 }
 
+// ------------------------------------------------------------------ //
+// `.match` as a field/method name — BACKLOG item 212
+// ------------------------------------------------------------------ //
+
+#[test]
+fn regex_match_qualified_call_parses() {
+    // `match` lexes to the `match` keyword token, not an identifier — the
+    // spec's own literal example (`Regex.match(pattern, text)`) previously
+    // could not be written in valid Certo syntax at all.
+    let m = ok("module A\nval x = Regex.match(\"[0-9]+\", \"abc123\")");
+    let Decl::Val(v) = &m.decls[0].node else { panic!("expected Decl::Val") };
+    let Expr::App { func, args, .. } = &v.value.node else {
+        panic!("expected Expr::App, got {:?}", v.value.node)
+    };
+    let Expr::Field { expr, field, .. } = &func.node else {
+        panic!("expected Expr::Field for Regex.match, got {:?}", func.node)
+    };
+    assert_eq!(field.node, "match");
+    assert!(matches!(&expr.node, Expr::Path { .. }), "expected Path(\"Regex\"), got {:?}", expr.node);
+    assert_eq!(args.len(), 2);
+}
+
+#[test]
+fn safe_dot_match_also_parses() {
+    // `?.match` — the safe-field-access sibling of the same fix.
+    let m = ok("module A\nval x = maybeRegexHelper?.match");
+    let Decl::Val(v) = &m.decls[0].node else { panic!("expected Decl::Val") };
+    assert!(matches!(&v.value.node, Expr::SafeField { .. }), "expected SafeField, got {:?}", v.value.node);
+}
+
+#[test]
+fn ordinary_match_expression_is_unaffected() {
+    // The fix only applies immediately after `.`/`?.` — a real `match`
+    // expression must still parse as Expr::Match, not be swallowed as a
+    // field name anywhere else.
+    let m = ok("module A\nfn f(x: Int): Int = match x {\n 0 => 1,\n _ => 2,\n}");
+    let body = fn_body(&m, 0);
+    assert!(matches!(body, Expr::Match { .. }), "expected Expr::Match, got {:?}", body);
+}
+
 #[test]
 fn to_be_requires_exactly_one_argument() {
     err("module A\nval x = expect(1).toBe()");

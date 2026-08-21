@@ -2078,3 +2078,42 @@ fn timestamp_comparison_is_not_flagged() {
     check("module A\nfn f(a: Timestamp, b: Timestamp): Bool = a == b").unwrap();
 }
 
+// ------------------------------------------------------------------ //
+// `unreachable()`/`todo()` zero-arg arity — BACKLOG item 210
+// ------------------------------------------------------------------ //
+
+#[test]
+fn unreachable_with_no_args_typechecks() {
+    check("module A\nfn f(): Int = unreachable()").unwrap();
+}
+
+#[test]
+fn todo_with_no_args_typechecks() {
+    check("module A\nfn f(): Int = todo()").unwrap();
+}
+
+#[test]
+fn unreachable_with_a_text_arg_is_rejected() {
+    // The spec's own table (§9.1) documents `unreachable`/`todo` as
+    // zero-arg (`fn(): Nothing`) — distinct from `panic(msg: Text)`, which
+    // does take one. Before this fix, this was the *only* form that
+    // typechecked at all (and it then failed the C compile stage).
+    let errs = check_err("module A\nfn f(): Int = unreachable(\"oops\")");
+    assert!(!errs.is_empty(), "unreachable(\"msg\") should be rejected — it takes no arguments");
+}
+
+#[test]
+fn todo_with_a_text_arg_is_rejected() {
+    let errs = check_err("module A\nfn f(): Int = todo(\"not done\")");
+    assert!(!errs.is_empty(), "todo(\"msg\") should be rejected — it takes no arguments");
+}
+
+#[test]
+fn panic_still_requires_a_text_arg() {
+    // panic's own signature is unaffected by this item — only
+    // unreachable/todo changed.
+    check("module A\nfn f(): Int = panic(\"real message\")").unwrap();
+    let errs = check_err("module A\nfn f(): Int = panic()");
+    assert!(!errs.is_empty(), "panic() with no message should still be rejected");
+}
+

@@ -155,16 +155,22 @@ pub fn emit_spawn_support(sites: &[SpawnSite], emitted_joins: &mut HashSet<Strin
     }
 }
 
-/// `panic(msg)` is `∀a. Text -> a` at the Certo level (usable in any
-/// expression position) but `certo_panic` is a genuinely `noreturn void` C
-/// function — unlike an ordinary `Unit`-returning Certo function, which
-/// fakes a capturable `int64_t` zero return so call sites can always assign
-/// the result uniformly. Assigning a `void` call's result is a C compile
-/// error, so a call to `panic` must be emitted as a bare statement instead.
-/// (`unreachable`/`todo` are deliberately not included here — they're
-/// zero-arg C macros with their own separate, unrelated argument-count bug.)
+/// `panic(msg)`/`unreachable()`/`todo()` are all `∀a. (...) -> a` at the
+/// Certo level (usable in any expression position) but their real C
+/// implementations are genuinely `noreturn void` (`certo_panic`, and the
+/// `certo_unreachable()`/`certo_todo()` macros that expand to it) — unlike
+/// an ordinary `Unit`-returning Certo function, which fakes a capturable
+/// `int64_t` zero return so call sites can always assign the result
+/// uniformly. Assigning a `void` call's result is a C compile error, so a
+/// call to any of these three must be emitted as a bare statement instead.
+/// `unreachable`/`todo` were excluded here until BACKLOG item 210 fixed
+/// their own separate, unrelated arity bug (typeck required a `Text` arg
+/// that their C macros don't accept) — with that fixed, they now reach
+/// this codegen path too and need the identical treatment `panic` already
+/// gets, or they'd hit this exact "assigning to 'int64_t' from incompatible
+/// type 'void'" error instead.
 fn is_void_noreturn_callee(func: &Operand) -> bool {
-    matches!(func, Operand::Global(name) if name == "panic")
+    matches!(func, Operand::Global(name) if matches!(name.as_str(), "panic" | "unreachable" | "todo"))
 }
 
 fn operand_ty(op: &Operand, locals: &[MirLocalDecl]) -> Ty {
