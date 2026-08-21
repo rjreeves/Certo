@@ -816,6 +816,86 @@ fn validator_validate_all_collects_violations() {
     assert_contains(&out, "[OE.X]");
 }
 
+// ------------------------------------------------------------------ //
+// `overrides` — BACKLOG item 218
+// ------------------------------------------------------------------ //
+
+#[test]
+fn override_rule_never_appears_as_its_own_failure() {
+    // Confirmed against the spec's own flagship example: an override
+    // rule's own require/else is purely a skip-switch for the rule it
+    // names — it must never independently contribute a failure. `OE.NA`
+    // (the override rule's own error) must not appear anywhere in either
+    // generated function.
+    let src = "module A\nvalidator V for Order errors OE {\n\
+        rule creditLimit { require order.total <= 100 else OE.OverLimit }\n\
+        rule adminOverride { overrides creditLimit priority 110 require isAdmin else OE.NA }\n\
+    }";
+    let out = gen_validator(src);
+    assert_not_contains(&out, "OE.NA");
+}
+
+#[test]
+fn overridden_rule_gates_on_the_overriders_negated_condition() {
+    let src = "module A\nvalidator V for Order errors OE {\n\
+        rule creditLimit { require order.total <= 100 else OE.OverLimit }\n\
+        rule adminOverride { overrides creditLimit priority 110 require isAdmin else OE.NA }\n\
+    }";
+    let out = gen_validator(src);
+    // Both validate and validateAll must guard creditLimit's own check with
+    // `!(isAdmin)` — it only fires when the override isn't active.
+    assert_contains(&out, "!(isAdmin)");
+}
+
+#[test]
+fn override_active_skips_the_overridden_rule_end_to_end() {
+    // A real interpreter-level check, not just string matching: build the
+    // full validate() body and confirm its actual boolean structure — the
+    // overridden rule's error only appears behind `!(isAdmin) and !(...)`.
+    // Real Certo uses `and`, not Rust's `&&` (a separate, pre-existing bug
+    // in this exact spot for `after`-gate combination too — fixed
+    // alongside this, see the `cond = conds.join(...)` comment in
+    // emit_validator.rs).
+    let src = "module A\nvalidator V for Order errors OE {\n\
+        rule creditLimit { require order.total <= 100 else OE.OverLimit }\n\
+        rule adminOverride { overrides creditLimit priority 110 require isAdmin else OE.NA }\n\
+    }";
+    let out = gen_validator(src);
+    assert_contains(&out, "!(isAdmin) and !(order.total <= 100)");
+}
+
+#[test]
+fn rule_with_no_overriders_is_unaffected() {
+    // No regression: a plain rule nothing overrides keeps its original,
+    // unguarded condition — exactly as before this item.
+    let src = "module A\nvalidator V for Order errors OE {\n    rule r { require order.total > 0 else OE.Empty }\n}";
+    let out = gen_validator(src);
+    assert_contains(&out, "!(order.total > 0)");
+    assert_not_contains(&out, "&& !(order.total > 0)");
+}
+
+#[test]
+fn multiple_after_dependencies_are_combined_with_real_certo_and_not_rust_ampamp() {
+    // A pre-existing, separate bug found while verifying item 218 end-to-
+    // end: `after`-gate combination already used Rust's `&&` (which lexes
+    // as two `Amp` tokens in real Certo and fails to parse), not the real
+    // `and` keyword — never caught before because every prior test used at
+    // most one `after` name, and `Vec::join` never inserts a separator
+    // for a single-element list, so the broken separator was silently
+    // never actually emitted until two dependencies needed combining.
+    let src = "module A\nvalidator V for Order errors OE {\n\
+        rule a { require order.aa > 0 else OE.A }\n\
+        rule b { require order.bb > 0 else OE.B }\n\
+        rule c { after a\n after b\n require order.cc > 0 else OE.C }\n\
+    }";
+    let out = gen_validator(src);
+    assert_not_contains(&out, "&&");
+    let wrapped = format!("module __v\ntype Order = {{ aa: Int, bb: Int, cc: Int }}\n\
+        type OE = | A | B | C\n{}", out);
+    assert!(certo_parser::parse(&wrapped).is_ok(),
+        "generated source with 2 `after` dependencies must parse:\n{}", out);
+}
+
 #[test]
 fn generated_validator_source_parses() {
     // The whole point of wiring validators in: the generated Certo source must

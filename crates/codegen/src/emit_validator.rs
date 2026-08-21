@@ -70,6 +70,35 @@ pub fn emit_validator(v: &ValidatorDecl) -> ValidatorOutput {
     let ordered = topo_sort_rules(&v.rules);
 
     // ---------------------------------------------------------------- //
+    // `overrides` — BACKLOG item 218. An `overrides`-carrying rule's own
+    // `require`/`else` never independently contributes a failure to
+    // `validate`/`validateAll` — confirmed against the spec's own flagship
+    // example (§16.4/16.10/16.11): a normal, non-admin user submitting a
+    // perfectly valid order must not be flagged e.g. `NotAuthorised` just
+    // for not being an admin, so `credit_limit_admin_override`'s own
+    // `require`/`else` can only ever be a skip-switch for the rule it
+    // names (`within_credit_limit`), never a failure of its own. Each
+    // overridden rule instead gets an extra guard: skip it while *any*
+    // rule that names it via `overrides` currently has a true condition.
+    // Deliberately a *direct*, one-level relationship, not a fully
+    // transitive override-chain resolver (`priority`'s own role in
+    // resolving conflicts among *multiple* overriders of the same rule
+    // remains unconsumed — that's W0100, BACKLOG item 220, not this one).
+    let mut overridden_by: HashMap<&str, Vec<String>> = HashMap::new();
+    for rule in &v.rules {
+        if let Some(target) = &rule.overrides {
+            overridden_by.entry(target.node.as_str())
+                .or_default()
+                .push(fmt_expr(&rule.require.node, 0));
+        }
+    }
+    let override_guard = |name: &str| -> Option<String> {
+        let reqs = overridden_by.get(name)?;
+        if reqs.is_empty() { return None; }
+        Some(reqs.iter().map(|r| format!("!({})", r)).collect::<Vec<_>>().join(" and "))
+    };
+
+    // ---------------------------------------------------------------- //
     // validate — fail fast
     // ---------------------------------------------------------------- //
     {
@@ -83,9 +112,14 @@ pub fn emit_validator(v: &ValidatorDecl) -> ValidatorOutput {
         // `after` gating is satisfied by ordering alone here.
         let mut expr = String::from("Ok(unit)");
         for rule in ordered.iter().rev() {
+            if rule.overrides.is_some() { continue; } // pure skip-switch, never fails on its own
             let req = fmt_expr(&rule.require.node, 0);
             let err = fmt_expr(&rule.else_.node, 0);
-            expr = format!("if !({}) then Err({}) else {}", req, err, expr);
+            let cond = match override_guard(&rule.name.node) {
+                Some(guard) => format!("{} and !({})", guard, req),
+                None => format!("!({})", req),
+            };
+            expr = format!("if {} then Err({}) else {}", cond, err, expr);
         }
         out.validate_fn = format!("{} =\n    {}\n", sig, expr);
     }
@@ -99,24 +133,36 @@ pub fn emit_validator(v: &ValidatorDecl) -> ValidatorOutput {
             &format!("List<{}>", errors_ty));
 
         // Each rule contributes `[err]` when it fails (and its `after`
-        // prerequisites' conditions hold), or `[]` otherwise; concatenate all.
+        // prerequisites' conditions hold, and no rule overriding it is
+        // active), or `[]` otherwise; concatenate all.
         let req_by_name: HashMap<&str, String> = ordered.iter()
             .map(|r| (r.name.node.as_str(), fmt_expr(&r.require.node, 0)))
             .collect();
 
         let mut parts: Vec<String> = Vec::new();
         for rule in &ordered {
+            if rule.overrides.is_some() { continue; } // pure skip-switch, never fails on its own
             let req = fmt_expr(&rule.require.node, 0);
             let err = fmt_expr(&rule.else_.node, 0);
-            let gates: Vec<String> = rule.after.iter()
+            let mut conds: Vec<String> = rule.after.iter()
                 .filter_map(|a| req_by_name.get(a.node.as_str()))
                 .map(|r| format!("({})", r))
                 .collect();
-            let cond = if gates.is_empty() {
-                format!("!({})", req)
-            } else {
-                format!("{} && !({})", gates.join(" && "), req)
-            };
+            if let Some(guard) = override_guard(&rule.name.node) {
+                conds.push(guard);
+            }
+            conds.push(format!("!({})", req));
+            // BACKLOG item 218 — real Certo uses the `and` keyword, not
+            // Rust's `&&` (which lexes as two separate `Amp` tokens and
+            // fails to parse) — a pre-existing mistake in this exact spot
+            // for `after`-gate combination too (this file's own original
+            // `gates.join(" && ")`), just never triggered by any existing
+            // test or a real compile: every prior test used at most one
+            // `after` dependency, and `Vec::join` never inserts a
+            // separator for a single-element list, so the broken
+            // separator was silently never emitted until multiple
+            // conditions actually needed combining here.
+            let cond = conds.join(" and ");
             parts.push(format!("(if {} then [{}] else [])", cond, err));
         }
 
