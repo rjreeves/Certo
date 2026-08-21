@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::fmt::Write as FmtWrite;
-use certo_ast::decl::{ValidatorDecl, RuleDecl, TriggerOp};
+use certo_ast::decl::{ValidatorDecl, RuleDecl, TriggerOp, ConstraintDecl};
 use certo_fmt::{fmt_expr, fmt_type};
 
 /// All source artifacts produced for one validator declaration.
@@ -40,7 +40,18 @@ impl ValidatorOutput {
 }
 
 /// Generate all source artifacts for a single validator declaration.
-pub fn emit_validator(v: &ValidatorDecl) -> ValidatorOutput {
+///
+/// `constraints` is the module's own name → expanded-source map from
+/// `build_constraint_bodies` — BACKLOG item 220. Named constraints (spec
+/// 16.8) are a compile-time-only vocabulary with no runtime symbol of their
+/// own (confirmed: `Decl::Constraint` is never lowered past typeck anywhere
+/// in this codebase), so a rule's `require`/`else`/`overrides` expression
+/// that names one must have that constraint's body inlined here — before
+/// this, the generated source referenced the bare constraint name directly,
+/// which type-checked (constraints hoist as a global `Ty::Bool`) but failed
+/// the C compile with `use of undeclared identifier` the moment a validator
+/// using one was actually run, not just checked.
+pub fn emit_validator(v: &ValidatorDecl, constraints: &HashMap<String, String>) -> ValidatorOutput {
     let mut out = ValidatorOutput::default();
 
     let vname       = &v.name.node;
@@ -50,6 +61,7 @@ pub fn emit_validator(v: &ValidatorDecl) -> ValidatorOutput {
 
     // Entity variable: lowercase first letter of entity type name.
     let entity_var  = lowercase_first(&entity_ty);
+    let expand = |raw: String| substitute_constraints(&raw, constraints);
 
     // ---------------------------------------------------------------- //
     // Context type
@@ -89,7 +101,7 @@ pub fn emit_validator(v: &ValidatorDecl) -> ValidatorOutput {
         if let Some(target) = &rule.overrides {
             overridden_by.entry(target.node.as_str())
                 .or_default()
-                .push(fmt_expr(&rule.require.node, 0));
+                .push(expand(fmt_expr(&rule.require.node, 0)));
         }
     }
     let override_guard = |name: &str| -> Option<String> {
@@ -113,15 +125,15 @@ pub fn emit_validator(v: &ValidatorDecl) -> ValidatorOutput {
         let mut expr = String::from("Ok(unit)");
         for rule in ordered.iter().rev() {
             if rule.overrides.is_some() { continue; } // pure skip-switch, never fails on its own
-            let req = fmt_expr(&rule.require.node, 0);
-            let err = fmt_expr(&rule.else_.node, 0);
+            let req = expand(fmt_expr(&rule.require.node, 0));
+            let err = expand(fmt_expr(&rule.else_.node, 0));
             let cond = match override_guard(&rule.name.node) {
                 Some(guard) => format!("{} and !({})", guard, req),
                 None => format!("!({})", req),
             };
             expr = format!("if {} then Err({}) else {}", cond, err, expr);
         }
-        out.validate_fn = format!("{} =\n    {}\n", sig, expr);
+        out.validate_fn = format!("{} =\n{}\n", sig, wrap_body(&expr, &v.context));
     }
 
     // ---------------------------------------------------------------- //
@@ -136,14 +148,14 @@ pub fn emit_validator(v: &ValidatorDecl) -> ValidatorOutput {
         // prerequisites' conditions hold, and no rule overriding it is
         // active), or `[]` otherwise; concatenate all.
         let req_by_name: HashMap<&str, String> = ordered.iter()
-            .map(|r| (r.name.node.as_str(), fmt_expr(&r.require.node, 0)))
+            .map(|r| (r.name.node.as_str(), expand(fmt_expr(&r.require.node, 0))))
             .collect();
 
         let mut parts: Vec<String> = Vec::new();
         for rule in &ordered {
             if rule.overrides.is_some() { continue; } // pure skip-switch, never fails on its own
-            let req = fmt_expr(&rule.require.node, 0);
-            let err = fmt_expr(&rule.else_.node, 0);
+            let req = expand(fmt_expr(&rule.require.node, 0));
+            let err = expand(fmt_expr(&rule.else_.node, 0));
             let mut conds: Vec<String> = rule.after.iter()
                 .filter_map(|a| req_by_name.get(a.node.as_str()))
                 .map(|r| format!("({})", r))
@@ -175,7 +187,7 @@ pub fn emit_validator(v: &ValidatorDecl) -> ValidatorOutput {
                 format!("List.concat({}, {})", p, acc)
             })
         };
-        out.validate_all_fn = format!("{} =\n    {}\n", sig, body);
+        out.validate_all_fn = format!("{} =\n{}\n", sig, wrap_body(&body, &v.context));
     }
 
     // ---------------------------------------------------------------- //
@@ -274,13 +286,145 @@ fn build_fn_sig(
     // Use an underscore-joined name (`V_validate`) so the generated source parses
     // as an ordinary function. Call sites still write `V.validate(...)`; both map
     // to the same C symbol (`certo_v_validate`) via `c_fn_name`, so they link up.
+    // The context parameter is named `ctx`, not `context` — BACKLOG item 220:
+    // `context` is a lexer keyword (used by the `context { ... }` block itself),
+    // so naming the parameter that made every validator with a context block
+    // fail to even parse (`expected identifier, found Context`) the moment it
+    // was actually built/run — `certo check` never caught it since it never
+    // expands validators at all.
     if has_ctx {
-        format!("fn {}_{}({}: {}, context: {}): {}",
+        format!("fn {}_{}({}: {}, ctx: {}): {}",
             vname, method, entity_var, entity_ty, ctx_type, ret)
     } else {
         format!("fn {}_{}({}: {}): {}",
             vname, method, entity_var, entity_ty, ret)
     }
+}
+
+/// Wrap a `validate`/`validateAll` body expression in a block that first
+/// destructures each context field out of the `ctx` parameter — BACKLOG item
+/// 220. Previously the parameter existed but its fields (`customer`, `user`,
+/// ...) were never actually bound to anything a rule's `require`/`else`
+/// expression could reference by name; only the whole-struct `ctx` was ever
+/// in scope, so any real context-using validator failed to compile with an
+/// unbound-name error the moment the (separate) `context`-keyword collision
+/// above was fixed.
+fn wrap_body(expr: &str, context: &[certo_ast::decl::ContextField]) -> String {
+    if context.is_empty() {
+        return format!("    {}", expr);
+    }
+    let mut out = String::from("    {\n");
+    for field in context {
+        writeln!(out, "        val {} = ctx.{}", field.name.node, field.name.node).unwrap();
+    }
+    writeln!(out, "        {}", expr).unwrap();
+    out.push_str("    }");
+    out
+}
+
+/// Build a name → fully-expanded, parenthesized Certo source map for every
+/// module-level `constraint` declaration, resolving constraint-references-
+/// constraint composition (spec 16.8) by recursive substitution.
+pub fn build_constraint_bodies(constraints: &[&ConstraintDecl]) -> HashMap<String, String> {
+    let by_name: HashMap<&str, &ConstraintDecl> =
+        constraints.iter().map(|c| (c.name.node.as_str(), *c)).collect();
+    let mut resolved: HashMap<String, String> = HashMap::new();
+    let names: Vec<&str> = by_name.keys().copied().collect();
+    for name in names {
+        resolve_constraint(name, &by_name, &mut resolved, &mut Vec::new());
+    }
+    resolved
+}
+
+/// Recursively expand one named constraint's body, substituting any other
+/// constraint names it references (composition), memoizing into `resolved`.
+/// `stack` guards against a reference cycle — bails out to the bare name
+/// rather than recursing forever; a real cycle here isn't caught by any
+/// dedicated diagnostic (out of scope for this item).
+fn resolve_constraint(
+    name: &str,
+    by_name: &HashMap<&str, &ConstraintDecl>,
+    resolved: &mut HashMap<String, String>,
+    stack: &mut Vec<String>,
+) -> String {
+    if let Some(s) = resolved.get(name) { return s.clone(); }
+    let Some(c) = by_name.get(name).copied() else { return name.to_string(); };
+    if stack.iter().any(|s| s == name) { return name.to_string(); }
+    stack.push(name.to_string());
+    let raw = fmt_expr(&c.body.node, 0);
+    let expanded = expand_idents(&raw, |word| {
+        if by_name.contains_key(word) {
+            Some(resolve_constraint(word, by_name, resolved, stack))
+        } else {
+            None
+        }
+    });
+    stack.pop();
+    let wrapped = format!("({})", expanded);
+    resolved.insert(name.to_string(), wrapped.clone());
+    wrapped
+}
+
+/// Replace every standalone identifier in `text` that names a known
+/// constraint with that constraint's own expanded, parenthesized body.
+/// Skips content inside string literals and identifiers immediately
+/// following `.` (a field/qualified-path segment, never a bare constraint
+/// reference).
+fn substitute_constraints(text: &str, resolved: &HashMap<String, String>) -> String {
+    if resolved.is_empty() { return text.to_string(); }
+    expand_idents(text, |word| resolved.get(word).cloned())
+}
+
+/// Shared identifier-scanning core for both constraint-composition
+/// resolution and rule-body substitution: walks `text`, skipping string
+/// literals verbatim, and calls `replace` on every standalone identifier
+/// not immediately preceded by `.`; `replace` returns `Some(new_text)` to
+/// substitute or `None` to leave the identifier as-is.
+fn expand_idents(text: &str, mut replace: impl FnMut(&str) -> Option<String>) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = String::with_capacity(text.len());
+    let mut i = 0;
+    let mut prev_non_space: Option<char> = None;
+    while i < chars.len() {
+        let c = chars[i];
+        if c == '"' {
+            out.push(c);
+            i += 1;
+            while i < chars.len() {
+                out.push(chars[i]);
+                if chars[i] == '\\' && i + 1 < chars.len() {
+                    i += 1;
+                    out.push(chars[i]);
+                    i += 1;
+                    continue;
+                }
+                let closed = chars[i] == '"';
+                i += 1;
+                if closed { break; }
+            }
+            prev_non_space = Some('"');
+            continue;
+        }
+        if c.is_alphabetic() || c == '_' {
+            let start = i;
+            while i < chars.len() && (chars[i].is_alphanumeric() || chars[i] == '_') { i += 1; }
+            let word: String = chars[start..i].iter().collect();
+            if prev_non_space != Some('.') {
+                if let Some(replacement) = replace(&word) {
+                    prev_non_space = replacement.chars().last();
+                    out.push_str(&replacement);
+                    continue;
+                }
+            }
+            prev_non_space = word.chars().last();
+            out.push_str(&word);
+            continue;
+        }
+        out.push(c);
+        if !c.is_whitespace() { prev_non_space = Some(c); }
+        i += 1;
+    }
+    out
 }
 
 /// Topological sort of rules respecting `after` dependencies.

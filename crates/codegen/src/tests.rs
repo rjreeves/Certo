@@ -744,7 +744,11 @@ fn gen_validator(src: &str) -> String {
     let v = module.decls.iter().find_map(|d| {
         if let Decl::Validator(v) = &d.node { Some(v) } else { None }
     }).expect("no validator decl found");
-    emit_validator(v).to_source()
+    let constraints: Vec<&certo_ast::decl::ConstraintDecl> = module.decls.iter()
+        .filter_map(|d| if let Decl::Constraint(c) = &d.node { Some(c) } else { None })
+        .collect();
+    let constraint_bodies = crate::build_constraint_bodies(&constraints);
+    emit_validator(v, &constraint_bodies).to_source()
 }
 
 #[test]
@@ -778,7 +782,12 @@ fn validator_with_context_emits_context_type() {
     let out = gen_validator(src);
     assert_contains(&out, "type VContext = {");
     assert_contains(&out, "customer: Customer");
-    assert_contains(&out, "context: VContext");
+    // BACKLOG item 220 — the parameter is named `ctx`, not `context`, since
+    // `context` is a lexer keyword and collided with it, and each context
+    // field must be destructured out of it (`val customer = ctx.customer`)
+    // for rule bodies to actually be able to reference it by name.
+    assert_contains(&out, "ctx: VContext");
+    assert_contains(&out, "val customer = ctx.customer");
 }
 
 #[test]
@@ -786,7 +795,7 @@ fn validator_no_context_omits_context_type() {
     let src = "module A\nvalidator V for Order errors OE {\n    rule r { require true else true }\n}";
     let out = gen_validator(src);
     assert_not_contains(&out, "type VContext");
-    assert_not_contains(&out, "context: VContext");
+    assert_not_contains(&out, "ctx: VContext");
 }
 
 #[test]
@@ -911,6 +920,24 @@ fn generated_validator_source_parses() {
 }
 
 #[test]
+fn generated_validator_source_with_context_parses() {
+    // BACKLOG item 220 — a `context` block used to make every generated
+    // validator function unparseable (`context` used literally as a
+    // parameter name collides with the `context` keyword) and, once that
+    // was fixed, the context fields still weren't bound to anything a rule
+    // could reference by name.
+    let src = "module A\nvalidator V for Order errors OE {\n\
+        context { customer: Customer }\n\
+        rule active { require customer.status == Active else OE.NotActive }\n}";
+    let generated = gen_validator(src);
+    let wrapped = format!("module __v\ntype Status = | Active | Inactive\n\
+        type Order = {{ total: Int }}\ntype Customer = {{ status: Status }}\n\
+        type OE = | NotActive\n{}", generated);
+    assert!(certo_parser::parse(&wrapped).is_ok(),
+        "generated validator source with a context block must parse:\n{}", generated);
+}
+
+#[test]
 fn validator_with_loaded_by_emits_validate_with_db() {
     let src = "module A\nvalidator V for Order errors OE {\n    context { customer: Customer loaded by db.customers.find(order.customerId) }\n    rule r { require true else true }\n}";
     let out = gen_validator(src);
@@ -933,6 +960,87 @@ fn validator_topo_order_respects_after() {
     let pos_a = out.find("order.aa > 0").unwrap_or(usize::MAX);
     let pos_b = out.find("order.bb > 0").unwrap_or(0);
     assert!(pos_a < pos_b, "rule `a` should appear before `b`:\n{}", out);
+}
+
+// ------------------------------------------------------------------ //
+// Named constraint inlining — BACKLOG item 220
+// ------------------------------------------------------------------ //
+
+#[test]
+fn constraint_reference_is_inlined_not_left_as_a_bare_name() {
+    // Constraints have no runtime symbol of their own (spec 16.8) — a rule
+    // that names one must have its body inlined, or the generated function
+    // references a nonexistent global.
+    let src = "module A\nconstraint OrderIsDraft = order.status == Draft\nvalidator V for Order errors OE {\n    rule r { require OrderIsDraft else true }\n}";
+    let out = gen_validator(src);
+    assert_not_contains(&out, "OrderIsDraft");
+    assert_contains(&out, "order.status == Draft");
+}
+
+#[test]
+fn constraint_reference_in_validate_all_is_also_inlined() {
+    let src = "module A\nconstraint OrderIsDraft = order.status == Draft\nvalidator V for Order errors OE {\n    rule r { require OrderIsDraft else true }\n}";
+    let out = gen_validator(src);
+    let (_, validate_all) = out.split_once("fn V_validateAll").expect("validateAll present");
+    assert_not_contains(validate_all, "OrderIsDraft");
+    assert_contains(validate_all, "order.status == Draft");
+}
+
+#[test]
+fn composed_constraint_expands_transitively() {
+    // `UserCanApprove` references `UserIsAdmin`/`UserIsSales`, which must
+    // themselves be fully expanded — no constraint name should survive.
+    let src = "module A\n\
+        constraint UserIsAdmin = user.role == Admin\n\
+        constraint UserIsSales = user.role == Sales\n\
+        constraint UserCanApprove = UserIsAdmin or UserIsSales\n\
+        validator V for Order errors OE {\n    context { user: User }\n    rule r { require UserCanApprove else true }\n}";
+    let out = gen_validator(src);
+    assert_not_contains(&out, "UserCanApprove");
+    assert_not_contains(&out, "UserIsAdmin");
+    assert_not_contains(&out, "UserIsSales");
+    assert_contains(&out, "user.role == Admin");
+    assert_contains(&out, "user.role == Sales");
+}
+
+#[test]
+fn inlined_constraint_is_parenthesized_so_composition_preserves_precedence() {
+    // `UserCanApprove` is `A or B`; a rule combining it with `and` must not
+    // silently change precedence to `x and A or B` (which reassociates
+    // wrong) — the substituted constraint must carry its own parens.
+    let src = "module A\n\
+        constraint UserIsAdmin = user.role == Admin\n\
+        constraint UserIsSales = user.role == Sales\n\
+        constraint UserCanApprove = UserIsAdmin or UserIsSales\n\
+        validator V for Order errors OE {\n    context { user: User }\n    rule r { require order.total > 0 and UserCanApprove else true }\n}";
+    let out = gen_validator(src);
+    assert_contains(&out, "((user.role == Admin) or (user.role == Sales))");
+}
+
+#[test]
+fn constraint_reference_inside_a_string_literal_is_left_alone() {
+    // The substitution must not rewrite a name that merely appears inside
+    // an error constructor's string argument — it isn't a code reference.
+    let src = "module A\nconstraint OrderIsDraft = order.status == Draft\ntype OE = | Bad(Text)\nvalidator V for Order errors OE {\n    rule r { require OrderIsDraft else OE.Bad(\"OrderIsDraft failed\") }\n}";
+    let out = gen_validator(src);
+    assert_contains(&out, "\"OrderIsDraft failed\"");
+}
+
+#[test]
+fn validator_using_a_constraint_generates_parseable_source() {
+    let src = "module A\nconstraint OrderIsDraft = order.status == Draft\nvalidator V for Order errors OE {\n    rule r { require OrderIsDraft else true }\n}";
+    let module = parse(src).expect("parse error");
+    let v = module.decls.iter().find_map(|d| {
+        if let Decl::Validator(v) = &d.node { Some(v) } else { None }
+    }).unwrap();
+    let constraints: Vec<&certo_ast::decl::ConstraintDecl> = module.decls.iter()
+        .filter_map(|d| if let Decl::Constraint(c) = &d.node { Some(c) } else { None })
+        .collect();
+    let bodies = crate::build_constraint_bodies(&constraints);
+    let generated = emit_validator(v, &bodies).to_source();
+    let wrapped = format!("module __validators\n{}", generated);
+    assert!(certo_parser::parse(&wrapped).is_ok(),
+        "generated validator source using a constraint must parse:\n{}", generated);
 }
 
 // ------------------------------------------------------------------ //
