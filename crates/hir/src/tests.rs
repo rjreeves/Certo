@@ -680,6 +680,51 @@ fn query_first_return_type_is_option_of_mapper_return_type() {
     assert_eq!(f.body.as_ref().unwrap().ty, Ty::Option(Box::new(widget)));
 }
 
+#[test]
+fn query_first_consumed_inline_via_match_resolves_field_access() {
+    // BACKLOG item 207 — filed as "Query.first fails to compile when consumed
+    // inline in the same function, not through an intermediate named wrapper
+    // function". Re-investigated: doesn't reproduce against a live Postgres
+    // connection (4 separate real end-to-end round trips all worked), and
+    // this HIR-level check confirms why — `Query.first`'s recovered
+    // `Option<Widget>` return type (via `generic_container_ret`) already
+    // flows correctly into a `match` consuming it in the very same function,
+    // with no intermediate `val` boundary at all: the `Some(x) => x.name`
+    // arm's field access resolves to `Text`, not `Ty::Error`. Likely already
+    // fixed as a side effect of the many other "known type thrown away"
+    // fixes landed this session (items 179/180/182/189/191/199/211) — none
+    // of which existed when item 207 was originally filed.
+    let m = lower(
+        "module A\nimport Stdlib.Db\ntype Widget = { id: Int, name: Text }\n\
+         fn fromRow(row: List<Text?>): Widget = Widget { id: 0, name: \"\" }\n\
+         fn f(conn: Int): Text = match Query.first(Query.from(\"SELECT 1\"), conn, fromRow) {\
+         Some(x) => x.name, None => \"none\" }");
+    let f = m.items.iter().find_map(|it| match it {
+        HirItem::Fn(f) if f.name == "f" => Some(f),
+        _ => None,
+    }).expect("expected fn `f`");
+    assert_eq!(f.body.as_ref().unwrap().ty, Ty::Text);
+}
+
+#[test]
+fn query_list_and_list_first_consumed_inline_with_no_intermediate_val() {
+    // BACKLOG item 207 — the file's own "Query.list + List.first" half of the
+    // filed repro, nested directly (`List.first(Query.list(...))`) with zero
+    // intermediate `val` bindings at all, inside a `match` in the same
+    // function. Confirms the same recovery chain (`Query.list`'s `List<T>` ->
+    // `List.first`'s `Option<T>`) composes correctly end-to-end.
+    let m = lower(
+        "module A\nimport Stdlib.Db\ntype Widget = { id: Int, name: Text }\n\
+         fn fromRow(row: List<Text?>): Widget = Widget { id: 0, name: \"\" }\n\
+         fn f(conn: Int): Text = match List.first(Query.list(Query.from(\"SELECT 1\"), conn, fromRow)) {\
+         Some(x) => x.name, None => \"none\" }");
+    let f = m.items.iter().find_map(|it| match it {
+        HirItem::Fn(f) if f.name == "f" => Some(f),
+        _ => None,
+    }).expect("expected fn `f`");
+    assert_eq!(f.body.as_ref().unwrap().ty, Ty::Text);
+}
+
 // ------------------------------------------------------------------ //
 // Lambda closure-capture rejection (BACKLOG item 136)
 // ------------------------------------------------------------------ //

@@ -6,6 +6,7 @@ mod cmd_generate;
 mod certo_toml;
 mod diff;
 mod static_serve;
+mod span_rewrite;
 
 
 use std::path::{Path, PathBuf};
@@ -456,11 +457,17 @@ fn cmd_build(args: &[String], quiet: bool) {
     }
 
     // ── Expand state machines and validators into executable functions ─
-    expand_state_machines(&mut module, colour);
-    expand_validators(&mut module, colour);
+    // `combined_src` starts as an exact copy of the real file's own source
+    // (so every real declaration's existing span, relative to offset 0,
+    // still indexes into it correctly), then grows by exactly the bytes of
+    // each freshly-parsed generated chunk, in the same order it's spliced
+    // into `module.decls` — see BACKLOG item 223 and `span_rewrite.rs`.
+    let mut combined_src = src.clone();
+    expand_state_machines(&mut module, colour, &mut combined_src);
+    expand_validators(&mut module, colour, &mut combined_src);
 
     // ── Type-check ────────────────────────────────────────────────────
-    run_typeck_opts_with_root(&module, &src, &filename, colour, false, &project_root);
+    run_typeck_opts_with_root(&module, &combined_src, &filename, colour, false, &project_root);
 
     // ── Check for entry point ─────────────────────────────────────────
     let has_main = module.decls.iter().any(|d| {
@@ -719,7 +726,14 @@ fn parse_file_or_exit(path: &Path, colour: bool) -> (Module, String) {
 /// (`V_validate`, `V_validateAll`, optional `VContext` type) by generating Certo
 /// source from the validator, parsing it, and splicing the decls into the module.
 /// Call sites use `V.validate(...)`, which links to `V_validate` via `c_fn_name`.
-fn expand_validators(module: &mut Module, colour: bool) {
+///
+/// `combined_src` is the growing "real file + every generated chunk so far"
+/// source string a caller threads through `expand_state_machines` and this
+/// function in order (BACKLOG item 223) — every spliced decl's spans are
+/// rewritten (`span_rewrite::offset_decl_spans`) to index into it correctly,
+/// so a type error inside generated validator code renders against the real
+/// generated text instead of colliding with the real file's own span range.
+fn expand_validators(module: &mut Module, colour: bool, combined_src: &mut String) {
     use certo_ast::decl::Decl;
     let constraints: Vec<&certo_ast::decl::ConstraintDecl> = module.decls.iter()
         .filter_map(|d| if let Decl::Constraint(c) = &d.node { Some(c) } else { None })
@@ -736,7 +750,17 @@ fn expand_validators(module: &mut Module, colour: bool) {
 
     let wrapped = format!("module __validators\n{}", generated);
     match certo_parser::parse(&wrapped) {
-        Ok(gen_module) => module.decls.extend(gen_module.decls),
+        Ok(mut gen_module) => {
+            if !combined_src.is_empty() && !combined_src.ends_with('\n') {
+                combined_src.push('\n');
+            }
+            let offset = combined_src.len() as u32;
+            for d in &mut gen_module.decls {
+                span_rewrite::offset_decl_spans(d, offset);
+            }
+            combined_src.push_str(&wrapped);
+            module.decls.extend(gen_module.decls);
+        }
         Err(errs) => {
             // A failure here is a compiler bug in the validator generator, not a
             // user error — surface it clearly rather than silently dropping rules.
@@ -754,7 +778,11 @@ fn expand_validators(module: &mut Module, colour: bool) {
 /// / accessor functions, **replacing** the original declaration. After this the
 /// module contains only ordinary types and functions, so the rest of the
 /// pipeline needs no special state-machine handling.
-fn expand_state_machines(module: &mut Module, colour: bool) {
+///
+/// `combined_src` — see `expand_validators`'s own doc comment above (BACKLOG
+/// item 223); this function must run first so its own generated chunk lands
+/// first in the combined source, ahead of `expand_validators`'s.
+fn expand_state_machines(module: &mut Module, colour: bool, combined_src: &mut String) {
     use certo_ast::decl::Decl;
     let mut generated = String::new();
     let mut kept = Vec::with_capacity(module.decls.len());
@@ -772,7 +800,17 @@ fn expand_state_machines(module: &mut Module, colour: bool) {
 
     let wrapped = format!("module __statemachines\n{}", generated);
     match certo_parser::parse(&wrapped) {
-        Ok(gen_module) => module.decls.extend(gen_module.decls),
+        Ok(mut gen_module) => {
+            if !combined_src.is_empty() && !combined_src.ends_with('\n') {
+                combined_src.push('\n');
+            }
+            let offset = combined_src.len() as u32;
+            for d in &mut gen_module.decls {
+                span_rewrite::offset_decl_spans(d, offset);
+            }
+            combined_src.push_str(&wrapped);
+            module.decls.extend(gen_module.decls);
+        }
         Err(errs) => {
             let diags: Vec<Diagnostic> = errs.iter()
                 .map(|e| Diagnostic::error("", format!("{}", e)).with_span(e.span))
@@ -4040,5 +4078,104 @@ mod db_pull_codegen_tests {
         assert!(!expr.contains("null"), "got: {expr}");
         assert!(expr.contains("== None"), "got: {expr}");
         assert!(expr.contains("dbNull()"), "got: {expr}"); // real C-runtime helper, not the keyword
+    }
+}
+
+// ------------------------------------------------------------------ //
+// BACKLOG item 223 — generated-code span correctness
+// ------------------------------------------------------------------ //
+
+#[cfg(test)]
+mod span_rewrite_tests {
+    use super::*;
+
+    /// Runs the real `expand_state_machines`/`expand_validators` expansion
+    /// (same order and same growing `combined_src` buffer `cmd_build` uses),
+    /// then typechecks directly via `certo_typeck::check_module_seeded` —
+    /// bypassing the process::exit-heavy CLI wrapper so the test can inspect
+    /// `TypeError` spans and the exact source text they index into, rather
+    /// than scraping rendered terminal output.
+    fn expand_and_typecheck(src: &str) -> (String, Vec<TypeError>) {
+        let mut module = certo_parser::parse(src).expect("parse error");
+        let mut combined_src = src.to_string();
+        expand_state_machines(&mut module, false, &mut combined_src);
+        expand_validators(&mut module, false, &mut combined_src);
+
+        let mut env = TypeEnv::new();
+        let mut counter = 0u32;
+        env.seed_builtins(&mut counter);
+        certo_stdlib::seed_stdlib(&mut env, &mut counter);
+        let errs = certo_typeck::check_module_seeded(&module, env, counter)
+            .err()
+            .unwrap_or_default();
+        (combined_src, errs)
+    }
+
+    #[test]
+    fn validator_constraint_error_span_points_at_the_real_generated_expression() {
+        // A named `constraint` referencing an undefined field is never
+        // checked directly against the original `Decl::Validator` AST (its
+        // body is only checked once inlined into the generated `V_validate`/
+        // `V_validateAll` functions — see BACKLOG item 225) — so every error
+        // here necessarily comes from spliced, generated code, making this a
+        // direct, unavoidable test of item 223's own fix.
+        let src = "module V\n\
+            type CustomerStatus = | Active | Inactive\n\
+            type Customer = { status: CustomerStatus }\n\
+            type InvoiceStatus = | Draft | Issued\n\
+            type Invoice = { status: InvoiceStatus }\n\
+            type InvoiceError = | NotInDraftStatus(InvoiceStatus) | CustomerBad\n\
+            constraint CustomerIsActive = customer.wrongField == Active\n\
+            validator InvoiceIssue for Invoice errors InvoiceError {\n\
+                context { customer: Customer }\n\
+                rule invoice_is_draft {\n\
+                    require CustomerIsActive\n\
+                    else InvoiceError.CustomerBad\n\
+                }\n\
+            }\n";
+        let (combined_src, errs) = expand_and_typecheck(src);
+        assert!(!errs.is_empty(), "expected a type error for the undefined field");
+        for e in &errs {
+            let (start, end) = (e.span.start as usize, e.span.end as usize);
+            let text = &combined_src[start..end];
+            assert!(
+                text.contains("wrongField") || text.contains("customer"),
+                "error span should point at the real `customer.wrongField` \
+                 expression (inside the generated validator code), not \
+                 unrelated real-file text — got {:?} (span {}..{})",
+                text, start, end
+            );
+        }
+    }
+
+    #[test]
+    fn state_machine_invariant_error_span_points_at_the_real_generated_expression() {
+        // `Decl::StateMachine` is fully replaced by generated `Decl::Fn`s
+        // before typeck ever runs (`expand_state_machines`'s own doc
+        // comment) — an invariant's body is *never* checked anywhere except
+        // inside that generated code, so this is likewise an unavoidable
+        // test of the fix, not just a happens-to-pass case.
+        let src = "module SM\n\
+            statemachine Toggle {\n\
+              states:\n\
+                Off, On\n\
+              transitions:\n\
+                Off -> On : turnOn()\n\
+                On -> Off : turnOff()\n\
+              invariant On: \"not a number\" > 0\n\
+            }\n";
+        let (combined_src, errs) = expand_and_typecheck(src);
+        assert!(!errs.is_empty(), "expected a type error for Text > Int");
+        for e in &errs {
+            let (start, end) = (e.span.start as usize, e.span.end as usize);
+            let text = &combined_src[start..end];
+            assert!(
+                text.contains("not a number"),
+                "error span should point at the real invariant expression \
+                 (inside the generated state-machine code), not unrelated \
+                 real-file text — got {:?} (span {}..{})",
+                text, start, end
+            );
+        }
     }
 }
