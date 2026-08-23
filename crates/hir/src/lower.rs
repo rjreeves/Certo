@@ -1402,6 +1402,29 @@ fn lower_expr(expr: &S<Expr>, cx: &mut Cx) -> HirExpr {
             let call_ty = fn_full_path.as_deref()
                 .and_then(|fp| cx.sm_returns.get(fp).cloned())
                 .or_else(|| fn_full_path.as_deref().and_then(|fp| cx.fn_ret_types.get(fp).cloned()))
+                // BACKLOG item 224 — a validator's real generated function
+                // is named with an underscore (`V_validate`, so the
+                // generated Certo source parses as an ordinary function —
+                // `crates/codegen/src/emit_validator.rs`'s own
+                // `build_fn_sig`), but a call site's dot-qualified
+                // reference (`V.validate(...)`) lowers to the *dotted*
+                // global name (`"V.validate"`, `Expr::Field`'s own
+                // `Module.fn` handling just above) — this table is a plain
+                // `HashMap` with no dot/underscore normalization, so the
+                // lookup above always misses even though `c_fn_name`
+                // (`crates/codegen/src/emit_mir.rs`) already normalizes
+                // both spellings to the identical C symbol, so the call
+                // itself links and runs correctly — only the *return
+                // type* silently stayed `Ty::Error`, confirmed directly: a
+                // bare `V.validate(entity).isOk()` UFCS dot-call failed to
+                // compile (`member reference base type 'int64_t'`) even
+                // though `match V.validate(entity) { Ok(_) => ..., ... }`
+                // on the identical value already worked (a `match`
+                // scrutinee's type comes from a different path — see
+                // `Expr::Match`'s own lowering — that never needed this
+                // table at all).
+                .or_else(|| fn_full_path.as_deref()
+                    .and_then(|fp| cx.fn_ret_types.get(fp.replace('.', "_").as_str()).cloned()))
                 .or_else(|| cx.fn_ret_types.get(short).cloned())
                 .or_else(|| fn_full_path.as_deref().and_then(|fp| stdlib_ret_types().get(fp).cloned()))
                 .or_else(|| stdlib_ret_types().get(short).cloned())

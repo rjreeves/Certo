@@ -1215,6 +1215,35 @@ same validator.
 
 ---
 
+### E0704  Constraint field not in scope
+
+```
+error[E0704]: constraint `UserIsAdmin` references field `user` not in validator context
+  --> src/validators.cto:41:17
+   |
+41 |         require UserIsAdmin
+   |                 ^^^^^^^^^^^
+   |
+   = note: `UserIsAdmin` references `user.<field>`
+   = note: `user` is not declared in this validator's context block
+   = help: add `user: <Type>` to the context block
+```
+
+**Cause:** A named `constraint`'s body is deliberately never checked at its
+own declaration site (its field references, e.g. `user.role`, don't exist
+yet — the constraint is a reusable rule fragment, resolved against
+whichever validator actually uses it). This is that deferred check, run
+directly against every `validator` that references the constraint by
+name: the constraint's own base names (`user`, `customer`, ...) must each
+be either the validator's own entity variable or a name declared in its
+`context` block.
+
+**Fix:** Add the missing name to the validator's `context` block (e.g.
+`context { user: User }`), or use a different constraint that only
+references names this validator actually has.
+
+---
+
 ## E0708–E0709  Temporal / `.age` errors
 
 ### E0708  Temporal body is not a Duration

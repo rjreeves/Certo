@@ -1544,6 +1544,15 @@ pub(crate) fn type_error_to_diagnostic(e: &TypeError) -> Diagnostic {
                 .with_note(format!("change the error variant to one of `{}`, or change the validator's `errors` declaration", expected.display_named(&names)))
         }
 
+        TypeErrorKind::ConstraintFieldNotInScope { constraint_name, field_name } => {
+            Diagnostic::error("E0704",
+                format!("constraint `{}` references field `{}` not in validator context", constraint_name, field_name))
+                .with_span(e.span)
+                .with_note(format!("`{}` references `{}.<field>`", constraint_name, field_name))
+                .with_note(format!("`{}` is not declared in this validator's context block", field_name))
+                .with_note(format!("add `{}: <Type>` to the context block", field_name))
+        }
+
         TypeErrorKind::LoadedByTypeMismatch { field_name, expected, found } => {
             let names = assign_var_names(&[expected, found]);
             Diagnostic::error("E0705",

@@ -742,6 +742,137 @@ fn callIt(o: Order): Result<Unit, OE> = V.validate(o)").unwrap();
 }
 
 #[test]
+fn validator_with_context_validate_takes_entity_and_ctx() {
+    // BACKLOG item 224 — a validator with a `context` block's real generated
+    // function takes `(entity, ctx)`, but `hoist_decl`'s own registration
+    // previously always registered a 1-parameter signature regardless,
+    // rejecting the correct, spec-shaped 2-argument call with a hard type
+    // error. Resolved nominally (`Ty::Named("{Name}Context")`) — `VContext`
+    // is never declared in this isolated `check(...)` module, so this also
+    // exercises the "undeclared capitalized name is an accepted opaque
+    // nominal type" leniency `certo check` alone already relies on
+    // elsewhere (real end-to-end verification, where `expand_validators`
+    // really does splice `type VContext = {...}` in first, lives in
+    // `crates/cli`'s own integration coverage, not here).
+    check("module A
+type OE = | X
+validator V for Order errors OE {
+    context { customer: Customer }
+    rule r { require true else OE.X }
+}
+fn callIt(o: Order, c: VContext): Result<Unit, OE> = V.validate(o, c)").unwrap();
+}
+
+#[test]
+fn validator_with_context_validate_all_takes_entity_and_ctx() {
+    // Same fix, `validateAll`'s own signature.
+    check("module A
+type OE = | X
+validator V for Order errors OE {
+    context { customer: Customer }
+    rule r { require true else OE.X }
+}
+fn callIt(o: Order, c: VContext): List<OE> = V.validateAll(o, c)").unwrap();
+}
+
+#[test]
+fn validator_with_context_validate_rejects_single_arg() {
+    // Regression guard: a context-bearing validator's `validate` must
+    // actually *require* the ctx argument now, not just tolerate it —
+    // confirms this isn't accidentally loosened to "any arity".
+    let kind = first_error_kind("module A
+type OE = | X
+validator V for Order errors OE {
+    context { customer: Customer }
+    rule r { require true else OE.X }
+}
+fn callIt(o: Order): Result<Unit, OE> = V.validate(o)");
+    assert!(matches!(kind, TypeErrorKind::Mismatch { .. }), "expected a type mismatch, got {kind:?}");
+}
+
+#[test]
+fn validator_without_context_validate_still_takes_only_entity() {
+    // Regression guard: a context-*free* validator's signature must stay
+    // exactly 1 parameter, not silently grow a phantom ctx arg.
+    check("module A
+type OE = | X
+validator V for Order errors OE {
+    rule r { require true else OE.X }
+}
+fn callIt(o: Order): Result<Unit, OE> = V.validate(o)").unwrap();
+}
+
+// ------------------------------------------------------------------ //
+// E0704 — named-constraint field scope (BACKLOG item 225)
+// ------------------------------------------------------------------ //
+
+#[test]
+fn constraint_referencing_a_field_not_in_context_is_e0704() {
+    // Spec §16.8's own exact repro shape: `user.role` inside a constraint,
+    // but `user` was never declared in the validator's `context` block —
+    // this direct check (not the generated/expanded code's own inlined
+    // version) must catch it under `certo check` alone, without ever
+    // running `expand_validators`.
+    let kind = first_error_kind("module A
+type UserRole = | Admin | Regular
+type User = { role: UserRole }
+type OE = | NotAuthorised
+constraint UserIsAdmin = user.role == Admin
+validator V for Order errors OE {
+    rule r { require UserIsAdmin else OE.NotAuthorised }
+}");
+    match kind {
+        TypeErrorKind::ConstraintFieldNotInScope { constraint_name, field_name } => {
+            assert_eq!(constraint_name, "UserIsAdmin");
+            assert_eq!(field_name, "user");
+        }
+        other => panic!("expected ConstraintFieldNotInScope (E0704), got {other:?}"),
+    }
+}
+
+#[test]
+fn constraint_referencing_a_declared_context_field_is_ok() {
+    // The exact same constraint is fine once `user` is actually declared.
+    check("module A
+type UserRole = | Admin | Regular
+type User = { role: UserRole }
+type OE = | NotAuthorised
+constraint UserIsAdmin = user.role == Admin
+validator V for Order errors OE {
+    context { user: User }
+    rule r { require UserIsAdmin else OE.NotAuthorised }
+}").unwrap();
+}
+
+#[test]
+fn constraint_referencing_the_entity_variable_itself_is_ok() {
+    // A constraint may also reference the validator's own primary entity
+    // variable directly (not just a `context` field) — `order` here, from
+    // `for Order`, not a declared context field at all.
+    check("module A
+type Order = { total: Int }
+type OE = | TooLow
+constraint OrderHasTotal = order.total > 0
+validator V for Order errors OE {
+    rule r { require OrderHasTotal else OE.TooLow }
+}").unwrap();
+}
+
+#[test]
+fn plain_bool_expression_without_any_named_constraint_is_unaffected() {
+    // Regression guard: a rule with no named-constraint reference at all
+    // (just an ordinary boolean expression) must not spuriously trigger
+    // E0704 — the whole pass is a no-op when there are no constraints in
+    // the module (an early return), and this confirms that.
+    check("module A
+type Order = { total: Int }
+type OE = | TooLow
+validator V for Order errors OE {
+    rule r { require order.total > 0 else OE.TooLow }
+}").unwrap();
+}
+
+#[test]
 fn result_rewrap_in_match_different_payload() {
     // Regression: `Ok`/`Err` must quantify BOTH type variables, so matching a
     // `Result<Int, Text>` and re-wrapping into `Result<Text, Text>` type-checks.
