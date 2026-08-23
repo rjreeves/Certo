@@ -74,6 +74,10 @@ pub fn check_module_seeded(
     // be called from within an `impl` block for that same type.
     check_priv_ctors(module, &mut errors);
 
+    // Pass 5 — E0704: a named constraint referenced from a validator rule
+    // must only touch fields in that validator's own scope.
+    check_constraint_scope(module, &mut errors);
+
     if errors.is_empty() { Ok(()) } else { Err(errors) }
 }
 
@@ -203,6 +207,188 @@ fn walk_ffi(
         Expr::Record { base, fields, .. } => {
             if let Some(b) = base { walk_ffi(b, in_unsafe, extern_fns, errors); }
             for fld in fields { walk_ffi(&fld.value, in_unsafe, extern_fns, errors); }
+        }
+    }
+}
+
+// ------------------------------------------------------------------ //
+// E0704 — named-constraint field scope (BACKLOG item 225, split out of
+// item 220's own investigation)
+// ------------------------------------------------------------------ //
+
+/// Generic recursive expression walker calling `visit` on every sub-node —
+/// exhaustive over every `Expr` variant, mirroring `walk_ffi` above (a
+/// missed variant here would just be a false-negative on this one new
+/// diagnostic, not a regression of already-working behavior, but kept
+/// exhaustive anyway so the compiler forces an update if `Expr` ever grows
+/// a new shape, matching this file's own established convention).
+fn walk_expr(expr: &S<Expr>, visit: &mut dyn FnMut(&Expr)) {
+    use certo_ast::expr::{Lit, FStringPart, Stmt};
+    visit(&expr.node);
+    match &expr.node {
+        Expr::Lit { value: Lit::FString(parts), .. } => {
+            for p in parts {
+                if let FStringPart::Interpolated(e) = p { walk_expr(e, visit); }
+            }
+        }
+        Expr::Lit { .. } | Expr::Path { .. } => {}
+        Expr::Pipe { left, right, .. } | Expr::BinOp { left, right, .. } => {
+            walk_expr(left, visit);
+            walk_expr(right, visit);
+        }
+        Expr::App { func, args, .. } => {
+            walk_expr(func, visit);
+            for a in args { walk_expr(&a.value, visit); }
+        }
+        Expr::UnOp { expr, .. }
+        | Expr::Field { expr, .. } | Expr::SafeField { expr, .. }
+        | Expr::Try { expr, .. } | Expr::Await { expr, .. } | Expr::Spawn { expr, .. }
+        | Expr::Ascribe { expr, .. } | Expr::Age { expr, .. } => walk_expr(expr, visit),
+        Expr::ExpectAssertion { actual, matcher, .. } => {
+            walk_expr(actual, visit);
+            if let ExpectMatcher::ToBe(y) = matcher { walk_expr(y, visit); }
+        }
+        Expr::If { cond, then_expr, else_expr, .. } => {
+            walk_expr(cond, visit);
+            walk_expr(then_expr, visit);
+            walk_expr(else_expr, visit);
+        }
+        Expr::Match { scrutinee, arms, .. } => {
+            walk_expr(scrutinee, visit);
+            for arm in arms {
+                if let Some(g) = &arm.guard { walk_expr(g, visit); }
+                walk_expr(&arm.body, visit);
+            }
+        }
+        Expr::Block { stmts, .. } => {
+            for st in stmts {
+                match st {
+                    Stmt::Val { value, .. } | Stmt::Var { value, .. } | Stmt::Assign { value, .. } =>
+                        walk_expr(value, visit),
+                    Stmt::Defer { body, .. } | Stmt::Expr { expr: body, .. } => walk_expr(body, visit),
+                }
+            }
+        }
+        Expr::Lambda { body, .. } | Expr::Transaction { body, .. } | Expr::Unsafe { body, .. } =>
+            walk_expr(body, visit),
+        Expr::For { iter, body, .. } => {
+            walk_expr(iter, visit);
+            walk_expr(body, visit);
+        }
+        Expr::While { cond, body, .. } => {
+            walk_expr(cond, visit);
+            walk_expr(body, visit);
+        }
+        Expr::Guard { cond, else_expr, .. } => {
+            walk_expr(cond, visit);
+            walk_expr(else_expr, visit);
+        }
+        Expr::Require { expr, error, .. } => {
+            walk_expr(expr, visit);
+            walk_expr(error, visit);
+        }
+        Expr::List { elements, .. } | Expr::Tuple { elements, .. } => {
+            for e in elements { walk_expr(e, visit); }
+        }
+        Expr::Parallel { tasks, timeout, .. } => {
+            for t in tasks { walk_expr(t, visit); }
+            if let Some(t) = timeout { walk_expr(t, visit); }
+        }
+        Expr::WithTimeout { duration, body, .. } => {
+            walk_expr(duration, visit);
+            walk_expr(body, visit);
+        }
+        Expr::Record { base, fields, .. } => {
+            if let Some(b) = base { walk_expr(b, visit); }
+            for fld in fields { walk_expr(&fld.value, visit); }
+        }
+    }
+}
+
+/// E0704 — a named `constraint`'s body references fields (`user.role`,
+/// `customer.status`) that don't exist at its own declaration site by
+/// design (spec §16.8's "deferred resolution": a constraint's body is
+/// never type-checked until it's actually used inside a validator, where
+/// the context fields are finally known). This is that deferred check,
+/// run directly against every `Decl::Validator` — unlike the *generated*
+/// code's own inlined-constraint checking (item 220), this runs under
+/// `certo check` too, since it doesn't depend on `expand_validators` ever
+/// having run at all.
+///
+/// Scoped to *direct* constraint references (a rule's `require`/`else`
+/// naming a constraint by its bare name) — a constraint referencing
+/// *another* constraint isn't transitively expanded here; not attempted,
+/// since no example in `docs/section-16-validators.md` demonstrates it and
+/// guessing at the right resolution order wasn't worth it for an
+/// unconfirmed need.
+fn check_constraint_scope(module: &Module, errors: &mut Vec<TypeError>) {
+    use std::collections::{HashMap, HashSet};
+
+    let constraints: HashMap<&str, &S<Expr>> = module.decls.iter()
+        .filter_map(|d| match &d.node {
+            Decl::Constraint(c) => Some((c.name.node.as_str(), &c.body)),
+            _ => None,
+        })
+        .collect();
+    if constraints.is_empty() { return; }
+
+    for sdecl in &module.decls {
+        let Decl::Validator(v) = &sdecl.node else { continue };
+
+        let mut scope: HashSet<String> = HashSet::new();
+        if let Some(entity_name) = type_expr_simple_name(&v.entity.node) {
+            scope.insert(lowercase_first(&entity_name));
+        }
+        for field in &v.context {
+            scope.insert(field.name.node.clone());
+        }
+
+        for rule in &v.rules {
+            for site in [&rule.require, &rule.else_] {
+                // Every bare, single-segment name in this require/else that
+                // happens to match a declared constraint — a real reference,
+                // not a guess (a name that isn't a constraint is simply
+                // ignored here; normal inference already checks it elsewhere).
+                let mut referenced: Vec<String> = Vec::new();
+                walk_expr(site, &mut |e| {
+                    if let Expr::Path { path, .. } = e {
+                        if path.segments.len() == 1 {
+                            let name = path.segments[0].node.as_str();
+                            if constraints.contains_key(name) && !referenced.iter().any(|r| r == name) {
+                                referenced.push(name.to_string());
+                            }
+                        }
+                    }
+                });
+
+                for cname in referenced {
+                    let body = constraints[cname.as_str()];
+                    let mut bases: Vec<String> = Vec::new();
+                    walk_expr(body, &mut |e| {
+                        if let Expr::Field { expr, .. } | Expr::SafeField { expr, .. } = e {
+                            if let Expr::Path { path, .. } = &expr.node {
+                                if path.segments.len() == 1 {
+                                    let base = path.segments[0].node.clone();
+                                    let starts_lower = base.chars().next()
+                                        .map(|c| c.is_lowercase()).unwrap_or(false);
+                                    if starts_lower && !bases.contains(&base) { bases.push(base); }
+                                }
+                            }
+                        }
+                    });
+                    for base in bases {
+                        if !scope.contains(&base) {
+                            errors.push(TypeError {
+                                kind: TypeErrorKind::ConstraintFieldNotInScope {
+                                    constraint_name: cname.to_string(),
+                                    field_name: base,
+                                },
+                                span: site.span,
+                            });
+                        }
+                    }
+                }
+            }
         }
     }
 }
@@ -572,15 +758,43 @@ fn hoist_decl(
             let errors_ty  = type_expr_to_ty(&v.errors.node,  &mut Ctx { env, uf, errors, counter });
             let result_ty  = Ty::Result(Box::new(Ty::Unit), Box::new(errors_ty.clone()));
             let result_list = Ty::List(Box::new(errors_ty));
-            // validate(entity) -> Result<Unit, ErrorsType>
+            // BACKLOG item 224 — a validator with a `context` block's real
+            // generated function (`crates/codegen/src/emit_validator.rs`'s
+            // `build_fn_sig`) takes `(entity, ctx)`, but this hoist always
+            // registered a 1-parameter signature regardless, rejecting the
+            // correct, spec-shaped 2-argument call site
+            // (`V.validate(entity, ctx)`) with a hard type error — confirmed
+            // directly. Resolved *nominally* (`Ty::Named("{Name}Context")`),
+            // matching the real synthesized context type's own name
+            // (`emit_validator.rs`'s `ctx_type = format!("{}Context", vname)`)
+            // exactly, rather than an anonymous structural `Ty::Record` —
+            // under `certo build`/`run` (where `expand_validators` splices
+            // that type's own declaration in before this hoist runs) this is
+            // fully precise; under `certo check` alone (which never expands
+            // validators, so the name is never actually declared) it falls
+            // back to this codebase's own established "an undeclared
+            // capitalized name is accepted as a valid opaque nominal type"
+            // leniency — a real, already-flagged, pre-existing check-vs-build
+            // divergence (see item 220's own note), not made any worse here:
+            // a context-free validator's call sites are already fully
+            // correct either way, and a context-bearing one at least now
+            // accepts the right *arity*, where before it rejected every
+            // context-using call site categorically.
+            let params = if v.context.is_empty() {
+                vec![entity_ty.clone()]
+            } else {
+                let ctx_ty = Ty::Named { name: format!("{}Context", v.name.node), args: vec![] };
+                vec![entity_ty.clone(), ctx_ty]
+            };
+            // validate(entity[, ctx]) -> Result<Unit, ErrorsType>
             env.define(
                 format!("{}.validate", v.name.node),
-                Ty::Fn { params: vec![entity_ty.clone()], ret: Box::new(result_ty) },
+                Ty::Fn { params: params.clone(), ret: Box::new(result_ty) },
             );
-            // validateAll(entity) -> List<ErrorsType>
+            // validateAll(entity[, ctx]) -> List<ErrorsType>
             env.define(
                 format!("{}.validateAll", v.name.node),
-                Ty::Fn { params: vec![entity_ty], ret: Box::new(result_list) },
+                Ty::Fn { params, ret: Box::new(result_list) },
             );
         }
         // Impl blocks register each method as a qualified function `Type.method`,

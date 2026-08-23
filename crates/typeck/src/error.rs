@@ -100,6 +100,20 @@ pub enum TypeErrorKind {
     /// than a bare type mismatch would.
     ElseTypeMismatch { rule_name: String, expected: Ty, found: Ty },
 
+    /// E0704 — a named `constraint` referenced from a validator rule's
+    /// `require`/`else` accesses a field on a base name that isn't the
+    /// validator's own entity variable or one of its declared `context`
+    /// fields (BACKLOG item 225, split out of item 220's own investigation).
+    /// A constraint's body is deliberately never checked at its own
+    /// declaration site (`Decl::Constraint` hoists its name as a bare
+    /// `Ty::Bool` with no body inference — spec §16.8's own "deferred
+    /// resolution") — this is the direct, non-expanded check that catches
+    /// a scope violation at every validator that actually *uses* the
+    /// constraint, reported at the `require`/`else` clause referencing it,
+    /// not the constraint's own declaration (matching the spec's own
+    /// E0704 example exactly).
+    ConstraintFieldNotInScope { constraint_name: String, field_name: String },
+
     /// E0705 — a `loaded by` expression's own inferred type does not match
     /// the context field's declared type (BACKLOG item 220). Compares
     /// already-resolved types directly, mirroring `ElseTypeMismatch`/
@@ -172,6 +186,9 @@ impl TypeError {
             TypeErrorKind::ElseTypeMismatch { rule_name, expected, found } =>
                 format!("E0703: rule `{}`'s `else` branch produces `{}`, but this validator declares `errors {}`",
                     rule_name, found.display(), expected.display()),
+            TypeErrorKind::ConstraintFieldNotInScope { constraint_name, field_name } =>
+                format!("E0704: constraint `{}` references field `{}` not in validator context",
+                    constraint_name, field_name),
             TypeErrorKind::LoadedByTypeMismatch { field_name, expected, found } =>
                 format!("E0705: context field `{}`'s `loaded by` expression produces `{}`, but the field is declared `{}`",
                     field_name, found.display(), expected.display()),

@@ -1416,3 +1416,52 @@ fn with_timeout_await_body_result_type_is_option_of_the_awaited_calls_type() {
     assert_eq!(body.ty, Ty::Option(Box::new(Ty::Int)),
         "withTimeout(d) {{ await work() }}'s own type must be Option<Int>, got {:?}", body.ty);
 }
+
+// ------------------------------------------------------------------ //
+// Dot-call vs. underscore-named real function (BACKLOG item 224)
+// ------------------------------------------------------------------ //
+
+#[test]
+fn dot_qualified_call_to_an_underscore_named_function_resolves_its_real_return_type() {
+    // Mirrors exactly what `expand_validators` (`crates/cli/src/main.rs`)
+    // actually produces: a real function named with an underscore
+    // (`V_validate`, so the generated source parses as an ordinary
+    // function — `crates/codegen/src/emit_validator.rs`'s own
+    // `build_fn_sig`), called at a dot-qualified site (`V.validate(...)`,
+    // matching every validator call site users actually write). `c_fn_name`
+    // (`crates/codegen/src/emit_mir.rs`) already normalizes both spellings
+    // to the identical C symbol, so the call itself always linked and ran
+    // correctly — only the HIR-level *return type* lookup (`cx.fn_ret_types`,
+    // a literal-string `HashMap` with no dot/underscore normalization of
+    // its own) silently missed and fell all the way through to `Ty::Error`,
+    // confirmed directly via a real segfault-class UFCS dot-call failure
+    // (`V.validate(entity).isOk()` failed to compile even though `match`-ing
+    // the identical value already worked).
+    let m = lower("module A\nfn V_validate(x: Int): Result<Int, Text> = Ok(x)\nfn f(x: Int): Result<Int, Text> = V.validate(x)");
+    let f = m.items.iter().find_map(|it| match it {
+        HirItem::Fn(f) if f.name == "f" => Some(f),
+        _ => None,
+    }).expect("expected fn `f`");
+    assert_eq!(
+        f.body.as_ref().unwrap().ty,
+        Ty::Result(Box::new(Ty::Int), Box::new(Ty::Text)),
+        "dot-qualified call to an underscore-named real function must resolve its real return type, not Ty::Error"
+    );
+}
+
+#[test]
+fn plain_dot_qualified_call_matching_the_real_name_is_unaffected() {
+    // Regression guard: the already-working, exact-name-match case (a real
+    // user `impl` method, registered under its own literal dotted global
+    // name — `Decl::Impl`'s own pre-registration, unlike a validator's
+    // underscore-joined function) must not be disturbed by the new
+    // underscore-fallback lookup.
+    let m = lower(
+        "module A\ntype Widget = { n: Int }\nimpl Widget { fn size(w: Widget): Int = w.n }\n\
+         fn f(w: Widget): Int = Widget.size(w)");
+    let f = m.items.iter().find_map(|it| match it {
+        HirItem::Fn(f) if f.name == "f" => Some(f),
+        _ => None,
+    }).expect("expected fn `f`");
+    assert_eq!(f.body.as_ref().unwrap().ty, Ty::Int);
+}
