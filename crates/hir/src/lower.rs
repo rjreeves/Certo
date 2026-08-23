@@ -250,6 +250,34 @@ fn stdlib_param_types() -> &'static HashMap<String, Vec<Ty>> {
     })
 }
 
+/// Merges two independently-recovered branch types from the same `if`/
+/// `match` (BACKLOG item 227) — e.g. `if cond then Err(e) else Ok(x)`,
+/// where each branch's own call-type recovery (the new `Ok`/`Err` arms in
+/// `generic_container_ret` below) can only ever know ONE slot of the
+/// shared `Result` shape, leaving the other `Ty::Error`. The previous,
+/// shallower check here (`if !matches!(then_.ty, Error) { then_ } else
+/// { else_ }`) picked one branch's type wholesale the moment it wasn't
+/// *literally* `Ty::Error` at the top level — so `Err("too big")`'s own
+/// `Result<Error, Text>` was accepted as-is and `Ok(x)`'s `Result<Int,
+/// Error>` was never even consulted, leaving the success slot broken
+/// (confirmed via a real segfault reading it). Recurses into same-shape
+/// `Result`/`Option` containers so each slot is resolved independently,
+/// preferring whichever side isn't `Ty::Error`; a genuine disagreement
+/// between two *already concrete* types (which shouldn't occur in
+/// type-checked code) arbitrarily keeps the first, matching this
+/// function's own predecessor's tie-breaking, not a new risk it introduces.
+fn merge_partial(a: Ty, b: Ty) -> Ty {
+    match (a, b) {
+        (Ty::Error, b) => b,
+        (a, Ty::Error) => a,
+        (Ty::Result(a_ok, a_err), Ty::Result(b_ok, b_err)) =>
+            Ty::Result(Box::new(merge_partial(*a_ok, *b_ok)), Box::new(merge_partial(*a_err, *b_err))),
+        (Ty::Option(a_inner), Ty::Option(b_inner)) =>
+            Ty::Option(Box::new(merge_partial(*a_inner, *b_inner))),
+        (a, _) => a,
+    }
+}
+
 /// Return types for generic stdlib functions whose result depends on an
 /// argument's element type (e.g. `List.get<T>(List<T>, Int): T?`). Recovering
 /// the element type lets the caller unbox the payload correctly (Float bits).
@@ -328,20 +356,65 @@ fn generic_container_ret(full: Option<&str>, args: &[HirExpr]) -> Option<Ty> {
         // say) — the same "known type thrown away" crash items 179/180/182/
         // 189/191 already fixed elsewhere, missed for `fold`/`reduce`.
         Some("List.fold") | Some("List.reduce") => args.get(1).map(|a| a.ty.clone()),
-        // `flatMap`/`mapErr`/`getOrElse`/`recover` and their `Result.`-
-        // qualified aliases (BACKLOG item 199) — registered as `Forall`
-        // generics whose return type has vars, so (like every other arm in
-        // this table) they fall through `stdlib_ret_types()` and land here.
-        // Confirmed by direct testing: even the long-working *bare*-call
-        // form (`flatMap(r, f)`) segfaulted the moment its result was
-        // actually consumed (e.g. `match result { ... }`) — the call's own
-        // type silently stayed `Ty::Error`, the exact "known type thrown
-        // away" crash items 179/180/182/189/191/211 already fixed
-        // elsewhere, just never caught here since dot-call reachability
-        // (this same item) was the only thing previously exercising these
-        // functions at all.
-        Some("flatMap") | Some("Result.flatMap")
-        | Some("recover") | Some("Result.recover") => args.get(1).and_then(callback_ret_ty),
+        // `Ok`/`Err` (BACKLOG item 227) — registered (`crates/stdlib/src/
+        // seed.rs`) as `∀A,B. A -> Result<A,B>` / `∀A,B. B -> Result<A,B>`:
+        // the *other* type parameter (`B` for `Ok`, `A` for `Err`) is never
+        // constrained by the constructor's own single argument, so both
+        // fall through `stdlib_ret_types()` (`ret.has_vars()`) same as
+        // every other arm here — but unlike every other arm, NOTHING
+        // recovered anything for them at all before this: a direct HIR
+        // probe confirmed `Ok(x + 1)`'s own call type was plain `Ty::Error`
+        // in its entirety, not "a `Result` with one bad slot" as it first
+        // appeared from the outside — since `Ok`/`Err` are stdlib
+        // constructors, not user-defined sum-type variants, they also
+        // never matched `recover_generic_variant_call_ty` below. Used
+        // directly as an unannotated inline lambda's own tail (`(x) =>
+        // Ok(x + 1)`, passed to `flatMap`), that `Ty::Error` propagated
+        // into the enclosing call's own type, then into whatever consumed
+        // it (a `match` arm's binding, then an f-string interpolation) —
+        // the same "known type thrown away" segfault class items 179/180/
+        // 182/189/191/199/211 already fixed elsewhere, one level deeper.
+        // Recovers the one half that *is* knowable from the argument,
+        // leaving the unconstrained half `Ty::Error` — mirrors
+        // `recover_generic_variant_call_ty`/`recover_generic_record_ty`
+        // below's own established "recover what's known, `Error` for the
+        // rest" convention for user-defined generics. `flatMap`'s own arm
+        // just below then backfills that remaining `Error` half from the
+        // receiver's own already-known error type (real, not a guess:
+        // `flatMap`'s signature guarantees the error type never changes).
+        Some("Ok")  => args.first().map(|a| Ty::Result(Box::new(a.ty.clone()), Box::new(Ty::Error))),
+        Some("Err") => args.first().map(|a| Ty::Result(Box::new(Ty::Error), Box::new(a.ty.clone()))),
+        // `flatMap` and its `Result.`-qualified alias (BACKLOG item 199,
+        // extended by item 227 above) — registered as `Result<T,E> -> (T ->
+        // Result<U,E>) -> Result<U,E>`: the error type `E` is always
+        // identical between the receiver and the result, by the
+        // signature itself, so it's taken directly from the receiver
+        // (already known, e.g. from a `val r: Result<Int,Text> = ...`
+        // annotation) rather than from the callback's own recovered
+        // return type — correct even when the callback's body is a bare
+        // `Ok(...)` (whose own `Err`-side slot the arm above can only ever
+        // leave as `Ty::Error`, never actually knowing it). Confirmed by
+        // direct testing: even the long-working *bare*-call form
+        // (`flatMap(r, f)`) segfaulted the moment its result was actually
+        // consumed (e.g. `match result { ... }`) — the call's own type
+        // silently stayed `Ty::Error`, the exact "known type thrown away"
+        // crash items 179/180/182/189/191/211 already fixed elsewhere,
+        // just never caught here since dot-call reachability (item 199)
+        // was the only thing previously exercising these functions at all.
+        Some("flatMap") | Some("Result.flatMap") => {
+            let succ_ty = args.get(1).and_then(callback_ret_ty).map(|t| match t {
+                Ty::Result(succ, _) => *succ,
+                other => other,
+            })?;
+            let err_ty = args.first().and_then(result_ok_err).map(|(_, e)| e).unwrap_or(Ty::Error);
+            Some(Ty::Result(Box::new(succ_ty), Box::new(err_ty)))
+        }
+        // `recover`/`Result.recover`'s callback returns the raw success
+        // value `T` directly, never a `Result` (`Result<T,E> -> (E -> T)
+        // -> T` — `crates/stdlib/src/seed.rs`), so a bare `Ok(...)`/
+        // `Err(...)` tail could never legitimately appear here in the
+        // first place; no backfill needed, unlike `flatMap` above.
+        Some("recover") | Some("Result.recover") => args.get(1).and_then(callback_ret_ty),
         Some("mapErr") | Some("Result.mapErr") => {
             let ok_ty = args.first().and_then(result_ok_err).map(|(ok, _)| ok)?;
             let err_ty = args.get(1).and_then(callback_ret_ty)?;
@@ -558,6 +631,29 @@ fn stdlib_param_names() -> HashMap<&'static str, &'static [&'static str]> {
     // the key closure and list swapped).
     m.insert("List.groupBy",    &["list", "key"]);
     m.insert("List.upsert",     &["list", "item", "on"]);
+
+    // Result (BACKLOG item 227) — needed for the exact same reason
+    // `List.map` etc. above are: without a `stdlib_params` entry here,
+    // `stdlib_names` (`crates/hir/src/lower.rs`'s own `Expr::App` arm)
+    // never recognizes `flatMap`/`mapErr`/`recover` as a function whose
+    // lambda argument needs a param-type hint at all — this table is a
+    // separate, HIR-local structure from `crates/stdlib/src/seed.rs`'s own
+    // `pm!`-registered param names (which back typeck's default-argument
+    // handling, not this). Both the bare and `Result.`-qualified spellings
+    // need their own entry — this table's `fn_full_path` lookup has no
+    // bare-name fallback, so a dot-called `r.flatMap(f)` (rewritten to
+    // `Result.flatMap` by item 199's UFCS rewrite) silently got neither
+    // this table's bare entry (name mismatch) nor a qualified one (never
+    // existed) — confirmed via a direct HIR probe: `r.flatMap((x) => Ok(x))`
+    // left `x` as `Ty::Error` even after this exact list's own hint-source
+    // selection (`result_hint_side`, this arm's own sibling logic below)
+    // was added, until this entry existed too.
+    m.insert("flatMap",         &["r", "f"]);
+    m.insert("Result.flatMap",  &["r", "f"]);
+    m.insert("mapErr",          &["r", "f"]);
+    m.insert("Result.mapErr",   &["r", "f"]);
+    m.insert("recover",         &["r", "f"]);
+    m.insert("Result.recover",  &["r", "f"]);
 
     // Map
     m.insert("Map.insert",      &["map", "key", "value"]);
@@ -1051,10 +1147,34 @@ fn lower_expr(expr: &S<Expr>, cx: &mut Cx) -> HirExpr {
                 // function" — this same-shaped `(List<T>, T=>...)`
                 // call just never happened to have a lambda argument
                 // *and* live outside `BOXED_ABI_CALLEES` before now.
+                // `flatMap`/`recover`/`mapErr`'s callback param needs the
+                // identical hint treatment (BACKLOG item 227), sourced from
+                // the receiver's `Result<A,B>` instead of a list's element
+                // type: `flatMap: A -> Result<C,B>` takes the success side
+                // (`A`); `recover: B -> A` and `mapErr: B -> F` both take
+                // the error side (`B`). Without this, `(x) => Ok(x)`/`(x) =>
+                // if cond then Err(e) else Ok(x)`'s own bare `x` stayed
+                // `Ty::Error` (the same hardcoded default `Expr::Lambda`'s
+                // own generic arm gives every param with no hint) — the new
+                // `Ok`/`Err` call-type recovery above could only ever
+                // recover a real type from `x` when something *else*
+                // (arithmetic, a field access) happened to reconstruct one
+                // structurally; a bare, unmodified `x` had nothing to
+                // recover from at all. Confirmed via a real segfault: `r.
+                // flatMap((x) => if x > 3 then Err("too big") else Ok(x))`
+                // crashed reading `x` back out of the `Ok` branch, even
+                // with the `Ok`/`Err`-recovery and `merge_partial` fixes
+                // above both already in place.
+                let result_hint_side: Option<bool> = match fn_full_path.as_deref() {
+                    Some("flatMap") | Some("Result.flatMap") => Some(true),
+                    Some("recover") | Some("Result.recover")
+                    | Some("mapErr") | Some("Result.mapErr") => Some(false),
+                    _ => None,
+                };
                 let needs_lambda_hint = matches!(fn_full_path.as_deref(),
                     Some("List.map") | Some("List.groupBy")
                     | Some("List.sortBy") | Some("List.minBy") | Some("List.maxBy") | Some("List.sumBy")
-                    | Some("List.upsert"));
+                    | Some("List.upsert")) || result_hint_side.is_some();
                 // Every one of the above takes its lambda as the 2nd
                 // positional argument (index 1) — except `List.upsert`
                 // (BACKLOG item 209), whose signature is `(list, item, on)`,
@@ -1157,10 +1277,18 @@ fn lower_expr(expr: &S<Expr>, cx: &mut Cx) -> HirExpr {
                     for (i, arg) in args.iter().enumerate() {
                         if needs_lambda_hint && i == lambda_pos {
                             if let Expr::Lambda { params, body, .. } = &arg.value.node {
-                                let hint = out.first().and_then(|a: &HirExpr| match &a.ty {
-                                    Ty::List(inner) => Some((**inner).clone()),
-                                    _ => None,
-                                }).unwrap_or(Ty::Error);
+                                let hint = if let Some(want_ok) = result_hint_side {
+                                    out.first().and_then(|a: &HirExpr| match &a.ty {
+                                        Ty::Result(ok, err) =>
+                                            Some(if want_ok { (**ok).clone() } else { (**err).clone() }),
+                                        _ => None,
+                                    }).unwrap_or(Ty::Error)
+                                } else {
+                                    out.first().and_then(|a: &HirExpr| match &a.ty {
+                                        Ty::List(inner) => Some((**inner).clone()),
+                                        _ => None,
+                                    }).unwrap_or(Ty::Error)
+                                };
                                 let lowered = lower_lambda_with_param_hint(params, body, &hint, cx, arg.value.span);
                                 let is_key_fn = matches!(fn_full_path.as_deref(),
                                     Some("List.sortBy") | Some("List.minBy") | Some("List.maxBy") | Some("List.sumBy"));
@@ -1450,7 +1578,7 @@ fn lower_expr(expr: &S<Expr>, cx: &mut Cx) -> HirExpr {
             let cond = lower_expr(cond, cx);
             let then_ = lower_expr(then_expr, cx);
             let else_ = lower_expr(else_expr, cx);
-            let ty = if !matches!(then_.ty, Ty::Error) { then_.ty.clone() } else { else_.ty.clone() };
+            let ty = merge_partial(then_.ty.clone(), else_.ty.clone());
             HirExpr { kind: HirExprKind::If { cond: Box::new(cond), then_expr: Box::new(then_), else_expr: Box::new(else_) }, ty, span }
         }
 
@@ -1464,9 +1592,9 @@ fn lower_expr(expr: &S<Expr>, cx: &mut Cx) -> HirExpr {
                 cx.pop_scope();
                 HirArm { pat, guard, body }
             }).collect();
-            let ty = hir_arms.iter().find_map(|a| {
-                if !matches!(a.body.ty, Ty::Error) { Some(a.body.ty.clone()) } else { None }
-            }).unwrap_or(Ty::Error);
+            let ty = hir_arms.iter()
+                .map(|a| a.body.ty.clone())
+                .fold(Ty::Error, merge_partial);
             HirExpr { kind: HirExprKind::Match { scrutinee: Box::new(scrut), arms: hir_arms }, ty, span }
         }
 
