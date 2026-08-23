@@ -62,4 +62,72 @@ bool certo_uuid_eq(certo_uuid_t a, certo_uuid_t b) {
     }
     return true;
 }
+
+/* BACKLOG item 228 — no callable Certo-level function converted a runtime
+   Text value into a UUID at all; only the compile-time uuid"..." literal
+   (certo_uuid_parse above) worked, and that one panics on bad input —
+   fine for a literal the parser already validated, wrong for a fallible
+   function reading untrusted runtime Text (e.g. a UUID column read back
+   out of a database row as Text). Strict canonical-form check: exactly
+   36 characters, dashes at exactly the 4 standard 8-4-4-4-12 positions,
+   every other character a hex digit — rejects anything else (missing/
+   misplaced dashes, wrong length, non-hex characters) rather than the
+   literal parser's dashes-optional/ignored leniency. Returns NULL (None)
+   on failure, heap-allocated certo_uuid_t* on success — mirrors
+   certo_parse_decimal's nullable-box convention. */
+static bool certo_uuid_hex_nibble_checked(char c, uint8_t* out) {
+    if (c >= '0' && c <= '9') { *out = (uint8_t)(c - '0'); return true; }
+    if (c >= 'a' && c <= 'f') { *out = (uint8_t)(c - 'a' + 10); return true; }
+    if (c >= 'A' && c <= 'F') { *out = (uint8_t)(c - 'A' + 10); return true; }
+    return false;
+}
+
+certo_uuid_t* certo_parse_uuid(certo_text_t s) {
+    if (!s) return NULL;
+    if (strlen(s) != 36) return NULL;
+    if (s[8] != '-' || s[13] != '-' || s[18] != '-' || s[23] != '-') return NULL;
+    char hex[32];
+    int hi = 0;
+    for (int i = 0; i < 36; i++) {
+        if (i == 8 || i == 13 || i == 18 || i == 23) continue;
+        hex[hi++] = s[i];
+    }
+    certo_uuid_t u;
+    for (int i = 0; i < 16; i++) {
+        uint8_t nib_hi, nib_lo;
+        if (!certo_uuid_hex_nibble_checked(hex[i * 2], &nib_hi)) return NULL;
+        if (!certo_uuid_hex_nibble_checked(hex[i * 2 + 1], &nib_lo)) return NULL;
+        u.bytes[i] = (uint8_t)((nib_hi << 4) | nib_lo);
+    }
+    certo_uuid_t* box = (certo_uuid_t*)malloc(sizeof(certo_uuid_t));
+    if (!box) certo_panic("out of memory");
+    *box = u;
+    return box;
+}
+
+/* BACKLOG item 228 — the other direction: no function serialized a UUID
+   back to Text either (needed e.g. to pass a UUID-typed field as a Text
+   SQL parameter). Canonical lowercase 8-4-4-4-12 dashed form — the same
+   shape Postgres's own `uuid` column renders as and certo_parse_uuid
+   above accepts, so this is a real inverse of it. */
+certo_text_t certo_uuid_to_text(certo_uuid_t u) {
+    char* buf = (char*)malloc(37);
+    if (!buf) certo_panic("out of memory");
+    snprintf(buf, 37,
+        "%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x",
+        u.bytes[0], u.bytes[1], u.bytes[2], u.bytes[3],
+        u.bytes[4], u.bytes[5],
+        u.bytes[6], u.bytes[7],
+        u.bytes[8], u.bytes[9],
+        u.bytes[10], u.bytes[11], u.bytes[12], u.bytes[13], u.bytes[14], u.bytes[15]);
+    return buf;
+}
+
+/* Bridge codegen's UUID.toText name (certo_u_u_i_d_to_text — c_fn_name's
+   camel_to_snake inserts an underscore before every uppercase letter, so
+   the 4 consecutive capitals in "UUID" each get their own, same gap
+   DateTime's own aliases above this file's sibling bridge) to the real
+   implementation. `parseUuid` needs no such alias — its single leading
+   capital ('U' in "Uuid") already derives to the intended certo_parse_uuid. */
+#define certo_u_u_i_d_to_text certo_uuid_to_text
 "##;

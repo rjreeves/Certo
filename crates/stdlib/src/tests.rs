@@ -716,6 +716,67 @@ fn uuid_c_contains_eq_body() {
 }
 
 // ------------------------------------------------------------------ //
+// Stdlib.Uuid Text<->UUID conversions — BACKLOG item 228
+// ------------------------------------------------------------------ //
+
+#[test]
+fn parse_uuid_returns_option_uuid() {
+    // No callable Certo-level function converted a runtime Text value into
+    // a UUID at all before this — only the compile-time `uuid"..."` literal
+    // (backed by the always-panics `certo_uuid_parse`) worked. Fallible,
+    // matching `parseInt`/`parseFloat`/`parseDecimal`/`parseBool`'s own
+    // established convention.
+    let env = seeded_env();
+    match env.lookup("parseUuid").unwrap() {
+        Ty::Fn { params, ret } => {
+            assert_eq!(params, &[Ty::Text]);
+            assert_eq!(ret.as_ref(), &Ty::Option(Box::new(Ty::Uuid)));
+        }
+        other => panic!("expected Fn, got {:?}", other),
+    }
+}
+
+#[test]
+fn uuid_to_text_registered() {
+    // The other direction — serializing a UUID back to Text, needed e.g.
+    // to pass a UUID-typed field as a Text SQL parameter. Namespaced,
+    // matching `Decimal.toText`'s own convention (unlike the bare
+    // `parseInt`/`parseUuid` side).
+    let env = seeded_env();
+    match env.lookup("UUID.toText").unwrap() {
+        Ty::Fn { params, ret } => {
+            assert_eq!(params, &[Ty::Uuid]);
+            assert_eq!(ret.as_ref(), &Ty::Text);
+        }
+        other => panic!("expected Fn, got {:?}", other),
+    }
+}
+
+#[test]
+fn uuid_c_contains_parse_uuid_and_to_text_bodies() {
+    assert!(UUID_C.contains("certo_uuid_t* certo_parse_uuid(certo_text_t s) {"), "missing certo_parse_uuid body");
+    assert!(UUID_C.contains("certo_text_t certo_uuid_to_text(certo_uuid_t u) {"), "missing certo_uuid_to_text body");
+    // The auto-derived C name for the qualified `UUID.toText` stdlib name
+    // (`c_fn_name`'s camel_to_snake inserts an underscore before every
+    // uppercase letter, so all 4 capitals in "UUID" each get their own —
+    // `certo_u_u_i_d_to_text`) needs a `#define` bridge to the real
+    // implementation, the same pattern `DateTime.*`'s own aliases already
+    // use for the identical class of naming mismatch.
+    assert!(UUID_C.contains("#define certo_u_u_i_d_to_text certo_uuid_to_text"), "missing UUID.toText name-bridge alias");
+}
+
+#[test]
+fn parse_uuid_rejects_malformed_input_strictly() {
+    // Unlike the literal-backing `certo_uuid_parse` above (dashes
+    // optional/ignored, panics on any deviation), `certo_parse_uuid` backs
+    // a fallible function reading untrusted runtime Text (e.g. a UUID
+    // column read back out of a database row) — it must actually validate
+    // length and dash positions, not just count hex digits.
+    assert!(UUID_C.contains("if (strlen(s) != 36) return NULL;"));
+    assert!(UUID_C.contains("if (s[8] != '-' || s[13] != '-' || s[18] != '-' || s[23] != '-') return NULL;"));
+}
+
+// ------------------------------------------------------------------ //
 // Counter advances: seed_stdlib doesn't trample the caller's counter
 // ------------------------------------------------------------------ //
 
@@ -735,7 +796,7 @@ fn seed_advances_counter() {
 fn conversion_functions_registered() {
     let env = seeded_env();
     for name in &["intToText", "floatToText", "boolToText",
-                  "floatToInt", "intToFloat", "parseInt", "parseFloat", "parseDecimal", "parseBool"] {
+                  "floatToInt", "intToFloat", "parseInt", "parseFloat", "parseDecimal", "parseBool", "parseUuid"] {
         assert!(env.lookup(name).is_some(), "missing: {}", name);
     }
 }
