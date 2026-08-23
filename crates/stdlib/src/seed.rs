@@ -1370,6 +1370,21 @@ pub fn seed_stdlib(env: &mut TypeEnv, counter: &mut u32) {
     pm!("mapErr",              "r", "f");
     pm!("getOrElse",           "r", "default");
     pm!("recover",             "r", "f");
+    // BACKLOG item 227 — the `Result.`-qualified dot-call spelling (`r.
+    // flatMap(f)`/`Result.flatMap(r, f)`, item 199's own UFCS rewrite
+    // target) had no `pm!` entry of its own, unlike the bare name above —
+    // `crates/hir/src/lower.rs`'s `stdlib_names` lookup keys strictly on
+    // `fn_full_path` with no bare-name fallback, so a dot-called `flatMap`/
+    // `recover`/`mapErr` silently got NONE of the lambda-callback
+    // param-hint treatment the bare form already had, even though
+    // `generic_container_ret`'s *return*-type recovery already explicitly
+    // handles both spellings side by side. Confirmed via a direct HIR
+    // probe: `r.flatMap((x) => Ok(x))`'s own bare, un-hinted `x` stayed
+    // `Ty::Error` — only ever "accidentally" recovered when something else
+    // in the body (arithmetic) reconstructed a type structurally.
+    pm!("Result.flatMap",      "r", "f");
+    pm!("Result.mapErr",       "r", "f");
+    pm!("Result.recover",      "r", "f");
     pm!("Result.all",          "results");
     pm!("Result.allSettled",   "results");
 

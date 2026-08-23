@@ -726,6 +726,110 @@ fn query_list_and_list_first_consumed_inline_with_no_intermediate_val() {
 }
 
 // ------------------------------------------------------------------ //
+// `Ok`/`Err` as a bare lambda body (BACKLOG item 227)
+// ------------------------------------------------------------------ //
+
+#[test]
+fn bare_ok_call_recovers_success_type_leaving_error_side_as_error() {
+    // A direct HIR probe (not just an end-to-end run) confirmed `Ok(x + 1)`
+    // alone — with no enclosing context at all — used to come out as plain
+    // `Ty::Error` in its entirety, not "a `Result` with one bad slot". The
+    // success side (known from the argument) must now resolve; the error
+    // side genuinely can't be known from `Ok(...)` alone, so it stays
+    // `Ty::Error` here (this exact case is what `flatMap`'s own arm exists
+    // to backfill — see the next test).
+    let m = lower("module A\nfn f(x: Int): Result<Int, Text> = Ok(x + 1)");
+    let f = m.items.iter().find_map(|it| match it {
+        HirItem::Fn(f) if f.name == "f" => Some(f),
+        _ => None,
+    }).expect("expected fn `f`");
+    match &f.body.as_ref().unwrap().ty {
+        Ty::Result(ok, _) => assert_eq!(**ok, Ty::Int, "success side should recover to Int"),
+        other => panic!("expected Ty::Result, got {:?} (Ok(x+1) collapsed to Ty::Error again)", other),
+    }
+}
+
+#[test]
+fn flatmap_with_bare_ok_lambda_body_resolves_full_result_type() {
+    // BACKLOG item 227's own filed repro: `r.flatMap((x) => Ok(x + 1))`
+    // segfaulted on consumption because the whole call's type silently
+    // stayed `Ty::Error`. `flatMap`'s error type never changes from the
+    // receiver's own (by its real signature), so the fix backfills it
+    // from `r`'s own known `Text` — not a guess, a correct derivation.
+    let m = lower(
+        "module A\nfn f(r: Result<Int, Text>): Result<Int, Text> = r.flatMap((x) => Ok(x + 1))");
+    let f = m.items.iter().find_map(|it| match it {
+        HirItem::Fn(f) if f.name == "f" => Some(f),
+        _ => None,
+    }).expect("expected fn `f`");
+    assert_eq!(
+        f.body.as_ref().unwrap().ty,
+        Ty::Result(Box::new(Ty::Int), Box::new(Ty::Text)),
+        "flatMap's own call type must fully resolve, not collapse to Ty::Error"
+    );
+}
+
+#[test]
+fn flatmap_with_bare_err_lambda_body_leaves_the_genuinely_unknowable_success_side_as_error() {
+    // A callback whose tail is *unconditionally* `Err("bad")`, never
+    // referencing its own param at all, has no argument, branch, or
+    // operation anywhere for the success side to be structurally
+    // recovered from — unlike every other case here (arithmetic on the
+    // param, an `if`/`else` where the *other* branch is `Ok(x)`), this one
+    // is a genuine, honest structural-recovery limit, not a bug: real
+    // programs write this shape when the callback's success type is
+    // truly irrelevant to a call that always errors (e.g. a validation
+    // step that never succeeds on its own). Documented here so a future
+    // change can't silently start returning something *wrong* instead of
+    // just incomplete.
+    let m = lower(
+        "module A\nfn f(r: Result<Int, Text>): Result<Int, Text> = r.flatMap((x) => Err(\"bad\"))");
+    let f = m.items.iter().find_map(|it| match it {
+        HirItem::Fn(f) if f.name == "f" => Some(f),
+        _ => None,
+    }).expect("expected fn `f`");
+    assert_eq!(
+        f.body.as_ref().unwrap().ty,
+        Ty::Result(Box::new(Ty::Error), Box::new(Ty::Text))
+    );
+}
+
+#[test]
+fn flatmap_with_a_conditional_ok_or_err_lambda_body_resolves_full_result_type() {
+    // A slightly less trivial callback body (an `if`, not a bare tail call)
+    // — both branches independently need the same backfill treatment.
+    let m = lower(
+        "module A\nfn f(r: Result<Int, Text>): Result<Int, Text> = \
+         r.flatMap((x) => if x > 3 then Err(\"too big\") else Ok(x))");
+    let f = m.items.iter().find_map(|it| match it {
+        HirItem::Fn(f) if f.name == "f" => Some(f),
+        _ => None,
+    }).expect("expected fn `f`");
+    assert_eq!(
+        f.body.as_ref().unwrap().ty,
+        Ty::Result(Box::new(Ty::Int), Box::new(Ty::Text))
+    );
+}
+
+#[test]
+fn flatmap_with_named_function_callback_is_unaffected() {
+    // Regression guard: the already-working named-function-callback path
+    // (item 199's own precedent, `callback_ret_ty`'s `Ty::Fn{ret,..}` arm)
+    // must still resolve correctly, not be shadowed by the new backfill.
+    let m = lower(
+        "module A\nfn addOne(x: Int): Result<Int, Text> = Ok(x + 1)\n\
+         fn f(r: Result<Int, Text>): Result<Int, Text> = r.flatMap(addOne)");
+    let f = m.items.iter().find_map(|it| match it {
+        HirItem::Fn(f) if f.name == "f" => Some(f),
+        _ => None,
+    }).expect("expected fn `f`");
+    assert_eq!(
+        f.body.as_ref().unwrap().ty,
+        Ty::Result(Box::new(Ty::Int), Box::new(Ty::Text))
+    );
+}
+
+// ------------------------------------------------------------------ //
 // Lambda closure-capture rejection (BACKLOG item 136)
 // ------------------------------------------------------------------ //
 
