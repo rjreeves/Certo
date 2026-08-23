@@ -3306,7 +3306,18 @@ fn cmd_db_pull(args: &[String]) {
 
         if let Some((pk_col, pk_ty, _)) = pk {
             let pk_certo   = if pk_ty == "Int" { "Int" } else { "Text" };
-            let pk_to_text = certo_to_text_expr("id", pk_ty);
+            // BACKLOG item 229's own investigation — found a third, distinct
+            // bug finishing it: this must convert from `id`'s own DECLARED
+            // Certo type (`pk_certo`, already collapsed to bare `Text` for
+            // anything non-`Int`), not from the original pre-collapse
+            // `pk_ty`. Using `pk_ty` here (e.g. `"DateTime"`) wrapped an
+            // already-`Text`-typed `id` in a conversion function that
+            // expects the *original* type (`DateTime.toIso(id)`), which
+            // fails to typecheck since `id: Text` was declared just above —
+            // confirmed via the real `history_`/`log` tables' `FindById`/
+            // `DeleteById` output in `examples/db/schema.cto` (any DateTime/
+            // Decimal/UUID-keyed table hits this, not just DateTime).
+            let pk_to_text = certo_to_text_expr("id", pk_certo);
 
             src.push_str(&format!(
                 "fn {}FindById(conn: Int, id: {}): {}? [io] = {{\n    val rows = dbQueryTyped(conn, \"SELECT {} FROM {} WHERE {} = $1 LIMIT 1\", [{}], {}FromRow)\n    List.first(rows)\n}}\n\n",
@@ -3407,6 +3418,16 @@ fn pg_type_to_certo(pg: &str, precision: Option<i64>, scale: Option<i64>, char_m
         "time" | "time with time zone" | "time without time zone" | "timetz" => "Text".to_string(),
         "json" | "jsonb"                               => "Text".to_string(),
         "bytea"                                        => "Text".to_string(),
+        // BACKLOG item 229 — Postgres's internal `oid` type (a 32-bit
+        // unsigned object identifier — used e.g. by `pg_class.oid`/a
+        // catalog-referencing audit column, not a real UUID) fell through
+        // to the `other` catch-all like `time with time zone` above did
+        // before item 205's fix, producing the literal, undeclared,
+        // unparseable field type `Oid`. `Int` is the correct match for its
+        // actual 32-bit-unsigned-integer semantics (same representation
+        // `Int`/`int8` already uses for every other Postgres integer type
+        // above; Certo has no unsigned integer type to distinguish it with).
+        "oid"                                          => "Int".to_string(),
         other => snake_to_pascal(other),
     }
 }
@@ -3466,7 +3487,17 @@ fn text_to_certo_expr(cell: &str, ty: &str) -> String {
         // silently truncate/fail to parse, corrupting the value on every row read.
         "Decimal"  => format!("parseDecimal({}) ?? Decimal.fromInt(0)", cell),
         "DateTime" => format!("DateTime.parseIso({})", cell),
-        _          => cell.to_string(), // Text, UUID, unknown named types
+        // BACKLOG item 228 — found via `examples/db/schema.cto`: a raw
+        // Text column value was previously assigned directly to a
+        // UUID-typed field with no conversion at all (bundled into this
+        // catch-all's own comment, which was simply wrong) — 36 of that
+        // file's real compile errors were exactly this. `parseUuid` now
+        // exists; nil-UUID default matches `Decimal`/`Int`'s own "typed
+        // zero, dead branch" convention just above.
+        "UUID"     => format!(
+            "parseUuid({}) ?? uuid\"00000000-0000-0000-0000-000000000000\"", cell
+        ),
+        _          => cell.to_string(), // Text, unknown named types
     }
 }
 
@@ -3479,7 +3510,14 @@ fn certo_to_text_expr(expr: &str, ty: &str) -> String {
         "Float"    => format!("floatToText({})", expr),
         "Decimal"  => format!("Decimal.toText({})", expr),
         "DateTime" => format!("DateTime.toIso({})", expr),
-        _          => expr.to_string(), // Text, UUID
+        // BACKLOG item 228 — this catch-all's own comment previously
+        // (wrongly) bundled `UUID` in with `Text` as needing no
+        // conversion; `UUID.toText` now exists and is the real inverse of
+        // `text_to_certo_expr`'s own `UUID` arm above. Found via
+        // `examples/db/schema.cto`'s generated `Insert` functions passing
+        // a UUID-typed field directly as a `Text` param.
+        "UUID"     => format!("UUID.toText({})", expr),
+        _          => expr.to_string(), // Text, unknown named types
     }
 }
 
@@ -3499,6 +3537,15 @@ fn null_default(ty: &str) -> &'static str {
         "Float"    => "intToFloat(0)",
         "Decimal"  => "Decimal.fromInt(0)",
         "DateTime" => "DateTime.now()",
+        // BACKLOG item 228 — the bare `""` (Text) catch-all default below
+        // is wrong for a nullable UUID field: `certo_nullable_to_text_expr`
+        // unifies `expr ?? null_default(ty)` before converting, so a real
+        // `UUID?` field (e.g. `examples/db/schema.cto`'s `pkey: UUID?`)
+        // would need its non-null branch to unify `Text` against `UUID` —
+        // a genuine type error, not just a cosmetic default. Nil UUID
+        // (RFC 4122's all-zero form) matches `Decimal.fromInt(0)`/`0`'s own
+        // "typed zero, dead branch" convention.
+        "UUID"     => "uuid\"00000000-0000-0000-0000-000000000000\"",
         _          => "\"\"",
     }
 }
@@ -3871,6 +3918,16 @@ mod flag_tests {
         // pre-existing, correct `timestamp with time zone` → `DateTime`
         // mapping just above it.
         assert_eq!(pg_type_to_certo("timestamp with time zone", None, None, None), "DateTime");
+    }
+
+    #[test]
+    fn pg_type_to_certo_maps_oid_to_int() {
+        // BACKLOG item 229 — found finishing item 205's `examples/db/schema.cto`
+        // cleanup: Postgres's internal `oid` type (a 32-bit unsigned object
+        // identifier) fell through to the `other` catch-all, same bug class
+        // as `time with time zone` (item 205) — producing the undeclared,
+        // unparseable field type `Oid` for the `history_.table_oid_` column.
+        assert_eq!(pg_type_to_certo("oid", None, None, None), "Int");
     }
 }
 

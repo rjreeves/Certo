@@ -941,6 +941,8 @@ typedef struct { uint8_t bytes[16]; } certo_uuid_t;
 #define CERTO_UUID(s) certo_uuid_parse(s)
 certo_uuid_t certo_uuid_parse(const char* s);
 certo_uuid_t certo_uuid_new(void);
+certo_uuid_t* certo_parse_uuid(certo_text_t s);   /* BACKLOG item 228 */
+certo_text_t  certo_uuid_to_text(certo_uuid_t u); /* BACKLOG item 228 */
 
 /* Generic option (pointer-sized tag + value) */
 typedef struct { bool has_value; void* value; } certo_option_t;

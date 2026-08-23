@@ -43,7 +43,7 @@ fn boundvolumesubsFromRow(row: List<Text?>): Boundvolumesubs =
         mailCde: if List.getOrPanic(row, 9) == None then None else Some((List.getOrPanic(row, 9) ?? "")),
         sourceMnth: if List.getOrPanic(row, 10) == None then None else Some((List.getOrPanic(row, 10) ?? "")),
         subsStatus: if List.getOrPanic(row, 11) == None then None else Some((List.getOrPanic(row, 11) ?? "") == "t"),
-        pkey: if List.getOrPanic(row, 12) == None then None else Some((List.getOrPanic(row, 12) ?? "")),
+        pkey: if List.getOrPanic(row, 12) == None then None else Some(parseUuid((List.getOrPanic(row, 12) ?? "")) ?? uuid"00000000-0000-0000-0000-000000000000"),
         recordModified: if List.getOrPanic(row, 13) == None then None else Some((List.getOrPanic(row, 13) ?? "")),
         srcMnth: if List.getOrPanic(row, 14) == None then None else Some(parseInt((List.getOrPanic(row, 14) ?? "")) ?? 0),
         subActive: if List.getOrPanic(row, 15) == None then None else Some((List.getOrPanic(row, 15) ?? "") == "t"),
@@ -64,7 +64,7 @@ fn boundvolumesubsFindAll(conn: Int): List<Boundvolumesubs> [io] =
 fn boundvolumesubsInsert(conn: Int, record: Boundvolumesubs): Int [io] =
     dbExec(conn,
         "INSERT INTO boundvolumesubs (cust_no, sub_no, subs_name, subs_name1, subs_name2, subs_address1, subs_address2, subs_town, subs_postcode, mail_cde, source_mnth, subs_status, pkey_, record_modified_, src_mnth, sub_active, dn, subs_email, record_deleted_, use_email, product_code, sub_copies, labels_count) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23)",
-        [if record.custNo == None then dbNull() else intToText(record.custNo ?? 0), if record.subNo == None then dbNull() else intToText(record.subNo ?? 0), if record.subsName == None then dbNull() else record.subsName ?? "", if record.subsName1 == None then dbNull() else record.subsName1 ?? "", if record.subsName2 == None then dbNull() else record.subsName2 ?? "", if record.subsAddress1 == None then dbNull() else record.subsAddress1 ?? "", if record.subsAddress2 == None then dbNull() else record.subsAddress2 ?? "", if record.subsTown == None then dbNull() else record.subsTown ?? "", if record.subsPostcode == None then dbNull() else record.subsPostcode ?? "", if record.mailCde == None then dbNull() else record.mailCde ?? "", if record.sourceMnth == None then dbNull() else record.sourceMnth ?? "", if record.subsStatus == None then dbNull() else boolToText(record.subsStatus ?? false), if record.pkey == None then dbNull() else record.pkey ?? "", if record.recordModified == None then dbNull() else record.recordModified ?? "", if record.srcMnth == None then dbNull() else intToText(record.srcMnth ?? 0), if record.subActive == None then dbNull() else boolToText(record.subActive ?? false), if record.dn == None then dbNull() else record.dn ?? "", if record.subsEmail == None then dbNull() else record.subsEmail ?? "", if record.recordDeleted == None then dbNull() else DateTime.toIso(record.recordDeleted ?? DateTime.now()), if record.useEmail == None then dbNull() else boolToText(record.useEmail ?? false), if record.productCode == None then dbNull() else record.productCode ?? "", if record.subCopies == None then dbNull() else intToText(record.subCopies ?? 0), if record.labelsCount == None then dbNull() else intToText(record.labelsCount ?? 0)])
+        [if record.custNo == None then dbNull() else intToText(record.custNo ?? 0), if record.subNo == None then dbNull() else intToText(record.subNo ?? 0), if record.subsName == None then dbNull() else record.subsName ?? "", if record.subsName1 == None then dbNull() else record.subsName1 ?? "", if record.subsName2 == None then dbNull() else record.subsName2 ?? "", if record.subsAddress1 == None then dbNull() else record.subsAddress1 ?? "", if record.subsAddress2 == None then dbNull() else record.subsAddress2 ?? "", if record.subsTown == None then dbNull() else record.subsTown ?? "", if record.subsPostcode == None then dbNull() else record.subsPostcode ?? "", if record.mailCde == None then dbNull() else record.mailCde ?? "", if record.sourceMnth == None then dbNull() else record.sourceMnth ?? "", if record.subsStatus == None then dbNull() else boolToText(record.subsStatus ?? false), if record.pkey == None then dbNull() else UUID.toText(record.pkey ?? uuid"00000000-0000-0000-0000-000000000000"), if record.recordModified == None then dbNull() else record.recordModified ?? "", if record.srcMnth == None then dbNull() else intToText(record.srcMnth ?? 0), if record.subActive == None then dbNull() else boolToText(record.subActive ?? false), if record.dn == None then dbNull() else record.dn ?? "", if record.subsEmail == None then dbNull() else record.subsEmail ?? "", if record.recordDeleted == None then dbNull() else DateTime.toIso(record.recordDeleted ?? DateTime.now()), if record.useEmail == None then dbNull() else boolToText(record.useEmail ?? false), if record.productCode == None then dbNull() else record.productCode ?? "", if record.subCopies == None then dbNull() else intToText(record.subCopies ?? 0), if record.labelsCount == None then dbNull() else intToText(record.labelsCount ?? 0)])
 
 type BulkCopies = {
     bulNo: Text?
@@ -186,7 +186,7 @@ fn cust_notesFromRow(row: List<Text?>): CustNotes =
     CustNotes {
         note: if List.getOrPanic(row, 0) == None then None else Some((List.getOrPanic(row, 0) ?? "")),
         custNo: if List.getOrPanic(row, 1) == None then None else Some(parseInt((List.getOrPanic(row, 1) ?? "")) ?? 0),
-        id: (List.getOrPanic(row, 2) ?? ""),
+        id: parseUuid((List.getOrPanic(row, 2) ?? "")) ?? uuid"00000000-0000-0000-0000-000000000000",
         noteTime: if List.getOrPanic(row, 3) == None then None else Some(DateTime.parseIso((List.getOrPanic(row, 3) ?? ""))),
     }
 
@@ -287,11 +287,11 @@ fn customerFromRow(row: List<Text?>): Customer =
         custPrintInvoice: (List.getOrPanic(row, 21) ?? "") == "t",
         custCfwd: if List.getOrPanic(row, 22) == None then None else Some(Decimal.fromInt(parseInt((List.getOrPanic(row, 22) ?? "")) ?? 0)),
         custSortkey: if List.getOrPanic(row, 23) == None then None else Some((List.getOrPanic(row, 23) ?? "")),
-        pkey: (List.getOrPanic(row, 24) ?? ""),
+        pkey: parseUuid((List.getOrPanic(row, 24) ?? "")) ?? uuid"00000000-0000-0000-0000-000000000000",
         recordModified: if List.getOrPanic(row, 25) == None then None else Some((List.getOrPanic(row, 25) ?? "")),
         lastInvoiceNumber: if List.getOrPanic(row, 26) == None then None else Some(parseInt((List.getOrPanic(row, 26) ?? "")) ?? 0),
         preCustNo: if List.getOrPanic(row, 27) == None then None else Some(parseInt((List.getOrPanic(row, 27) ?? "")) ?? 0),
-        prePkey: if List.getOrPanic(row, 28) == None then None else Some((List.getOrPanic(row, 28) ?? "")),
+        prePkey: if List.getOrPanic(row, 28) == None then None else Some(parseUuid((List.getOrPanic(row, 28) ?? "")) ?? uuid"00000000-0000-0000-0000-000000000000"),
     }
 
 impl DbRow for Customer {}
@@ -310,7 +310,7 @@ fn customerDeleteById(conn: Int, id: Text): Int [io] =
 fn customerInsert(conn: Int, record: Customer): Int [io] =
     dbExec(conn,
         "INSERT INTO customer (cust_no, cust_status, cust_type, cust_acctname, cust_name1, cust_name2, cust_address1, cust_address2, cust_town, cust_postcode, cust_mail_cde, cust_contact, cust_phone, cust_bill_cycle, cust_next_bill, cust_credit_cde, cust_limit, cust_dunning, cust_start_dte, cust_email, cust_ebilling, cust_print_invoice, cust_cfwd, cust_sortkey, record_modified_, last_invoice_number, pre_cust_no, pre_pkey_) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28)",
-        [intToText(record.custNo), if record.custStatus == None then dbNull() else boolToText(record.custStatus ?? false), record.custType, record.custAcctname, if record.custName1 == None then dbNull() else record.custName1 ?? "", if record.custName2 == None then dbNull() else record.custName2 ?? "", if record.custAddress1 == None then dbNull() else record.custAddress1 ?? "", if record.custAddress2 == None then dbNull() else record.custAddress2 ?? "", if record.custTown == None then dbNull() else record.custTown ?? "", record.custPostcode, record.custMailCde, record.custContact, record.custPhone, record.custBillCycle, DateTime.toIso(record.custNextBill), record.custCreditCde, if record.custLimit == None then dbNull() else Decimal.toText(record.custLimit ?? Decimal.fromInt(0)), if record.custDunning == None then dbNull() else boolToText(record.custDunning ?? false), DateTime.toIso(record.custStartDte), if record.custEmail == None then dbNull() else record.custEmail ?? "", boolToText(record.custEbilling), boolToText(record.custPrintInvoice), if record.custCfwd == None then dbNull() else Decimal.toText(record.custCfwd ?? Decimal.fromInt(0)), if record.custSortkey == None then dbNull() else record.custSortkey ?? "", if record.recordModified == None then dbNull() else record.recordModified ?? "", if record.lastInvoiceNumber == None then dbNull() else intToText(record.lastInvoiceNumber ?? 0), if record.preCustNo == None then dbNull() else intToText(record.preCustNo ?? 0), if record.prePkey == None then dbNull() else record.prePkey ?? ""])
+        [intToText(record.custNo), if record.custStatus == None then dbNull() else boolToText(record.custStatus ?? false), record.custType, record.custAcctname, if record.custName1 == None then dbNull() else record.custName1 ?? "", if record.custName2 == None then dbNull() else record.custName2 ?? "", if record.custAddress1 == None then dbNull() else record.custAddress1 ?? "", if record.custAddress2 == None then dbNull() else record.custAddress2 ?? "", if record.custTown == None then dbNull() else record.custTown ?? "", record.custPostcode, record.custMailCde, record.custContact, record.custPhone, record.custBillCycle, DateTime.toIso(record.custNextBill), record.custCreditCde, if record.custLimit == None then dbNull() else Decimal.toText(record.custLimit ?? Decimal.fromInt(0)), if record.custDunning == None then dbNull() else boolToText(record.custDunning ?? false), DateTime.toIso(record.custStartDte), if record.custEmail == None then dbNull() else record.custEmail ?? "", boolToText(record.custEbilling), boolToText(record.custPrintInvoice), if record.custCfwd == None then dbNull() else Decimal.toText(record.custCfwd ?? Decimal.fromInt(0)), if record.custSortkey == None then dbNull() else record.custSortkey ?? "", if record.recordModified == None then dbNull() else record.recordModified ?? "", if record.lastInvoiceNumber == None then dbNull() else intToText(record.lastInvoiceNumber ?? 0), if record.preCustNo == None then dbNull() else intToText(record.preCustNo ?? 0), if record.prePkey == None then dbNull() else UUID.toText(record.prePkey ?? uuid"00000000-0000-0000-0000-000000000000")])
 
 type CustomerDeleted = {
     custNo: Int
@@ -371,11 +371,11 @@ fn customer_deletedFromRow(row: List<Text?>): CustomerDeleted =
         custPrintInvoice: (List.getOrPanic(row, 21) ?? "") == "t",
         custCfwd: if List.getOrPanic(row, 22) == None then None else Some(Decimal.fromInt(parseInt((List.getOrPanic(row, 22) ?? "")) ?? 0)),
         custSortkey: if List.getOrPanic(row, 23) == None then None else Some((List.getOrPanic(row, 23) ?? "")),
-        pkey: (List.getOrPanic(row, 24) ?? ""),
+        pkey: parseUuid((List.getOrPanic(row, 24) ?? "")) ?? uuid"00000000-0000-0000-0000-000000000000",
         recordModified: if List.getOrPanic(row, 25) == None then None else Some((List.getOrPanic(row, 25) ?? "")),
         lastInvoiceNumber: if List.getOrPanic(row, 26) == None then None else Some(parseInt((List.getOrPanic(row, 26) ?? "")) ?? 0),
         preCustNo: if List.getOrPanic(row, 27) == None then None else Some(parseInt((List.getOrPanic(row, 27) ?? "")) ?? 0),
-        prePkey: if List.getOrPanic(row, 28) == None then None else Some((List.getOrPanic(row, 28) ?? "")),
+        prePkey: if List.getOrPanic(row, 28) == None then None else Some(parseUuid((List.getOrPanic(row, 28) ?? "")) ?? uuid"00000000-0000-0000-0000-000000000000"),
         recordDeleted: if List.getOrPanic(row, 29) == None then None else Some(DateTime.parseIso((List.getOrPanic(row, 29) ?? ""))),
     }
 
@@ -387,7 +387,7 @@ fn customer_deletedFindAll(conn: Int): List<CustomerDeleted> [io] =
 fn customer_deletedInsert(conn: Int, record: CustomerDeleted): Int [io] =
     dbExec(conn,
         "INSERT INTO customer_deleted (cust_no, cust_status, cust_type, cust_acctname, cust_name1, cust_name2, cust_address1, cust_address2, cust_town, cust_postcode, cust_mail_cde, cust_contact, cust_phone, cust_bill_cycle, cust_next_bill, cust_credit_cde, cust_limit, cust_dunning, cust_start_dte, cust_email, cust_ebilling, cust_print_invoice, cust_cfwd, cust_sortkey, pkey_, record_modified_, last_invoice_number, pre_cust_no, pre_pkey_, record_deleted_) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30)",
-        [intToText(record.custNo), if record.custStatus == None then dbNull() else boolToText(record.custStatus ?? false), record.custType, record.custAcctname, if record.custName1 == None then dbNull() else record.custName1 ?? "", if record.custName2 == None then dbNull() else record.custName2 ?? "", if record.custAddress1 == None then dbNull() else record.custAddress1 ?? "", if record.custAddress2 == None then dbNull() else record.custAddress2 ?? "", if record.custTown == None then dbNull() else record.custTown ?? "", record.custPostcode, record.custMailCde, record.custContact, record.custPhone, record.custBillCycle, DateTime.toIso(record.custNextBill), record.custCreditCde, if record.custLimit == None then dbNull() else Decimal.toText(record.custLimit ?? Decimal.fromInt(0)), if record.custDunning == None then dbNull() else boolToText(record.custDunning ?? false), DateTime.toIso(record.custStartDte), if record.custEmail == None then dbNull() else record.custEmail ?? "", boolToText(record.custEbilling), boolToText(record.custPrintInvoice), if record.custCfwd == None then dbNull() else Decimal.toText(record.custCfwd ?? Decimal.fromInt(0)), if record.custSortkey == None then dbNull() else record.custSortkey ?? "", record.pkey, if record.recordModified == None then dbNull() else record.recordModified ?? "", if record.lastInvoiceNumber == None then dbNull() else intToText(record.lastInvoiceNumber ?? 0), if record.preCustNo == None then dbNull() else intToText(record.preCustNo ?? 0), if record.prePkey == None then dbNull() else record.prePkey ?? "", if record.recordDeleted == None then dbNull() else DateTime.toIso(record.recordDeleted ?? DateTime.now())])
+        [intToText(record.custNo), if record.custStatus == None then dbNull() else boolToText(record.custStatus ?? false), record.custType, record.custAcctname, if record.custName1 == None then dbNull() else record.custName1 ?? "", if record.custName2 == None then dbNull() else record.custName2 ?? "", if record.custAddress1 == None then dbNull() else record.custAddress1 ?? "", if record.custAddress2 == None then dbNull() else record.custAddress2 ?? "", if record.custTown == None then dbNull() else record.custTown ?? "", record.custPostcode, record.custMailCde, record.custContact, record.custPhone, record.custBillCycle, DateTime.toIso(record.custNextBill), record.custCreditCde, if record.custLimit == None then dbNull() else Decimal.toText(record.custLimit ?? Decimal.fromInt(0)), if record.custDunning == None then dbNull() else boolToText(record.custDunning ?? false), DateTime.toIso(record.custStartDte), if record.custEmail == None then dbNull() else record.custEmail ?? "", boolToText(record.custEbilling), boolToText(record.custPrintInvoice), if record.custCfwd == None then dbNull() else Decimal.toText(record.custCfwd ?? Decimal.fromInt(0)), if record.custSortkey == None then dbNull() else record.custSortkey ?? "", UUID.toText(record.pkey), if record.recordModified == None then dbNull() else record.recordModified ?? "", if record.lastInvoiceNumber == None then dbNull() else intToText(record.lastInvoiceNumber ?? 0), if record.preCustNo == None then dbNull() else intToText(record.preCustNo ?? 0), if record.prePkey == None then dbNull() else UUID.toText(record.prePkey ?? uuid"00000000-0000-0000-0000-000000000000"), if record.recordDeleted == None then dbNull() else DateTime.toIso(record.recordDeleted ?? DateTime.now())])
 
 type Debtors = {
     debId: Int?
@@ -609,14 +609,14 @@ type History = {
     newValue: Text
     uuid: UUID
     operation: Text
-    tableOid: Oid
+    tableOid: Int
     ordinalPositionOfColumn: Int
     transactionBegan: DateTime
 }
 
 fn history_FromRow(row: List<Text?>): History =
     History {
-        pkey: (List.getOrPanic(row, 0) ?? ""),
+        pkey: parseUuid((List.getOrPanic(row, 0) ?? "")) ?? uuid"00000000-0000-0000-0000-000000000000",
         tableName: (List.getOrPanic(row, 1) ?? ""),
         columnName: (List.getOrPanic(row, 2) ?? ""),
         timestamp: DateTime.parseIso((List.getOrPanic(row, 3) ?? "")),
@@ -624,9 +624,9 @@ fn history_FromRow(row: List<Text?>): History =
         appName: (List.getOrPanic(row, 5) ?? ""),
         oldValue: (List.getOrPanic(row, 6) ?? ""),
         newValue: (List.getOrPanic(row, 7) ?? ""),
-        uuid: (List.getOrPanic(row, 8) ?? ""),
+        uuid: parseUuid((List.getOrPanic(row, 8) ?? "")) ?? uuid"00000000-0000-0000-0000-000000000000",
         operation: (List.getOrPanic(row, 9) ?? ""),
-        tableOid: (List.getOrPanic(row, 10) ?? ""),
+        tableOid: parseInt((List.getOrPanic(row, 10) ?? "")) ?? 0,
         ordinalPositionOfColumn: parseInt((List.getOrPanic(row, 11) ?? "")) ?? 0,
         transactionBegan: DateTime.parseIso((List.getOrPanic(row, 12) ?? "")),
     }
@@ -639,7 +639,7 @@ fn history_FindAll(conn: Int): List<History> [io] =
 fn history_Insert(conn: Int, record: History): Int [io] =
     dbExec(conn,
         "INSERT INTO history_ (pkey_, table_name_, column_name_, timestamp_, db_user_name_, app_name_, old_value_, new_value_, uuid_, operation_, table_oid_, ordinal_position_of_column_, transaction_began_) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)",
-        [record.pkey, record.tableName, record.columnName, DateTime.toIso(record.timestamp), record.dbUserName, record.appName, record.oldValue, record.newValue, record.uuid, record.operation, record.tableOid, intToText(record.ordinalPositionOfColumn), DateTime.toIso(record.transactionBegan)])
+        [UUID.toText(record.pkey), record.tableName, record.columnName, DateTime.toIso(record.timestamp), record.dbUserName, record.appName, record.oldValue, record.newValue, UUID.toText(record.uuid), record.operation, intToText(record.tableOid), intToText(record.ordinalPositionOfColumn), DateTime.toIso(record.transactionBegan)])
 
 type HomeSummary = {
     homeMetric: Text?
@@ -1054,12 +1054,12 @@ fn logFindAll(conn: Int): List<Log> [io] =
     dbQueryTyped(conn, "SELECT log_timestamp, log_eventid, log_event, log_eventx FROM log ORDER BY 1", [], logFromRow)
 
 fn logFindById(conn: Int, id: Text): Log? [io] = {
-    val rows = dbQueryTyped(conn, "SELECT log_timestamp, log_eventid, log_event, log_eventx FROM log WHERE log_timestamp = $1 LIMIT 1", [DateTime.toIso(id)], logFromRow)
+    val rows = dbQueryTyped(conn, "SELECT log_timestamp, log_eventid, log_event, log_eventx FROM log WHERE log_timestamp = $1 LIMIT 1", [id], logFromRow)
     List.first(rows)
 }
 
 fn logDeleteById(conn: Int, id: Text): Int [io] =
-    dbExec(conn, "DELETE FROM log WHERE log_timestamp = $1", [DateTime.toIso(id)])
+    dbExec(conn, "DELETE FROM log WHERE log_timestamp = $1", [id])
 
 fn logInsert(conn: Int, record: Log): Int [io] =
     dbExec(conn,
@@ -1386,7 +1386,7 @@ fn subscriberFromRow(row: List<Text?>): Subscriber =
         mailCde: if List.getOrPanic(row, 9) == None then None else Some((List.getOrPanic(row, 9) ?? "")),
         sourceMnth: if List.getOrPanic(row, 10) == None then None else Some((List.getOrPanic(row, 10) ?? "")),
         subsStatus: if List.getOrPanic(row, 11) == None then None else Some((List.getOrPanic(row, 11) ?? "") == "t"),
-        pkey: (List.getOrPanic(row, 12) ?? ""),
+        pkey: parseUuid((List.getOrPanic(row, 12) ?? "")) ?? uuid"00000000-0000-0000-0000-000000000000",
         recordModified: if List.getOrPanic(row, 13) == None then None else Some((List.getOrPanic(row, 13) ?? "")),
         srcMnth: if List.getOrPanic(row, 14) == None then None else Some(parseInt((List.getOrPanic(row, 14) ?? "")) ?? 0),
         subActive: if List.getOrPanic(row, 15) == None then None else Some((List.getOrPanic(row, 15) ?? "") == "t"),
@@ -1451,7 +1451,7 @@ fn subscriber_deletedFromRow(row: List<Text?>): SubscriberDeleted =
         mailCde: if List.getOrPanic(row, 9) == None then None else Some((List.getOrPanic(row, 9) ?? "")),
         sourceMnth: if List.getOrPanic(row, 10) == None then None else Some((List.getOrPanic(row, 10) ?? "")),
         subsStatus: if List.getOrPanic(row, 11) == None then None else Some((List.getOrPanic(row, 11) ?? "") == "t"),
-        pkey: (List.getOrPanic(row, 12) ?? ""),
+        pkey: parseUuid((List.getOrPanic(row, 12) ?? "")) ?? uuid"00000000-0000-0000-0000-000000000000",
         recordModified: if List.getOrPanic(row, 13) == None then None else Some((List.getOrPanic(row, 13) ?? "")),
         srcMnth: if List.getOrPanic(row, 14) == None then None else Some(parseInt((List.getOrPanic(row, 14) ?? "")) ?? 0),
         subActive: if List.getOrPanic(row, 15) == None then None else Some((List.getOrPanic(row, 15) ?? "") == "t"),
@@ -1469,7 +1469,7 @@ fn subscriber_deletedFindAll(conn: Int): List<SubscriberDeleted> [io] =
 fn subscriber_deletedInsert(conn: Int, record: SubscriberDeleted): Int [io] =
     dbExec(conn,
         "INSERT INTO subscriber_deleted (cust_no, sub_no, subs_name, subs_name1, subs_name2, subs_address1, subs_address2, subs_town, subs_postcode, mail_cde, source_mnth, subs_status, pkey_, record_modified_, src_mnth, sub_active, title, subs_email, record_deleted_, use_email) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)",
-        [intToText(record.custNo), intToText(record.subNo), if record.subsName == None then dbNull() else record.subsName ?? "", if record.subsName1 == None then dbNull() else record.subsName1 ?? "", if record.subsName2 == None then dbNull() else record.subsName2 ?? "", if record.subsAddress1 == None then dbNull() else record.subsAddress1 ?? "", if record.subsAddress2 == None then dbNull() else record.subsAddress2 ?? "", if record.subsTown == None then dbNull() else record.subsTown ?? "", if record.subsPostcode == None then dbNull() else record.subsPostcode ?? "", if record.mailCde == None then dbNull() else record.mailCde ?? "", if record.sourceMnth == None then dbNull() else record.sourceMnth ?? "", if record.subsStatus == None then dbNull() else boolToText(record.subsStatus ?? false), record.pkey, if record.recordModified == None then dbNull() else record.recordModified ?? "", if record.srcMnth == None then dbNull() else intToText(record.srcMnth ?? 0), if record.subActive == None then dbNull() else boolToText(record.subActive ?? false), if record.title == None then dbNull() else record.title ?? "", if record.subsEmail == None then dbNull() else record.subsEmail ?? "", if record.recordDeleted == None then dbNull() else DateTime.toIso(record.recordDeleted ?? DateTime.now()), if record.useEmail == None then dbNull() else boolToText(record.useEmail ?? false)])
+        [intToText(record.custNo), intToText(record.subNo), if record.subsName == None then dbNull() else record.subsName ?? "", if record.subsName1 == None then dbNull() else record.subsName1 ?? "", if record.subsName2 == None then dbNull() else record.subsName2 ?? "", if record.subsAddress1 == None then dbNull() else record.subsAddress1 ?? "", if record.subsAddress2 == None then dbNull() else record.subsAddress2 ?? "", if record.subsTown == None then dbNull() else record.subsTown ?? "", if record.subsPostcode == None then dbNull() else record.subsPostcode ?? "", if record.mailCde == None then dbNull() else record.mailCde ?? "", if record.sourceMnth == None then dbNull() else record.sourceMnth ?? "", if record.subsStatus == None then dbNull() else boolToText(record.subsStatus ?? false), UUID.toText(record.pkey), if record.recordModified == None then dbNull() else record.recordModified ?? "", if record.srcMnth == None then dbNull() else intToText(record.srcMnth ?? 0), if record.subActive == None then dbNull() else boolToText(record.subActive ?? false), if record.title == None then dbNull() else record.title ?? "", if record.subsEmail == None then dbNull() else record.subsEmail ?? "", if record.recordDeleted == None then dbNull() else DateTime.toIso(record.recordDeleted ?? DateTime.now()), if record.useEmail == None then dbNull() else boolToText(record.useEmail ?? false)])
 
 type SubscriberLastInvoiceRun = {
     custNo: Int
@@ -1543,7 +1543,7 @@ fn subscriptionFromRow(row: List<Text?>): Subscription =
         localCode: (List.getOrPanic(row, 7) ?? ""),
         invoiceFreq: parseInt((List.getOrPanic(row, 8) ?? "")) ?? 0,
         sourceMnth: (List.getOrPanic(row, 9) ?? ""),
-        pkey: (List.getOrPanic(row, 10) ?? ""),
+        pkey: parseUuid((List.getOrPanic(row, 10) ?? "")) ?? uuid"00000000-0000-0000-0000-000000000000",
         recordModified: if List.getOrPanic(row, 11) == None then None else Some((List.getOrPanic(row, 11) ?? "")),
     }
 
@@ -1625,7 +1625,7 @@ fn tFromRow(row: List<Text?>): T =
         mailCde: if List.getOrPanic(row, 9) == None then None else Some((List.getOrPanic(row, 9) ?? "")),
         sourceMnth: if List.getOrPanic(row, 10) == None then None else Some((List.getOrPanic(row, 10) ?? "")),
         subsStatus: if List.getOrPanic(row, 11) == None then None else Some((List.getOrPanic(row, 11) ?? "") == "t"),
-        pkey: if List.getOrPanic(row, 12) == None then None else Some((List.getOrPanic(row, 12) ?? "")),
+        pkey: if List.getOrPanic(row, 12) == None then None else Some(parseUuid((List.getOrPanic(row, 12) ?? "")) ?? uuid"00000000-0000-0000-0000-000000000000"),
         recordModified: if List.getOrPanic(row, 13) == None then None else Some((List.getOrPanic(row, 13) ?? "")),
         srcMnth: if List.getOrPanic(row, 14) == None then None else Some(parseInt((List.getOrPanic(row, 14) ?? "")) ?? 0),
         subActive: if List.getOrPanic(row, 15) == None then None else Some((List.getOrPanic(row, 15) ?? "") == "t"),
@@ -1643,7 +1643,7 @@ fn tFindAll(conn: Int): List<T> [io] =
 fn tInsert(conn: Int, record: T): Int [io] =
     dbExec(conn,
         "INSERT INTO t (cust_no, sub_no, subs_name, subs_name1, subs_name2, subs_address1, subs_address2, subs_town, subs_postcode, mail_cde, source_mnth, subs_status, pkey_, record_modified_, src_mnth, sub_active, title, subs_email, record_deleted_, use_email) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)",
-        [if record.custNo == None then dbNull() else intToText(record.custNo ?? 0), if record.subNo == None then dbNull() else intToText(record.subNo ?? 0), if record.subsName == None then dbNull() else record.subsName ?? "", if record.subsName1 == None then dbNull() else record.subsName1 ?? "", if record.subsName2 == None then dbNull() else record.subsName2 ?? "", if record.subsAddress1 == None then dbNull() else record.subsAddress1 ?? "", if record.subsAddress2 == None then dbNull() else record.subsAddress2 ?? "", if record.subsTown == None then dbNull() else record.subsTown ?? "", if record.subsPostcode == None then dbNull() else record.subsPostcode ?? "", if record.mailCde == None then dbNull() else record.mailCde ?? "", if record.sourceMnth == None then dbNull() else record.sourceMnth ?? "", if record.subsStatus == None then dbNull() else boolToText(record.subsStatus ?? false), if record.pkey == None then dbNull() else record.pkey ?? "", if record.recordModified == None then dbNull() else record.recordModified ?? "", if record.srcMnth == None then dbNull() else intToText(record.srcMnth ?? 0), if record.subActive == None then dbNull() else boolToText(record.subActive ?? false), if record.title == None then dbNull() else record.title ?? "", if record.subsEmail == None then dbNull() else record.subsEmail ?? "", if record.recordDeleted == None then dbNull() else DateTime.toIso(record.recordDeleted ?? DateTime.now()), if record.useEmail == None then dbNull() else boolToText(record.useEmail ?? false)])
+        [if record.custNo == None then dbNull() else intToText(record.custNo ?? 0), if record.subNo == None then dbNull() else intToText(record.subNo ?? 0), if record.subsName == None then dbNull() else record.subsName ?? "", if record.subsName1 == None then dbNull() else record.subsName1 ?? "", if record.subsName2 == None then dbNull() else record.subsName2 ?? "", if record.subsAddress1 == None then dbNull() else record.subsAddress1 ?? "", if record.subsAddress2 == None then dbNull() else record.subsAddress2 ?? "", if record.subsTown == None then dbNull() else record.subsTown ?? "", if record.subsPostcode == None then dbNull() else record.subsPostcode ?? "", if record.mailCde == None then dbNull() else record.mailCde ?? "", if record.sourceMnth == None then dbNull() else record.sourceMnth ?? "", if record.subsStatus == None then dbNull() else boolToText(record.subsStatus ?? false), if record.pkey == None then dbNull() else UUID.toText(record.pkey ?? uuid"00000000-0000-0000-0000-000000000000"), if record.recordModified == None then dbNull() else record.recordModified ?? "", if record.srcMnth == None then dbNull() else intToText(record.srcMnth ?? 0), if record.subActive == None then dbNull() else boolToText(record.subActive ?? false), if record.title == None then dbNull() else record.title ?? "", if record.subsEmail == None then dbNull() else record.subsEmail ?? "", if record.recordDeleted == None then dbNull() else DateTime.toIso(record.recordDeleted ?? DateTime.now()), if record.useEmail == None then dbNull() else boolToText(record.useEmail ?? false)])
 
 type TSubsn = {
     custNo: Int?
@@ -1672,7 +1672,7 @@ fn t_subsnFromRow(row: List<Text?>): TSubsn =
         localCode: if List.getOrPanic(row, 7) == None then None else Some((List.getOrPanic(row, 7) ?? "")),
         invoiceFreq: if List.getOrPanic(row, 8) == None then None else Some(parseInt((List.getOrPanic(row, 8) ?? "")) ?? 0),
         sourceMnth: if List.getOrPanic(row, 9) == None then None else Some((List.getOrPanic(row, 9) ?? "")),
-        pkey: if List.getOrPanic(row, 10) == None then None else Some((List.getOrPanic(row, 10) ?? "")),
+        pkey: if List.getOrPanic(row, 10) == None then None else Some(parseUuid((List.getOrPanic(row, 10) ?? "")) ?? uuid"00000000-0000-0000-0000-000000000000"),
         recordModified: if List.getOrPanic(row, 11) == None then None else Some((List.getOrPanic(row, 11) ?? "")),
     }
 
@@ -1684,7 +1684,7 @@ fn t_subsnFindAll(conn: Int): List<TSubsn> [io] =
 fn t_subsnInsert(conn: Int, record: TSubsn): Int [io] =
     dbExec(conn,
         "INSERT INTO t_subsn (cust_no, sub_no, sub_typer, sub_copies, product_code, invoice_mnth, labels_count, local_code, invoice_freq, source_mnth, pkey_, record_modified_) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
-        [if record.custNo == None then dbNull() else intToText(record.custNo ?? 0), if record.subNo == None then dbNull() else intToText(record.subNo ?? 0), if record.subTyper == None then dbNull() else record.subTyper ?? "", if record.subCopies == None then dbNull() else intToText(record.subCopies ?? 0), if record.productCode == None then dbNull() else record.productCode ?? "", if record.invoiceMnth == None then dbNull() else record.invoiceMnth ?? "", if record.labelsCount == None then dbNull() else intToText(record.labelsCount ?? 0), if record.localCode == None then dbNull() else record.localCode ?? "", if record.invoiceFreq == None then dbNull() else intToText(record.invoiceFreq ?? 0), if record.sourceMnth == None then dbNull() else record.sourceMnth ?? "", if record.pkey == None then dbNull() else record.pkey ?? "", if record.recordModified == None then dbNull() else record.recordModified ?? ""])
+        [if record.custNo == None then dbNull() else intToText(record.custNo ?? 0), if record.subNo == None then dbNull() else intToText(record.subNo ?? 0), if record.subTyper == None then dbNull() else record.subTyper ?? "", if record.subCopies == None then dbNull() else intToText(record.subCopies ?? 0), if record.productCode == None then dbNull() else record.productCode ?? "", if record.invoiceMnth == None then dbNull() else record.invoiceMnth ?? "", if record.labelsCount == None then dbNull() else intToText(record.labelsCount ?? 0), if record.localCode == None then dbNull() else record.localCode ?? "", if record.invoiceFreq == None then dbNull() else intToText(record.invoiceFreq ?? 0), if record.sourceMnth == None then dbNull() else record.sourceMnth ?? "", if record.pkey == None then dbNull() else UUID.toText(record.pkey ?? uuid"00000000-0000-0000-0000-000000000000"), if record.recordModified == None then dbNull() else record.recordModified ?? ""])
 
 type TSubsr = {
     custNo: Int?
@@ -1721,7 +1721,7 @@ fn t_subsrFromRow(row: List<Text?>): TSubsr =
         mailCde: if List.getOrPanic(row, 9) == None then None else Some((List.getOrPanic(row, 9) ?? "")),
         sourceMnth: if List.getOrPanic(row, 10) == None then None else Some((List.getOrPanic(row, 10) ?? "")),
         subsStatus: if List.getOrPanic(row, 11) == None then None else Some((List.getOrPanic(row, 11) ?? "") == "t"),
-        pkey: if List.getOrPanic(row, 12) == None then None else Some((List.getOrPanic(row, 12) ?? "")),
+        pkey: if List.getOrPanic(row, 12) == None then None else Some(parseUuid((List.getOrPanic(row, 12) ?? "")) ?? uuid"00000000-0000-0000-0000-000000000000"),
         recordModified: if List.getOrPanic(row, 13) == None then None else Some((List.getOrPanic(row, 13) ?? "")),
         srcMnth: if List.getOrPanic(row, 14) == None then None else Some(parseInt((List.getOrPanic(row, 14) ?? "")) ?? 0),
         subActive: if List.getOrPanic(row, 15) == None then None else Some((List.getOrPanic(row, 15) ?? "") == "t"),
@@ -1737,7 +1737,7 @@ fn t_subsrFindAll(conn: Int): List<TSubsr> [io] =
 fn t_subsrInsert(conn: Int, record: TSubsr): Int [io] =
     dbExec(conn,
         "INSERT INTO t_subsr (cust_no, sub_no, subs_name, subs_name1, subs_name2, subs_address1, subs_address2, subs_town, subs_postcode, mail_cde, source_mnth, subs_status, pkey_, record_modified_, src_mnth, sub_active, title, subs_email) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)",
-        [if record.custNo == None then dbNull() else intToText(record.custNo ?? 0), if record.subNo == None then dbNull() else intToText(record.subNo ?? 0), if record.subsName == None then dbNull() else record.subsName ?? "", if record.subsName1 == None then dbNull() else record.subsName1 ?? "", if record.subsName2 == None then dbNull() else record.subsName2 ?? "", if record.subsAddress1 == None then dbNull() else record.subsAddress1 ?? "", if record.subsAddress2 == None then dbNull() else record.subsAddress2 ?? "", if record.subsTown == None then dbNull() else record.subsTown ?? "", if record.subsPostcode == None then dbNull() else record.subsPostcode ?? "", if record.mailCde == None then dbNull() else record.mailCde ?? "", if record.sourceMnth == None then dbNull() else record.sourceMnth ?? "", if record.subsStatus == None then dbNull() else boolToText(record.subsStatus ?? false), if record.pkey == None then dbNull() else record.pkey ?? "", if record.recordModified == None then dbNull() else record.recordModified ?? "", if record.srcMnth == None then dbNull() else intToText(record.srcMnth ?? 0), if record.subActive == None then dbNull() else boolToText(record.subActive ?? false), if record.title == None then dbNull() else record.title ?? "", if record.subsEmail == None then dbNull() else record.subsEmail ?? ""])
+        [if record.custNo == None then dbNull() else intToText(record.custNo ?? 0), if record.subNo == None then dbNull() else intToText(record.subNo ?? 0), if record.subsName == None then dbNull() else record.subsName ?? "", if record.subsName1 == None then dbNull() else record.subsName1 ?? "", if record.subsName2 == None then dbNull() else record.subsName2 ?? "", if record.subsAddress1 == None then dbNull() else record.subsAddress1 ?? "", if record.subsAddress2 == None then dbNull() else record.subsAddress2 ?? "", if record.subsTown == None then dbNull() else record.subsTown ?? "", if record.subsPostcode == None then dbNull() else record.subsPostcode ?? "", if record.mailCde == None then dbNull() else record.mailCde ?? "", if record.sourceMnth == None then dbNull() else record.sourceMnth ?? "", if record.subsStatus == None then dbNull() else boolToText(record.subsStatus ?? false), if record.pkey == None then dbNull() else UUID.toText(record.pkey ?? uuid"00000000-0000-0000-0000-000000000000"), if record.recordModified == None then dbNull() else record.recordModified ?? "", if record.srcMnth == None then dbNull() else intToText(record.srcMnth ?? 0), if record.subActive == None then dbNull() else boolToText(record.subActive ?? false), if record.title == None then dbNull() else record.title ?? "", if record.subsEmail == None then dbNull() else record.subsEmail ?? ""])
 
 type Temp = {
     invn: Int?

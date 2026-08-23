@@ -43,6 +43,12 @@ pub fn seed_stdlib(env: &mut TypeEnv, counter: &mut u32) {
     // was the one genuine gap (`certo generate api`'s own row-to-JSON codegen
     // needed all three to encode typed values instead of always Json.string).
     def!("parseBool",    fn1(Ty::Text, Ty::Option(Box::new(Ty::Bool))));
+    // BACKLOG item 228 — no callable function converted a runtime Text value
+    // into a UUID at all (only the compile-time `uuid"..."` literal worked);
+    // found reading a UUID column back out of a `dbQueryTyped` row mapper,
+    // where the raw value necessarily arrives as Text. Fallible, matching
+    // `parseInt`/`parseFloat`/`parseDecimal`/`parseBool`'s own convention.
+    def!("parseUuid",    fn1(Ty::Text, Ty::Option(Box::new(Ty::Uuid))));
 
     // Option constructors — Some(x) / None
     {
@@ -836,6 +842,12 @@ pub fn seed_stdlib(env: &mut TypeEnv, counter: &mut u32) {
     def!("Decimal.toInt",      fn1(Ty::Decimal(None), Ty::Int));
     def!("Decimal.fromInt",    fn1(Ty::Int, Ty::Decimal(None)));
     def!("Decimal.toText",     fn1(Ty::Decimal(None), Ty::Text));
+    // BACKLOG item 228 — the inverse of `parseUuid` above: no function
+    // serialized a UUID back to Text either, needed e.g. to pass a
+    // UUID-typed field as a Text SQL parameter (`dbExec`'s params are
+    // always `List<Text>`). Named to match `Decimal.toText`'s own
+    // namespaced convention (unlike the bare `parseInt`/`parseUuid` side).
+    def!("UUID.toText",        fn1(Ty::Uuid, Ty::Text));
     def!("Money.fromCents",    fn1(Ty::Int, Ty::Decimal(None)));
     def!("Money.toCents",      fn1(Ty::Decimal(None), Ty::Int));
     def!("Money.fromDecimal",  fn1(Ty::Decimal(None), Ty::Decimal(None)));
