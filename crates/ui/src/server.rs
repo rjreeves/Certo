@@ -318,14 +318,21 @@ fn emit_view_handler(v: &ViewDecl, forms: &[&FormDecl], _all_views: &[&ViewDecl]
         writeln!(out, "}}").unwrap();
     } else {
         // Static view
+        //
+        // BACKLOG item 215 — this previously filtered out every line
+        // starting with `<!--` before splicing `layout_to_html`'s output in,
+        // silently discarding the diagnostic HTML comment `layout_to_html`
+        // itself emits for any unrecognized layout primitive (`layout.rs`'s
+        // own doc comment: "any unrecognised call emits an HTML comment so
+        // the file stays valid") — an unsupported primitive vanished with
+        // zero trace in the page this handler actually serves, unlike the
+        // legacy `--html` codegen mode, which already keeps these comments.
+        // No longer stripped, so the two modes behave consistently and the
+        // gap stays visible (in view-source) instead of silently disappearing.
         let body_html = {
             use crate::layout::layout_to_html;
             let layout_expr = extract_layout_expr(&v.layout.node).unwrap_or(&v.layout.node);
-            let raw = layout_to_html(layout_expr, 0);
-            raw.lines()
-               .filter(|l| !l.trim_start().starts_with("<!--"))
-               .collect::<Vec<_>>()
-               .join("")
+            layout_to_html(layout_expr, 0)
         };
         let escaped = escape_certo_str(&format!("<h1>{title}</h1>{body_html}{live_script}"));
         writeln!(out, "fn {fn_name}(req: HttpRequest): HttpResponse =").unwrap();
@@ -934,6 +941,25 @@ mod tests {
     fn form_post_handler_does_not_notify_with_no_live_views_in_the_module() {
         let out = server_source("module M\nform CreateWidget -> Widget {\n name: Text\n}");
         assert!(!out.contains("Http.liveNotify"), "should not emit a notify call with no live val anywhere\n{}", out);
+    }
+
+    #[test]
+    fn unrecognized_layout_primitive_leaves_a_visible_diagnostic_comment() {
+        // BACKLOG item 215 — this handler previously stripped every line
+        // starting with `<!--` before splicing `layout_to_html`'s output
+        // in, silently discarding the diagnostic comment `layout_to_html`
+        // itself emits for an unrecognized primitive (`layout.rs`'s own
+        // "unknown UI primitive: {name}" case) — the gap vanished with zero
+        // trace in the page this handler actually serves. The legacy
+        // `--html` codegen mode already kept it; this closes the gap in
+        // the default Htmx path too.
+        let out = server_source(
+            "module M\nview Home {\n layout = Mystery(\"x\")\n}"
+        );
+        assert!(
+            out.contains("unknown UI primitive: Mystery"),
+            "diagnostic comment for an unrecognized layout primitive vanished\n{}", out
+        );
     }
 
     #[test]

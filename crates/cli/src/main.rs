@@ -3634,23 +3634,46 @@ fn cmd_migrate(args: &[String]) {
             let state = certo_migrate::MigrationState::load(&manifest)
                 .unwrap_or_else(|e| { eprintln!("error: {}", e); process::exit(1); });
             let steps = plan_up(&migrations, &state);
-            if steps.is_empty() { println!("Nothing to migrate."); return; }
             let sql = plan_sql(&steps);
+            // BACKLOG item 221 — a trigger-bearing `validator` "installs
+            // itself as a database trigger when you run `certo db migrate`"
+            // (`docs/section-16-validators.md` §16.7), but nothing ever
+            // called this before: `emit_validator()` already builds real,
+            // idempotent trigger SQL (`CREATE OR REPLACE FUNCTION` +
+            // `DROP TRIGGER IF EXISTS` + `CREATE TRIGGER`), it just never
+            // reached anywhere past `ValidatorOutput::to_source()`, which
+            // silently drops it. Unlike file-based migrations, a trigger
+            // isn't tracked as one-time "applied" state at all — it's just
+            // always re-installed to match the validator's current source,
+            // so this must run on every invocation, not only when `steps`
+            // is non-empty (an early return here, before this existed,
+            // would mean a trigger the user just edited only ever installed
+            // on this project's *first* migrate run and never again).
+            let trigger_sql = collect_validator_trigger_sql(&project_root);
+
+            if steps.is_empty() && trigger_sql.is_empty() { println!("Nothing to migrate."); return; }
             for stmt in &sql { println!("{}", stmt); }
+            for stmt in &trigger_sql { println!("{}", stmt); }
 
             if dry_run {
-                println!("-- dry run: {} statement(s) not executed", sql.len());
+                println!("-- dry run: {} statement(s) not executed", sql.len() + trigger_sql.len());
                 return;
             }
 
-            run_migration_sql(&sql);
-            if let Err(e) = commit_steps(&steps, &manifest) {
-                eprintln!("error: migration(s) executed successfully against the database,");
-                eprintln!("       but failed to record local state: {}", e);
-                eprintln!("       `certo db status` may now be inaccurate — check .certo_migrations");
-                process::exit(1);
+            if !sql.is_empty() {
+                run_migration_sql(&sql);
+                if let Err(e) = commit_steps(&steps, &manifest) {
+                    eprintln!("error: migration(s) executed successfully against the database,");
+                    eprintln!("       but failed to record local state: {}", e);
+                    eprintln!("       `certo db status` may now be inaccurate — check .certo_migrations");
+                    process::exit(1);
+                }
+                println!("Applied {} migration(s).", steps.len());
             }
-            println!("Applied {} migration(s).", steps.len());
+            if !trigger_sql.is_empty() {
+                run_migration_sql(&trigger_sql);
+                println!("Installed {} trigger(s).", trigger_sql.len());
+            }
             warn_if_schema_stale(&project_root);
         }
 
@@ -3815,6 +3838,69 @@ fn load_migrations(project_root: &Path) -> Vec<MigrationDecl> {
         }
     }
     result
+}
+
+/// BACKLOG item 221 — the SQL for every trigger-bearing `validator` in the
+/// project, ready to execute directly against the database (already
+/// idempotent — see `emit_validator`'s own `CREATE OR REPLACE FUNCTION` +
+/// `DROP TRIGGER IF EXISTS` + `CREATE TRIGGER` shape).
+///
+/// Unlike `load_migrations` (a fixed, dedicated directory), a validator can
+/// live anywhere in the project's real source tree — so this reuses
+/// `certo.toml`'s `[build] entry` (the same file `certo build` itself
+/// treats as the project's entry point) plus its local imports, mirroring
+/// `cmd_build`'s own project-root/import-resolution logic exactly. A
+/// project with no certo.toml, no `[build] entry`, or an entry file that
+/// fails to parse simply has no triggers to install here — `certo db
+/// migrate`'s core job (applying pending file-based migrations) must never
+/// be blocked by an unrelated problem in the main source file, so this
+/// degrades to a warning + empty result rather than a hard error.
+fn collect_validator_trigger_sql(project_root: &Path) -> Vec<String> {
+    let Some(toml) = load_certo_toml_or_die(project_root) else { return Vec::new(); };
+    let Some(entry) = toml.build.as_ref().and_then(|b| b.entry.as_deref()) else { return Vec::new(); };
+    if entry.is_empty() { return Vec::new(); }
+    let entry_path = project_root.join(entry);
+
+    let Ok(src) = std::fs::read_to_string(&entry_path) else {
+        eprintln!("warning: could not read `[build] entry` ({}) — skipping trigger installation", entry_path.display());
+        return Vec::new();
+    };
+    let Ok(mut module) = certo_parser::parse(&src) else {
+        eprintln!("warning: `{}` failed to parse — skipping trigger installation", entry_path.display());
+        return Vec::new();
+    };
+
+    // Resolve local imports the same way `cmd_build` does — a validator's
+    // own declaration may live in an imported file, not the entry file itself.
+    let base_dir = entry_path.parent().unwrap_or(Path::new("."));
+    let stdlib_prefixes = ["Stdlib", "Core", "Collections", "Text", "DateTime", "Money"];
+    for imp in &module.imports.clone() {
+        let first_seg = imp.path.segments.first().map(|s| s.node.as_str()).unwrap_or("");
+        if stdlib_prefixes.contains(&first_seg) { continue; }
+        let rel: PathBuf = imp.path.segments.iter()
+            .map(|s| s.node.as_str())
+            .collect::<Vec<_>>()
+            .join("/")
+            .into();
+        let candidate = base_dir.join(rel).with_extension("cto");
+        if let Ok(imp_src) = std::fs::read_to_string(&candidate) {
+            if let Ok(imp_module) = certo_parser::parse(&imp_src) {
+                module.decls.extend(imp_module.decls);
+            }
+        }
+    }
+
+    let constraints: Vec<&certo_ast::decl::ConstraintDecl> = module.decls.iter()
+        .filter_map(|d| if let Decl::Constraint(c) = &d.node { Some(c) } else { None })
+        .collect();
+    let constraint_bodies = certo_codegen::build_constraint_bodies(&constraints);
+
+    module.decls.iter()
+        .filter_map(|d| if let Decl::Validator(v) = &d.node { Some(v) } else { None })
+        .filter(|v| v.trigger.is_some())
+        .map(|v| certo_codegen::emit_validator(v, &constraint_bodies).trigger_sql
+            .expect("trigger_sql is always Some when v.trigger.is_some()"))
+        .collect()
 }
 
 #[cfg(test)]
@@ -4019,6 +4105,95 @@ mod migrations_dir_tests {
         let dir = temp_project("configured");
         std::fs::write(dir.join("certo.toml"), "[project]\nname = \"x\"\n\n[database]\nmigrations = \"db/migrations/\"\n").unwrap();
         assert_eq!(migrations_dir(&dir), dir.join("db/migrations/"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+}
+
+// ------------------------------------------------------------------ //
+// BACKLOG item 221 — validator trigger SQL reaching `certo db migrate`
+// ------------------------------------------------------------------ //
+
+#[cfg(test)]
+mod trigger_sql_tests {
+    use super::*;
+
+    fn temp_project(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("certo_trigger_sql_test_{}_{}_{}", name, std::process::id(), line!()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn no_certo_toml_returns_no_triggers() {
+        let dir = temp_project("no_toml");
+        assert!(collect_validator_trigger_sql(&dir).is_empty());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn certo_toml_without_build_entry_returns_no_triggers() {
+        let dir = temp_project("no_entry");
+        std::fs::write(dir.join("certo.toml"), "[project]\nname = \"x\"\n").unwrap();
+        assert!(collect_validator_trigger_sql(&dir).is_empty());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn entry_file_with_no_validators_returns_no_triggers() {
+        let dir = temp_project("no_validators");
+        std::fs::write(dir.join("certo.toml"), "[project]\nname = \"x\"\n\n[build]\nentry = \"main.cto\"\n").unwrap();
+        std::fs::write(dir.join("main.cto"), "module M\nfn main(): Unit [io] = {}\n").unwrap();
+        assert!(collect_validator_trigger_sql(&dir).is_empty());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn validator_without_a_trigger_block_contributes_no_sql() {
+        // Not every validator installs a trigger — only ones that declare one.
+        let dir = temp_project("no_trigger_block");
+        std::fs::write(dir.join("certo.toml"), "[project]\nname = \"x\"\n\n[build]\nentry = \"main.cto\"\n").unwrap();
+        std::fs::write(dir.join("main.cto"),
+            "module M\ntype Widget = { status: Text }\ntype WidgetError = | NotReady\n\
+             validator WidgetCheck for Widget errors WidgetError {\n\
+                 rule always_ok { require true else WidgetError.NotReady }\n}\n\
+             fn main(): Unit [io] = {}\n").unwrap();
+        assert!(collect_validator_trigger_sql(&dir).is_empty());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn validator_with_a_trigger_block_contributes_real_sql() {
+        let dir = temp_project("with_trigger");
+        std::fs::write(dir.join("certo.toml"), "[project]\nname = \"x\"\n\n[build]\nentry = \"main.cto\"\n").unwrap();
+        std::fs::write(dir.join("main.cto"),
+            "module M\ntype WidgetStatus = | Draft | Submitted\n\
+             type Widget = { status: WidgetStatus }\ntype WidgetError = | NotReady\n\
+             validator WidgetSubmit for Widget errors WidgetError trigger on Update when status == Submitted {\n\
+                 rule always_ok { require true else WidgetError.NotReady }\n}\n\
+             fn main(): Unit [io] = {}\n").unwrap();
+        let sql = collect_validator_trigger_sql(&dir);
+        assert_eq!(sql.len(), 1);
+        assert!(sql[0].contains("CREATE OR REPLACE FUNCTION"), "got: {}", sql[0]);
+        assert!(sql[0].contains("CREATE TRIGGER"), "got: {}", sql[0]);
+        assert!(sql[0].contains("DROP TRIGGER IF EXISTS"), "got: {}", sql[0]);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn validator_declared_in_a_locally_imported_file_is_still_found() {
+        // A validator doesn't have to live in the entry file itself —
+        // `cmd_build`'s own local-import resolution must be mirrored here.
+        let dir = temp_project("imported");
+        std::fs::write(dir.join("certo.toml"), "[project]\nname = \"x\"\n\n[build]\nentry = \"main.cto\"\n").unwrap();
+        std::fs::write(dir.join("main.cto"),
+            "module M\nimport Validators\nfn main(): Unit [io] = {}\n").unwrap();
+        std::fs::write(dir.join("Validators.cto"),
+            "module Validators\ntype WidgetStatus = | Draft | Submitted\n\
+             type Widget = { status: WidgetStatus }\ntype WidgetError = | NotReady\n\
+             validator WidgetSubmit for Widget errors WidgetError trigger on Update when status == Submitted {\n\
+                 rule always_ok { require true else WidgetError.NotReady }\n}\n").unwrap();
+        let sql = collect_validator_trigger_sql(&dir);
+        assert_eq!(sql.len(), 1, "expected the imported file's trigger validator to be found");
         std::fs::remove_dir_all(&dir).ok();
     }
 }
