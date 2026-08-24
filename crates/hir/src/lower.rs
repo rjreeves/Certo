@@ -1421,7 +1421,7 @@ fn lower_expr(expr: &S<Expr>, cx: &mut Cx) -> HirExpr {
                 let declared = declared.clone();
                 for (i, arg) in lowered_args.iter_mut().enumerate() {
                     let expected = declared.get(i).filter(|t| !matches!(t, Ty::Var(_)));
-                    resolve_bare_generic_return(arg, expected, cx);
+                    resolve_bare_generic_return(arg, expected, false, cx);
                 }
             }
             let call_ty = fn_full_path.as_deref()
@@ -2209,7 +2209,7 @@ fn lower_block(stmts: &[Stmt], span: Span, cx: &mut Cx) -> HirExpr {
                 // mis-cast a raw `void*` as a concrete C type, so it's a
                 // hard error instead — BACKLOG item 135.
                 let declared = val_ty_ann.as_ref().map(|t| ast_ty_to_ty_with_params(&t.node, &[]));
-                resolve_bare_generic_return(&mut init, declared.as_ref(), cx);
+                resolve_bare_generic_return(&mut init, declared.as_ref(), true, cx);
                 if let Some(d) = &declared {
                     if literal_matches_fixed_width(&value.node, d) { init.ty = d.clone(); }
                 }
@@ -2584,19 +2584,107 @@ fn record_field_declared_ty(named_ty: &Ty, field: &str, cx: &Cx) -> Ty {
 // Bare-generic-return resolution (BACKLOG item 135)
 // ------------------------------------------------------------------ //
 
+/// Whether `ty` contains an unresolved `Ty::Var` *anywhere* inside it,
+/// recursively — not just as the whole type itself. BACKLOG item 247: every
+/// declared type param collapses to the identical sentinel `Ty::Var(0)`
+/// (`ast_ty_to_ty_with_params`'s own type-param handling, just below), so
+/// `fn wrapOk<T, E>(v: T): Result<T, E>`'s declared return type is
+/// `Ty::Result(Var(0), Var(0))` — both slots the same sentinel, at
+/// different tree positions. `resolve_bare_generic_return` originally only
+/// recognized a *bare* `Ty::Var(_)` as its whole type, missing every
+/// compound shape like this one entirely — the payload's real concrete
+/// type never reached the eventual `match Ok(v) => ...` arm that bound it,
+/// which then passed a raw heap pointer straight into text concatenation
+/// (or worse) as if it were already the right type.
+fn ty_contains_var(ty: &Ty) -> bool {
+    match ty {
+        Ty::Var(_) => true,
+        Ty::Option(inner) | Ty::List(inner) => ty_contains_var(inner),
+        Ty::Result(a, b) | Ty::Map(a, b) => ty_contains_var(a) || ty_contains_var(b),
+        Ty::Tuple(elems) => elems.iter().any(ty_contains_var),
+        Ty::Named { args, .. } => args.iter().any(ty_contains_var),
+        Ty::Record(fields) => fields.iter().any(|(_, t)| ty_contains_var(t)),
+        // Deliberately excludes `Ty::Fn` — a function *value*'s own erased
+        // parameter types are a normal, harmless situation (its eventual
+        // caller supplies and boxes concrete arguments at the call site;
+        // the function value itself is never directly read/matched the way
+        // a container's payload is), not the same "value flows through an
+        // erased slot and needs boxing/unboxing at *this* point" concern
+        // Result/Option/etc. have. Including `Fn` here regressed a real,
+        // working case: `val h = const("hi")` (`h: Fn { params: [Var(0)],
+        // ret: Text }`, the unused/ignored param staying deliberately
+        // erased) started forcing a hard "cannot determine concrete type"
+        // error with no annotation available, even though nothing about
+        // that program was actually broken.
+        _ => false,
+    }
+}
+
+/// Recursively substitute every `Ty::Var` slot in `actual` with whatever
+/// sits at the *same tree position* in `expected` — position-based, not
+/// identity-based, since (per `ty_contains_var`'s own doc comment above)
+/// every type param already collapsed to the same indistinguishable
+/// `Ty::Var(0)` sentinel long before this runs; there is no real variable
+/// identity left to match on, only structural position. Already-concrete
+/// parts of `actual` are kept as-is rather than overwritten wholesale by
+/// `expected` — e.g. `Ty::Result(Ty::Int, Ty::Var(0))` (an error type still
+/// unresolved) against `expected = Ty::Result(Ty::Int, Ty::Text)` keeps its
+/// own already-known `Ty::Int` success slot and fills in `Text` only for
+/// the genuinely unresolved one. A shape mismatch between `actual` and
+/// `expected` (or a leaf that isn't a `Var`) falls back to `actual`
+/// unchanged — this only ever narrows a still-erased slot, never discards
+/// something already known.
+fn merge_var_slots(actual: &Ty, expected: &Ty) -> Ty {
+    match actual {
+        Ty::Var(_) => expected.clone(),
+        Ty::Option(a) => match expected {
+            Ty::Option(e) => Ty::Option(Box::new(merge_var_slots(a, e))),
+            _ => actual.clone(),
+        },
+        Ty::List(a) => match expected {
+            Ty::List(e) => Ty::List(Box::new(merge_var_slots(a, e))),
+            _ => actual.clone(),
+        },
+        Ty::Result(a1, a2) => match expected {
+            Ty::Result(e1, e2) => Ty::Result(Box::new(merge_var_slots(a1, e1)), Box::new(merge_var_slots(a2, e2))),
+            _ => actual.clone(),
+        },
+        Ty::Map(a1, a2) => match expected {
+            Ty::Map(e1, e2) => Ty::Map(Box::new(merge_var_slots(a1, e1)), Box::new(merge_var_slots(a2, e2))),
+            _ => actual.clone(),
+        },
+        Ty::Tuple(a_elems) => match expected {
+            Ty::Tuple(e_elems) if e_elems.len() == a_elems.len() => Ty::Tuple(
+                a_elems.iter().zip(e_elems.iter()).map(|(a, e)| merge_var_slots(a, e)).collect(),
+            ),
+            _ => actual.clone(),
+        },
+        Ty::Named { name, args: a_args } => match expected {
+            Ty::Named { name: e_name, args: e_args } if e_name == name && e_args.len() == a_args.len() => Ty::Named {
+                name: name.clone(),
+                args: a_args.iter().zip(e_args.iter()).map(|(a, e)| merge_var_slots(a, e)).collect(),
+            },
+            _ => actual.clone(),
+        },
+        _ => actual.clone(),
+    }
+}
+
 /// Try to resolve a call expression's unresolved bare-generic-return
-/// sentinel (`Ty::Var(0)`) to a concrete type using `expected` — the type
-/// context the call is being consumed in: a `val`'s declared annotation, or
-/// an enclosing call's declared concrete param type at this argument
-/// position. Only ever touches a `HirExprKind::Call` node whose type is
-/// still the unresolved sentinel; anything else (including a legitimate
-/// `Ty::Var(0)`-typed local/parameter reference forwarded through a still-
-/// generic context, e.g. `v` inside `fn wrap<T>(v: T) = Secret(v)`) is left
-/// untouched — those aren't a call result, so there's nothing to resolve.
-/// With no concrete `expected` available, this is exactly the case codegen
-/// would otherwise silently mis-cast a raw `void*` as a concrete C type —
-/// a hard compile error instead of shipping that.
-fn resolve_bare_generic_return(expr: &mut HirExpr, expected: Option<&Ty>, cx: &mut Cx) {
+/// sentinel (`Ty::Var(0)`, or — BACKLOG item 247 — one nested inside a
+/// compound type like `Result<T, E>`/`Option<T>`) to a concrete type using
+/// `expected` — the type context the call is being consumed in: a `val`'s
+/// declared annotation, or an enclosing call's declared concrete param type
+/// at this argument position. Only ever touches a `HirExprKind::Call` node
+/// whose type still contains an unresolved var somewhere; anything else
+/// (including a legitimate `Ty::Var(0)`-typed local/parameter reference
+/// forwarded through a still-generic context, e.g. `v` inside `fn
+/// wrap<T>(v: T) = Secret(v)`) is left untouched — those aren't a call
+/// result, so there's nothing to resolve. With no concrete `expected`
+/// available, this is exactly the case codegen would otherwise silently
+/// mis-cast a raw `void*` as a concrete C type — a hard compile error
+/// instead of shipping that.
+fn resolve_bare_generic_return(expr: &mut HirExpr, expected: Option<&Ty>, hard_error_if_unresolvable: bool, cx: &mut Cx) {
     // A bare `None` reference (BACKLOG item 250) — unlike `Some(x)` (fixed
     // directly in `generic_container_ret` above, since its own argument
     // already carries a real type to derive `Option<T>` from), `None` has
@@ -2614,15 +2702,36 @@ fn resolve_bare_generic_return(expr: &mut HirExpr, expected: Option<&Ty>, cx: &m
         }
         return;
     }
-    if !matches!(expr.kind, HirExprKind::Call { .. }) || !matches!(expr.ty, Ty::Var(_)) {
+    if !matches!(expr.kind, HirExprKind::Call { .. }) || !ty_contains_var(&expr.ty) {
         return;
     }
+    // BACKLOG item 247 — combines two independent signals for whether an
+    // unresolvable case should be a hard error:
+    //  - `hard_error_if_unresolvable` (per call site): true at a `val`'s
+    //    own binding, where the value is consumed directly from here on,
+    //    so an unresolved generic return (bare *or* compound) is always a
+    //    real problem; false at the call-argument backfill site, where
+    //    something else downstream may already have its own correct,
+    //    separate erasure handling for a still-unresolved *compound* type
+    //    (e.g. `Box.wrap`'s own `Box<T>` return, passed straight into
+    //    `Box.unwrap`, whose own pattern-match-based unboxing — item 119's
+    //    established convention — needs no help from this function).
+    //  - `is_bare_var`: a bare `Ty::Var(0)` *as the whole type* (e.g.
+    //    `identity<T>(v: T): T`) is a dead end regardless of call site —
+    //    nothing about a compound wrapper's own established handling
+    //    applies to it, so it still hard-errors even as a call argument
+    //    (confirmed necessary: `identity(Box.unwrap(Box.wrap(42)))`,
+    //    `identity`'s own param is itself generic so there's no expected
+    //    type to resolve against, and this must still fail rather than
+    //    silently let a raw `Ty::Var(0)` flow through unchecked).
+    let is_bare_var = matches!(expr.ty, Ty::Var(_));
     match expected {
-        Some(ty) if !matches!(ty, Ty::Var(_)) => expr.ty = ty.clone(),
-        _ => cx.err(LowerErrorKind::Unsupported(
+        Some(ty) if !ty_contains_var(ty) => expr.ty = merge_var_slots(&expr.ty, ty),
+        _ if hard_error_if_unresolvable || is_bare_var => cx.err(LowerErrorKind::Unsupported(
             "cannot determine the concrete type of this generic function's return value here — \
              add an explicit type annotation (e.g. `val x: SomeType = ...`)".into()
         ), expr.span),
+        _ => {}
     }
 }
 
