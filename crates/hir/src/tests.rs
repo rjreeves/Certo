@@ -1,7 +1,7 @@
 use certo_parser::parse;
 use certo_typeck::Ty;
 use crate::lower_module;
-use crate::hir::{HirItem, HirExprKind, HirStmt, BinOp};
+use crate::hir::{HirItem, HirExprKind, HirStmt, BinOp, HirPat};
 
 fn lower(src: &str) -> crate::HirModule {
     let module = parse(src).expect("parse error");
@@ -1589,4 +1589,118 @@ fn fn_return_position_literal_resolves_to_the_declared_fixed_width_type() {
     assert_eq!(f.body.as_ref().unwrap().ty, Ty::Int8,
         "the bare-literal function body's own HIR type must resolve to Int8, not Ty::Int — \
          MIR derives the C return type from this, not from HirFn.ret_ty");
+}
+
+// BACKLOG item 248 — `Expr::UnOp` unconditionally hardcoded `ty: Ty::Error`
+// regardless of the operand's own type, masked for `-Int` only because
+// Ty::Error's own C fallback (int64_t) happens to coincide with Int's;
+// negating anything else (Float, a fixed-width int) got silently
+// miscompiled once typeck itself started accepting them (this item's own
+// typeck-side fix). Negation must preserve the operand's real type.
+#[test]
+fn negation_hir_node_carries_the_operands_own_type_not_ty_error() {
+    let m = lower("module A\nfn f(): Unit = { val y: Float = -3.5 }");
+    let f = m.items.iter().find_map(|it| match it {
+        HirItem::Fn(f) if f.name == "f" => Some(f),
+        _ => None,
+    }).expect("expected fn `f`");
+    let HirExprKind::Block { stmts, .. } = &f.body.as_ref().unwrap().kind else {
+        panic!("expected a Block body");
+    };
+    let HirStmt::Let { init, .. } = stmts.first().expect("expected `val y = -3.5`") else {
+        panic!("expected the first statement to be a Let");
+    };
+    let HirExprKind::UnOp { .. } = &init.kind else { panic!("expected a UnOp node, got {:?}", init.kind) };
+    assert_eq!(init.ty, Ty::Float, "negating a Float must carry Ty::Float, not Ty::Error");
+}
+
+#[test]
+fn not_hir_node_carries_ty_bool_not_ty_error() {
+    let m = lower("module A\nfn f(): Unit = { val b = not true }");
+    let f = m.items.iter().find_map(|it| match it {
+        HirItem::Fn(f) if f.name == "f" => Some(f),
+        _ => None,
+    }).expect("expected fn `f`");
+    let HirExprKind::Block { stmts, .. } = &f.body.as_ref().unwrap().kind else {
+        panic!("expected a Block body");
+    };
+    let HirStmt::Let { init, .. } = stmts.first().expect("expected `val b = not true`") else {
+        panic!("expected the first statement to be a Let");
+    };
+    assert_eq!(init.ty, Ty::Bool, "`not` must carry Ty::Bool, not Ty::Error");
+}
+
+// BACKLOG item 246 — `.age` on an `Option<Timestamp>` (`Timestamp?`)
+// previously desugared straight-line to `DateTime.diff(DateTime.now(), e)`
+// with no `None`/`Some` handling at all, passing the still-boxed Option
+// where a raw `CertoDateTime` struct was expected. Must desugar to a real
+// match: `None` → `Duration.max` (i64::MAX milliseconds), `Some(x)` →
+// the original `DateTime.diff(now, x)` call against the *unwrapped* `x`.
+#[test]
+fn optional_timestamp_age_desugars_to_a_match_with_a_duration_max_none_arm() {
+    let m = lower("module A\nfn f(t: Timestamp?): Duration = t.age");
+    let f = m.items.iter().find_map(|it| match it {
+        HirItem::Fn(f) if f.name == "f" => Some(f),
+        _ => None,
+    }).expect("expected fn `f`");
+    let body = f.body.as_ref().unwrap();
+    assert_eq!(body.ty, Ty::Named { name: "Duration".into(), args: vec![] });
+    let HirExprKind::Match { arms, .. } = &body.kind else {
+        panic!("expected `.age` on an Option to desugar to a Match, got {:?}", body.kind);
+    };
+    assert_eq!(arms.len(), 2);
+
+    let some_arm = arms.iter().find(|a| matches!(&a.pat, HirPat::Constructor { name, .. } if name == "Some"))
+        .expect("expected a Some(_) arm");
+    let HirExprKind::Call { func, args } = &some_arm.body.kind else {
+        panic!("expected the Some arm's body to be a DateTime.diff call, got {:?}", some_arm.body.kind);
+    };
+    assert!(matches!(&func.kind, HirExprKind::Global(name) if name == "DateTime.diff"));
+    assert_eq!(args.len(), 2);
+    // The second argument must be the *unwrapped* payload local, not the
+    // still-Option-wrapped scrutinee — the whole point of the fix.
+    assert!(matches!(&args[1].kind, HirExprKind::Local(_)));
+    assert_ne!(args[1].ty, Ty::Option(Box::new(Ty::Named { name: "Timestamp".into(), args: vec![] })),
+        "the Some arm's DateTime.diff must receive the unwrapped Timestamp, not the still-optional value");
+
+    let none_arm = arms.iter().find(|a| matches!(&a.pat, HirPat::Constructor { name, .. } if name == "None"))
+        .expect("expected a None arm");
+    assert!(matches!(none_arm.body.kind, HirExprKind::Int(i64::MAX)),
+        "the None arm must produce Duration.max (i64::MAX milliseconds), got {:?}", none_arm.body.kind);
+    assert_eq!(none_arm.body.ty, Ty::Named { name: "Duration".into(), args: vec![] });
+}
+
+#[test]
+fn non_optional_timestamp_age_is_unaffected_by_the_optional_fix() {
+    // The ordinary, non-optional `.age` path (a bare `Timestamp`, not
+    // `Timestamp?`) must still desugar straight-line, no regression.
+    let m = lower("module A\nfn f(t: Timestamp): Duration = t.age");
+    let f = m.items.iter().find_map(|it| match it {
+        HirItem::Fn(f) if f.name == "f" => Some(f),
+        _ => None,
+    }).expect("expected fn `f`");
+    let body = f.body.as_ref().unwrap();
+    assert!(matches!(&body.kind, HirExprKind::Call { .. }),
+        "a non-optional Timestamp's .age must stay a direct call, not a Match, got {:?}", body.kind);
+    assert_eq!(body.ty, Ty::Named { name: "Duration".into(), args: vec![] });
+}
+
+// BACKLOG item 245 — `a in xs` desugars directly to `List.contains(xs, a)`
+// — note the reversed argument order vs. the source's own `item in list`.
+#[test]
+fn membership_in_desugars_to_list_contains_with_reversed_args() {
+    let m = lower("module A\nfn f(): Bool = 2 in [1, 2, 3]");
+    let f = m.items.iter().find_map(|it| match it {
+        HirItem::Fn(f) if f.name == "f" => Some(f),
+        _ => None,
+    }).expect("expected fn `f`");
+    let body = f.body.as_ref().unwrap();
+    assert_eq!(body.ty, Ty::Bool);
+    let HirExprKind::Call { func, args } = &body.kind else {
+        panic!("expected `in` to desugar to a Call, got {:?}", body.kind);
+    };
+    assert!(matches!(&func.kind, HirExprKind::Global(name) if name == "List.contains"));
+    assert_eq!(args.len(), 2);
+    assert_eq!(args[0].ty, Ty::List(Box::new(Ty::Int)), "first arg must be the list");
+    assert_eq!(args[1].ty, Ty::Int, "second arg must be the searched-for item");
 }

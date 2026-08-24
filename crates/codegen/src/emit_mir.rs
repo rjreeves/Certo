@@ -765,6 +765,28 @@ fn local_name(id: u32) -> String {
     format!("_l{}", id)
 }
 
+thread_local! {
+    // BACKLOG item 242 — `extern "C"` FFI declarations' own names must
+    // reach the real, already-compiled C symbol a linked library exports
+    // (`abs`, `sqlite3_open`, …), never `certo_<mangled>` — `c_fn_name` is
+    // called pervasively across this file from dozens of call sites with
+    // no per-call context (a bare `Operand::Global(name)` render has no
+    // way to know whether `name` names an extern declaration), so
+    // threading an `is_extern` flag through every one of them would be a
+    // large, invasive refactor for a small fix. Populated once, before any
+    // codegen runs, by `emit_module`'s own top-level entry point (the only
+    // place that already walks every `Decl::Fn` and knows `f.is_extern`);
+    // codegen itself is single-threaded and non-reentrant per process, so
+    // a thread-local registry is safe and self-contained to this crate.
+    static EXTERN_NAMES: std::cell::RefCell<HashSet<String>> = std::cell::RefCell::new(HashSet::new());
+}
+
+/// Populate the extern-name registry `c_fn_name` consults — call once,
+/// before any codegen for the module runs. See `EXTERN_NAMES`'s own doc.
+pub fn set_extern_names(names: HashSet<String>) {
+    EXTERN_NAMES.with(|s| *s.borrow_mut() = names);
+}
+
 pub fn c_fn_name(name: &str) -> String {
     // Sum-type variant tag constant: `__tag__TypeName__VariantName` → `TypeName_VariantName`
     if let Some(rest) = name.strip_prefix("__tag__") {
@@ -772,6 +794,9 @@ pub fn c_fn_name(name: &str) -> String {
     }
     // Runtime intrinsics (__ prefix) are emitted verbatim — no certo_ wrapper.
     if name.starts_with("__") { return name.to_string(); }
+    // `extern "C"` declarations name a real, already-compiled external C
+    // symbol verbatim — never mangled (BACKLOG item 242).
+    if EXTERN_NAMES.with(|s| s.borrow().contains(name)) { return name.to_string(); }
     // Convert camelCase to snake_case so Certo names match C stdlib conventions.
     let snake = camel_to_snake(name);
     format!("certo_{}", snake.replace('.', "_").replace('-', "_"))

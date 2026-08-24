@@ -1005,6 +1005,41 @@ fn gen_validator(src: &str) -> String {
     emit_validator(v, &constraint_bodies).to_source()
 }
 
+fn gen_trigger_sql(src: &str) -> String {
+    let module = parse(src).expect("parse error");
+    let v = module.decls.iter().find_map(|d| {
+        if let Decl::Validator(v) = &d.node { Some(v) } else { None }
+    }).expect("no validator decl found");
+    let constraint_bodies = crate::build_constraint_bodies(&[]);
+    emit_validator(v, &constraint_bodies).trigger_sql.expect("expected trigger SQL")
+}
+
+// BACKLOG item 244 — a trigger `when` condition value that's a real
+// expression (`OLD.field`) was always wrapped in SQL quotes, the same as a
+// bare enum-variant literal (`Submitted`) — comparing against the literal
+// string `'OLD.status'` instead of the real column, so the gate almost
+// never matched its documented "on any status change" behaviour.
+#[test]
+fn trigger_when_condition_against_old_field_is_not_quoted() {
+    let src = "module A\ntype WidgetStatus = | Draft | Submitted\n\
+               type Widget = { status: WidgetStatus }\ntype WidgetError = | NotReady\n\
+               validator V for Widget errors WidgetError trigger on Update when status != OLD.status {\n\
+                   rule r { require true else WidgetError.NotReady }\n}";
+    let sql = gen_trigger_sql(src);
+    assert_contains(&sql, "IF NEW.status = OLD.status THEN RETURN NEW; END IF;");
+    assert!(!sql.contains("'OLD.status'"), "OLD.status must not be quoted as a string literal, got: {sql}");
+}
+
+#[test]
+fn trigger_when_condition_against_enum_variant_is_still_quoted() {
+    let src = "module A\ntype WidgetStatus = | Draft | Submitted\n\
+               type Widget = { status: WidgetStatus }\ntype WidgetError = | NotReady\n\
+               validator V for Widget errors WidgetError trigger on Update when status == Submitted {\n\
+                   rule r { require true else WidgetError.NotReady }\n}";
+    let sql = gen_trigger_sql(src);
+    assert_contains(&sql, "IF NEW.status != 'Submitted' THEN RETURN NEW; END IF;");
+}
+
 #[test]
 fn validator_emits_validate_fn() {
     let src = "module A\nvalidator V for Order errors OE {\n    rule r { require true else true }\n}";
@@ -1341,13 +1376,51 @@ fn string_concat_emits_text_concat() {
 fn extern_fn_emits_prototype_not_definition() {
     // An `extern "C"` declaration must emit a forward prototype with the correct
     // ABI (Int -> int64_t) and NO definition — the body is linked externally.
+    //
+    // BACKLOG item 242 — the name must be emitted *verbatim*, not mangled
+    // through `c_fn_name`'s usual `certo_<snake_case>` treatment: a real C
+    // library exports its symbol under its own real name (`rustAdd`, or a
+    // genuine external function like `abs`), never a Certo-mangled one, so
+    // a mangled forward declaration can never actually link. This test
+    // previously asserted the *mangled* name (`certo_rust_add`) as the
+    // expected, checked-in behavior — i.e. it was asserting the bug itself
+    // rather than catching it, which is exactly why it went unnoticed.
     let c = codegen(
         "module A\nextern \"C\" {\n  fn rustAdd(a: Int, b: Int): Int\n}\nfn main(): Unit = {\n  val r = rustAdd(2, 3)\n  println(intToText(r))\n}",
     );
-    assert_contains(&c, "int64_t certo_rust_add(int64_t, int64_t);");
-    assert_contains(&c, "certo_rust_add(2, 3)");
+    assert_contains(&c, "int64_t rustAdd(int64_t, int64_t);");
+    assert_contains(&c, "rustAdd(2, 3)");
+    assert_not_contains(&c, "certo_rust_add");
     // No body was generated for the extern fn.
-    assert_not_contains(&c, "certo_rust_add(int64_t _l");
+    assert_not_contains(&c, "rustAdd(int64_t _l");
+}
+
+#[test]
+fn ordinary_fn_sharing_a_similar_name_to_an_extern_fn_is_still_mangled() {
+    // Regression guard for the extern-name registry (BACKLOG item 242,
+    // `set_extern_names`/`EXTERN_NAMES` in `crates/codegen/src/emit_mir.rs`)
+    // — only genuinely `is_extern` declarations skip mangling; an ordinary
+    // Certo function must still get its usual `certo_<snake_case>` name,
+    // even one compiled in the same module as an extern block.
+    let c = codegen(
+        "module A\nextern \"C\" {\n  fn rustAdd(a: Int, b: Int): Int\n}\n\
+         fn plainAdd(a: Int, b: Int): Int = a + b\n\
+         fn main(): Unit = {\n  println(intToText(plainAdd(2, 3)))\n}",
+    );
+    assert_contains(&c, "certo_plain_add(");
+    assert_not_contains(&c, "int64_t plainAdd(");
+}
+
+#[test]
+fn two_modules_compiled_in_the_same_process_do_not_leak_extern_names() {
+    // The extern-name registry is a thread-local reset at the top of every
+    // `emit_module` call (BACKLOG item 242) — a prior module's extern
+    // names must not leak into a later one compiled in the same process
+    // (e.g. `certo-testrunner` compiling multiple test files sequentially).
+    let _first = codegen("module A\nextern \"C\" {\n  fn rustAdd(a: Int, b: Int): Int\n}\nfn main(): Unit = {}");
+    let second = codegen("module B\nfn rustAdd(a: Int, b: Int): Int = a + b\nfn main(): Unit = {\n  println(intToText(rustAdd(2, 3)))\n}");
+    assert_contains(&second, "certo_rust_add(");
+    assert_not_contains(&second, "int64_t rustAdd(int64_t _l");
 }
 
 #[test]

@@ -1,5 +1,5 @@
 use super::parse;
-use certo_ast::expr::{Expr, Lit, BinOp, Stmt};
+use certo_ast::expr::{Expr, Lit, BinOp, UnOp, Stmt};
 use certo_ast::decl::Decl;
 use certo_ast::pattern::Pattern;
 use certo_ast::span::S;
@@ -755,6 +755,56 @@ fn addition() {
     match &m.decls[0].node {
         Decl::Val(v) => match &v.value.node {
             Expr::BinOp { op: BinOp::Add, .. } => {}
+            other => panic!("{other:?}"),
+        },
+        _ => panic!(),
+    }
+}
+
+// BACKLOG item 245 — `EXPR in LIST-EXPR` / `EXPR not in LIST-EXPR` didn't
+// exist anywhere in the grammar despite being used throughout spec §16.
+#[test]
+fn membership_in() {
+    let m = ok("module A\nval x = a in [1, 2, 3]");
+    match &m.decls[0].node {
+        Decl::Val(v) => match &v.value.node {
+            Expr::BinOp { op: BinOp::In, .. } => {}
+            other => panic!("{other:?}"),
+        },
+        _ => panic!(),
+    }
+}
+
+#[test]
+fn membership_not_in_desugars_to_not_wrapping_in() {
+    // `not in` is two tokens (the lexer's own `not_in_two_token_sequence`
+    // test has long anticipated this) — the parser pairs them into
+    // `UnOp::Not` wrapping a `BinOp::In` node, not a separate `NotIn`
+    // variant, reusing `not`'s own already-correct downstream handling.
+    let m = ok("module A\nval x = a not in [1, 2, 3]");
+    match &m.decls[0].node {
+        Decl::Val(v) => match &v.value.node {
+            Expr::UnOp { op: UnOp::Not, expr, .. } => {
+                assert!(matches!(&expr.node, Expr::BinOp { op: BinOp::In, .. }),
+                    "expected `not in` to wrap a BinOp::In, got {:?}", expr.node);
+            }
+            other => panic!("expected UnOp::Not wrapping BinOp::In, got {other:?}"),
+        },
+        _ => panic!(),
+    }
+}
+
+#[test]
+fn membership_in_binds_looser_than_arithmetic() {
+    // `1 + 1 in [1, 2, 3]` must parse as `(1 + 1) in [1, 2, 3]`, matching
+    // `in`'s own comparison-level precedence (same level as `==`/`<`).
+    let m = ok("module A\nval x = 1 + 1 in [1, 2, 3]");
+    match &m.decls[0].node {
+        Decl::Val(v) => match &v.value.node {
+            Expr::BinOp { op: BinOp::In, left, .. } => {
+                assert!(matches!(&left.node, Expr::BinOp { op: BinOp::Add, .. }),
+                    "expected the left side to still be the addition, got {:?}", left.node);
+            }
             other => panic!("{other:?}"),
         },
         _ => panic!(),

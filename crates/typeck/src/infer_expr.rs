@@ -549,8 +549,25 @@ pub fn infer(expr: &S<Expr>, ctx: &mut Ctx<'_>) -> Ty {
             let ty = infer(expr, ctx);
             match op {
                 UnOp::Neg => {
-                    ctx.unify(ty.clone(), Ty::Int, *span);
-                    ty
+                    // BACKLOG item 248 — previously unified the operand
+                    // against Ty::Int unconditionally, regardless of its own
+                    // real type, so negating *any* other numeric type never
+                    // typechecked (most surprisingly: `-3.5`, a plain Float
+                    // literal). Accept any already-resolved numeric type
+                    // directly; a still-unresolved var (an unannotated
+                    // negative literal with nothing else pinning its type)
+                    // falls through to the original Int-unify, preserving
+                    // the existing default; a genuinely non-numeric type
+                    // (Text, Bool, …) also falls through, so it still gets
+                    // the same real "expected Int" diagnostic as before
+                    // rather than silently accepting nonsense.
+                    let resolved = ctx.uf.apply(&ty);
+                    if is_numeric_ty(&resolved) {
+                        resolved
+                    } else {
+                        ctx.unify(ty.clone(), Ty::Int, *span);
+                        ty
+                    }
                 }
                 UnOp::Not => {
                     ctx.unify(ty, Ty::Bool, *span);
@@ -965,6 +982,19 @@ fn is_displayable(ty: &Ty) -> bool {
 /// `crates/codegen/src/emit_mir.rs`). Must stay in sync with
 /// `crates/mir/src/lower.rs`'s per-call-site comparator/adder synthesis,
 /// which trusts this check has already ruled out everything else.
+/// Every numeric type whose C representation is a primitive scalar (so a
+/// raw C unary `-` on it just works) — used by `UnOp::Neg`'s inference
+/// (BACKLOG item 248) to accept negation of any of them, not just `Int`.
+/// Deliberately excludes `Decimal`: its C representation is a *struct*
+/// (`certo_decimal_t`), and neither unary negation nor even binary `+`/`-`
+/// have any codegen support for it at all (confirmed separately — see
+/// BACKLOG item 249) — accepting it here would trade a clean typeck
+/// rejection for a confusing raw C compile error instead.
+fn is_numeric_ty(ty: &Ty) -> bool {
+    matches!(ty,
+        Ty::Int | Ty::Int8 | Ty::Int16 | Ty::Int32 | Ty::UInt | Ty::Float | Ty::Float32)
+}
+
 fn is_supported_key_type(ty: &Ty) -> bool {
     matches!(ty,
         Ty::Int | Ty::Int8 | Ty::Int16 | Ty::Int32 | Ty::UInt | Ty::Float | Ty::Float32)
@@ -1118,6 +1148,7 @@ fn binop_symbol(op: &BinOp) -> &'static str {
         BinOp::And => "and", BinOp::Or => "or",
         BinOp::RangeInclusive => "..", BinOp::RangeExclusive => "...",
         BinOp::NullCoalesce => "??", BinOp::Concat => "++",
+        BinOp::In => "in",
     }
 }
 
@@ -1178,6 +1209,15 @@ fn infer_binop(op: &BinOp, left: &S<Expr>, right: &S<Expr>, span: Span, ctx: &mu
             ctx.unify(lt, Ty::Text, span);
             ctx.unify(rt, Ty::Text, span);
             Ty::Text
+        }
+        // `a in xs` — BACKLOG item 245. `xs` must be a `List<T>` whose
+        // element type unifies with `a`'s own type; the result is Bool.
+        // `not in` is `UnOp::Not` wrapping this same node (the parser's
+        // own desugar, `crates/parser/src/parse_expr.rs`'s `parse_comparison`),
+        // so it needs no separate handling here.
+        BinOp::In => {
+            ctx.unify(rt, Ty::List(Box::new(lt)), span);
+            Ty::Bool
         }
     }
 }

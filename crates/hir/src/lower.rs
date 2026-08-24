@@ -1491,6 +1491,23 @@ fn lower_expr(expr: &S<Expr>, cx: &mut Cx) -> HirExpr {
                     let list_int = Ty::List(Box::new(Ty::Int));
                     HirExpr { kind: HirExprKind::Call { func: Box::new(func), args: vec![lhs, rhs] }, ty: list_int, span }
                 }
+                // `a in xs` — BACKLOG item 245. Desugars directly to the
+                // already-real, already-working `List.contains(xs, a)`
+                // (note the argument order: `List.contains`'s own signature
+                // is `(list, item)`, the reverse of `in`'s own `item in
+                // list` source order) — same "direct desugar, not a real
+                // call expression, so hardcode the known result type"
+                // treatment the range desugar just above uses, since this
+                // bypasses `Expr::App`'s own call-type-recovery chain too.
+                // `not in` needs no separate handling here — the parser
+                // itself desugars it to `UnOp::Not` wrapping this same
+                // `BinOp::In` node (`crates/parser/src/parse_expr.rs`).
+                AstBinOp::In => {
+                    let lhs = lower_expr(left, cx);
+                    let rhs = lower_expr(right, cx);
+                    let func = HirExpr { kind: HirExprKind::Global("List.contains".into()), ty: Ty::Error, span };
+                    HirExpr { kind: HirExprKind::Call { func: Box::new(func), args: vec![rhs, lhs] }, ty: Ty::Bool, span }
+                }
                 _ => {
                     let lhs = lower_expr(left, cx);
                     let rhs = lower_expr(right, cx);
@@ -1506,8 +1523,19 @@ fn lower_expr(expr: &S<Expr>, cx: &mut Cx) -> HirExpr {
 
         Expr::UnOp { op, expr, .. } => {
             let arg = lower_expr(expr, cx);
-            let op = match op { AstUnOp::Neg => UnOp::Neg, AstUnOp::Not => UnOp::Not };
-            HirExpr { kind: HirExprKind::UnOp { op, arg: Box::new(arg) }, ty: Ty::Error, span }
+            // BACKLOG item 248 — this unconditionally hardcoded Ty::Error
+            // regardless of the operand's own type, masked for the common
+            // `-Int` case only because Ty::Error's own C codegen fallback
+            // happens to coincide with Ty::Int's (int64_t either way); any
+            // other operand type (Float, Decimal, a fixed-width int) got
+            // silently miscompiled once typeck itself started accepting
+            // them. Negation preserves the operand's type; `not` always
+            // produces Bool.
+            let (op, ty) = match op {
+                AstUnOp::Neg => (UnOp::Neg, arg.ty.clone()),
+                AstUnOp::Not => (UnOp::Not, Ty::Bool),
+            };
+            HirExpr { kind: HirExprKind::UnOp { op, arg: Box::new(arg) }, ty, span }
         }
 
         Expr::Field { expr, field, .. } => {
@@ -1982,6 +2010,7 @@ fn lower_expr(expr: &S<Expr>, cx: &mut Cx) -> HirExpr {
         // passed into `DateTime.diff` with no conversion needed.
         Expr::Age { expr, .. } => {
             let base = lower_expr(expr, cx);
+            let duration_ty = Ty::Named { name: "Duration".into(), args: vec![] };
             let now_call = HirExpr {
                 kind: HirExprKind::Call {
                     func: Box::new(HirExpr {
@@ -1993,16 +2022,64 @@ fn lower_expr(expr: &S<Expr>, cx: &mut Cx) -> HirExpr {
                 ty: Ty::Named { name: "DateTime".into(), args: vec![] },
                 span,
             };
-            HirExpr {
-                kind: HirExprKind::Call {
-                    func: Box::new(HirExpr {
-                        kind: HirExprKind::Global("DateTime.diff".into()),
-                        ty: Ty::Error, span,
-                    }),
-                    args: vec![now_call, base],
-                },
-                ty: Ty::Named { name: "Duration".into(), args: vec![] },
-                span,
+            // BACKLOG item 246 — `e.age` for `e: Timestamp?` previously
+            // desugared straight-line, passing the still-boxed/optional
+            // value where `DateTime.diff` expects a raw `CertoDateTime`
+            // struct — no `None` → `Duration.max` branch (the spec's own
+            // documented behaviour) and no `Some` unwrap, producing garbage
+            // for both cases at runtime. Mirrors `Expr::SafeField`'s own
+            // `Some`/`None` match-desugar just above for the identical
+            // "optional base, real Some-arm unwrap" shape.
+            if let Ty::Option(inner) = &base.ty {
+                let inner_ty = (**inner).clone();
+                let tmp = cx.fresh_local();
+                if !matches!(inner_ty, Ty::Error) {
+                    cx.local_types.insert(tmp, inner_ty.clone());
+                }
+                let diff_call = HirExpr {
+                    kind: HirExprKind::Call {
+                        func: Box::new(HirExpr {
+                            kind: HirExprKind::Global("DateTime.diff".into()),
+                            ty: Ty::Error, span,
+                        }),
+                        args: vec![now_call, HirExpr { kind: HirExprKind::Local(tmp), ty: inner_ty.clone(), span }],
+                    },
+                    ty: duration_ty.clone(), span,
+                };
+                let some_arm = HirArm {
+                    pat: HirPat::Constructor {
+                        name: "Some".into(),
+                        fields: vec![HirPat::Bind { local: tmp, name: "_age_tmp".into() }],
+                        field_names: vec!["f0".into()],
+                        field_types: vec![inner_ty],
+                    },
+                    guard: None,
+                    body: diff_call,
+                };
+                let none_arm = HirArm {
+                    pat: HirPat::Constructor { name: "None".into(), fields: vec![], field_names: vec![], field_types: vec![] },
+                    guard: None,
+                    // Duration's own C representation is a plain int64
+                    // millisecond count (`CertoDuration`, `crates/stdlib/
+                    // src/datetime.rs`) — the largest representable span,
+                    // matching `Duration.max`'s own "max" semantics.
+                    body: HirExpr { kind: HirExprKind::Int(i64::MAX), ty: duration_ty.clone(), span },
+                };
+                HirExpr {
+                    kind: HirExprKind::Match { scrutinee: Box::new(base), arms: vec![some_arm, none_arm] },
+                    ty: duration_ty, span,
+                }
+            } else {
+                HirExpr {
+                    kind: HirExprKind::Call {
+                        func: Box::new(HirExpr {
+                            kind: HirExprKind::Global("DateTime.diff".into()),
+                            ty: Ty::Error, span,
+                        }),
+                        args: vec![now_call, base],
+                    },
+                    ty: duration_ty, span,
+                }
             }
         }
         // BACKLOG item 165 — desugars to the same real `assert(cond: Bool,
@@ -2101,6 +2178,7 @@ fn lower_binop(op: &AstBinOp) -> BinOp {
         AstBinOp::NullCoalesce => BinOp::NullCoalesce,
         AstBinOp::Concat       => BinOp::Concat,
         AstBinOp::RangeInclusive | AstBinOp::RangeExclusive => unreachable!("handled above"),
+        AstBinOp::In => unreachable!("handled above"),
     }
 }
 
