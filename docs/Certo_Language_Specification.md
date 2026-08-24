@@ -82,9 +82,9 @@ certo-lang.org  |  github.com/certo-lang
 
 ## **2.1 Source Files**
 
-***Certo source files use UTF-8 encoding and carry the .cto extension. Each file begins with a module declaration. The file name must match the module name in kebab-case (my-module.cto → module MyModule).**
+***Certo source files use UTF-8 encoding and carry the .cto extension. Each file begins with a module declaration. The file path must mirror the module path's own segments exactly, one directory per segment, ending in a file named after the last segment (module MyModule → MyModule.cto; module MyApp.Models.Order → MyApp/Models/Order.cto). There is no case conversion — the file name matches the module segment's own PascalCase spelling, not kebab-case.**
 
-| // src/orders/processing.cto module Orders.Processing  import Stdlib.Collections.\{ List, Map \} import Stdlib.Result import MyApp.Models.Order |
+| // src/Orders/Processing.cto module Orders.Processing  import Stdlib.Collections.\{ List, Map \} import Stdlib.Result import MyApp.Models.Order |
 | - |
 
 
@@ -97,7 +97,7 @@ certo-lang.org  |  github.com/certo-lang
 | Constants | UPPER\_SNAKE\_CASE | MAX\_RETRIES, DEFAULT\_PAGE\_SIZE |
 | Type parameters | Single uppercase letter or PascalCase | T, E, Key, Value |
 | Trait names | PascalCase adjective | Serializable, Comparable, DbModel |
-| File names | kebab-case | order-processing.cto, user-model.cto |
+| File names | Matches the module path segment exactly (PascalCase, no conversion) | OrderProcessing.cto, UserModel.cto |
 
 
 ## **2.3 Keywords**
@@ -584,13 +584,13 @@ certo db create add_users_table     # scaffold a new migration file
 
 ## **7.3 Structured Concurrency**
 
-| // All tasks spawned inside a scope are cancelled when scope exits async fn processWithTimeout(orderId: UUID): Result\<Receipt, Error\> =     withTimeout(Duration.seconds(30)) \{         processOrder(orderId)     \}  // Background tasks — fire and forget with supervision fn startBackgroundJobs(): Unit =     spawn \{         every(Duration.minutes(5))  \{ cleanExpiredSessions() \}         every(Duration.hours(1))    \{ generateHourlyReports() \}         every(Duration.days(1))     \{ archiveOldRecords() \}     \}  // Channels — communicate between coroutines val channel = Channel\<Order\>(capacity: 100)  spawn \{ orderProducer(channel) \} spawn \{ orderConsumer(channel) \} |
+| // All tasks spawned inside a scope are cancelled when scope exits async fn processWithTimeout(orderId: UUID): Result\<Receipt, Error\> =     withTimeout(Duration.seconds(30)) \{         processOrder(orderId)     \}  // Background tasks — fire and forget with supervision fn startBackgroundJobs(): Unit =     spawn \{         every(Duration.minutes(5))  \{ cleanExpiredSessions() \}         every(Duration.hours(1))    \{ generateHourlyReports() \}         every(Duration.days(1))     \{ archiveOldRecords() \}     \}  // Channels — communicate between coroutines val channel = Channel.new(100)  spawn \{ orderProducer(channel) \} spawn \{ orderConsumer(channel) \} |
 | - |
 
 
 ## **7.4 Resource Management**
 
-| // use — automatically closes resources when scope exits async fn processFile(path: Path): Result\<Report, IOError\> =     use file = await File.open(path) \{         val content = await file.readAll()         Ok(parseReport(content))     \}  // file.close() called automatically here  // defer — run on scope exit regardless of success/failure async fn withAudit(action: Text, f: () =\> Result\<T, E\>): Result\<T, E\> = \{     val start = Timestamp.now()     defer \{ db.auditLog.insert(AuditEntry(action, start, Timestamp.now())) \}     f() \} |
+| // use — automatically closes resources when scope exits async fn processFile(path: Path): Result\<Report, IOError\> =     use file = await File.open(path) \{         val content = await file.readAll()         Ok(parseReport(content))     \}  // file.close() called automatically here  // defer — run on scope exit regardless of success/failure async fn withAudit\<T, E\>(action: Text, f: () =\> Result\<T, E\>): Result\<T, E\> = \{     val start = Timestamp.now()     defer \{ db.auditLog.insert(AuditEntry(action, start, Timestamp.now())) \}     f() \} |
 | - |
 
 
@@ -702,8 +702,8 @@ Regex is a separate namespace, not a method on `Text` — pattern first, subject
 | timestamp.format(pattern, tz) | Format with explicit timezone |
 | Date.today(tz) | Current date in given timezone |
 | Date.of(year, month, day) | Construct from components |
-| date + duration | Produces Date |
-| timestamp - timestamp | Produces Duration |
+| date.addDuration(duration) | Produces Date |
+| timestamp.diff(timestamp) | Produces Duration |
 | Duration.days(n) | Construct duration of n days |
 | Duration.hours(n) | Construct duration of n hours |
 | Timezone("Europe/London") | IANA timezone by name |
