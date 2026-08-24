@@ -330,8 +330,17 @@ fn emit_stmt(stmt: &MirStmt, locals: &[MirLocalDecl], fn_cname: &str, spawn_idx:
             }
         }
         Rvalue::UnOp { op, arg } => {
-            let sym = match op { UnOp::Neg => "-", UnOp::Not => "!" };
-            writeln!(out, "    {} = {}({});", lhs, sym, emit_operand(arg)).unwrap();
+            // BACKLOG item 249 — `Decimal`'s C representation is a struct
+            // (`certo_decimal_t`), so a bare unary `-` doesn't compile;
+            // route to the already-existing `certo_decimal_negate`
+            // (`crates/stdlib/src/money.rs`) instead, mirroring
+            // `emit_binop`'s own Decimal-aware routing just below.
+            if matches!(op, UnOp::Neg) && matches!(operand_ty(arg, locals), Ty::Decimal(_)) {
+                writeln!(out, "    {} = certo_decimal_negate({});", lhs, emit_operand(arg)).unwrap();
+            } else {
+                let sym = match op { UnOp::Neg => "-", UnOp::Not => "!" };
+                writeln!(out, "    {} = {}({});", lhs, sym, emit_operand(arg)).unwrap();
+            }
         }
         Rvalue::Call { func, args } => {
             let args_str = emit_call_args(func, args, locals);
@@ -741,6 +750,39 @@ fn emit_binop(
 ) -> String {
     let lhs = emit_operand(l);
     let rhs = emit_operand(r);
+    // BACKLOG item 249 — `Decimal`'s C representation is a struct
+    // (`certo_decimal_t`), so a bare C operator doesn't compile for
+    // arithmetic/ordering (`Eq`/`NotEq` already route to `certo_decimal_eq`
+    // below — this closes the identical gap for the rest). The runtime
+    // functions themselves (`certo_decimal_add`/`sub`/`mul`/`div`/`lt`/
+    // `lte`/`gt`/`gte`, `crates/stdlib/src/money.rs`) already existed,
+    // fully implemented (fixed-point value/scale, scale-aligned add/sub,
+    // scale-summed mul, extra-precision div) — only the codegen routing
+    // to call them was missing.
+    let decimal_fn = match op {
+        BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div
+        | BinOp::Lt | BinOp::LtEq | BinOp::Gt | BinOp::GtEq => {
+            let is_decimal = match operand_ty(l, locals) {
+                Ty::Decimal(_) => true,
+                _ => matches!(operand_ty(r, locals), Ty::Decimal(_)),
+            };
+            is_decimal.then(|| match op {
+                BinOp::Add  => "certo_decimal_add",
+                BinOp::Sub  => "certo_decimal_sub",
+                BinOp::Mul  => "certo_decimal_mul",
+                BinOp::Div  => "certo_decimal_div",
+                BinOp::Lt   => "certo_decimal_lt",
+                BinOp::LtEq => "certo_decimal_lte",
+                BinOp::Gt   => "certo_decimal_gt",
+                BinOp::GtEq => "certo_decimal_gte",
+                _ => unreachable!(),
+            })
+        }
+        _ => None,
+    };
+    if let Some(f) = decimal_fn {
+        return format!("{f}({lhs}, {rhs})");
+    }
     match op {
         BinOp::Add  => format!("({} + {})", lhs, rhs),
         BinOp::Sub  => format!("({} - {})", lhs, rhs),

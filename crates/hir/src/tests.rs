@@ -1704,3 +1704,84 @@ fn membership_in_desugars_to_list_contains_with_reversed_args() {
     assert_eq!(args[0].ty, Ty::List(Box::new(Ty::Int)), "first arg must be the list");
     assert_eq!(args[1].ty, Ty::Int, "second arg must be the searched-for item");
 }
+
+// BACKLOG item 250 — a bare `Some(x)`/`None` literal previously never
+// resolved its own real type at all (`Ty::Error`), even when a `val`'s own
+// declared annotation made the concrete type completely unambiguous.
+#[test]
+fn bare_some_call_resolves_option_type_from_its_own_argument() {
+    // `Some(x)` needs no external annotation at all — its own argument
+    // already carries a real type, mirroring `Ok`/`Err`'s existing fix
+    // (item 227) in `generic_container_ret`.
+    let m = lower("module A\nfn f(): Unit = { val x = Some(5) }");
+    let f = m.items.iter().find_map(|it| match it {
+        HirItem::Fn(f) if f.name == "f" => Some(f),
+        _ => None,
+    }).expect("expected fn `f`");
+    let HirExprKind::Block { stmts, .. } = &f.body.as_ref().unwrap().kind else {
+        panic!("expected a Block body");
+    };
+    let HirStmt::Let { init, .. } = stmts.first().expect("expected `val x = Some(5)`") else {
+        panic!("expected the first statement to be a Let");
+    };
+    assert_eq!(init.ty, Ty::Option(Box::new(Ty::Int)),
+        "Some(5) must resolve to Option<Int>, not Ty::Error, got {:?}", init.ty);
+}
+
+#[test]
+fn bare_none_resolves_option_type_from_the_vals_own_declared_annotation() {
+    let m = lower("module A\nfn f(): Unit = { val x: Option<Int> = None }");
+    let f = m.items.iter().find_map(|it| match it {
+        HirItem::Fn(f) if f.name == "f" => Some(f),
+        _ => None,
+    }).expect("expected fn `f`");
+    let HirExprKind::Block { stmts, .. } = &f.body.as_ref().unwrap().kind else {
+        panic!("expected a Block body");
+    };
+    let HirStmt::Let { init, .. } = stmts.first().expect("expected `val x: Option<Int> = None`") else {
+        panic!("expected the first statement to be a Let");
+    };
+    assert_eq!(init.ty, Ty::Option(Box::new(Ty::Int)),
+        "None must resolve to the val's own declared Option<Int>, not Ty::Error, got {:?}", init.ty);
+}
+
+#[test]
+fn bare_none_with_no_annotation_stays_ty_error_not_a_new_hard_error() {
+    // Conservative choice: with nothing at all pinning the payload type
+    // down, `None` silently stays `Ty::Error` (the pre-fix behavior),
+    // rather than a new hard-error path that could break code that
+    // happens to work today without ever needing the real type — unlike
+    // an unresolved generic call's return (which *always* needs
+    // resolving), an unannotated `None` might genuinely never need it.
+    let m = try_lower("module A\nfn f(): Unit = { val x = None }");
+    assert!(m.is_ok(), "an unannotated bare `None` must not become a new hard lowering error");
+    let f = m.unwrap().items.into_iter().find_map(|it| match it {
+        HirItem::Fn(f) if f.name == "f" => Some(f),
+        _ => None,
+    }).expect("expected fn `f`");
+    let HirExprKind::Block { stmts, .. } = &f.body.as_ref().unwrap().kind else {
+        panic!("expected a Block body");
+    };
+    let HirStmt::Let { init, .. } = stmts.first().expect("expected `val x = None`") else {
+        panic!("expected the first statement to be a Let");
+    };
+    assert_eq!(init.ty, Ty::Error);
+}
+
+#[test]
+fn some_via_a_function_argument_still_resolves_via_the_callees_declared_param_type() {
+    // Regression guard for the *other* call site of
+    // `resolve_bare_generic_return` (function-call-argument backfill,
+    // used independently of the `val`-annotation path) — must still work
+    // for both `None` and `Some(x)` passed directly as arguments.
+    let m = lower("module A\nfn ageOf(t: Timestamp?): Duration = t.age\nfn f(): Duration = ageOf(None)");
+    let f = m.items.iter().find_map(|it| match it {
+        HirItem::Fn(f) if f.name == "f" => Some(f),
+        _ => None,
+    }).expect("expected fn `f`");
+    let HirExprKind::Call { args, .. } = &f.body.as_ref().unwrap().kind else {
+        panic!("expected fn f's body to be a Call");
+    };
+    assert_eq!(args[0].ty, Ty::Option(Box::new(Ty::Named { name: "Timestamp".into(), args: vec![] })),
+        "None passed as ageOf's argument must resolve via the callee's declared param type");
+}

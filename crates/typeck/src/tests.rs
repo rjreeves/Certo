@@ -2321,13 +2321,12 @@ fn negating_each_fixed_width_numeric_type_typechecks() {
 }
 
 #[test]
-fn negating_a_decimal_still_cleanly_rejected() {
-    // Decimal's C representation is a struct — neither unary negation nor
-    // binary +/- have any codegen support at all (BACKLOG item 249), so
-    // this must stay a clean typeck rejection, not silently pass through
-    // to a confusing raw C compile error.
-    let errs = check_err("module A\nfn f(): Unit = { val d: Decimal = d\"1.5\"\n val n = -d }");
-    assert!(!errs.is_empty(), "negating a Decimal should still be rejected at typeck");
+fn negating_a_decimal_now_typechecks() {
+    // Originally a clean rejection (BACKLOG item 248's own scope, when
+    // Decimal negation had no codegen support at all) — item 249 gave
+    // `UnOp::Neg` on Decimal a real codegen path (`certo_decimal_negate`),
+    // so this now correctly typechecks instead.
+    check("module A\nfn f(): Unit = { val d: Decimal = d\"1.5\"\n val n = -d }").unwrap();
 }
 
 #[test]
