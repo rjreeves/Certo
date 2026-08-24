@@ -337,6 +337,9 @@ pub enum BinOp {
     Add, Sub, Mul, Div, Rem, Pow,
     // Comparison
     Eq, NotEq, Lt, LtEq, Gt, GtEq,
+    // Collection membership (BACKLOG item 245) — `EXPR in LIST-EXPR`.
+    // `not in` desugars to `UnOp::Not` wrapping this, not a separate variant.
+    In,
     // Logical
     And, Or,
     // Range

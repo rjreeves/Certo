@@ -2303,3 +2303,66 @@ fn non_literal_expression_does_not_get_fixed_width_inference() {
     assert!(!errs.is_empty(), "a non-literal Int value must not silently coerce to Int8");
 }
 
+// BACKLOG item 248 — `UnOp::Neg` previously unified its operand against
+// Ty::Int unconditionally, so negating any other numeric type (most
+// surprisingly plain Float) never typechecked at all.
+#[test]
+fn negating_a_float_typechecks() {
+    check("module A\nfn f(): Unit = { val y: Float = -3.5 }").unwrap();
+    check("module A\nfn f(): Unit = { val z = -3.5 }").unwrap();
+}
+
+#[test]
+fn negating_each_fixed_width_numeric_type_typechecks() {
+    check("module A\nfn f(a: Int8): Unit = { val n: Int8 = -a }").unwrap();
+    check("module A\nfn f(a: Int16): Unit = { val n: Int16 = -a }").unwrap();
+    check("module A\nfn f(a: Int32): Unit = { val n: Int32 = -a }").unwrap();
+    check("module A\nfn f(a: Float32): Unit = { val n: Float32 = -a }").unwrap();
+}
+
+#[test]
+fn negating_a_decimal_still_cleanly_rejected() {
+    // Decimal's C representation is a struct — neither unary negation nor
+    // binary +/- have any codegen support at all (BACKLOG item 249), so
+    // this must stay a clean typeck rejection, not silently pass through
+    // to a confusing raw C compile error.
+    let errs = check_err("module A\nfn f(): Unit = { val d: Decimal = d\"1.5\"\n val n = -d }");
+    assert!(!errs.is_empty(), "negating a Decimal should still be rejected at typeck");
+}
+
+#[test]
+fn negating_a_text_still_cleanly_rejected() {
+    let errs = check_err("module A\nfn f(): Unit = { val n = -\"hello\" }");
+    assert!(!errs.is_empty(), "negating a Text should still be rejected");
+}
+
+#[test]
+fn negating_an_unannotated_literal_still_defaults_to_int() {
+    // Preserves the pre-existing default behaviour for the common case —
+    // an unannotated negative literal with nothing else pinning its type.
+    check("module A\nfn f(): Int = -5").unwrap();
+}
+
+// BACKLOG item 245 — `EXPR in LIST-EXPR` / `EXPR not in LIST-EXPR`.
+#[test]
+fn membership_in_a_matching_element_type_typechecks_as_bool() {
+    check("module A\nfn f(): Bool = 2 in [1, 2, 3]").unwrap();
+}
+
+#[test]
+fn membership_not_in_also_typechecks_as_bool() {
+    check("module A\nfn f(): Bool = 2 not in [1, 2, 3]").unwrap();
+}
+
+#[test]
+fn membership_element_type_mismatch_is_rejected() {
+    let errs = check_err("module A\nfn f(): Unit = { val x = \"hello\"\n val y = x in [1, 2, 3] }");
+    assert!(!errs.is_empty(), "a Text left side against a List<Int> right side should be rejected");
+}
+
+#[test]
+fn membership_right_side_must_be_a_list() {
+    let errs = check_err("module A\nfn f(): Unit = { val y = 5 in 5 }");
+    assert!(!errs.is_empty(), "the right side of `in` must be a list");
+}
+

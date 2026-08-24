@@ -3,7 +3,7 @@ use certo_ast::decl::{Decl, TypeBody, StateMachineDecl};
 use certo_ast::module::Module;
 use certo_hir::{HirFn, HirItem, lower_module};
 use certo_mir::lower_fn;
-use crate::emit_mir::{emit_fn_with_prefix, c_fn_name, collect_spawn_sites, emit_spawn_support, LineMap};
+use crate::emit_mir::{emit_fn_with_prefix, c_fn_name, collect_spawn_sites, emit_spawn_support, set_extern_names, LineMap};
 use crate::ty_to_c::{ty_to_c, ret_ty_to_c, c_ident};
 
 /// Options controlling C output.
@@ -28,6 +28,13 @@ pub fn emit_module(module: &Module, opts: &CodegenOptions) -> String {
     let mut out = String::new();
     let line_map: Option<LineMap> = opts.line_directives.as_ref()
         .map(|(filename, source)| LineMap::new(filename, source));
+
+    // BACKLOG item 242 — must run before any codegen call below, since
+    // `c_fn_name` consults this registry on every call.
+    set_extern_names(module.decls.iter().filter_map(|sdecl| match &sdecl.node {
+        Decl::Fn(f) if f.is_extern => Some(f.name.node.clone()),
+        _ => None,
+    }).collect());
 
     // All-nullary enums are represented as plain int enums (not structs). The
     // function emitters need to know which, so `match`'s `.tag` read on such a

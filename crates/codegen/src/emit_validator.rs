@@ -234,7 +234,20 @@ pub fn emit_validator(v: &ValidatorDecl, constraints: &HashMap<String, String>) 
                 certo_ast::decl::TriggerCondOp::Eq    => "!=",
                 certo_ast::decl::TriggerCondOp::NotEq => "=",
             };
-            format!("    IF NEW.{field} {op} '{value}' THEN RETURN NEW; END IF;\n")
+            // BACKLOG item 244 — a bare enum-variant literal (`Submitted`,
+            // a single-segment `Expr::Path`) is a real SQL value and must
+            // stay quoted; anything else (`OLD.status`, parsed by
+            // `parse_trigger_value` as `Expr::Field { Path(["OLD"]), .. }`)
+            // is a real PL/pgSQL column reference and must NOT be quoted —
+            // quoting it compared `NEW.status` against the literal 9-byte
+            // string `'OLD.status'` instead of the actual old row value,
+            // so the gate almost never matched. `fmt_expr`'s own output
+            // for `OLD.field` (`"OLD.field"`) is already valid PL/pgSQL
+            // syntax verbatim — no translation needed, just don't quote it.
+            let is_bare_literal = matches!(&cond.value.node,
+                certo_ast::expr::Expr::Path { path, .. } if path.segments.len() == 1);
+            let rendered = if is_bare_literal { format!("'{value}'") } else { value };
+            format!("    IF NEW.{field} {op} {rendered} THEN RETURN NEW; END IF;\n")
         } else {
             String::new()
         };

@@ -91,6 +91,30 @@ fn parse_not(cur: &mut Cursor<'_>) -> Result<S<Expr>, ParseError> {
 fn parse_comparison(cur: &mut Cursor<'_>) -> Result<S<Expr>, ParseError> {
     let mut left = parse_range(cur)?;
     loop {
+        // `EXPR in LIST-EXPR` / `EXPR not in LIST-EXPR` — BACKLOG item 245.
+        // Two-token lookahead for `not`+`in`, matching the lexer's own
+        // long-anticipated "'not in' is two tokens — parser handles the
+        // operator pairing" (`crates/lexer/src/lib.rs`'s
+        // `not_in_two_token_sequence` test). `not in` desugars to `UnOp::Not`
+        // wrapping the same `BinOp::In` node, reusing that operator's
+        // already-correct typeck/HIR/codegen handling rather than a second,
+        // parallel `NotIn` variant.
+        if cur.peek() == Some(&Token::In) {
+            cur.bump();
+            let right = parse_range(cur)?;
+            let span = left.span.to(right.span);
+            left = S::new(Expr::BinOp { op: BinOp::In, left: Box::new(left), right: Box::new(right), span }, span);
+            continue;
+        }
+        if cur.peek() == Some(&Token::Not) && cur.peek2() == Some(&Token::In) {
+            cur.bump(); // `not`
+            cur.bump(); // `in`
+            let right = parse_range(cur)?;
+            let span = left.span.to(right.span);
+            let in_expr = S::new(Expr::BinOp { op: BinOp::In, left: Box::new(left), right: Box::new(right), span }, span);
+            left = S::new(Expr::UnOp { op: UnOp::Not, expr: Box::new(in_expr), span }, span);
+            continue;
+        }
         let op = match cur.peek() {
             Some(Token::EqEq)  => BinOp::Eq,
             Some(Token::NotEq) => BinOp::NotEq,

@@ -140,27 +140,29 @@ static CertoList* certo_regex_captures(certo_text_t pat, certo_text_t str) {
     return list;
 }
 
+/* Replaces only the *first* match (BACKLOG item 240) — matches its own
+   spec table row ("Replace first match with replacement") and its own
+   name; the old `while (*s)` loop kept re-matching and substituting after
+   every replacement, i.e. it was really a "replace all" under a
+   "replace first" name. A single `_re_find` plus one prefix/replacement/
+   suffix copy is all "first match only" needs — no loop at all. */
 static certo_text_t certo_regex_replace(certo_text_t pat, certo_text_t str, certo_text_t repl) {
-    size_t cap = strlen(str)*2 + 64; char *out = (char*)malloc(cap); size_t j = 0;
-    const char *s = str;
-    while (*s) {
-        certo_re_cap caps[CERTO_RE_NCAP] = {0};
-        const char *ms, *me;
-        if (_re_find(pat, s, caps, CERTO_RE_NCAP, &ms, &me)) {
-            /* copy prefix */
-            size_t pre = ms - s;
-            if (j + pre + strlen(repl) + (strlen(s) - (me-s)) + 2 > cap) {
-                cap *= 2; out = (char*)realloc(out, cap);
-            }
-            memcpy(out+j, s, pre); j += pre;
-            size_t rl = strlen(repl); memcpy(out+j, repl, rl); j += rl;
-            s = me;
-        } else {
-            if (j + 1 >= cap) { cap *= 2; out = (char*)realloc(out, cap); }
-            out[j++] = *s++;
-        }
+    certo_re_cap caps[CERTO_RE_NCAP] = {0};
+    const char *ms, *me;
+    if (!_re_find(pat, str, caps, CERTO_RE_NCAP, &ms, &me)) {
+        char *out = (char*)malloc(strlen(str)+1);
+        strcpy(out, str);
+        return out;
     }
-    out[j] = 0; return out;
+    size_t pre = ms - str;
+    size_t rl = strlen(repl);
+    size_t suf = strlen(me);
+    char *out = (char*)malloc(pre + rl + suf + 1);
+    memcpy(out, str, pre);
+    memcpy(out+pre, repl, rl);
+    memcpy(out+pre+rl, me, suf);
+    out[pre+rl+suf] = 0;
+    return out;
 }
 
 static CertoList* certo_regex_split(certo_text_t pat, certo_text_t str) {
