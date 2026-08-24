@@ -983,6 +983,46 @@ fn decimal_equality_uses_certo_decimal_eq_not_bare_c_equals() {
     assert_contains(&c, "certo_decimal_eq(");
 }
 
+// BACKLOG item 249 — `Decimal` arithmetic/ordering had *zero* codegen
+// routing at all (unlike `==`/`!=` just above), despite the runtime
+// functions themselves (`certo_decimal_add`/`sub`/`mul`/`div`/`lt`/`lte`/
+// `gt`/`gte`) already existing, fully implemented, in
+// `crates/stdlib/src/money.rs` — a bare C `+`/`-`/`*`/`/`/`<`/etc. on a
+// struct doesn't compile.
+#[test]
+fn decimal_arithmetic_routes_to_the_already_existing_runtime_functions() {
+    let cases = [
+        ("fn f(a: Decimal(19,4), b: Decimal(19,4)): Decimal(19,4) = a + b", "certo_decimal_add("),
+        ("fn f(a: Decimal(19,4), b: Decimal(19,4)): Decimal(19,4) = a - b", "certo_decimal_sub("),
+        ("fn f(a: Decimal(19,4), b: Decimal(19,4)): Decimal(19,4) = a * b", "certo_decimal_mul("),
+        ("fn f(a: Decimal(19,4), b: Decimal(19,4)): Decimal(19,4) = a / b", "certo_decimal_div("),
+        ("fn f(a: Decimal(19,4), b: Decimal(19,4)): Bool = a < b",  "certo_decimal_lt("),
+        ("fn f(a: Decimal(19,4), b: Decimal(19,4)): Bool = a <= b", "certo_decimal_lte("),
+        ("fn f(a: Decimal(19,4), b: Decimal(19,4)): Bool = a > b",  "certo_decimal_gt("),
+        ("fn f(a: Decimal(19,4), b: Decimal(19,4)): Bool = a >= b", "certo_decimal_gte("),
+    ];
+    for (src, expected_call) in cases {
+        let c = codegen(&format!("module A\n{src}"));
+        assert_contains(&c, expected_call);
+    }
+}
+
+#[test]
+fn decimal_negation_routes_to_certo_decimal_negate() {
+    let c = codegen("module A\nfn f(a: Decimal(19,4)): Decimal(19,4) = -a");
+    assert_contains(&c, "certo_decimal_negate(");
+}
+
+#[test]
+fn int_arithmetic_is_unaffected_by_the_decimal_routing() {
+    // Regression guard — the Decimal check in `emit_binop` must not
+    // accidentally divert ordinary Int arithmetic to a nonexistent
+    // certo_decimal_* call.
+    let c = codegen("module A\nfn f(a: Int, b: Int): Int = a + b");
+    assert_contains(&c, "(_l1 + _l2)");
+    assert_not_contains(&c, "certo_decimal_add");
+}
+
 #[test]
 fn uuid_equality_uses_certo_uuid_eq_not_bare_c_equals() {
     let c = codegen("module A\nfn eq(a: UUID, b: UUID): Bool = a == b");

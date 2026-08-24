@@ -982,17 +982,18 @@ fn is_displayable(ty: &Ty) -> bool {
 /// `crates/codegen/src/emit_mir.rs`). Must stay in sync with
 /// `crates/mir/src/lower.rs`'s per-call-site comparator/adder synthesis,
 /// which trusts this check has already ruled out everything else.
-/// Every numeric type whose C representation is a primitive scalar (so a
-/// raw C unary `-` on it just works) — used by `UnOp::Neg`'s inference
-/// (BACKLOG item 248) to accept negation of any of them, not just `Int`.
-/// Deliberately excludes `Decimal`: its C representation is a *struct*
-/// (`certo_decimal_t`), and neither unary negation nor even binary `+`/`-`
-/// have any codegen support for it at all (confirmed separately — see
-/// BACKLOG item 249) — accepting it here would trade a clean typeck
-/// rejection for a confusing raw C compile error instead.
+/// Every numeric type — used by `UnOp::Neg`'s inference (BACKLOG item 248)
+/// to accept negation of any of them, not just `Int`. `Decimal`'s C
+/// representation is a *struct* (`certo_decimal_t`), not a primitive
+/// scalar a raw C unary `-` works on directly — originally excluded here
+/// for exactly that reason (a struct-typed unary minus doesn't compile),
+/// until item 249 routed `UnOp::Neg` on a `Decimal` operand to the
+/// already-existing `certo_decimal_negate` runtime function instead
+/// (`crates/codegen/src/emit_mir.rs`'s `Rvalue::UnOp` codegen) — now
+/// included too.
 fn is_numeric_ty(ty: &Ty) -> bool {
     matches!(ty,
-        Ty::Int | Ty::Int8 | Ty::Int16 | Ty::Int32 | Ty::UInt | Ty::Float | Ty::Float32)
+        Ty::Int | Ty::Int8 | Ty::Int16 | Ty::Int32 | Ty::UInt | Ty::Float | Ty::Float32 | Ty::Decimal(_))
 }
 
 fn is_supported_key_type(ty: &Ty) -> bool {

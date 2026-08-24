@@ -384,6 +384,15 @@ fn generic_container_ret(full: Option<&str>, args: &[HirExpr]) -> Option<Ty> {
         // `flatMap`'s signature guarantees the error type never changes).
         Some("Ok")  => args.first().map(|a| Ty::Result(Box::new(a.ty.clone()), Box::new(Ty::Error))),
         Some("Err") => args.first().map(|a| Ty::Result(Box::new(Ty::Error), Box::new(a.ty.clone()))),
+        // `Some(x)` (BACKLOG item 250) — the identical gap as `Ok`/`Err`
+        // just above, for `Option` instead of `Result`: recovers `Ty::Option`
+        // from the argument's own already-known type. Went unnoticed
+        // longer than `Ok`/`Err` since a bare `val x = Some(5)` with no
+        // further consumption needing the real type limps along fine on
+        // `Ty::Error` alone — only surfaced chasing item 246's `.age` fix,
+        // where `val t: Timestamp? = Some(Timestamp.now())` stayed
+        // `Ty::Error` even after that fix.
+        Some("Some") => args.first().map(|a| Ty::Option(Box::new(a.ty.clone()))),
         // `flatMap` and its `Result.`-qualified alias (BACKLOG item 199,
         // extended by item 227 above) — registered as `Result<T,E> -> (T ->
         // Result<U,E>) -> Result<U,E>`: the error type `E` is always
@@ -2588,6 +2597,23 @@ fn record_field_declared_ty(named_ty: &Ty, field: &str, cx: &Cx) -> Ty {
 /// would otherwise silently mis-cast a raw `void*` as a concrete C type —
 /// a hard compile error instead of shipping that.
 fn resolve_bare_generic_return(expr: &mut HirExpr, expected: Option<&Ty>, cx: &mut Cx) {
+    // A bare `None` reference (BACKLOG item 250) — unlike `Some(x)` (fixed
+    // directly in `generic_container_ret` above, since its own argument
+    // already carries a real type to derive `Option<T>` from), `None` has
+    // no argument at all to recover anything from — it can only ever be
+    // resolved from *external* context, exactly like a generic call's
+    // unresolved return just below. Left as `Ty::Error` (not a hard error)
+    // when no `expected` is available here, matching the pre-fix silent
+    // behavior for callers who never needed the real type — unlike the
+    // Call case below, this isn't a *guaranteed*-unresolvable situation
+    // (an unannotated `None` might still be fine downstream), so it
+    // doesn't force the same hard-error treatment.
+    if matches!(&expr.kind, HirExprKind::Global(name) if name == "None") && matches!(expr.ty, Ty::Error) {
+        if let Some(ty @ Ty::Option(_)) = expected {
+            expr.ty = ty.clone();
+        }
+        return;
+    }
     if !matches!(expr.kind, HirExprKind::Call { .. }) || !matches!(expr.ty, Ty::Var(_)) {
         return;
     }
