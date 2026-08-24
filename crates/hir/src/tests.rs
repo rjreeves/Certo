@@ -1785,3 +1785,91 @@ fn some_via_a_function_argument_still_resolves_via_the_callees_declared_param_ty
     assert_eq!(args[0].ty, Ty::Option(Box::new(Ty::Named { name: "Timestamp".into(), args: vec![] })),
         "None passed as ageOf's argument must resolve via the callee's declared param type");
 }
+
+// BACKLOG item 247 — a generic function's return type with a `Ty::Var`
+// *nested inside* a compound type (e.g. `Result<T, E>`) was never resolved
+// at all — `resolve_bare_generic_return` only recognized a *bare*
+// `Ty::Var(_)` as the whole return type (`fn identity<T>(x: T): T`), never
+// one buried inside `Result`/`Option`/etc. Every declared type param
+// collapses to the identical sentinel `Ty::Var(0)` regardless of name, so
+// resolution has to be positional (walking both types in lockstep), not
+// identity-based.
+#[test]
+fn generic_result_return_resolves_both_slots_from_a_val_annotation() {
+    let m = lower("module A\nfn wrapOk<T, E>(v: T): Result<T, E> = Ok(v)\nfn f(): Unit = { val r: Result<Int, Text> = wrapOk(42) }");
+    let f = m.items.iter().find_map(|it| match it {
+        HirItem::Fn(f) if f.name == "f" => Some(f),
+        _ => None,
+    }).expect("expected fn `f`");
+    let HirExprKind::Block { stmts, .. } = &f.body.as_ref().unwrap().kind else {
+        panic!("expected a Block body");
+    };
+    let HirStmt::Let { init, .. } = stmts.first().expect("expected `val r = wrapOk(42)`") else {
+        panic!("expected the first statement to be a Let");
+    };
+    assert_eq!(init.ty, Ty::Result(Box::new(Ty::Int), Box::new(Ty::Text)),
+        "wrapOk(42)'s call type must fully resolve to Result<Int, Text>, not stay generic/Error, got {:?}", init.ty);
+}
+
+#[test]
+fn generic_result_return_merges_only_the_still_unresolved_slot() {
+    // `merge_var_slots` must keep an already-concrete slot from `actual` as
+    // -is, not blindly overwrite the whole type with `expected` — a
+    // function generic in only the error type, with a fixed success type.
+    let m = lower("module A\nfn okOrErr<E>(e: E): Result<Int, E> = Err(e)\nfn f(): Unit = { val r: Result<Int, Text> = okOrErr(\"boom\") }");
+    let f = m.items.iter().find_map(|it| match it {
+        HirItem::Fn(f) if f.name == "f" => Some(f),
+        _ => None,
+    }).expect("expected fn `f`");
+    let HirExprKind::Block { stmts, .. } = &f.body.as_ref().unwrap().kind else {
+        panic!("expected a Block body");
+    };
+    let HirStmt::Let { init, .. } = stmts.first().expect("expected `val r = okOrErr(\"boom\")`") else {
+        panic!("expected the first statement to be a Let");
+    };
+    assert_eq!(init.ty, Ty::Result(Box::new(Ty::Int), Box::new(Ty::Text)));
+}
+
+#[test]
+fn generic_option_return_also_resolves_via_the_same_mechanism() {
+    // The fix generalizes beyond Result — Option<T> (and List<T>/Map<K,V>/
+    // Tuple/user-defined Named<Args> generics) share the identical
+    // nested-Var-slot shape.
+    let m = lower("module A\nfn wrapSome<T>(v: T): Option<T> = Some(v)\nfn f(): Unit = { val o: Option<Int> = wrapSome(7) }");
+    let f = m.items.iter().find_map(|it| match it {
+        HirItem::Fn(f) if f.name == "f" => Some(f),
+        _ => None,
+    }).expect("expected fn `f`");
+    let HirExprKind::Block { stmts, .. } = &f.body.as_ref().unwrap().kind else {
+        panic!("expected a Block body");
+    };
+    let HirStmt::Let { init, .. } = stmts.first().expect("expected `val o = wrapSome(7)`") else {
+        panic!("expected the first statement to be a Let");
+    };
+    assert_eq!(init.ty, Ty::Option(Box::new(Ty::Int)));
+}
+
+#[test]
+fn generic_result_return_still_resolves_via_a_function_argument_too() {
+    // Regression guard for the *other* call site of
+    // `resolve_bare_generic_return` (function-call-argument backfill).
+    let m = lower("module A\nfn wrapOk<T, E>(v: T): Result<T, E> = Ok(v)\n\
+                   fn takesResult(r: Result<Int, Text>): Unit = {}\n\
+                   fn f(): Unit = { takesResult(wrapOk(1)) }");
+    let f = m.items.iter().find_map(|it| match it {
+        HirItem::Fn(f) if f.name == "f" => Some(f),
+        _ => None,
+    }).expect("expected fn `f`");
+    let HirExprKind::Call { args, .. } = &f.body.as_ref().unwrap().kind else {
+        panic!("expected fn f's body to be a Call");
+    };
+    assert_eq!(args[0].ty, Ty::Result(Box::new(Ty::Int), Box::new(Ty::Text)));
+}
+
+#[test]
+fn generic_result_return_with_no_expected_type_is_still_a_hard_error() {
+    // Preserves the pre-existing behavior for the genuinely-unresolvable
+    // case — nothing anywhere provides a concrete type for T/E.
+    let m = try_lower("module A\nfn wrapOk<T, E>(v: T): Result<T, E> = Ok(v)\nfn f(): Unit = { val r = wrapOk(42) }");
+    assert!(m.is_err(), "a generic Result-returning call with no expected type anywhere must still be a hard error");
+}
