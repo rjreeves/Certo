@@ -920,8 +920,43 @@ pub fn infer(expr: &S<Expr>, ctx: &mut Ctx<'_>) -> Ty {
 
 /// Types that can be interpolated into an f-string. Must stay in sync with the
 /// conversions codegen emits in `coerce_to_text` (Int/Float/Bool/Decimal/Text).
+/// Whether a bare literal `expr` can be typed directly as the fixed-width
+/// numeric type `ann_ty` instead of its rigid default (`Ty::Int`/`Ty::Float`)
+/// — BACKLOG item 235's own narrow, annotated-position-only literal
+/// inference. This typechecker has no general expected-type-directed
+/// inference (`infer` is pure bottom-up with no `check`-style counterpart —
+/// unlike `Decimal`/`BoundedText`, whose apparent "bidirectional" behaviour
+/// is purely a *post-inference* unify-time flexibility between two forms of
+/// the *same* type, never a literal being retyped by context); confirmed
+/// with the user this narrow, syntax-level special case at each
+/// annotated-position call site (`val`/`var`/fn-return-position) is the
+/// right scope rather than a general bidirectional-checking engine. An int
+/// literal matches `Int8`/`Int16`/`Int32`/`UInt`; a float literal matches
+/// `Float32` only — no cross-matching (a float literal against an `Int8`
+/// annotation is a real type error, not silently narrowed).
+pub(crate) fn literal_matches_fixed_width(expr: &Expr, ann_ty: &Ty) -> bool {
+    // `-5000: Int32` parses as `UnOp::Neg` wrapping a bare `Lit::Int` — the
+    // signed fixed-width types must see through it (`UInt` must not; it has
+    // no negative values for a negated literal to widen into).
+    let (inner, is_negated) = match expr {
+        Expr::UnOp { op: UnOp::Neg, expr, .. } => (&expr.node, true),
+        other => (other, false),
+    };
+    match (inner, ann_ty) {
+        (Expr::Lit { value: Lit::Int(_), .. }, Ty::Int8 | Ty::Int16 | Ty::Int32) => true,
+        (Expr::Lit { value: Lit::Int(_), .. }, Ty::UInt) => !is_negated,
+        (Expr::Lit { value: Lit::Float(_), .. }, Ty::Float32) => true,
+        _ => false,
+    }
+}
+
 fn is_displayable(ty: &Ty) -> bool {
-    matches!(ty, Ty::Int | Ty::Float | Ty::Bool | Ty::Decimal(_) | Ty::Text)
+    matches!(ty, Ty::Int | Ty::Float | Ty::Bool | Ty::Decimal(_) | Ty::Text
+        // Fixed-width numeric types (BACKLOG item 235) — each has its own
+        // `certo_<ty>_to_text` runtime conversion (`crates/stdlib/src/
+        // core.rs`), reached via `coerce_to_text`'s matching arms
+        // (`crates/codegen/src/emit_mir.rs`).
+        | Ty::Int8 | Ty::Int16 | Ty::Int32 | Ty::UInt | Ty::Float32)
 }
 
 /// Types `List.sortBy`/`minBy`/`maxBy`/`sumBy`'s key/numeric projection can
@@ -1161,11 +1196,18 @@ pub fn infer_stmt(stmt: &Stmt, ctx: &mut Ctx<'_>) -> Ty {
     match stmt {
         Stmt::Val { pattern, ty, value, span } => {
             let val_ty = infer(value, ctx);
-            if let Some(ann) = ty {
+            let val_ty = if let Some(ann) = ty {
                 let ann_ty = type_expr_to_ty(&ann.node, ctx);
-                // Point at the value expression, not the whole statement
-                ctx.unify(val_ty.clone(), ann_ty, value.span);
-            }
+                if literal_matches_fixed_width(&value.node, &ann_ty) {
+                    ann_ty
+                } else {
+                    // Point at the value expression, not the whole statement
+                    ctx.unify(val_ty.clone(), ann_ty, value.span);
+                    val_ty
+                }
+            } else {
+                val_ty
+            };
             let generalised = ctx.env.generalise(val_ty, ctx.uf);
             check_pattern(&pattern.node, generalised, ctx);
             let _ = span;
@@ -1173,10 +1215,17 @@ pub fn infer_stmt(stmt: &Stmt, ctx: &mut Ctx<'_>) -> Ty {
         }
         Stmt::Var { name, ty, value, span } => {
             let val_ty = infer(value, ctx);
-            if let Some(ann) = ty {
+            let val_ty = if let Some(ann) = ty {
                 let ann_ty = type_expr_to_ty(&ann.node, ctx);
-                ctx.unify(val_ty.clone(), ann_ty, value.span);
-            }
+                if literal_matches_fixed_width(&value.node, &ann_ty) {
+                    ann_ty
+                } else {
+                    ctx.unify(val_ty.clone(), ann_ty, value.span);
+                    val_ty
+                }
+            } else {
+                val_ty
+            };
             ctx.env.define(name.node.clone(), val_ty);
             let _ = span;
             Ty::Unit

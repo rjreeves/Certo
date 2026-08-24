@@ -95,7 +95,14 @@ impl Builder {
             next_tmp:  0,
             lifted_fns: Vec::new(),
             lambda_count: 0,
-            fn_name: fn_name.to_string(),
+            // Synthesized helper names below (`__lam_{fn_name}_{idx}` etc.)
+            // start with `__`, so `c_fn_name` (codegen/emit_mir.rs) emits
+            // them verbatim with no sanitization — BACKLOG item 238. A
+            // qualified HIR name like "Cart.total" (impl methods/computed
+            // properties) must have its dot replaced here, once, at the
+            // single point every synthesized name is built from, rather
+            // than at each of the dozen call sites that interpolate it.
+            fn_name: fn_name.replace('.', "_"),
             defer_stack: Vec::new(),
             record_field_types,
             variant_field_types,
