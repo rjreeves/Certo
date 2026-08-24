@@ -660,6 +660,14 @@ fn coerce_to_text(op: &Operand, expr: String, locals: &[MirLocalDecl]) -> String
         Some(Ty::Float)      => format!("certo_float_to_text({})", expr),
         Some(Ty::Bool)       => format!("certo_bool_to_text({})", expr),
         Some(Ty::Decimal(_)) => format!("certo_decimal_to_text({})", expr),
+        // Fixed-width numeric types (BACKLOG item 235) — distinct C types
+        // from Int/Float, each with its own `certo_<ty>_to_text` runtime
+        // conversion (`crates/stdlib/src/core.rs`), mirroring the arms above.
+        Some(Ty::Int8)       => format!("certo_int8_to_text({})", expr),
+        Some(Ty::Int16)      => format!("certo_int16_to_text({})", expr),
+        Some(Ty::Int32)      => format!("certo_int32_to_text({})", expr),
+        Some(Ty::UInt)       => format!("certo_uint_to_text({})", expr),
+        Some(Ty::Float32)    => format!("certo_float32_to_text({})", expr),
         _ => expr,
     }
 }

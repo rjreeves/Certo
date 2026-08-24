@@ -378,3 +378,45 @@ fn defer_inside_an_early_exit_branch_fires_before_the_error_propagates() {
     assert!(matches!(mf.blocks[next_id].terminator, Some(Terminator::Return(_))),
         "the block right after the deferred cleanup() call must return — got: {:#?}", mf.blocks[next_id]);
 }
+
+// BACKLOG item 238 — an `impl` method or `computed` record property gets a
+// dot-qualified HIR name (`"Cart.total"`, see hir/src/lower.rs's own
+// `qname = format!("{}.{}", type_name, m.name.node)`). When such a method's
+// body passes an inline lambda to a stdlib higher-order function (`sumBy`,
+// `map`, etc.), MIR lifts that lambda to a synthesized top-level helper
+// whose name is built from the enclosing function's own name (`b.fn_name`).
+// Every one of those synthesized names is prefixed with `__`, which makes
+// codegen's `c_fn_name` (emit_mir.rs) skip its own sanitization entirely
+// (`if name.starts_with("__") { return name.to_string(); }`) — so a raw dot
+// in `b.fn_name` would flow straight through into an illegal C identifier
+// (`__lam_Cart.total_0`). The fix sanitizes once, at `Builder::new` itself.
+#[test]
+fn impl_method_qualified_name_dot_is_sanitized_in_lifted_lambda_helper_name() {
+    let (_mf, lifted) = mir_fn_and_lifted_named(
+        "module A\n\
+         type Item = { price: Int, qty: Int }\n\
+         type Cart = { items: List<Item> }\n\
+         impl Cart {\n  fn total(self): Int = self.items.sumBy(fn(i: Item): Int = i.price * i.qty)\n}\n\
+         fn f(c: Cart): Int = c.total()",
+        "Cart.total");
+    assert!(!lifted.is_empty(), "expected sumBy's lambda to be lifted to a top-level helper");
+    for lf in &lifted {
+        assert!(!lf.name.contains('.'),
+            "lifted helper name must not contain a raw '.', it becomes an illegal C identifier: {:?}", lf.name);
+    }
+}
+
+#[test]
+fn computed_property_qualified_name_dot_is_sanitized_in_lifted_lambda_helper_name() {
+    let (_mf, lifted) = mir_fn_and_lifted_named(
+        "module A\n\
+         type Item = { price: Int, qty: Int }\n\
+         type Cart = { items: List<Item>, computed total: Int = items.sumBy(fn(i: Item): Int = i.price * i.qty) }\n\
+         fn f(c: Cart): Int = c.total",
+        "Cart.total");
+    assert!(!lifted.is_empty(), "expected sumBy's lambda to be lifted to a top-level helper");
+    for lf in &lifted {
+        assert!(!lf.name.contains('.'),
+            "lifted helper name must not contain a raw '.', it becomes an illegal C identifier: {:?}", lf.name);
+    }
+}

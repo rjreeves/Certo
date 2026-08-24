@@ -106,6 +106,47 @@ float certo_float_to_float32(double f) {
     return (float)f;
 }
 
+/* ---- Int8/Int16/Int32/UInt (BACKLOG item 235) ----
+   Each is a genuinely distinct C type from the default int64_t Int (see
+   crates/typeck/src/unify.rs), so — mirroring Float32 just above — each
+   needs its own construction/conversion path rather than reusing Int's. */
+
+certo_text_t certo_int8_to_text(int8_t n) {
+    char* buf = (char*)malloc(8);
+    if (!buf) certo_panic("out of memory");
+    snprintf(buf, 8, "%" PRId8, n);
+    return buf;
+}
+int64_t certo_int8_to_int(int8_t n) { return (int64_t)n; }
+int8_t certo_int_to_int8(int64_t n) { return (int8_t)n; }
+
+certo_text_t certo_int16_to_text(int16_t n) {
+    char* buf = (char*)malloc(8);
+    if (!buf) certo_panic("out of memory");
+    snprintf(buf, 8, "%" PRId16, n);
+    return buf;
+}
+int64_t certo_int16_to_int(int16_t n) { return (int64_t)n; }
+int16_t certo_int_to_int16(int64_t n) { return (int16_t)n; }
+
+certo_text_t certo_int32_to_text(int32_t n) {
+    char* buf = (char*)malloc(16);
+    if (!buf) certo_panic("out of memory");
+    snprintf(buf, 16, "%" PRId32, n);
+    return buf;
+}
+int64_t certo_int32_to_int(int32_t n) { return (int64_t)n; }
+int32_t certo_int_to_int32(int64_t n) { return (int32_t)n; }
+
+certo_text_t certo_uint_to_text(uint64_t n) {
+    char* buf = (char*)malloc(24);
+    if (!buf) certo_panic("out of memory");
+    snprintf(buf, 24, "%" PRIu64, n);
+    return buf;
+}
+int64_t certo_uint_to_int(uint64_t n) { return (int64_t)n; }
+uint64_t certo_int_to_uint(int64_t n) { return (uint64_t)n; }
+
 int64_t certo_text_to_int_unsafe(certo_text_t s) {
     if (!s) certo_panic("text_to_int: null string");
     return (int64_t)strtoll(s, NULL, 10);

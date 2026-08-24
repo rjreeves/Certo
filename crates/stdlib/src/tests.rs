@@ -223,6 +223,37 @@ fn float32_conversion_functions_registered() {
     }
 }
 
+// BACKLOG item 235 — Int8/Int16/Int32/UInt were fully declared in the type
+// system and codegen-ready but had no construction/conversion functions at
+// all, unlike Float32 (whose own set the test above already covers).
+#[test]
+fn fixed_width_int_conversion_functions_registered() {
+    let env = seeded_env();
+    let cases: &[(&str, Ty, Ty)] = &[
+        ("int8ToText",  Ty::Int8,  Ty::Text),
+        ("int8ToInt",   Ty::Int8,  Ty::Int),
+        ("intToInt8",   Ty::Int,   Ty::Int8),
+        ("int16ToText", Ty::Int16, Ty::Text),
+        ("int16ToInt",  Ty::Int16, Ty::Int),
+        ("intToInt16",  Ty::Int,   Ty::Int16),
+        ("int32ToText", Ty::Int32, Ty::Text),
+        ("int32ToInt",  Ty::Int32, Ty::Int),
+        ("intToInt32",  Ty::Int,   Ty::Int32),
+        ("uintToText",  Ty::UInt,  Ty::Text),
+        ("uintToInt",   Ty::UInt,  Ty::Int),
+        ("intToUint",   Ty::Int,   Ty::UInt),
+    ];
+    for (name, param, ret) in cases {
+        match env.lookup(name).unwrap_or_else(|| panic!("missing: {}", name)) {
+            Ty::Fn { params, ret: actual_ret } => {
+                assert_eq!(params, &[param.clone()], "{} param mismatch", name);
+                assert_eq!(actual_ret.as_ref(), ret, "{} return mismatch", name);
+            }
+            other => panic!("{} expected Fn, got {:?}", name, other),
+        }
+    }
+}
+
 #[test]
 fn text_char_at_returns_option_char() {
     let env = seeded_env();

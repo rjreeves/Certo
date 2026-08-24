@@ -837,7 +837,17 @@ pub fn lower_module(module: &Module) -> Result<HirModule, Vec<LowerError>> {
                     HirParam { local, name: p.name.node.clone(), ty, span: p.span }
                 }).collect();
 
-                let body = f.body.as_ref().map(|b| lower_expr(b, &mut cx));
+                let mut body = f.body.as_ref().map(|b| lower_expr(b, &mut cx));
+                let ret_ty = f.ret_ty.as_ref().map(|t| ast_ty_to_ty_with_params(&t.node, &tp_names)).unwrap_or(Ty::Error);
+                // BACKLOG item 235 — `fn f(): Int8 = 100`'s bare-literal
+                // body: MIR derives a function's *real* C return type from
+                // the body's own computed operand type (`infer_operand_ty`,
+                // `crates/mir/src/lower.rs`), not `HirFn.ret_ty` below, so
+                // the literal's own `Ty::Int` default must be corrected here
+                // or the C function is still emitted returning `int64_t`.
+                if let (Some(b), Some(f_body)) = (&mut body, &f.body) {
+                    if literal_matches_fixed_width(&f_body.node, &ret_ty) { b.ty = ret_ty.clone(); }
+                }
 
                 cx.pop_scope();
 
@@ -845,7 +855,7 @@ pub fn lower_module(module: &Module) -> Result<HirModule, Vec<LowerError>> {
                     id,
                     name:   f.name.node.clone(),
                     params,
-                    ret_ty: f.ret_ty.as_ref().map(|t| ast_ty_to_ty_with_params(&t.node, &tp_names)).unwrap_or(Ty::Error),
+                    ret_ty,
                     body,
                     span:   f.span,
                 }));
@@ -899,13 +909,19 @@ pub fn lower_module(module: &Module) -> Result<HirModule, Vec<LowerError>> {
                         if !matches!(ty, Ty::Error) { cx.local_types.insert(local, ty.clone()); }
                         HirParam { local, name: p.name.node.clone(), ty, span: p.span }
                     }).collect();
-                    let body = Some(lower_expr(body_ast, &mut cx));
+                    let mut body = Some(lower_expr(body_ast, &mut cx));
+                    let ret_ty = m.ret_ty.as_ref().map(|t| ast_ty_to_ty_with_params(&t.node, &tp_names)).unwrap_or(Ty::Error);
+                    // BACKLOG item 235 — same fixed-width literal-body
+                    // correction as the top-level `Decl::Fn` case above.
+                    if let Some(b) = &mut body {
+                        if literal_matches_fixed_width(&body_ast.node, &ret_ty) { b.ty = ret_ty.clone(); }
+                    }
                     cx.pop_scope();
                     items.push(HirItem::Fn(HirFn {
                         id,
                         name:   qname,
                         params,
-                        ret_ty: m.ret_ty.as_ref().map(|t| ast_ty_to_ty_with_params(&t.node, &tp_names)).unwrap_or(Ty::Error),
+                        ret_ty,
                         body,
                         span:   m.span,
                     }));
@@ -1456,11 +1472,24 @@ fn lower_expr(expr: &S<Expr>, cx: &mut Cx) -> HirExpr {
             // Desugar range ops to stdlib calls; keep primitives as BinOp.
             match op {
                 AstBinOp::RangeInclusive | AstBinOp::RangeExclusive => {
+                    // BACKLOG item 231 — `range`/`rangeInclusive` (both
+                    // registered in `crates/stdlib/src/seed.rs` as
+                    // `(Int, Int) -> List<Int>`, never generic) always
+                    // hardcoded `Ty::Error` here instead of the real,
+                    // always-correct `List<Int>`. This call bypasses the
+                    // general `fn_full_path`/`stdlib_ret_types()` lookup
+                    // chain `Expr::App` uses (it's a separate, direct
+                    // desugar, not a real call expression in the source),
+                    // so nothing else ever recovered the real type either —
+                    // confirmed via a real segfault: `for i in 1..5 {
+                    // f"{i}" }` interpolated the loop variable's raw,
+                    // untyped bits as if already `Text`.
                     let fn_name = if *op == AstBinOp::RangeInclusive { "range_inclusive" } else { "range" };
                     let lhs = lower_expr(left, cx);
                     let rhs = lower_expr(right, cx);
                     let func = HirExpr { kind: HirExprKind::Global(fn_name.into()), ty: Ty::Error, span };
-                    HirExpr { kind: HirExprKind::Call { func: Box::new(func), args: vec![lhs, rhs] }, ty: Ty::Error, span }
+                    let list_int = Ty::List(Box::new(Ty::Int));
+                    HirExpr { kind: HirExprKind::Call { func: Box::new(func), args: vec![lhs, rhs] }, ty: list_int, span }
                 }
                 _ => {
                     let lhs = lower_expr(left, cx);
@@ -1896,15 +1925,31 @@ fn lower_expr(expr: &S<Expr>, cx: &mut Cx) -> HirExpr {
 
         Expr::For { binding, iter, body, .. } => {
             let iter_hir = lower_expr(iter, cx);
+            // BACKLOG item 231 — `binding_ty` was hardcoded `Ty::Error`
+            // *and* the loop variable's own local type was never recorded
+            // in `cx.local_types` before lowering the body — so every
+            // reference to the loop variable *inside* the loop (`Expr::Path`
+            // looks the local up in `cx.local_types`, defaulting to
+            // `Ty::Error` when absent) saw the wrong type regardless of
+            // what `iter`'s own type was. Recover the real element type
+            // from `iter_hir.ty` (already correct once the range-desugar
+            // arm above sets it properly) so both the loop variable's
+            // in-body references and `binding_ty` (MIR's own fallback,
+            // `crates/mir/src/lower.rs`) agree.
+            let elem_ty = match &iter_hir.ty {
+                Ty::List(inner) => (**inner).clone(),
+                _ => Ty::Error,
+            };
             cx.push_scope();
             let local = cx.define_local(&binding.node);
+            if !matches!(elem_ty, Ty::Error) { cx.local_types.insert(local, elem_ty.clone()); }
             let body_hir = lower_expr(body, cx);
             cx.pop_scope();
             HirExpr {
                 kind: HirExprKind::For {
                     binding:      local,
                     binding_name: binding.node.clone(),
-                    binding_ty:   Ty::Error,
+                    binding_ty:   elem_ty,
                     iter:         Box::new(iter_hir),
                     body:         Box::new(body_hir),
                 },
@@ -2078,6 +2123,9 @@ fn lower_block(stmts: &[Stmt], span: Span, cx: &mut Cx) -> HirExpr {
                 // hard error instead — BACKLOG item 135.
                 let declared = val_ty_ann.as_ref().map(|t| ast_ty_to_ty_with_params(&t.node, &[]));
                 resolve_bare_generic_return(&mut init, declared.as_ref(), cx);
+                if let Some(d) = &declared {
+                    if literal_matches_fixed_width(&value.node, d) { init.ty = d.clone(); }
+                }
                 match &pattern.node {
                     Pattern::Ident { name, .. } => {
                         let local = cx.define_local(&name.node);
@@ -2218,8 +2266,15 @@ fn lower_block(stmts: &[Stmt], span: Span, cx: &mut Cx) -> HirExpr {
                     }
                 }
             }
-            Stmt::Var { name, value, .. } => {
-                let init = lower_expr(value, cx);
+            Stmt::Var { name, ty: var_ty_ann, value, .. } => {
+                let mut init = lower_expr(value, cx);
+                // BACKLOG item 235 — mirrors `Stmt::Val`'s own fixed-width
+                // literal override just above (`var`'s declared annotation
+                // was previously discarded entirely here, unlike `Stmt::Val`).
+                if let Some(t) = var_ty_ann {
+                    let declared = ast_ty_to_ty_with_params(&t.node, &[]);
+                    if literal_matches_fixed_width(&value.node, &declared) { init.ty = declared; }
+                }
                 let ty = init.ty.clone();
                 let local = cx.define_local(&name.node);
                 hir_stmts.push(HirStmt::Let { local, name: name.node.clone(), ty, init });
@@ -2470,6 +2525,34 @@ fn resolve_bare_generic_return(expr: &mut HirExpr, expected: Option<&Ty>, cx: &m
 // ------------------------------------------------------------------ //
 // AST type expression → Ty (lightweight conversion for HIR param types)
 // ------------------------------------------------------------------ //
+
+/// Whether a bare literal `expr` can be typed directly as the fixed-width
+/// numeric type `declared` instead of its rigid default (`Ty::Int`/
+/// `Ty::Float`, set unconditionally by `lower_lit`) — BACKLOG item 235's own
+/// HIR-side half of the same narrow, annotated-position-only literal
+/// inference `crates/typeck/src/infer_expr.rs`'s own `literal_matches_fixed_width`
+/// implements (kept as an independent, syntax-level check here rather than
+/// threaded across crates — MIR derives a function's real C return type from
+/// its *body's own computed operand type*, not `HirFn.ret_ty`, so leaving
+/// `lower_lit`'s `Ty::Int`/`Ty::Float` default uncorrected here would still
+/// emit `int64_t`/`double` C code even once typeck itself stopped rejecting
+/// the annotation). An int literal matches `Int8`/`Int16`/`Int32`/`UInt`; a
+/// float literal matches `Float32` only.
+fn literal_matches_fixed_width(expr: &Expr, declared: &Ty) -> bool {
+    // `-5000: Int32` parses as `UnOp::Neg` wrapping a bare `Lit::Int` — the
+    // signed fixed-width types must see through it (`UInt` must not; it has
+    // no negative values for a negated literal to widen into).
+    let (inner, is_negated) = match expr {
+        Expr::UnOp { op: AstUnOp::Neg, expr, .. } => (&expr.node, true),
+        other => (other, false),
+    };
+    match (inner, declared) {
+        (Expr::Lit { value: Lit::Int(_), .. }, Ty::Int8 | Ty::Int16 | Ty::Int32) => true,
+        (Expr::Lit { value: Lit::Int(_), .. }, Ty::UInt) => !is_negated,
+        (Expr::Lit { value: Lit::Float(_), .. }, Ty::Float32) => true,
+        _ => false,
+    }
+}
 
 fn ast_ty_to_ty_with_params(te: &certo_ast::types::TypeExpr, type_params: &[&str]) -> Ty {
     use certo_ast::types::TypeExpr;

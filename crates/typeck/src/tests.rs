@@ -2248,3 +2248,58 @@ fn panic_still_requires_a_text_arg() {
     assert!(!errs.is_empty(), "panic() with no message should still be rejected");
 }
 
+// BACKLOG item 235 — fixed-width numeric literal inference. A bare int/float
+// literal at an *annotated* position (`val`/`var`/fn-return) types directly
+// as the declared fixed-width type instead of the rigid default `Int`/`Float`.
+#[test]
+fn int_literal_types_as_each_fixed_width_int_annotation() {
+    check("module A\nfn f(): Unit = { val a: Int8 = 100 }").unwrap();
+    check("module A\nfn f(): Unit = { val a: Int16 = 100 }").unwrap();
+    check("module A\nfn f(): Unit = { val a: Int32 = 100 }").unwrap();
+    check("module A\nfn f(): Unit = { val a: UInt = 100 }").unwrap();
+}
+
+#[test]
+fn float_literal_types_as_float32_annotation() {
+    check("module A\nfn f(): Unit = { val a: Float32 = 3.5 }").unwrap();
+}
+
+#[test]
+fn negative_int_literal_types_as_signed_fixed_width_annotation() {
+    check("module A\nfn f(): Unit = { val a: Int32 = -5000 }").unwrap();
+}
+
+#[test]
+fn negative_int_literal_against_uint_is_still_rejected() {
+    // Unsigned — a negated literal must not silently widen into it.
+    let errs = check_err("module A\nfn f(): Unit = { val a: UInt = -5 }");
+    assert!(!errs.is_empty(), "-5 should not typecheck as UInt");
+}
+
+#[test]
+fn float_literal_against_int8_is_still_rejected() {
+    // No cross-matching between the int and float literal families.
+    let errs = check_err("module A\nfn f(): Unit = { val a: Int8 = 3.14 }");
+    assert!(!errs.is_empty(), "3.14 should not typecheck as Int8");
+}
+
+#[test]
+fn var_declaration_also_gets_fixed_width_literal_inference() {
+    check("module A\nfn f(): Unit = { var a: Int16 = 200 }").unwrap();
+}
+
+#[test]
+fn fn_return_position_also_gets_fixed_width_literal_inference() {
+    check("module A\nfn f(): Int8 = 42").unwrap();
+    check("module A\nfn g(): Int32 = -5000").unwrap();
+}
+
+#[test]
+fn non_literal_expression_does_not_get_fixed_width_inference() {
+    // The narrow fix is literal-only — an ordinary Int-typed expression
+    // must still be rejected against a fixed-width annotation, not
+    // silently truncated.
+    let errs = check_err("module A\nfn f(): Unit = { val x = 100\n val a: Int8 = x }");
+    assert!(!errs.is_empty(), "a non-literal Int value must not silently coerce to Int8");
+}
+

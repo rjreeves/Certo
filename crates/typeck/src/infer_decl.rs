@@ -7,7 +7,7 @@ use crate::ty::Ty;
 use crate::env::TypeEnv;
 use crate::unify::UnionFind;
 use crate::error::{TypeError, TypeErrorKind};
-use crate::infer_expr::{infer, infer_block, type_expr_to_ty, Ctx};
+use crate::infer_expr::{infer, infer_block, type_expr_to_ty, literal_matches_fixed_width, Ctx};
 
 /// Extract row-polymorphism bounds (`R: { name: Text }`) from a function/method's
 /// type parameters, evaluating each required field's type. `type_param_vars` must
@@ -868,7 +868,9 @@ fn check_decl(decl: &Decl, ctx: &mut Ctx<'_>) {
                 // Unify body type with declared return type (if present)
                 if let Some(ann) = &f.ret_ty {
                     let declared = type_expr_to_ty(&ann.node, ctx);
-                    ctx.unify(body_ty, declared, f.span);
+                    if !literal_matches_fixed_width(&body.node, &declared) {
+                        ctx.unify(body_ty, declared, f.span);
+                    }
                 } else if is_recursive_call(body, &f.name.node) {
                     // Recursive fn without annotation — emit E0203
                     ctx.errors.push(TypeError {
@@ -883,10 +885,17 @@ fn check_decl(decl: &Decl, ctx: &mut Ctx<'_>) {
 
         Decl::Val(v) => {
             let inferred = infer(&v.value, ctx);
-            if let Some(ann) = &v.ty {
+            let inferred = if let Some(ann) = &v.ty {
                 let declared = type_expr_to_ty(&ann.node, ctx);
-                ctx.unify(inferred.clone(), declared, v.span);
-            }
+                if literal_matches_fixed_width(&v.value.node, &declared) {
+                    declared
+                } else {
+                    ctx.unify(inferred.clone(), declared, v.span);
+                    inferred
+                }
+            } else {
+                inferred
+            };
             let generalised = ctx.env.generalise(inferred, ctx.uf);
             use certo_ast::pattern::Pattern;
             if let Pattern::Ident { name, .. } = &v.pattern.node {
@@ -896,10 +905,17 @@ fn check_decl(decl: &Decl, ctx: &mut Ctx<'_>) {
 
         Decl::Var(v) => {
             let inferred = infer(&v.value, ctx);
-            if let Some(ann) = &v.ty {
+            let inferred = if let Some(ann) = &v.ty {
                 let declared = type_expr_to_ty(&ann.node, ctx);
-                ctx.unify(inferred.clone(), declared, v.span);
-            }
+                if literal_matches_fixed_width(&v.value.node, &declared) {
+                    declared
+                } else {
+                    ctx.unify(inferred.clone(), declared, v.span);
+                    inferred
+                }
+            } else {
+                inferred
+            };
             ctx.env.define(v.name.node.clone(), inferred);
         }
 
@@ -1078,7 +1094,9 @@ fn check_decl(decl: &Decl, ctx: &mut Ctx<'_>) {
                     let body_ty = infer_fn_body(body, ctx);
                     if let Some(ann) = &m.ret_ty {
                         let declared = type_expr_to_ty(&ann.node, ctx);
-                        ctx.unify(body_ty, declared, m.span);
+                        if !literal_matches_fixed_width(&body.node, &declared) {
+                            ctx.unify(body_ty, declared, m.span);
+                        }
                     }
                     ctx.env.pop();
                 }

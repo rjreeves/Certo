@@ -1,7 +1,7 @@
 use certo_parser::parse;
 use certo_typeck::Ty;
 use crate::lower_module;
-use crate::hir::{HirItem, HirExprKind, BinOp};
+use crate::hir::{HirItem, HirExprKind, HirStmt, BinOp};
 
 fn lower(src: &str) -> crate::HirModule {
     let module = parse(src).expect("parse error");
@@ -1464,4 +1464,129 @@ fn plain_dot_qualified_call_matching_the_real_name_is_unaffected() {
         _ => None,
     }).expect("expected fn `f`");
     assert_eq!(f.body.as_ref().unwrap().ty, Ty::Int);
+}
+
+// ------------------------------------------------------------------ //
+// `for x in a..b` range-loop variable typing (BACKLOG item 231)
+// ------------------------------------------------------------------ //
+
+#[test]
+fn range_call_resolves_to_list_int_not_error() {
+    // `1..5`/`1...5` desugar directly to a `range`/`rangeInclusive` stdlib
+    // call — this bypassed the general call-type-recovery machinery
+    // entirely (it's a dedicated `Expr::BinOp` desugar, not a real call
+    // expression), so it always hardcoded `Ty::Error` regardless of the
+    // stdlib's own always-correct `(Int, Int) -> List<Int>` signature.
+    let m = lower("module A\nfn f(): List<Int> = 1..5");
+    let f = m.items.iter().find_map(|it| match it {
+        HirItem::Fn(f) if f.name == "f" => Some(f),
+        _ => None,
+    }).expect("expected fn `f`");
+    assert_eq!(f.body.as_ref().unwrap().ty, Ty::List(Box::new(Ty::Int)));
+}
+
+#[test]
+fn for_loop_binding_ty_resolves_to_int_not_error() {
+    // The loop variable's own recorded type (`binding_ty`, MIR's fallback
+    // in `crates/mir/src/lower.rs`) used to stay `Ty::Error` unconditionally
+    // — confirmed via a real segfault: `for i in 1..5 { f"{i}" }`
+    // interpolated the loop variable's raw bits as if already `Text`.
+    let m = lower("module A\nfn f(): Unit = for i in 1..3 { println(f\"{i}\") }");
+    let f = m.items.iter().find_map(|it| match it {
+        HirItem::Fn(f) if f.name == "f" => Some(f),
+        _ => None,
+    }).expect("expected fn `f`");
+    let HirExprKind::For { binding_ty, iter, .. } = &f.body.as_ref().unwrap().kind else {
+        panic!("expected a top-level For expression");
+    };
+    assert_eq!(*binding_ty, Ty::Int, "for-loop binding_ty must resolve to Int, not Ty::Error");
+    assert_eq!(iter.ty, Ty::List(Box::new(Ty::Int)), "the range iterator's own type must resolve too");
+}
+
+#[test]
+fn for_loop_variable_reference_inside_the_body_resolves_to_int() {
+    // The deeper half of the same bug: even with `binding_ty` fixed, the
+    // loop variable's *local type table entry* (`cx.local_types`) must
+    // also be populated *before* the body is lowered, since every
+    // `Expr::Path` reference to `i` inside the loop reads from that table
+    // directly, independent of `binding_ty`. Checks a real in-body
+    // reference (`i + 1`) resolves to `Int`, not `Ty::Error`.
+    let m = lower("module A\nfn f(): Unit = for i in 1..3 { val n = i + 1\nprintln(f\"{n}\") }");
+    let f = m.items.iter().find_map(|it| match it {
+        HirItem::Fn(f) if f.name == "f" => Some(f),
+        _ => None,
+    }).expect("expected fn `f`");
+    let HirExprKind::For { body, .. } = &f.body.as_ref().unwrap().kind else {
+        panic!("expected a top-level For expression");
+    };
+    let HirExprKind::Block { stmts, .. } = &body.kind else { panic!("expected a Block loop body") };
+    let HirStmt::Let { init, .. } = stmts.first().expect("expected `val n = i + 1`") else {
+        panic!("expected the first statement to be a Let");
+    };
+    assert_eq!(init.ty, Ty::Int, "`i + 1` inside the loop body must resolve to Int, not Ty::Error");
+}
+
+// BACKLOG item 235 — a bare literal at an annotated fixed-width position
+// must get the *declared* type (`Ty::Int8` etc.), not `lower_lit`'s own
+// rigid default (`Ty::Int`/`Ty::Float`) — checked directly on the lowered
+// HIR node's own `.ty` field, since typeck accepting the annotation alone
+// doesn't guarantee HIR's independent lowering agrees (MIR derives a
+// function's real C return type from the body's own computed operand type,
+// not from `HirFn.ret_ty`, so a wrong `.ty` here would still emit the wrong
+// C type even though typeck no longer rejects the program).
+fn let_ty_of(m: &crate::HirModule, fn_name: &str) -> Ty {
+    let f = m.items.iter().find_map(|it| match it {
+        HirItem::Fn(f) if f.name == fn_name => Some(f),
+        _ => None,
+    }).unwrap_or_else(|| panic!("expected fn `{fn_name}`"));
+    let HirExprKind::Block { stmts, .. } = &f.body.as_ref().unwrap().kind else {
+        panic!("expected a Block body");
+    };
+    let HirStmt::Let { ty, .. } = stmts.first().expect("expected a `val`/`var` statement") else {
+        panic!("expected the first statement to be a Let");
+    };
+    ty.clone()
+}
+
+#[test]
+fn val_literal_resolves_to_each_declared_fixed_width_type() {
+    let m = lower("module A\nfn f(): Unit = { val a: Int8 = 100 }");
+    assert_eq!(let_ty_of(&m, "f"), Ty::Int8);
+    let m = lower("module A\nfn f(): Unit = { val a: Int16 = 100 }");
+    assert_eq!(let_ty_of(&m, "f"), Ty::Int16);
+    let m = lower("module A\nfn f(): Unit = { val a: Int32 = 100 }");
+    assert_eq!(let_ty_of(&m, "f"), Ty::Int32);
+    let m = lower("module A\nfn f(): Unit = { val a: UInt = 100 }");
+    assert_eq!(let_ty_of(&m, "f"), Ty::UInt);
+    let m = lower("module A\nfn f(): Unit = { val a: Float32 = 3.5 }");
+    assert_eq!(let_ty_of(&m, "f"), Ty::Float32);
+}
+
+#[test]
+fn var_literal_also_resolves_to_the_declared_fixed_width_type() {
+    // `Stmt::Var` previously discarded its own type annotation entirely in
+    // HIR (`Stmt::Var { name, value, .. }` — the `ty` field was never even
+    // destructured), unlike `Stmt::Val`.
+    let m = lower("module A\nfn f(): Unit = { var a: Int16 = 200 }");
+    assert_eq!(let_ty_of(&m, "f"), Ty::Int16);
+}
+
+#[test]
+fn negative_int_literal_resolves_to_the_signed_fixed_width_type() {
+    // `-5000` parses as `UnOp::Neg` wrapping a bare `Lit::Int` — must see
+    // through the negation to still recognize the literal.
+    let m = lower("module A\nfn f(): Unit = { val a: Int32 = -5000 }");
+    assert_eq!(let_ty_of(&m, "f"), Ty::Int32);
+}
+
+#[test]
+fn fn_return_position_literal_resolves_to_the_declared_fixed_width_type() {
+    let m = lower("module A\nfn f(): Int8 = 42");
+    let f = m.items.iter().find_map(|it| match it {
+        HirItem::Fn(f) if f.name == "f" => Some(f),
+        _ => None,
+    }).expect("expected fn `f`");
+    assert_eq!(f.body.as_ref().unwrap().ty, Ty::Int8,
+        "the bare-literal function body's own HIR type must resolve to Int8, not Ty::Int — \
+         MIR derives the C return type from this, not from HirFn.ret_ty");
 }

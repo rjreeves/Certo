@@ -36,6 +36,28 @@ pub fn seed_stdlib(env: &mut TypeEnv, counter: &mut u32) {
     def!("float32ToFloat", fn1(Ty::Float32, Ty::Float));
     def!("floatToFloat32", fn1(Ty::Float,   Ty::Float32));
 
+    // Int8/Int16/Int32/UInt — BACKLOG item 235. Each is a distinct C type
+    // from Int (see crates/typeck/src/unify.rs), so — mirroring Float32's
+    // own conversion set immediately above — each needs its own
+    // construction/conversion path rather than reusing Int's.
+    def!("int8ToText",  fn1(Ty::Int8,  Ty::Text));
+    def!("int8ToInt",   fn1(Ty::Int8,  Ty::Int));
+    def!("intToInt8",   fn1(Ty::Int,   Ty::Int8));
+    def!("int16ToText", fn1(Ty::Int16, Ty::Text));
+    def!("int16ToInt",  fn1(Ty::Int16, Ty::Int));
+    def!("intToInt16",  fn1(Ty::Int,   Ty::Int16));
+    def!("int32ToText", fn1(Ty::Int32, Ty::Text));
+    def!("int32ToInt",  fn1(Ty::Int32, Ty::Int));
+    def!("intToInt32",  fn1(Ty::Int,   Ty::Int32));
+    def!("uintToText",  fn1(Ty::UInt,  Ty::Text));
+    def!("uintToInt",   fn1(Ty::UInt,  Ty::Int));
+    // `intToUint`, not `intToUInt` — `c_fn_name`'s `camel_to_snake`
+    // (`crates/codegen/src/emit_mir.rs`) inserts an underscore before
+    // *every* uppercase letter, so a mid-identifier `UInt` would mangle to
+    // `_u_int` instead of `_uint`; a single leading capital round-trips
+    // correctly, matching how `uintToText`/`uintToInt` above are spelled.
+    def!("intToUint",   fn1(Ty::Int,   Ty::UInt));
+
     def!("parseInt",     fn1(Ty::Text, Ty::Option(Box::new(Ty::Int))));
     def!("parseFloat",   fn1(Ty::Text, Ty::Option(Box::new(Ty::Float))));
     def!("parseDecimal", fn1(Ty::Text, Ty::Option(Box::new(Ty::Decimal(None)))));

@@ -9,10 +9,15 @@ mod static_serve;
 mod span_rewrite;
 
 
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process;
 use certo_ast::decl::{Decl, MigrationDecl};
+use certo_ast::expr::{Expr, ExpectMatcher, Stmt};
 use certo_ast::module::Module;
+use certo_ast::pattern::Pattern;
+use certo_ast::span::S;
+use certo_ast::types::ModulePath;
 use certo_migrate::{
     plan_up, plan_down, plan_sql, commit_steps, status,
     default_manifest_path,
@@ -166,7 +171,8 @@ fn cmd_check(args: &[String]) {
 
     if verbose { eprintln!("checking {}...", filename); }
 
-    let (module, src) = module;
+    let (mut module, src) = module;
+    resolve_local_imports(&mut module, &input, colour, verbose);
     run_typeck_opts(&module, &src, &filename, colour, explain);
 
     if strict {
@@ -435,26 +441,7 @@ fn cmd_build(args: &[String], quiet: bool) {
 
     let (mut module, src) = parse_file_or_exit(&input, colour);
 
-    // ── Resolve local imports (multi-file) ────────────────────────────
-    let base_dir = input.parent().unwrap_or(Path::new("."));
-    let stdlib_prefixes = ["Stdlib", "Core", "Collections", "Text", "DateTime", "Money"];
-    for imp in &module.imports.clone() {
-        let first_seg = imp.path.segments.first().map(|s| s.node.as_str()).unwrap_or("");
-        if stdlib_prefixes.contains(&first_seg) { continue; }
-        let rel: PathBuf = imp.path.segments.iter()
-            .map(|s| s.node.as_str())
-            .collect::<Vec<_>>()
-            .join("/")
-            .into();
-        let candidate = base_dir.join(rel).with_extension("cto");
-        if candidate.exists() {
-            let (imp_module, imp_src) = parse_file_or_exit(&candidate, colour);
-            let imp_filename = candidate.display().to_string();
-            let _ = (imp_src, imp_filename); // already reported inside helper
-            if verbose { eprintln!("importing {}", candidate.display()); }
-            module.decls.extend(imp_module.decls);
-        }
-    }
+    resolve_local_imports(&mut module, &input, colour, verbose);
 
     // ── Expand state machines and validators into executable functions ─
     // `combined_src` starts as an exact copy of the real file's own source
@@ -720,6 +707,364 @@ fn parse_file_or_exit(path: &Path, colour: bool) -> (Module, String) {
         process::exit(1);
     });
     (module, src)
+}
+
+/// Merge every local (non-stdlib) import's declarations directly into
+/// `module.decls`, unqualified — BACKLOG item 232. Previously only
+/// `cmd_build` did this (inlined at its own call site); `cmd_check` parsed
+/// just the one input file and never resolved local imports at all, so any
+/// project with legitimate cross-file imports spuriously failed `certo
+/// check` (`E0206: undefined name`) even though the identical source built
+/// and ran fine. Factored out so both commands share the exact same
+/// resolution logic rather than risking the two silently drifting apart.
+fn resolve_local_imports(module: &mut Module, input: &Path, colour: bool, verbose: bool) {
+    use certo_ast::module::ImportKind;
+    let base_dir = input.parent().unwrap_or(Path::new("."));
+    let stdlib_prefixes = ["Stdlib", "Core", "Collections", "Text", "DateTime", "Money"];
+    for imp in &module.imports.clone() {
+        let first_seg = imp.path.segments.first().map(|s| s.node.as_str()).unwrap_or("");
+        if stdlib_prefixes.contains(&first_seg) { continue; }
+        let rel: PathBuf = imp.path.segments.iter()
+            .map(|s| s.node.as_str())
+            .collect::<Vec<_>>()
+            .join("/")
+            .into();
+        let candidate = base_dir.join(rel).with_extension("cto");
+        if candidate.exists() {
+            let (mut imp_module, imp_src) = parse_file_or_exit(&candidate, colour);
+            let imp_filename = candidate.display().to_string();
+            let _ = (imp_src, imp_filename); // already reported inside helper
+            if verbose { eprintln!("importing {}", candidate.display()); }
+
+            match &imp.kind {
+                ImportKind::Whole => {
+                    module.decls.extend(imp_module.decls);
+                }
+                ImportKind::Named(names) => {
+                    // BACKLOG item 234 — `import X.{ a, b }` brings only the
+                    // listed names into scope; every other top-level
+                    // declaration in the imported file is dropped entirely
+                    // (not merged in unqualified, unlike `Whole`/`Aliased`).
+                    // A per-name `as` (`import X.{ a as b }`) renames the
+                    // matched decl to the new bare name and rewrites every
+                    // free (non-shadowed) reference to `a` inside the
+                    // imported file's own bodies to `b` first, so `a`'s own
+                    // internal self-references (if any) still resolve.
+                    let mut renames: HashMap<String, RenameTo> = HashMap::new();
+                    for n in names {
+                        if let Some(alias) = &n.alias {
+                            renames.insert(n.name.node.clone(), RenameTo::Bare(alias.node.clone()));
+                        }
+                    }
+                    rewrite_decls_free_refs(&mut imp_module.decls, &renames);
+                    imp_module.decls.retain_mut(|d| {
+                        let Some(own_name) = decl_own_name(&d.node).map(|s| s.to_string()) else { return false };
+                        match names.iter().find(|n| n.name.node == own_name) {
+                            None => false,
+                            Some(n) => {
+                                if let Some(alias) = &n.alias {
+                                    set_decl_own_name(&mut d.node, alias.node.clone());
+                                }
+                                true
+                            }
+                        }
+                    });
+                    module.decls.extend(imp_module.decls);
+                }
+                ImportKind::Aliased(alias) => {
+                    // BACKLOG item 234 — `import X as M` namespaces every
+                    // function declared in X under `M.`, reusing the same
+                    // dot-qualified-global convention `impl` methods and
+                    // `computed` properties already use (`Type.method`,
+                    // `crates/hir/src/lower.rs`) — so `M.fn(...)` reaches the
+                    // exact lookup path a `Type.method(...)` call already
+                    // does in both `crates/typeck` and `crates/hir`, with no
+                    // new alias-aware lookup logic needed in either crate.
+                    // Scoped to `Decl::Fn` only, matching this item's own
+                    // filed repro (`M.greet()`) — `val`/`var`/sum-variant
+                    // qualification under a module alias is a real,
+                    // narrower, still-open gap, not attempted here.
+                    let mut renames: HashMap<String, RenameTo> = HashMap::new();
+                    for d in &imp_module.decls {
+                        if let Decl::Fn(f) = &d.node {
+                            renames.insert(f.name.node.clone(), RenameTo::Qualified(alias.node.clone()));
+                        }
+                    }
+                    rewrite_decls_free_refs(&mut imp_module.decls, &renames);
+                    for d in &mut imp_module.decls {
+                        if let Decl::Fn(f) = &mut d.node {
+                            if renames.contains_key(&f.name.node) {
+                                f.name.node = format!("{}.{}", alias.node, f.name.node);
+                            }
+                        }
+                    }
+                    module.decls.extend(imp_module.decls);
+                }
+            }
+        }
+    }
+}
+
+/// A rewrite target for a free reference to a renamed top-level name, used
+/// by `rewrite_decls_free_refs` (BACKLOG item 234).
+enum RenameTo {
+    /// Per-name import alias (`import X.{ a as b }`) — rewrite bare `a`
+    /// references to the new bare identifier `b`.
+    Bare(String),
+    /// Module-level import alias (`import X as M`) — rewrite bare `a`
+    /// references to the dot-qualified `M.a`.
+    Qualified(String),
+}
+
+/// The name a top-level declaration introduces into module scope — mirrors
+/// `crates/resolve/src/resolve_module.rs`'s own `hoist_decls` match exactly
+/// (impl/migration/test/rule-test decls don't introduce one).
+fn decl_own_name(decl: &Decl) -> Option<&str> {
+    match decl {
+        Decl::Fn(f)           => Some(&f.name.node),
+        Decl::Type(t)         => Some(&t.name.node),
+        Decl::Val(v)          => match &v.pattern.node {
+            Pattern::Ident { name, .. } => Some(&name.node),
+            _ => None,
+        },
+        Decl::Var(v)          => Some(&v.name.node),
+        Decl::Trait(t)        => Some(&t.name.node),
+        Decl::StateMachine(s) => Some(&s.name.node),
+        Decl::View(v)         => Some(&v.name.node),
+        Decl::Constraint(c)   => Some(&c.name.node),
+        Decl::Temporal(t)     => Some(&t.name.node),
+        Decl::Validator(v)    => Some(&v.name.node),
+        _ => None,
+    }
+}
+
+/// Rename a top-level declaration's own name in place — the per-name-alias
+/// half of `import X.{ a as b }` (BACKLOG item 234). Mirrors `decl_own_name`.
+fn set_decl_own_name(decl: &mut Decl, new_name: String) {
+    match decl {
+        Decl::Fn(f)           => f.name.node = new_name,
+        Decl::Type(t)         => t.name.node = new_name,
+        Decl::Val(v)          => if let Pattern::Ident { name, .. } = &mut v.pattern.node { name.node = new_name; },
+        Decl::Var(v)          => v.name.node = new_name,
+        Decl::Trait(t)        => t.name.node = new_name,
+        Decl::StateMachine(s) => s.name.node = new_name,
+        Decl::View(v)         => v.name.node = new_name,
+        Decl::Constraint(c)   => c.name.node = new_name,
+        Decl::Temporal(t)     => t.name.node = new_name,
+        Decl::Validator(v)    => v.name.node = new_name,
+        _ => {}
+    }
+}
+
+/// Every name a pattern binds — used to track which identifiers a nested
+/// scope shadows during `rewrite_expr`'s free-reference rewrite.
+fn pattern_bound_names(pat: &Pattern, out: &mut HashSet<String>) {
+    match pat {
+        Pattern::Wildcard { .. } | Pattern::Literal { .. } => {}
+        Pattern::Ident { name, .. } => { out.insert(name.node.clone()); }
+        Pattern::Constructor { fields, .. } => for f in fields { pattern_bound_names(&f.node, out); },
+        Pattern::Record { fields, .. } => for f in fields {
+            match &f.pattern {
+                Some(p) => pattern_bound_names(&p.node, out),
+                None => { out.insert(f.name.node.clone()); }
+            }
+        },
+        Pattern::Tuple { elements, .. } => for e in elements { pattern_bound_names(&e.node, out); },
+        Pattern::List { head, tail, .. } => {
+            for e in head { pattern_bound_names(&e.node, out); }
+            if let Some(t) = tail { pattern_bound_names(&t.node, out); }
+        }
+        Pattern::Guard { pattern, .. } => pattern_bound_names(&pattern.node, out),
+        Pattern::As { pattern, name, .. } => { pattern_bound_names(&pattern.node, out); out.insert(name.node.clone()); }
+        Pattern::Or { left, .. } => pattern_bound_names(&left.node, out),
+    }
+}
+
+/// Rewrite every *free* (non-shadowed) reference to a renamed top-level
+/// name inside `expr` — BACKLOG item 234's own alias/named-import rewrite.
+/// `scope` is the stack of currently-shadowing local-binding frames
+/// (fn/lambda params, val/var/for bindings, match-arm patterns); a name in
+/// `renames` is only rewritten when nothing in `scope` already binds it,
+/// mirroring `crates/hir/src/lower.rs`'s own push/pop-scope convention for
+/// the same kind of scope-aware tree walk (see `Expr::For`'s own lowering).
+fn rewrite_expr(expr: &mut S<Expr>, renames: &HashMap<String, RenameTo>, scope: &mut Vec<HashSet<String>>) {
+    use certo_ast::expr::{Lit, FStringPart};
+    if let Expr::Path { path, span } = &expr.node {
+        if path.segments.len() == 1 {
+            let name = path.segments[0].node.clone();
+            let shadowed = scope.iter().any(|f| f.contains(&name));
+            if !shadowed {
+                if let Some(target) = renames.get(&name) {
+                    let sp = *span;
+                    expr.node = match target {
+                        RenameTo::Bare(new_name) => Expr::Path {
+                            path: ModulePath { segments: vec![S::new(new_name.clone(), sp)], span: sp },
+                            span: sp,
+                        },
+                        RenameTo::Qualified(alias) => Expr::Field {
+                            expr: Box::new(S::new(
+                                Expr::Path { path: ModulePath { segments: vec![S::new(alias.clone(), sp)], span: sp }, span: sp },
+                                sp,
+                            )),
+                            field: S::new(name, sp),
+                            span: sp,
+                        },
+                    };
+                }
+            }
+        }
+        return;
+    }
+
+    match &mut expr.node {
+        Expr::Lit { value: Lit::FString(parts), .. } => {
+            for p in parts {
+                if let FStringPart::Interpolated(e) = p { rewrite_expr(e, renames, scope); }
+            }
+        }
+        Expr::Lit { .. } => {}
+        Expr::Path { .. } => unreachable!("handled above"),
+        Expr::App { func, args, .. } => {
+            rewrite_expr(func, renames, scope);
+            for a in args { rewrite_expr(&mut a.value, renames, scope); }
+        }
+        Expr::Pipe { left, right, .. } | Expr::BinOp { left, right, .. } => {
+            rewrite_expr(left, renames, scope);
+            rewrite_expr(right, renames, scope);
+        }
+        Expr::UnOp { expr, .. }
+        | Expr::Field { expr, .. } | Expr::SafeField { expr, .. }
+        | Expr::Try { expr, .. } | Expr::Await { expr, .. } | Expr::Spawn { expr, .. }
+        | Expr::Ascribe { expr, .. } | Expr::Age { expr, .. } => rewrite_expr(expr, renames, scope),
+        Expr::ExpectAssertion { actual, matcher, .. } => {
+            rewrite_expr(actual, renames, scope);
+            if let ExpectMatcher::ToBe(y) = matcher { rewrite_expr(y, renames, scope); }
+        }
+        Expr::If { cond, then_expr, else_expr, .. } => {
+            rewrite_expr(cond, renames, scope);
+            rewrite_expr(then_expr, renames, scope);
+            rewrite_expr(else_expr, renames, scope);
+        }
+        Expr::Match { scrutinee, arms, .. } => {
+            rewrite_expr(scrutinee, renames, scope);
+            for arm in arms {
+                let mut bound = HashSet::new();
+                pattern_bound_names(&arm.pattern.node, &mut bound);
+                scope.push(bound);
+                if let Some(g) = &mut arm.guard { rewrite_expr(g, renames, scope); }
+                rewrite_expr(&mut arm.body, renames, scope);
+                scope.pop();
+            }
+        }
+        Expr::Block { stmts, .. } => {
+            scope.push(HashSet::new());
+            for st in stmts {
+                match st {
+                    Stmt::Val { pattern, value, .. } => {
+                        rewrite_expr(value, renames, scope);
+                        let mut bound = HashSet::new();
+                        pattern_bound_names(&pattern.node, &mut bound);
+                        scope.last_mut().unwrap().extend(bound);
+                    }
+                    Stmt::Var { name, value, .. } => {
+                        rewrite_expr(value, renames, scope);
+                        scope.last_mut().unwrap().insert(name.node.clone());
+                    }
+                    Stmt::Assign { value, .. } => rewrite_expr(value, renames, scope),
+                    Stmt::Defer { body, .. } | Stmt::Expr { expr: body, .. } => rewrite_expr(body, renames, scope),
+                }
+            }
+            scope.pop();
+        }
+        Expr::Lambda { params, body, .. } => {
+            let mut bound = HashSet::new();
+            for p in params.iter() { bound.insert(p.name.node.clone()); }
+            scope.push(bound);
+            rewrite_expr(body, renames, scope);
+            scope.pop();
+        }
+        Expr::Transaction { body, .. } | Expr::Unsafe { body, .. } => rewrite_expr(body, renames, scope),
+        Expr::For { binding, iter, body, .. } => {
+            rewrite_expr(iter, renames, scope);
+            let mut bound = HashSet::new();
+            bound.insert(binding.node.clone());
+            scope.push(bound);
+            rewrite_expr(body, renames, scope);
+            scope.pop();
+        }
+        Expr::While { cond, body, .. } => {
+            rewrite_expr(cond, renames, scope);
+            rewrite_expr(body, renames, scope);
+        }
+        Expr::Guard { cond, else_expr, .. } => {
+            rewrite_expr(cond, renames, scope);
+            rewrite_expr(else_expr, renames, scope);
+        }
+        Expr::Require { expr, error, .. } => {
+            rewrite_expr(expr, renames, scope);
+            rewrite_expr(error, renames, scope);
+        }
+        Expr::List { elements, .. } | Expr::Tuple { elements, .. } => {
+            for e in elements { rewrite_expr(e, renames, scope); }
+        }
+        Expr::Parallel { tasks, timeout, .. } => {
+            for t in tasks { rewrite_expr(t, renames, scope); }
+            if let Some(t) = timeout { rewrite_expr(t, renames, scope); }
+        }
+        Expr::WithTimeout { duration, body, .. } => {
+            rewrite_expr(duration, renames, scope);
+            rewrite_expr(body, renames, scope);
+        }
+        Expr::Record { base, fields, .. } => {
+            if let Some(b) = base { rewrite_expr(b, renames, scope); }
+            for fld in fields { rewrite_expr(&mut fld.value, renames, scope); }
+        }
+    }
+}
+
+/// Rewrite every free reference to a renamed name across a whole imported
+/// file's own declarations (BACKLOG item 234) — covers the declaration
+/// shapes that carry an ordinary executable body (`fn`, `val`, `var`,
+/// `impl` methods). A reference inside a `validator`/`constraint`/`trait`/
+/// `statemachine` body is not rewritten — no local-import test in this
+/// codebase exercises aliasing one of those, and each has its own distinct
+/// body shape `rewrite_expr`'s `Expr`-only walk doesn't cover; a real,
+/// narrower gap than the general case, not attempted here.
+fn rewrite_decls_free_refs(decls: &mut [S<Decl>], renames: &HashMap<String, RenameTo>) {
+    if renames.is_empty() { return; }
+    for sdecl in decls.iter_mut() {
+        match &mut sdecl.node {
+            Decl::Fn(f) => {
+                if let Some(body) = &mut f.body {
+                    let mut scope = vec![f.params.iter().map(|p| p.name.node.clone()).collect::<HashSet<_>>()];
+                    rewrite_expr(body, renames, &mut scope);
+                }
+                for p in &mut f.params {
+                    if let Some(default) = &mut p.default {
+                        let mut scope = vec![HashSet::new()];
+                        rewrite_expr(default, renames, &mut scope);
+                    }
+                }
+            }
+            Decl::Val(v) => {
+                let mut scope = vec![HashSet::new()];
+                rewrite_expr(&mut v.value, renames, &mut scope);
+            }
+            Decl::Var(v) => {
+                let mut scope = vec![HashSet::new()];
+                rewrite_expr(&mut v.value, renames, &mut scope);
+            }
+            Decl::Impl(i) => {
+                for m in &mut i.methods {
+                    if let Some(body) = &mut m.body {
+                        let mut scope = vec![m.params.iter().map(|p| p.name.node.clone()).collect::<HashSet<_>>()];
+                        rewrite_expr(body, renames, &mut scope);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 /// Expand each `validator { … }` declaration into executable functions
@@ -4418,5 +4763,145 @@ mod span_rewrite_tests {
                 text, start, end
             );
         }
+    }
+}
+
+// ------------------------------------------------------------------ //
+// BACKLOG item 232 — `resolve_local_imports` shared by check and build
+// ------------------------------------------------------------------ //
+
+#[cfg(test)]
+mod resolve_local_imports_tests {
+    use super::*;
+
+    fn temp_project(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("certo_resolve_imports_test_{}_{}_{}", name, std::process::id(), line!()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn merges_a_local_imports_declarations() {
+        let dir = temp_project("basic");
+        std::fs::write(dir.join("MyModule.cto"), "module MyModule\nfn greet(): Text = \"hi\"\n").unwrap();
+        let main_path = dir.join("main.cto");
+        std::fs::write(&main_path, "module Main\nimport MyModule\nfn main(): Unit [io] = { println(greet()) }\n").unwrap();
+
+        let (mut module, _src) = parse_file_or_exit(&main_path, false);
+        assert!(module.decls.iter().all(|d| !matches!(&d.node, Decl::Fn(f) if f.name.node == "greet")),
+            "sanity check: `greet` shouldn't be present before resolving imports");
+        resolve_local_imports(&mut module, &main_path, false, false);
+        assert!(module.decls.iter().any(|d| matches!(&d.node, Decl::Fn(f) if f.name.node == "greet")),
+            "expected `greet` to be merged in from the local import");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn stdlib_imports_are_never_treated_as_local_files() {
+        // A `Stdlib.*`/`Text`/`DateTime`/etc. import must never be looked up
+        // as a local file — regression guard for the existing `stdlib_prefixes`
+        // skip-list this function inherited unchanged from `cmd_build`.
+        let dir = temp_project("stdlib");
+        let main_path = dir.join("main.cto");
+        std::fs::write(&main_path, "module Main\nimport Stdlib.Text\nfn main(): Unit [io] = { println(\"hi\") }\n").unwrap();
+
+        let (mut module, _src) = parse_file_or_exit(&main_path, false);
+        let before = module.decls.len();
+        resolve_local_imports(&mut module, &main_path, false, false);
+        assert_eq!(module.decls.len(), before, "a stdlib import must not attempt local file resolution");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    fn write_mymodule(dir: &Path) {
+        std::fs::write(dir.join("MyModule.cto"),
+            "module MyModule\nfn greet(): Text = helper()\nfn helper(): Text = \"hi\"\nfn secretHelper(): Text = \"secret\"\n").unwrap();
+    }
+
+    // BACKLOG item 234 — `import X.{ a, b }` only brings the listed names
+    // into scope; every other declaration in the imported file must be
+    // absent entirely, not just conventionally-unused.
+    #[test]
+    fn named_import_only_merges_listed_names() {
+        let dir = temp_project("named");
+        write_mymodule(&dir);
+        let main_path = dir.join("main.cto");
+        std::fs::write(&main_path,
+            "module Main\nimport MyModule.{ greet, helper }\nfn main(): Unit [io] = { println(greet()) }\n").unwrap();
+
+        let (mut module, _src) = parse_file_or_exit(&main_path, false);
+        resolve_local_imports(&mut module, &main_path, false, false);
+        assert!(module.decls.iter().any(|d| matches!(&d.node, Decl::Fn(f) if f.name.node == "greet")),
+            "expected the listed `greet` to be merged in");
+        assert!(module.decls.iter().any(|d| matches!(&d.node, Decl::Fn(f) if f.name.node == "helper")),
+            "expected the listed `helper` to be merged in");
+        assert!(module.decls.iter().all(|d| !matches!(&d.node, Decl::Fn(f) if f.name.node == "secretHelper")),
+            "an unlisted decl must not be merged in at all, not just left unused");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // BACKLOG item 234 — `import X.{ a as b }` renames the matched decl to
+    // the new bare name `b`, and any free reference to `a` inside the
+    // imported file's own bodies (its own internal cross-references) must
+    // be rewritten to `b` too, not just the decl's own top-level name.
+    #[test]
+    fn named_import_per_name_alias_renames_decl_and_its_internal_self_references() {
+        let dir = temp_project("named_alias");
+        write_mymodule(&dir);
+        let main_path = dir.join("main.cto");
+        std::fs::write(&main_path,
+            "module Main\nimport MyModule.{ greet as g, helper }\nfn main(): Unit [io] = { println(g()) }\n").unwrap();
+
+        let (mut module, _src) = parse_file_or_exit(&main_path, false);
+        resolve_local_imports(&mut module, &main_path, false, false);
+        let g_fn = module.decls.iter().find_map(|d| match &d.node {
+            Decl::Fn(f) if f.name.node == "g" => Some(f),
+            _ => None,
+        }).expect("expected `greet` to be renamed to `g`");
+        assert!(!module.decls.iter().any(|d| matches!(&d.node, Decl::Fn(f) if f.name.node == "greet")),
+            "the old bare name `greet` must not still be present alongside the rename");
+        // `g`'s own body called `helper()` before the rename — must still
+        // reference the unrenamed sibling `helper` by its own bare name,
+        // not accidentally the string "helper" mangled some other way.
+        let body = g_fn.body.as_ref().unwrap();
+        let calls_helper = matches!(&body.node,
+            Expr::App { func, .. } if matches!(&func.node, Expr::Path { path, .. } if path.segments.last().map(|s| s.node.as_str()) == Some("helper")));
+        assert!(calls_helper, "expected g()'s body to still call helper() by its own unrenamed name, got {:#?}", body.node);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // BACKLOG item 234 — `import X as M` namespaces every function under
+    // `M.`, and internal cross-references between two functions in the
+    // aliased file (`greet` calling `helper`) must both end up under the
+    // same alias so they still resolve to each other post-rename.
+    #[test]
+    fn aliased_import_namespaces_functions_and_rewrites_internal_cross_references() {
+        let dir = temp_project("aliased");
+        write_mymodule(&dir);
+        let main_path = dir.join("main.cto");
+        std::fs::write(&main_path,
+            "module Main\nimport MyModule as M\nfn main(): Unit [io] = { println(M.greet()) }\n").unwrap();
+
+        let (mut module, _src) = parse_file_or_exit(&main_path, false);
+        resolve_local_imports(&mut module, &main_path, false, false);
+        let greet_fn = module.decls.iter().find_map(|d| match &d.node {
+            Decl::Fn(f) if f.name.node == "M.greet" => Some(f),
+            _ => None,
+        }).expect("expected `greet` to be renamed to the qualified `M.greet`");
+        assert!(module.decls.iter().any(|d| matches!(&d.node, Decl::Fn(f) if f.name.node == "M.helper")),
+            "expected `helper` to also be renamed to `M.helper`");
+        // `M.greet`'s own body called bare `helper()` before the rename —
+        // must now call it as `M.helper()` (an `Expr::Field` on `M`), or the
+        // internal cross-reference is left dangling on the old bare name.
+        let body = greet_fn.body.as_ref().unwrap();
+        let calls_m_helper = matches!(&body.node, Expr::App { func, .. } if matches!(&func.node,
+            Expr::Field { expr, field, .. } if field.node == "helper"
+                && matches!(&expr.node, Expr::Path { path, .. } if path.segments.last().map(|s| s.node.as_str()) == Some("M"))));
+        assert!(calls_m_helper, "expected M.greet()'s body to call M.helper(), got {:#?}", body.node);
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 }
