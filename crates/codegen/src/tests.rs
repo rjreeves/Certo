@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use certo_ast::decl::Decl;
 use certo_parser::parse;
 use crate::{emit_module, CodegenOptions, emit_validator};
@@ -1083,7 +1084,12 @@ fn gen_validator(src: &str) -> String {
         .filter_map(|d| if let Decl::Constraint(c) = &d.node { Some(c) } else { None })
         .collect();
     let constraint_bodies = crate::build_constraint_bodies(&constraints);
-    emit_validator(v, &constraint_bodies).to_source()
+    let constraint_asts: HashMap<&str, &certo_ast::span::S<certo_ast::expr::Expr>> =
+        constraints.iter().map(|c| (c.name.node.as_str(), &c.body)).collect();
+    let temporal_asts: HashMap<&str, &certo_ast::span::S<certo_ast::expr::Expr>> = module.decls.iter()
+        .filter_map(|d| if let Decl::Temporal(t) = &d.node { Some((t.name.node.as_str(), &t.body)) } else { None })
+        .collect();
+    emit_validator(v, &constraint_bodies, &constraint_asts, &temporal_asts).to_source()
 }
 
 fn gen_trigger_sql(src: &str) -> String {
@@ -1091,8 +1097,16 @@ fn gen_trigger_sql(src: &str) -> String {
     let v = module.decls.iter().find_map(|d| {
         if let Decl::Validator(v) = &d.node { Some(v) } else { None }
     }).expect("no validator decl found");
-    let constraint_bodies = crate::build_constraint_bodies(&[]);
-    emit_validator(v, &constraint_bodies).trigger_sql.expect("expected trigger SQL")
+    let constraints: Vec<&certo_ast::decl::ConstraintDecl> = module.decls.iter()
+        .filter_map(|d| if let Decl::Constraint(c) = &d.node { Some(c) } else { None })
+        .collect();
+    let constraint_bodies = crate::build_constraint_bodies(&constraints);
+    let constraint_asts: HashMap<&str, &certo_ast::span::S<certo_ast::expr::Expr>> =
+        constraints.iter().map(|c| (c.name.node.as_str(), &c.body)).collect();
+    let temporal_asts: HashMap<&str, &certo_ast::span::S<certo_ast::expr::Expr>> = module.decls.iter()
+        .filter_map(|d| if let Decl::Temporal(t) = &d.node { Some((t.name.node.as_str(), &t.body)) } else { None })
+        .collect();
+    emit_validator(v, &constraint_bodies, &constraint_asts, &temporal_asts).trigger_sql.expect("expected trigger SQL")
 }
 
 // BACKLOG item 244 — a trigger `when` condition value that's a real
@@ -1119,6 +1133,135 @@ fn trigger_when_condition_against_enum_variant_is_still_quoted() {
                    rule r { require true else WidgetError.NotReady }\n}";
     let sql = gen_trigger_sql(src);
     assert_contains(&sql, "IF NEW.status != 'Submitted' THEN RETURN NEW; END IF;");
+}
+
+// ------------------------------------------------------------------ //
+// Real trigger SQL enforcement — BACKLOG item 243
+// ------------------------------------------------------------------ //
+
+fn gen_trigger_sql_with_warnings(src: &str) -> (String, Vec<String>) {
+    let module = parse(src).expect("parse error");
+    let v = module.decls.iter().find_map(|d| {
+        if let Decl::Validator(v) = &d.node { Some(v) } else { None }
+    }).expect("no validator decl found");
+    let constraints: Vec<&certo_ast::decl::ConstraintDecl> = module.decls.iter()
+        .filter_map(|d| if let Decl::Constraint(c) = &d.node { Some(c) } else { None })
+        .collect();
+    let constraint_bodies = crate::build_constraint_bodies(&constraints);
+    let constraint_asts: HashMap<&str, &certo_ast::span::S<certo_ast::expr::Expr>> =
+        constraints.iter().map(|c| (c.name.node.as_str(), &c.body)).collect();
+    let temporal_asts: HashMap<&str, &certo_ast::span::S<certo_ast::expr::Expr>> = module.decls.iter()
+        .filter_map(|d| if let Decl::Temporal(t) = &d.node { Some((t.name.node.as_str(), &t.body)) } else { None })
+        .collect();
+    let out = emit_validator(v, &constraint_bodies, &constraint_asts, &temporal_asts);
+    (out.trigger_sql.expect("expected trigger SQL"), out.trigger_warnings)
+}
+
+#[test]
+fn trigger_rule_on_entity_field_emits_real_raise_exception() {
+    let src = "module A\ntype OrderStatus = | Draft | Submitted\n\
+               type Order = { status: OrderStatus }\ntype OrderError = | NotDraft\n\
+               validator V for Order errors OrderError trigger on Update {\n\
+                   rule r { require order.status == Draft else OrderError.NotDraft }\n}";
+    let sql = gen_trigger_sql(src);
+    assert_contains(&sql, "IF NOT ((NEW.status = 'Draft')) THEN RAISE EXCEPTION 'OrderError.NotDraft'; END IF;");
+}
+
+#[test]
+fn trigger_rule_with_and_or_not_translates_correctly() {
+    let src = "module A\ntype Order = { status: Text, total: Int }\ntype OrderError = | Bad\n\
+               validator V for Order errors OrderError trigger on Update {\n\
+                   rule r { require (order.status == \"Draft\" and order.total > 0) or not (order.total < 0) else OrderError.Bad }\n}";
+    let sql = gen_trigger_sql(src);
+    assert_contains(&sql, "RAISE EXCEPTION 'OrderError.Bad'");
+    assert_contains(&sql, "AND");
+    assert_contains(&sql, "OR");
+    assert_contains(&sql, "NOT");
+}
+
+#[test]
+fn trigger_rule_on_context_field_uses_correlated_subquery() {
+    let src = "module A\ntype Customer = { status: Text }\ntype Order = { customerId: Int }\n\
+               type OrderError = | CustomerNotActive\n\
+               validator V for Order errors OrderError trigger on Update {\n\
+                   context { customer: Customer loaded by db.customers.find(order.customerId) }\n\
+                   rule r { require customer.status == \"Active\" else OrderError.CustomerNotActive }\n}";
+    let sql = gen_trigger_sql(src);
+    assert_contains(&sql, "(SELECT status FROM customers WHERE id = NEW.customer_id)");
+    assert_contains(&sql, "RAISE EXCEPTION 'OrderError.CustomerNotActive'");
+}
+
+#[test]
+fn trigger_rule_inlines_named_constraint() {
+    let src = "module A\nconstraint OrderIsDraft = order.status == \"Draft\"\n\
+               type Order = { status: Text }\ntype OrderError = | NotDraft\n\
+               validator V for Order errors OrderError trigger on Update {\n\
+                   rule r { require OrderIsDraft else OrderError.NotDraft }\n}";
+    let sql = gen_trigger_sql(src);
+    assert_contains(&sql, "NEW.status = 'Draft'");
+    assert_contains(&sql, "RAISE EXCEPTION 'OrderError.NotDraft'");
+}
+
+#[test]
+fn trigger_rule_with_is_some_translates_to_is_not_null() {
+    let src = "module A\ntype Order = { note: Text? }\ntype OrderError = | Bad\n\
+               validator V for Order errors OrderError trigger on Update {\n\
+                   rule r { require order.note.isSome() else OrderError.Bad }\n}";
+    let sql = gen_trigger_sql(src);
+    assert_contains(&sql, "NEW.note IS NOT NULL");
+}
+
+#[test]
+fn trigger_rule_with_age_and_literal_duration_translates_to_interval() {
+    let src = "module A\ntype Invoice = { createdAt: Timestamp }\ntype InvoiceError = | Expired\n\
+               validator V for Invoice errors InvoiceError trigger on Update {\n\
+                   rule r { require invoice.createdAt.age < Duration.days(30) else InvoiceError.Expired }\n}";
+    let sql = gen_trigger_sql(src);
+    assert_contains(&sql, "interval '2592000000 milliseconds'");
+    assert_contains(&sql, "RAISE EXCEPTION 'InvoiceError.Expired'");
+}
+
+#[test]
+fn trigger_rule_with_age_and_named_temporal_translates_to_interval() {
+    let src = "module A\ntemporal VoidWindow = Duration.hours(48)\n\
+               type Invoice = { createdAt: Timestamp }\ntype InvoiceError = | Expired\n\
+               validator V for Invoice errors InvoiceError trigger on Update {\n\
+                   rule r { require invoice.createdAt.age < VoidWindow else InvoiceError.Expired }\n}";
+    let sql = gen_trigger_sql(src);
+    assert_contains(&sql, "interval '172800000 milliseconds'");
+}
+
+#[test]
+fn trigger_rules_respect_overrides_gating() {
+    let src = "module A\ntype Order = { status: Text, total: Int }\ntype OrderError = | OverLimit\n\
+               validator V for Order errors OrderError trigger on Update {\n\
+                   rule base { require order.total <= 1000 else OrderError.OverLimit }\n\
+                   rule bypass { overrides base require order.status == \"Approved\" else OrderError.OverLimit }\n}";
+    let sql = gen_trigger_sql(src);
+    // `bypass` is a pure skip-switch — never contributes its own RAISE.
+    assert_eq!(sql.matches("RAISE EXCEPTION").count(), 1, "expected exactly one RAISE, got:\n{sql}");
+    // `base` only fires when NOT overridden (bypass's own condition doesn't hold) and its own require is false.
+    assert_contains(&sql, "NOT ((NEW.status = 'Approved'))");
+    assert_contains(&sql, "NOT ((NEW.total <= 1000))");
+}
+
+#[test]
+fn trigger_rule_untranslatable_falls_back_to_comment_and_warns() {
+    // `loaded by someArbitraryFn(...)` doesn't match the `db.<table>.find(key)`
+    // shape this translator recognizes — the dependent rule can't be
+    // translated, but must not block sibling rules from installing.
+    let src = "module A\ntype Customer = { status: Text }\ntype Order = { status: Text }\n\
+               type OrderError = | CustomerNotActive | NotDraft\n\
+               validator V for Order errors OrderError trigger on Update {\n\
+                   context { customer: Customer loaded by someArbitraryFn(order.customerId) }\n\
+                   rule untranslatable { require customer.status == \"Active\" else OrderError.CustomerNotActive }\n\
+                   rule fine { require order.status == \"Draft\" else OrderError.NotDraft }\n}";
+    let (sql, warnings) = gen_trigger_sql_with_warnings(src);
+    assert_contains(&sql, "-- Rule: untranslatable");
+    assert_contains(&sql, "not enforced by this trigger");
+    assert_contains(&sql, "RAISE EXCEPTION 'OrderError.NotDraft'");
+    assert_eq!(warnings.len(), 1, "expected exactly one warning, got: {:?}", warnings);
+    assert!(warnings[0].contains("untranslatable"), "warning should name the rule: {}", warnings[0]);
 }
 
 #[test]
@@ -1407,7 +1550,10 @@ fn validator_using_a_constraint_generates_parseable_source() {
         .filter_map(|d| if let Decl::Constraint(c) = &d.node { Some(c) } else { None })
         .collect();
     let bodies = crate::build_constraint_bodies(&constraints);
-    let generated = emit_validator(v, &bodies).to_source();
+    let constraint_asts: HashMap<&str, &certo_ast::span::S<certo_ast::expr::Expr>> =
+        constraints.iter().map(|c| (c.name.node.as_str(), &c.body)).collect();
+    let temporal_asts: HashMap<&str, &certo_ast::span::S<certo_ast::expr::Expr>> = HashMap::new();
+    let generated = emit_validator(v, &bodies, &constraint_asts, &temporal_asts).to_source();
     let wrapped = format!("module __validators\n{}", generated);
     assert!(certo_parser::parse(&wrapped).is_ok(),
         "generated validator source using a constraint must parse:\n{}", generated);
