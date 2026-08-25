@@ -6,7 +6,7 @@ use certo_ast::types::TypeExpr;
 use crate::ty::Ty;
 use crate::env::TypeEnv;
 use crate::unify::UnionFind;
-use crate::error::{TypeError, TypeErrorKind};
+use crate::error::{TypeError, TypeErrorKind, Warning, WarningKind};
 use crate::infer_expr::{infer, infer_block, type_expr_to_ty, literal_matches_fixed_width, Ctx};
 
 /// Extract row-polymorphism bounds (`R: { name: Text }`) from a function/method's
@@ -389,6 +389,83 @@ fn check_constraint_scope(module: &Module, errors: &mut Vec<TypeError>) {
                     }
                 }
             }
+        }
+    }
+}
+
+// ------------------------------------------------------------------ //
+// Validator warnings (BACKLOG item 230) — W0100/W0101/W0102. Unlike every
+// pass above, these are non-fatal: collected separately from `TypeError`
+// and never abort compilation on their own (see `crate::error::Warning`'s
+// own doc comment). Run directly against the un-expanded `Decl::Validator`
+// AST, the same way `check_constraint_scope` above does, so these work
+// under `certo check` alone with no dependency on `expand_validators`.
+// ------------------------------------------------------------------ //
+
+/// Entry point: collect every validator warning in a module. Called
+/// separately from `check_module_seeded` (which only ever returns hard
+/// errors) — see that function's own doc comment for why a parallel
+/// `Vec<Warning>` was chosen over widening its own return type.
+pub fn check_module_warnings(module: &Module) -> Vec<Warning> {
+    let mut warnings = Vec::new();
+    for sdecl in &module.decls {
+        let Decl::Validator(v) = &sdecl.node else { continue };
+        check_validator_overrides(v, &mut warnings);
+        check_validator_context_loaded_by(v, &mut warnings);
+    }
+    warnings
+}
+
+/// W0100/W0101 — a rule's `overrides` relationship with no explicit
+/// `priority` on either rule (W0100), or whose own condition is a
+/// compile-time-obvious tautology, permanently shadowing the rule it
+/// overrides (W0101).
+fn check_validator_overrides(v: &certo_ast::decl::ValidatorDecl, warnings: &mut Vec<Warning>) {
+    for rule in &v.rules {
+        let Some(overridden) = &rule.overrides else { continue };
+        // A name that doesn't resolve to a real rule in this validator is
+        // a separate, existing concern (E0702) — not this check's job;
+        // skip it silently rather than warning about a rule that may not
+        // even exist.
+        if !v.rules.iter().any(|r| r.name.node == overridden.node) { continue; }
+
+        if rule.priority.is_none() {
+            warnings.push(Warning {
+                kind: WarningKind::AmbiguousOverridePriority {
+                    rule_name: rule.name.node.clone(),
+                    overridden_name: overridden.node.clone(),
+                },
+                span: rule.span,
+            });
+        }
+
+        if matches!(&rule.require.node, Expr::Lit { value: certo_ast::expr::Lit::Bool(true), .. }) {
+            warnings.push(Warning {
+                kind: WarningKind::UnreachableOverriddenRule {
+                    overriding_name: rule.name.node.clone(),
+                    overridden_name: overridden.node.clone(),
+                },
+                span: rule.require.span,
+            });
+        }
+    }
+}
+
+/// W0102 — a context field with no `loaded by` clause. Mirrors
+/// `crates/codegen/src/emit_validator.rs`'s own `all_have_loaded_by` gate
+/// exactly (`validateWithDb` is only generated when *every* context field
+/// has `loaded by`) — this is that same condition, surfaced as a warning
+/// at typeck time instead of silently never generating the function.
+fn check_validator_context_loaded_by(v: &certo_ast::decl::ValidatorDecl, warnings: &mut Vec<Warning>) {
+    for field in &v.context {
+        if field.loaded_by.is_none() {
+            warnings.push(Warning {
+                kind: WarningKind::ContextFieldMissingLoadedBy {
+                    validator_name: v.name.node.clone(),
+                    field_name: field.name.node.clone(),
+                },
+                span: field.span,
+            });
         }
     }
 }

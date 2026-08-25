@@ -205,3 +205,56 @@ impl TypeError {
         }
     }
 }
+
+// ------------------------------------------------------------------ //
+// Warnings (BACKLOG item 230) — non-fatal diagnostics. Unlike `TypeError`
+// above, a warning never aborts compilation on its own; `certo check`/
+// `certo build` print every one collected here and continue. The first
+// three codes (W0100-W0102, validator-specific — spec §16.3/§16.4/§16.6)
+// are the initial use of this mechanism; anything future that wants a
+// non-fatal diagnostic reuses this same `Warning`/`WarningKind` machinery
+// rather than inventing its own.
+// ------------------------------------------------------------------ //
+
+#[derive(Debug, Clone)]
+pub struct Warning {
+    pub kind: WarningKind,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone)]
+pub enum WarningKind {
+    /// W0100 — a rule declares `overrides` against another rule, but
+    /// neither rule has an explicit `priority` — the `overrides` clause
+    /// alone determines evaluation order (mechanically unambiguous), but
+    /// the spec's own recommended pattern (§16.4) pairs every `overrides`
+    /// with an explicit `priority` to state that intent, so a rule pair
+    /// relying on `overrides` alone gets flagged.
+    AmbiguousOverridePriority { rule_name: String, overridden_name: String },
+
+    /// W0101 — an overriding rule's own `require` condition is a
+    /// compile-time-obvious tautology (a bare `true` literal), which makes
+    /// the rule it `overrides` permanently unreachable — it is never
+    /// evaluated, since the overriding rule's condition always passes.
+    UnreachableOverriddenRule { overriding_name: String, overridden_name: String },
+
+    /// W0102 — a validator's `context` field has no `loaded by` clause, so
+    /// `{Validator}.validateWithDb` is not generated for it (mirrors
+    /// `crates/codegen/src/emit_validator.rs`'s own `all_have_loaded_by`
+    /// gate exactly — `validateWithDb` requires every context field to
+    /// have `loaded by`, not just some).
+    ContextFieldMissingLoadedBy { validator_name: String, field_name: String },
+}
+
+impl Warning {
+    pub fn message(&self) -> String {
+        match &self.kind {
+            WarningKind::AmbiguousOverridePriority { rule_name, overridden_name } =>
+                format!("W0100: rule `{}` overrides `{}` with no explicit `priority` on either rule — add `priority` to state evaluation order explicitly", rule_name, overridden_name),
+            WarningKind::UnreachableOverriddenRule { overriding_name, overridden_name } =>
+                format!("W0101: rule `{}`'s condition is always true — rule `{}` (which it overrides) is never evaluated", overriding_name, overridden_name),
+            WarningKind::ContextFieldMissingLoadedBy { validator_name, field_name } =>
+                format!("W0102: context field `{}` has no `loaded by` — `{}.validateWithDb` will not be generated", field_name, validator_name),
+        }
+    }
+}
