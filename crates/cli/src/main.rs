@@ -1177,10 +1177,18 @@ fn expand_validators(module: &mut Module, colour: bool, combined_src: &mut Strin
         .filter_map(|d| if let Decl::Constraint(c) = &d.node { Some(c) } else { None })
         .collect();
     let constraint_bodies = certo_codegen::build_constraint_bodies(&constraints);
+    // BACKLOG item 243 — parallel, AST-level maps for the trigger-SQL
+    // translator (`constraint_bodies` above holds already-rendered Certo
+    // *source text*, only useful for the text-splicing path below).
+    let constraint_asts: std::collections::HashMap<&str, &certo_ast::span::S<certo_ast::expr::Expr>> =
+        constraints.iter().map(|c| (c.name.node.as_str(), &c.body)).collect();
+    let temporal_asts: std::collections::HashMap<&str, &certo_ast::span::S<certo_ast::expr::Expr>> = module.decls.iter()
+        .filter_map(|d| if let Decl::Temporal(t) = &d.node { Some((t.name.node.as_str(), &t.body)) } else { None })
+        .collect();
     let mut generated = String::new();
     for d in &module.decls {
         if let Decl::Validator(v) = &d.node {
-            generated.push_str(&certo_codegen::emit_validator(v, &constraint_bodies).to_source());
+            generated.push_str(&certo_codegen::emit_validator(v, &constraint_bodies, &constraint_asts, &temporal_asts).to_source());
             generated.push('\n');
         }
     }
@@ -4413,12 +4421,23 @@ fn collect_validator_trigger_sql(project_root: &Path) -> Vec<String> {
         .filter_map(|d| if let Decl::Constraint(c) = &d.node { Some(c) } else { None })
         .collect();
     let constraint_bodies = certo_codegen::build_constraint_bodies(&constraints);
+    // BACKLOG item 243 — see `expand_validators`'s own identical comment.
+    let constraint_asts: std::collections::HashMap<&str, &certo_ast::span::S<certo_ast::expr::Expr>> =
+        constraints.iter().map(|c| (c.name.node.as_str(), &c.body)).collect();
+    let temporal_asts: std::collections::HashMap<&str, &certo_ast::span::S<certo_ast::expr::Expr>> = module.decls.iter()
+        .filter_map(|d| if let Decl::Temporal(t) = &d.node { Some((t.name.node.as_str(), &t.body)) } else { None })
+        .collect();
 
     module.decls.iter()
         .filter_map(|d| if let Decl::Validator(v) = &d.node { Some(v) } else { None })
         .filter(|v| v.trigger.is_some())
-        .map(|v| certo_codegen::emit_validator(v, &constraint_bodies).trigger_sql
-            .expect("trigger_sql is always Some when v.trigger.is_some()"))
+        .map(|v| {
+            let out = certo_codegen::emit_validator(v, &constraint_bodies, &constraint_asts, &temporal_asts);
+            for w in &out.trigger_warnings {
+                eprintln!("warning: {}", w);
+            }
+            out.trigger_sql.expect("trigger_sql is always Some when v.trigger.is_some()")
+        })
         .collect()
 }
 

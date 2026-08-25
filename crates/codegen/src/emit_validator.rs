@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 use std::fmt::Write as FmtWrite;
 use certo_ast::decl::{ValidatorDecl, RuleDecl, TriggerOp, ConstraintDecl};
+use certo_ast::expr::{Expr, Lit, BinOp, UnOp};
+use certo_ast::span::S;
 use certo_fmt::{fmt_expr, fmt_type};
 
 /// All source artifacts produced for one validator declaration.
@@ -18,6 +20,14 @@ pub struct ValidatorOutput {
     /// SQL CREATE TRIGGER statement emitted to `dist/triggers/<name>.sql`.
     /// Only present when the validator declares a `trigger` block.
     pub trigger_sql: Option<String>,
+    /// BACKLOG item 243 — one message per rule the trigger SQL translator
+    /// (`expr_to_sql`) couldn't fully translate, naming the rule and why —
+    /// that rule stays a `-- Rule: name` comment in `trigger_sql`, silently
+    /// unenforced by the installed trigger, exactly like every rule was
+    /// before this item. Surfaced as a real build-time warning by callers
+    /// (`crates/cli/src/main.rs`'s `collect_validator_trigger_sql`) instead
+    /// of needing rediscovery via raw `psql` the way item 243 itself was found.
+    pub trigger_warnings: Vec<String>,
 }
 
 impl ValidatorOutput {
@@ -51,7 +61,19 @@ impl ValidatorOutput {
 /// which type-checked (constraints hoist as a global `Ty::Bool`) but failed
 /// the C compile with `use of undeclared identifier` the moment a validator
 /// using one was actually run, not just checked.
-pub fn emit_validator(v: &ValidatorDecl, constraints: &HashMap<String, String>) -> ValidatorOutput {
+/// `constraint_asts`/`temporal_asts` (BACKLOG item 243) are the module's own
+/// name → real-AST-body maps for `constraint`/`temporal` declarations — a
+/// parallel, AST-level counterpart to `constraints` (which holds already-
+/// rendered *Certo source text*, only useful for the `validate`/`validateAll`
+/// text-splicing path above). The trigger-SQL translator (`expr_to_sql`)
+/// needs the real `Expr` tree to recurse into for inlining/constant-folding,
+/// not source text to re-parse.
+pub fn emit_validator(
+    v: &ValidatorDecl,
+    constraints: &HashMap<String, String>,
+    constraint_asts: &HashMap<&str, &S<Expr>>,
+    temporal_asts: &HashMap<&str, &S<Expr>>,
+) -> ValidatorOutput {
     let mut out = ValidatorOutput::default();
 
     let vname       = &v.name.node;
@@ -252,11 +274,111 @@ pub fn emit_validator(v: &ValidatorDecl, constraints: &HashMap<String, String>) 
             String::new()
         };
 
-        let mut rules_sql = String::new();
-        for rule in &ordered {
-            writeln!(rules_sql, "    -- Rule: {}", rule.name.node).unwrap();
-            writeln!(rules_sql, "    -- (condition evaluated in application layer)").unwrap();
+        // BACKLOG item 243 — real per-rule SQL enforcement. Context fields
+        // whose `loaded by` matches the `db.<table>.find(key)` shape (the
+        // one real, structural convention `certo db pull`/item 226 both
+        // already establish) resolve to a correlated subquery here; the key
+        // expression itself is translated against the *entity's own*
+        // fields only (a context field's `loaded by` key referencing
+        // another context field is not supported — no known real use case
+        // needs it, and it would risk an incorrectly-ordered subquery).
+        let key_sql_ctx = SqlCtx {
+            entity_var: &entity_var,
+            context_subqueries: &HashMap::new(),
+            constraints: constraint_asts,
+            temporals: temporal_asts,
+        };
+        let context_subqueries: HashMap<&str, ContextSubquery> = v.context.iter()
+            .filter_map(|f| {
+                let lb = f.loaded_by.as_ref()?;
+                let (table, key_expr) = context_field_table_and_key(&lb.node)?;
+                let key_sql = expr_to_sql(key_expr, &key_sql_ctx)?;
+                Some((f.name.node.as_str(), ContextSubquery { table: table.to_string(), key_sql }))
+            })
+            .collect();
+        let sql_ctx = SqlCtx {
+            entity_var: &entity_var,
+            context_subqueries: &context_subqueries,
+            constraints: constraint_asts,
+            temporals: temporal_asts,
+        };
+
+        // Every rule's own `require`, translated once, keyed by rule name —
+        // feeds both `after`-prerequisite gating (a dependent rule only
+        // fires once every prerequisite's own condition holds) and
+        // `overrides` guarding below. A rule missing here (translation
+        // failed) can't gate any dependent rule either — conservative and
+        // correct, since a partially-translated gate could silently under-
+        // or over-enforce.
+        let req_sql_by_name: HashMap<&str, String> = ordered.iter()
+            .filter_map(|r| expr_to_sql(&r.require.node, &sql_ctx).map(|s| (r.name.node.as_str(), s)))
+            .collect();
+
+        // Mirrors `overridden_by`/`override_guard` above exactly, but
+        // producing a SQL "not currently overridden" guard instead of
+        // Certo source text.
+        let mut overridden_by_rules: HashMap<&str, Vec<&RuleDecl>> = HashMap::new();
+        for rule in &v.rules {
+            if let Some(target) = &rule.overrides {
+                overridden_by_rules.entry(target.node.as_str()).or_default().push(rule);
+            }
         }
+        // Outer `None` = not overridden at all (no guard needed). Inner
+        // `None` = overridden, but at least one overriding rule's own
+        // condition didn't translate — the whole gate is unknowable.
+        let override_guard_sql = |name: &str| -> Option<Option<String>> {
+            let rules = overridden_by_rules.get(name)?;
+            if rules.is_empty() { return None; }
+            let mut parts = Vec::with_capacity(rules.len());
+            for r in rules {
+                parts.push(expr_to_sql(&r.require.node, &sql_ctx)?);
+            }
+            Some(Some(format!("NOT ({})", parts.join(" OR "))))
+        };
+
+        let mut rules_sql = String::new();
+        let mut trigger_warnings = Vec::new();
+        for rule in &ordered {
+            if rule.overrides.is_some() { continue; } // pure skip-switch, never fails on its own
+
+            let translated = (|| -> Option<(String, String)> {
+                let req_sql = expr_to_sql(&rule.require.node, &sql_ctx)?;
+                let message = variant_message(&rule.else_.node)?;
+
+                let mut conds: Vec<String> = Vec::new();
+                for after in &rule.after {
+                    conds.push(req_sql_by_name.get(after.node.as_str())?.clone());
+                }
+                match override_guard_sql(rule.name.node.as_str()) {
+                    Some(Some(guard)) => conds.push(guard),
+                    Some(None) => return None, // overriding rule's own condition didn't translate
+                    None => {}
+                }
+                conds.push(format!("NOT ({})", req_sql));
+                Some((conds.join(" AND "), message))
+            })();
+
+            match translated {
+                Some((gate, message)) => {
+                    writeln!(rules_sql, "    -- Rule: {}", rule.name.node).unwrap();
+                    writeln!(rules_sql, "    IF {} THEN RAISE EXCEPTION '{}'; END IF;",
+                        gate, message.replace('\'', "''")).unwrap();
+                }
+                None => {
+                    writeln!(rules_sql, "    -- Rule: {}", rule.name.node).unwrap();
+                    // Plain ASCII only (no em-dash etc.) — this text is emitted into
+                    // real SQL piped through `psql`, which on at least this platform's
+                    // pipeline does not reliably preserve non-ASCII bytes as UTF-8 (a
+                    // real, reproduced failure: "invalid byte sequence for encoding
+                    // UTF8" from a single em-dash character in this exact comment).
+                    writeln!(rules_sql, "    -- (could not be translated to SQL - not enforced by this trigger)").unwrap();
+                    trigger_warnings.push(format!(
+                        "validator `{}`'s rule `{}` could not be translated to trigger SQL — it is NOT enforced by the installed database trigger (only enforced at the application layer via `{}.validate`/`validateAll`)",
+                        vname, rule.name.node, vname));
+                }
+            }
+        }
+        out.trigger_warnings = trigger_warnings;
 
         let sql = format!(
 "-- Generated by certo build
@@ -488,3 +610,221 @@ fn snake_case(s: &str) -> String {
     }
     out
 }
+
+// ------------------------------------------------------------------ //
+// Trigger SQL translation (BACKLOG item 243)
+// ------------------------------------------------------------------ //
+
+/// A context field's `loaded by db.<table>.find(key)` resolved to a real,
+/// correlated subquery — `table` is the raw table name, `key_sql` the
+/// already-translated key expression (typically `NEW.some_column`).
+struct ContextSubquery {
+    table:   String,
+    key_sql: String,
+}
+
+struct SqlCtx<'a> {
+    entity_var:         &'a str,
+    context_subqueries: &'a HashMap<&'a str, ContextSubquery>,
+    constraints:        &'a HashMap<&'a str, &'a S<Expr>>,
+    temporals:          &'a HashMap<&'a str, &'a S<Expr>>,
+}
+
+/// Recognizes a context field's `loaded by` expression as the one real,
+/// structural convention item 226 already establishes for the ambient `db`
+/// accessor sugar — `db.<table>.find(<key-expr>)` — returning the table
+/// name and the (untranslated) key expression. Any other shape (an
+/// arbitrary function call) can't be turned into a subquery here; the
+/// caller falls back to leaving that context field's dependent rules
+/// untranslated rather than guessing.
+fn context_field_table_and_key(loaded_by: &Expr) -> Option<(&str, &Expr)> {
+    let Expr::App { func, args, .. } = loaded_by else { return None };
+    if args.len() != 1 { return None; }
+    let Expr::Field { expr: mid, field: method, .. } = &func.node else { return None };
+    if method.node != "find" { return None; }
+    let Expr::Field { expr: inner, field: table, .. } = &mid.node else { return None };
+    let Expr::Path { path, .. } = &inner.node else { return None };
+    if path.segments.len() != 1 || path.segments[0].node != "db" { return None; }
+    Some((table.node.as_str(), &args[0].value.node))
+}
+
+/// Extracts a `RAISE EXCEPTION` message from a rule's `else` clause — the
+/// qualified error-variant reference every `else` clause already is,
+/// `Err(...)`-wrapped by the *Certo*-source codegen paths above but never
+/// written that way by the user (confirmed: `rule.else_` itself is always
+/// the bare variant, e.g. `OE.X`). Confirmed by direct AST inspection: a
+/// qualified constructor reference like `OrderError.NotDraft` parses as a
+/// *single* `Expr::Path` with a 2-segment `ModulePath` (`["OrderError",
+/// "NotDraft"]`) — NOT `Expr::Field` (that shape is for value-level field
+/// access, e.g. `order.status`; this is a type-level/constructor reference,
+/// parsed the same way `List.map` is). A payload-carrying variant
+/// (`OE.X(v)`, `Expr::App` wrapping that same `Path`) still resolves to its
+/// own qualified name — the payload itself can't meaningfully cross into a
+/// raw SQL exception message, matching the user-confirmed "variant name as
+/// the message" scope for this item.
+fn variant_message(expr: &Expr) -> Option<String> {
+    match expr {
+        Expr::Path { path, .. } if path.segments.len() == 2 =>
+            Some(format!("{}.{}", path.segments[0].node, path.segments[1].node)),
+        Expr::App { func, .. } => variant_message(&func.node),
+        _ => None,
+    }
+}
+
+/// Constant-folds a `Duration.days(N)`/`.hours(N)`/`.minutes(N)`/
+/// `.seconds(N)`/`.milliseconds(N)` call (or a `temporal` declaration
+/// resolving to one) down to a millisecond count, matching the exact
+/// multipliers `certo_duration_*` uses at runtime
+/// (`crates/stdlib/src/datetime.rs`) — a `.age` comparison needs this
+/// constant to render a SQL `interval` literal, since PL/pgSQL has no
+/// first-class "Certo Duration" value to pass through directly.
+fn resolve_duration_ms(expr: &Expr, ctx: &SqlCtx) -> Option<i64> {
+    match expr {
+        Expr::Path { path, .. } if path.segments.len() == 1 => {
+            let body = ctx.temporals.get(path.segments[0].node.as_str())?;
+            resolve_duration_ms(&body.node, ctx)
+        }
+        Expr::App { func, args, .. } => {
+            let Expr::Field { expr: recv, field, .. } = &func.node else { return None };
+            let Expr::Path { path, .. } = &recv.node else { return None };
+            if path.segments.len() != 1 || path.segments[0].node != "Duration" { return None; }
+            let [arg] = args.as_slice() else { return None };
+            let Expr::Lit { value: Lit::Int(n), .. } = &arg.value.node else { return None };
+            let mult: i64 = match field.node.as_str() {
+                "milliseconds" => 1,
+                "seconds"      => 1_000,
+                "minutes"      => 60_000,
+                "hours"        => 3_600_000,
+                "days"         => 86_400_000,
+                _ => return None,
+            };
+            Some(n * mult)
+        }
+        _ => None,
+    }
+}
+
+/// True for `expr.age` (BACKLOG item 226/243's own `Expr::Age` postfix).
+fn is_age(expr: &Expr) -> bool { matches!(expr, Expr::Age { .. }) }
+
+/// Translates a `require`/override-guard/context-key boolean (or, for a
+/// context-key expression, scalar) expression to a SQL fragment. Returns
+/// `None` — not a hard error — for anything it doesn't structurally
+/// recognize, so a single untranslatable rule degrades gracefully (falls
+/// back to the pre-existing comment placeholder) without blocking the rest
+/// of the trigger. Deliberately narrow: this only needs to cover the real
+/// shapes validator rules actually use today, not general Certo expressions.
+fn expr_to_sql(expr: &Expr, ctx: &SqlCtx) -> Option<String> {
+    match expr {
+        Expr::Lit { value, .. } => match value {
+            Lit::Bool(b) => Some(if *b { "TRUE".to_string() } else { "FALSE".to_string() }),
+            Lit::Int(n)  => Some(n.to_string()),
+            Lit::String(s) => Some(format!("'{}'", s.replace('\'', "''"))),
+            _ => None, // Float/Decimal/FString/Uuid/Unit: not needed by any real rule today
+        },
+
+        // A bare identifier is only ever translatable as a named
+        // `constraint` reference — inlined recursively. An enum-variant
+        // literal (`Draft`) is only ever meaningful as one *side* of a
+        // comparison, handled by the `BinOp` arm below (matching item
+        // 244's own `is_bare_literal` heuristic), not standalone here.
+        Expr::Path { path, .. } if path.segments.len() == 1 => {
+            let body = ctx.constraints.get(path.segments[0].node.as_str())?;
+            expr_to_sql(&body.node, ctx)
+        }
+
+        Expr::Field { expr: inner, field, .. } => {
+            let Expr::Path { path, .. } = &inner.node else { return None };
+            if path.segments.len() != 1 { return None; }
+            let name = path.segments[0].node.as_str();
+            if name == ctx.entity_var {
+                Some(format!("NEW.{}", snake_case(&field.node)))
+            } else if let Some(sub) = ctx.context_subqueries.get(name) {
+                Some(format!("(SELECT {} FROM {} WHERE id = {})", snake_case(&field.node), sub.table, sub.key_sql))
+            } else {
+                None
+            }
+        }
+
+        Expr::UnOp { op: UnOp::Not, expr: inner, .. } =>
+            Some(format!("NOT ({})", expr_to_sql(&inner.node, ctx)?)),
+        Expr::UnOp { op: UnOp::Neg, .. } => None,
+
+        Expr::BinOp { op: op @ (BinOp::Eq | BinOp::NotEq | BinOp::Lt | BinOp::LtEq | BinOp::Gt | BinOp::GtEq),
+                      left, right, .. } => {
+            // `.age` comparison — special-cased as a whole, since there's
+            // no standalone SQL value to produce for `.age` on its own.
+            if is_age(&left.node) || is_age(&right.node) {
+                let (age_expr, other, flipped) = if let Expr::Age { expr: inner, .. } = &left.node {
+                    (inner, &right.node, false)
+                } else if let Expr::Age { expr: inner, .. } = &right.node {
+                    (inner, &left.node, true)
+                } else { unreachable!() };
+                let inner_sql = expr_to_sql(&inner_age_base(age_expr), ctx)?;
+                let ms = resolve_duration_ms(other, ctx)?;
+                let sql_op = match (op, flipped) {
+                    (BinOp::Eq, _)         => "=",
+                    (BinOp::NotEq, _)      => "!=",
+                    (BinOp::Lt, false)     => "<",
+                    (BinOp::Lt, true)      => ">",
+                    (BinOp::LtEq, false)   => "<=",
+                    (BinOp::LtEq, true)    => ">=",
+                    (BinOp::Gt, false)     => ">",
+                    (BinOp::Gt, true)      => "<",
+                    (BinOp::GtEq, false)   => ">=",
+                    (BinOp::GtEq, true)    => "<=",
+                    _ => return None,
+                };
+                return Some(format!("(now() - {}) {} interval '{} milliseconds'", inner_sql, sql_op, ms));
+            }
+
+            // Bare enum-variant literal on either side (item 244's own
+            // `is_bare_literal` heuristic, generalized) — quote it as a
+            // real SQL string rather than trying to translate it as a
+            // constraint/entity/context reference.
+            let is_bare_variant = |e: &Expr| matches!(e, Expr::Path { path, .. } if path.segments.len() == 1
+                && !ctx.constraints.contains_key(path.segments[0].node.as_str()));
+            let side_sql = |e: &Expr| -> Option<String> {
+                if let Expr::Path { path, .. } = e {
+                    if is_bare_variant(e) { return Some(format!("'{}'", path.segments[0].node)); }
+                }
+                expr_to_sql(e, ctx)
+            };
+
+            let l = side_sql(&left.node)?;
+            let r = side_sql(&right.node)?;
+            let sql_op = match op {
+                BinOp::Eq    => "=",
+                BinOp::NotEq => "!=",
+                BinOp::Lt    => "<",
+                BinOp::LtEq  => "<=",
+                BinOp::Gt    => ">",
+                BinOp::GtEq  => ">=",
+                _ => unreachable!(),
+            };
+            Some(format!("({} {} {})", l, sql_op, r))
+        }
+
+        Expr::BinOp { op: BinOp::And, left, right, .. } =>
+            Some(format!("({} AND {})", expr_to_sql(&left.node, ctx)?, expr_to_sql(&right.node, ctx)?)),
+        Expr::BinOp { op: BinOp::Or, left, right, .. } =>
+            Some(format!("({} OR {})", expr_to_sql(&left.node, ctx)?, expr_to_sql(&right.node, ctx)?)),
+
+        // `.isSome()` / `.isNone()` on a field.
+        Expr::App { func, args, .. } if args.is_empty() => {
+            let Expr::Field { expr: recv, field, .. } = &func.node else { return None };
+            let recv_sql = expr_to_sql(&recv.node, ctx)?;
+            match field.node.as_str() {
+                "isSome" => Some(format!("{} IS NOT NULL", recv_sql)),
+                "isNone" => Some(format!("{} IS NULL", recv_sql)),
+                _ => None,
+            }
+        }
+
+        _ => None,
+    }
+}
+
+/// `Expr::Age { expr, .. }` wraps the base expression `Box<S<Expr>>` — this
+/// just unwraps one layer so callers can hand `expr_to_sql` a plain `&Expr`.
+fn inner_age_base(expr: &S<Expr>) -> &Expr { &expr.node }
