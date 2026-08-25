@@ -670,11 +670,52 @@ fn result_decimal_payload_is_heap_boxed() {
 }
 
 #[test]
-fn result_int_payload_is_not_boxed() {
-    // Sanity: a plain pointer-sized payload must not regress to boxing —
-    // it already fits certo_ok's intptr_t slot directly.
+fn result_int_payload_is_now_always_boxed() {
+    // BACKLOG item 251 — previously asserted the *opposite* (an Int
+    // payload stays unboxed, since it fits certo_ok's pointer-sized slot
+    // directly) — that was actually the bug: a *generic* `Ok(v)` always
+    // heap-boxed its erased payload (item 119/120's own convention, since
+    // `v`'s type is opaque at that construction site), but a directly
+    // concrete `Ok(5)` stored it inline instead — the same resolved type
+    // (`Ty::Int`) ending up with two different runtime representations
+    // depending on whether the value flowed through a generic boundary,
+    // which the eventual match/`?`-desugar consumption side had no way to
+    // tell apart. Always boxing it — matching `Decimal`/`UUID`'s own
+    // already-consistent treatment — closes that ambiguity.
     let c = codegen("module A\nfn mk(): Result<Int, Text> = Ok(5)");
-    assert_not_contains(&c, "malloc(sizeof(int64_t))");
+    assert_contains(&c, "malloc(sizeof(int64_t))");
+}
+
+#[test]
+fn result_bool_and_unit_payloads_are_also_now_boxed() {
+    // Same fix, other scalar types that previously fell through
+    // `needs_result_box` the identical way `Int` did.
+    let c = codegen("module A\nfn mkBool(): Result<Bool, Text> = Ok(true)");
+    assert_contains(&c, "malloc(sizeof(bool))");
+}
+
+#[test]
+fn generic_some_of_a_bare_type_param_does_not_double_box() {
+    // BACKLOG item 251 — `Some(v)` always heap-boxes its payload
+    // unconditionally, *including* when `v`'s own type is still an
+    // erased, bare type param (`Ty::Var`) — but such a value is *already*
+    // a boxed pointer at this construction site (item 119/120's own
+    // convention for passing a concrete argument into a generic
+    // parameter), so boxing it again produced a pointer-to-a-pointer that
+    // the eventual (concrete-typed) match site only ever dereferenced
+    // once. `Some(v)` for a bare type-param `v` must now just reuse the
+    // already-boxed pointer directly — no `malloc` of its own at all.
+    let c = codegen("module A\nfn wrapSome<T>(v: T): Option<T> = Some(v)");
+    assert_not_contains(&c, "malloc");
+}
+
+#[test]
+fn concrete_some_of_an_int_is_still_boxed_exactly_once() {
+    // Regression guard — the fix above must not affect an ordinary,
+    // already-concrete `Some(5)`, which still needs its own real box
+    // (unaffected either way, but confirmed not accidentally skipped).
+    let c = codegen("module A\nfn mk(): Option<Int> = Some(5)");
+    assert_contains(&c, "malloc(sizeof(int64_t))");
 }
 
 #[test]

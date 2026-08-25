@@ -1873,3 +1873,34 @@ fn generic_result_return_with_no_expected_type_is_still_a_hard_error() {
     let m = try_lower("module A\nfn wrapOk<T, E>(v: T): Result<T, E> = Ok(v)\nfn f(): Unit = { val r = wrapOk(42) }");
     assert!(m.is_err(), "a generic Result-returning call with no expected type anywhere must still be a hard error");
 }
+
+// BACKLOG item 251 — `await genericCall(...)`'s own bound value is
+// `HirExprKind::Await(inner)`, not a bare `Call` — the item 247 fix above
+// only ever looked for `Call` directly, so an awaited generic call's
+// return type (this item's own original filed repro, `async fn
+// withAudit<T,E>`) never got resolved at all, regardless of the item 247
+// fix. `resolve_bare_generic_return` now sees through an `Await` wrapper
+// to its inner call.
+#[test]
+fn awaited_generic_result_return_resolves_via_a_val_annotation() {
+    let m = lower("module A\nasync fn wrapOk<T, E>(v: T): Result<T, E> = Ok(v)\nfn f(): Unit = { val r: Result<Int, Text> = await wrapOk(42) }");
+    let f = m.items.iter().find_map(|it| match it {
+        HirItem::Fn(f) if f.name == "f" => Some(f),
+        _ => None,
+    }).expect("expected fn `f`");
+    let HirExprKind::Block { stmts, .. } = &f.body.as_ref().unwrap().kind else {
+        panic!("expected a Block body");
+    };
+    let HirStmt::Let { init, .. } = stmts.first().expect("expected `val r = await wrapOk(42)`") else {
+        panic!("expected the first statement to be a Let");
+    };
+    assert!(matches!(&init.kind, HirExprKind::Await(_)), "expected the Let's init to still be an Await node");
+    assert_eq!(init.ty, Ty::Result(Box::new(Ty::Int), Box::new(Ty::Text)),
+        "await wrapOk(42)'s own type must fully resolve to Result<Int, Text>, got {:?}", init.ty);
+}
+
+#[test]
+fn awaited_generic_result_return_with_no_expected_type_is_still_a_hard_error() {
+    let m = try_lower("module A\nasync fn wrapOk<T, E>(v: T): Result<T, E> = Ok(v)\nfn f(): Unit = { val r = await wrapOk(42) }");
+    assert!(m.is_err(), "an awaited generic Result-returning call with no expected type anywhere must still be a hard error");
+}
