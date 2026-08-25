@@ -144,6 +144,24 @@ pub enum TypeErrorKind {
     /// don't compile at all (struct operands). Confirmed real numeric/
     /// comparable set: `Int`/`Int8`/`Int16`/`Int32`/`UInt`/`Float`/`Float32`.
     UnsupportedKeyType { fn_name: String, found: Ty },
+
+    /// E0700 — cycle in a validator's `after` rule dependency graph
+    /// (BACKLOG item 252). Ported directly from `crates/resolve` — fully
+    /// implemented there, but `crates/resolve` is dead code for the real
+    /// `certo` CLI binary (its only real consumer is the LSP), so this
+    /// never actually ran for `certo check`/`certo build` before now.
+    RuleCycle { validator: String, cycle: Vec<String> },
+
+    /// E0701 — a rule's `after <name>` names a rule that doesn't exist in
+    /// the same validator (BACKLOG item 252, ported from `crates/resolve`
+    /// — see `RuleCycle`'s own doc comment for why it never ran).
+    AfterRuleNotFound { rule_name: String, after_name: String },
+
+    /// E0702 — a rule's `overrides <name>` names a rule that doesn't
+    /// exist in the same validator (BACKLOG item 252, ported from
+    /// `crates/resolve` — see `RuleCycle`'s own doc comment for why it
+    /// never ran).
+    OverridesRuleNotFound { rule_name: String, overrides_name: String },
 }
 
 impl TypeError {
@@ -202,6 +220,12 @@ impl TypeError {
                 format!("E0709: `.age` is only valid on Timestamp or Timestamp?, found `{}`", found.display()),
             TypeErrorKind::UnsupportedKeyType { fn_name, found } =>
                 format!("E0710: `{}`'s key/numeric projection resolved to `{}`, which isn't supported — only Int/Int8/Int16/Int32/UInt/Float/Float32 are", fn_name, found.display()),
+            TypeErrorKind::RuleCycle { validator, cycle } =>
+                format!("E0700: cycle in rule dependency graph in validator `{}`: {}", validator, cycle.join(" → ")),
+            TypeErrorKind::AfterRuleNotFound { rule_name, after_name } =>
+                format!("E0701: rule `{}` has `after {}` but `{}` does not exist in this validator", rule_name, after_name, after_name),
+            TypeErrorKind::OverridesRuleNotFound { rule_name, overrides_name } =>
+                format!("E0702: rule `{}` has `overrides {}` but `{}` does not exist in this validator", rule_name, overrides_name, overrides_name),
         }
     }
 }

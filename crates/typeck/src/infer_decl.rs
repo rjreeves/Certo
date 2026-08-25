@@ -78,6 +78,12 @@ pub fn check_module_seeded(
     // must only touch fields in that validator's own scope.
     check_constraint_scope(module, &mut errors);
 
+    // Pass 6 — E0700/E0701/E0702: a validator's `after`/`overrides`
+    // references must name real rules in the same validator, and the
+    // `after` dependency graph must be acyclic (BACKLOG item 252, ported
+    // from `crates/resolve`, which never actually ran for the real CLI).
+    check_rule_dependencies(module, &mut errors);
+
     if errors.is_empty() { Ok(()) } else { Err(errors) }
 }
 
@@ -391,6 +397,107 @@ fn check_constraint_scope(module: &Module, errors: &mut Vec<TypeError>) {
             }
         }
     }
+}
+
+// ------------------------------------------------------------------ //
+// Rule dependency validation — E0700/E0701/E0702 (BACKLOG item 252).
+// Ported directly from `crates/resolve/src/resolve_decl.rs`'s own
+// `resolve_validator`/`detect_rule_cycles`/`dfs_cycle` (unchanged logic,
+// just `ResolveError`/`ResolveErrorKind` → `TypeError`/`TypeErrorKind`) —
+// that crate's own version is fully correct, it just never actually runs
+// for the real CLI (`crates/resolve` is dead code there; its only real
+// consumer is the LSP). Runs directly against the un-expanded
+// `Decl::Validator` AST, matching `check_constraint_scope`'s own
+// no-`certo_resolve`-dependency design just above.
+// ------------------------------------------------------------------ //
+
+fn check_rule_dependencies(module: &Module, errors: &mut Vec<TypeError>) {
+    use std::collections::{HashMap, HashSet};
+    for sdecl in &module.decls {
+        let Decl::Validator(v) = &sdecl.node else { continue };
+
+        let rule_map: HashMap<&str, ()> = v.rules.iter().map(|r| (r.name.node.as_str(), ())).collect();
+
+        let mut has_ref_errors = false;
+        for rule in &v.rules {
+            for after_ref in &rule.after {
+                if !rule_map.contains_key(after_ref.node.as_str()) {
+                    errors.push(TypeError {
+                        kind: TypeErrorKind::AfterRuleNotFound {
+                            rule_name:  rule.name.node.clone(),
+                            after_name: after_ref.node.clone(),
+                        },
+                        span: after_ref.span,
+                    });
+                    has_ref_errors = true;
+                }
+            }
+            if let Some(ov) = &rule.overrides {
+                if !rule_map.contains_key(ov.node.as_str()) {
+                    errors.push(TypeError {
+                        kind: TypeErrorKind::OverridesRuleNotFound {
+                            rule_name:      rule.name.node.clone(),
+                            overrides_name: ov.node.clone(),
+                        },
+                        span: ov.span,
+                    });
+                    has_ref_errors = true;
+                }
+            }
+        }
+
+        // Cycle detection — only meaningful when all references resolved.
+        if !has_ref_errors {
+            let adj: HashMap<&str, Vec<&str>> = v.rules.iter()
+                .map(|r| (r.name.node.as_str(), r.after.iter().map(|a| a.node.as_str()).collect()))
+                .collect();
+            let mut visited:   HashSet<&str> = HashSet::new();
+            let mut rec_stack: Vec<&str>     = Vec::new();
+            for rule in &v.rules {
+                let name = rule.name.node.as_str();
+                if !visited.contains(name) {
+                    if let Some(cycle) = dfs_rule_cycle(name, &adj, &mut visited, &mut rec_stack) {
+                        errors.push(TypeError {
+                            kind: TypeErrorKind::RuleCycle {
+                                validator: v.name.node.clone(),
+                                cycle,
+                            },
+                            span: v.span,
+                        });
+                        break; // report only the first cycle
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn dfs_rule_cycle<'a>(
+    node:      &'a str,
+    adj:       &std::collections::HashMap<&'a str, Vec<&'a str>>,
+    visited:   &mut std::collections::HashSet<&'a str>,
+    rec_stack: &mut Vec<&'a str>,
+) -> Option<Vec<String>> {
+    visited.insert(node);
+    rec_stack.push(node);
+
+    if let Some(neighbors) = adj.get(node) {
+        for &next in neighbors {
+            if !visited.contains(next) {
+                if let Some(cycle) = dfs_rule_cycle(next, adj, visited, rec_stack) {
+                    return Some(cycle);
+                }
+            } else if rec_stack.contains(&next) {
+                let start = rec_stack.iter().position(|&n| n == next).unwrap();
+                let mut cycle: Vec<String> = rec_stack[start..].iter().map(|&n| n.to_string()).collect();
+                cycle.push(next.to_string());
+                return Some(cycle);
+            }
+        }
+    }
+
+    rec_stack.pop();
+    None
 }
 
 // ------------------------------------------------------------------ //

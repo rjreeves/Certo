@@ -916,6 +916,59 @@ fn callIt(o: Order): Result<Unit, OE> = V.validate(o)").unwrap();
 }
 
 // ------------------------------------------------------------------ //
+// E0700/E0701/E0702 — rule dependency validation (BACKLOG item 252)
+//
+// Ported from `crates/resolve/src/tests.rs`, which exercises the same
+// logic through `certo_resolve::resolve` — dead code for the real CLI
+// binary (its only real consumer is the LSP). These versions exercise
+// the port living in `check_module_seeded` itself, which is what
+// `certo check`/`certo build` actually run.
+// ------------------------------------------------------------------ //
+
+#[test]
+fn validator_after_missing_rule_e0701() {
+    let kind = first_error_kind("module A
+type OE = | X
+validator V for Order errors OE {
+    rule b { after nonexistent  require true else OE.X }
+}");
+    assert!(matches!(kind, TypeErrorKind::AfterRuleNotFound { ref after_name, .. } if after_name == "nonexistent"));
+}
+
+#[test]
+fn validator_overrides_missing_rule_e0702() {
+    let kind = first_error_kind("module A
+type OE = | X
+validator V for Order errors OE {
+    rule b { overrides ghost  require true else OE.X }
+}");
+    assert!(matches!(kind, TypeErrorKind::OverridesRuleNotFound { ref overrides_name, .. } if overrides_name == "ghost"));
+}
+
+#[test]
+fn validator_rule_cycle_e0700() {
+    let kind = first_error_kind("module A
+type OE = | X
+validator V for Order errors OE {
+    rule a { after b  require true else OE.X }
+    rule b { after a  require true else OE.X }
+}");
+    assert!(matches!(kind, TypeErrorKind::RuleCycle { ref validator, .. } if validator == "V"));
+}
+
+#[test]
+fn validator_no_cycle_chain_ok() {
+    // a -> b -> c is a valid chain with no cycle.
+    check("module A
+type OE = | X
+validator V for Order errors OE {
+    rule a { require true else OE.X }
+    rule b { after a  require true else OE.X }
+    rule c { after b  require true else OE.X }
+}").unwrap();
+}
+
+// ------------------------------------------------------------------ //
 // E0704 — named-constraint field scope (BACKLOG item 225)
 // ------------------------------------------------------------------ //
 
