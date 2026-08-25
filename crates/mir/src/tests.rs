@@ -198,6 +198,68 @@ fn list_pattern_float_head_element_gets_unboxed() {
     assert!(has_unbox, "expected an Unbox for the Float head element");
 }
 
+// ------------------------------------------------------------------ //
+// `for x in <list>` element unboxing — BACKLOG item 253
+// ------------------------------------------------------------------ //
+
+#[test]
+fn for_loop_over_record_list_uses_unbox() {
+    // Regression for the confirmed crash: a record-element list's own
+    // `certo_list_get_or_panic` result (a raw `void*`) was assigned directly
+    // to the struct-typed loop variable with no cast at all — a hard C
+    // compile error (`assigning to 'Widget' from incompatible type 'void *'`),
+    // unlike `Ty::Float`, whose bit-reinterpretation this arm already
+    // special-cased separately.
+    let mf = mir_fn("module A\ntype Widget = { name: Text }\nfn f(xs: List<Widget>): Unit = {\n  for w in xs { println(w.name) }\n}");
+    let has_unbox = mf.blocks.iter().any(|bb| bb.stmts.iter().any(|s| matches!(s,
+        MirStmt::Assign { rvalue: Rvalue::Unbox { ty: certo_typeck::Ty::Named { name, .. }, .. }, .. } if name == "Widget"
+    )));
+    assert!(has_unbox, "expected an Unbox for the Widget record element");
+}
+
+#[test]
+fn for_loop_over_int_list_does_not_use_unbox() {
+    // Regression guard: the ordinary pointer/integer-sized element case
+    // (already working before this fix) must stay a direct assignment, not
+    // gain a needless Unbox.
+    let mf = mir_fn("module A\nfn f(xs: List<Int>): Unit = {\n  for x in xs { println(intToText(x)) }\n}");
+    let has_unbox = mf.blocks.iter().any(|bb| bb.stmts.iter().any(|s| matches!(s,
+        MirStmt::Assign { rvalue: Rvalue::Unbox { .. }, .. }
+    )));
+    assert!(!has_unbox, "an Int element needs no Unbox");
+}
+
+#[test]
+fn for_loop_over_decimal_list_uses_unbox_not_bitcast() {
+    // A second, latent bug this same fix closes: `Decimal`'s C
+    // representation is a `{value: int64_t, scale: int8_t}` struct, not a
+    // bit-castable scalar — the old code wrongly ran it through the same
+    // `__certo_i2f` bit-reinterpretation path as `Float`, which only
+    // happens to "work" for `Float` because a `double`'s bit pattern really
+    // does fit in the pointer-sized slot untouched.
+    let mf = mir_fn("module A\nfn f(xs: List<Decimal>): Unit = {\n  for d in xs { println(d.toText()) }\n}");
+    let has_unbox = mf.blocks.iter().any(|bb| bb.stmts.iter().any(|s| matches!(s,
+        MirStmt::Assign { rvalue: Rvalue::Unbox { ty: certo_typeck::Ty::Decimal(_), .. }, .. }
+    )));
+    let has_i2f = mf.blocks.iter().any(|bb| bb.stmts.iter().any(|s| matches!(s,
+        MirStmt::Assign { rvalue: Rvalue::Call { func: Operand::Global(name), .. }, .. } if name == "__certo_i2f"
+    )));
+    assert!(has_unbox, "expected a real Unbox for the Decimal element");
+    assert!(!has_i2f, "Decimal must not be bit-reinterpreted via __certo_i2f");
+}
+
+#[test]
+fn for_loop_over_float_list_still_unboxes_correctly() {
+    // Behavior-preservation guard: Float must still route through Unbox
+    // (which itself special-cases Float via __certo_i2f at the codegen
+    // layer) after unifying this arm's element-recovery logic.
+    let mf = mir_fn("module A\nfn f(xs: List<Float>): Unit = {\n  for v in xs { println(intToText(0)) }\n}");
+    let has_unbox = mf.blocks.iter().any(|bb| bb.stmts.iter().any(|s| matches!(s,
+        MirStmt::Assign { rvalue: Rvalue::Unbox { ty: certo_typeck::Ty::Float, .. }, .. }
+    )));
+    assert!(has_unbox, "expected an Unbox with Ty::Float for the Float element");
+}
+
 #[test]
 fn list_pattern_int_head_element_does_not_get_unboxed() {
     let mf = mir_fn("module A\nfn f(xs: List<Int>): Int = match xs {\n [a, ...rest] => a,\n _ => 0\n}");

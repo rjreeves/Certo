@@ -2348,23 +2348,45 @@ fn lower_expr(expr: &HirExpr, b: &mut Builder) -> Operand {
             });
 
             // loop_body: binding = List.getOrPanic(iter, _i); body; _i = _i + 1
+            //
+            // BACKLOG item 253 — `certo_list_get_or_panic` always returns a
+            // raw `void*` list-element slot; assigning it straight to
+            // `binding_local` only compiles when the element's own C type is
+            // itself pointer/integer-sized and implicitly convertible from
+            // `void*` (fine for Int/Bool/etc, a hard C compile error for any
+            // record/sum-type struct, which C has no implicit conversion
+            // for at all). Mirrors `lower_sum_by_call`'s own identical
+            // `elem_needs_unbox` handling just below in this same file
+            // (added for item 162b, whose own doc comment already
+            // — incorrectly, until this fix — claimed this `For` arm handled
+            // the general case too): for anything `Ty::needs_heap_box()`
+            // (records, sum types, `Decimal`, `Uuid`, `Fn`) the raw slot is
+            // first captured in a `Ty::Var(0)` (real C type `void*`) local,
+            // then `Rvalue::Unbox` recovers the real value via the same
+            // general-purpose `unbox_value` helper `emit_mir.rs`'s own
+            // tuple-field-access path already uses — a genuine heap
+            // dereference for these, not the bit-reinterpretation the old
+            // code wrongly also applied to `Decimal` here (a real, distinct,
+            // latent bug this fix also happens to close: `Decimal`'s C
+            // representation is a `{value: int64_t, scale: int8_t}` struct,
+            // not a bit-castable scalar `certo_i2f` could ever validly
+            // handle). `Ty::Float` keeps its own existing, correct
+            // bit-reinterpretation path — `unbox_value` already special-
+            // cases it identically to what this arm did directly before.
             b.switch_to(loop_body_bb);
             let binding_local = b.map_hir_local(*binding, binding_name, elem_ty.clone());
             let elem_done = b.new_block();
-            if matches!(elem_ty, Ty::Float | Ty::Decimal(_)) {
-                // Element was stored bit-cast; restore the double from its bits.
-                let boxed = b.declare_local("_elem_bits", Ty::Int);
+            let elem_needs_unbox = matches!(elem_ty, Ty::Float) || elem_ty.needs_heap_box();
+            if elem_needs_unbox {
+                let raw = b.declare_local("_elem_raw", Ty::Var(0));
                 b.terminate(Terminator::Call {
                     func: Operand::Global("List.getOrPanic".into()),
                     args: vec![iter_op.clone(), Operand::Local(i_local)],
-                    dest: boxed,
+                    dest: raw,
                     next: elem_done,
                 });
                 b.switch_to(elem_done);
-                b.assign(binding_local, Rvalue::Call {
-                    func: Operand::Global("__certo_i2f".into()),
-                    args: vec![Operand::Local(boxed)],
-                });
+                b.assign(binding_local, Rvalue::Unbox { value: Operand::Local(raw), ty: elem_ty.clone() });
             } else {
                 b.terminate(Terminator::Call {
                     func: Operand::Global("List.getOrPanic".into()),
