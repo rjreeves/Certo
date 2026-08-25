@@ -6,8 +6,8 @@ mod infer_decl;
 mod error;
 
 pub use ty::{Ty, assign_var_names};
-pub use error::{TypeError, TypeErrorKind};
-pub use infer_decl::{check_module, check_module_seeded};
+pub use error::{TypeError, TypeErrorKind, Warning, WarningKind};
+pub use infer_decl::{check_module, check_module_seeded, check_module_warnings};
 pub use env::TypeEnv;
 
 #[cfg(test)]

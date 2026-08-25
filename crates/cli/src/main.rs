@@ -1246,6 +1246,22 @@ fn run_typeck_inner(
         process::exit(1);
     }
 
+    // BACKLOG item 230 — validator warnings (W0100/W0101/W0102). Run only
+    // once the main typeck pass above has already succeeded (a program
+    // with hard errors already exited above, so there's nothing useful to
+    // warn about yet) — printed via the same `render_all` renderer, but
+    // never aborts the build; a real "promote to error" (`--strict`-style)
+    // path was deliberately not built, since nothing in the spec calls for
+    // one and it's speculative scope beyond what these three checks need.
+    let warnings = certo_typeck::check_module_warnings(module);
+    if !warnings.is_empty() {
+        let diags: Vec<Diagnostic> = warnings.iter()
+            .map(|w| warning_to_diagnostic(w))
+            .collect();
+        eprint!("{}", render_all(&diags, src, filename, colour));
+        if explain { print_explanations(&diags); }
+    }
+
     if let Err(errs) = certo_traits::check_module(module) {
         let diags: Vec<Diagnostic> = errs.iter()
             .map(|e| trait_error_to_diagnostic(e))
@@ -2013,6 +2029,30 @@ pub(crate) fn type_error_to_diagnostic(e: &TypeError) -> Diagnostic {
                 .with_label(format!("`{}` has no operator overloading", ty.display()))
                 .with_note("use a named function instead, e.g. `.diff(...)` or `.addDuration(...)`")
         }
+    }
+}
+
+/// BACKLOG item 230 — mirrors `type_error_to_diagnostic`'s own shape, but
+/// for `certo_typeck::Warning` (non-fatal — see that type's own doc
+/// comment). W0100/W0101/W0102 are the first three codes to use this path.
+pub(crate) fn warning_to_diagnostic(w: &certo_typeck::Warning) -> Diagnostic {
+    use certo_typeck::WarningKind;
+    match &w.kind {
+        WarningKind::AmbiguousOverridePriority { rule_name, overridden_name } =>
+            Diagnostic::warning("W0100",
+                format!("rule `{}` overrides `{}` with no explicit `priority` on either rule", rule_name, overridden_name))
+                .with_span(w.span)
+                .with_label("add `priority` to state evaluation order explicitly"),
+        WarningKind::UnreachableOverriddenRule { overriding_name, overridden_name } =>
+            Diagnostic::warning("W0101",
+                format!("rule `{}`'s condition is always true — `{}` is never evaluated", overriding_name, overridden_name))
+                .with_span(w.span)
+                .with_label("this condition is a compile-time-obvious tautology"),
+        WarningKind::ContextFieldMissingLoadedBy { validator_name, field_name } =>
+            Diagnostic::warning("W0102",
+                format!("context field `{}` has no `loaded by` — `{}.validateWithDb` will not be generated", field_name, validator_name))
+                .with_span(w.span)
+                .with_label("add `loaded by <expr>` to enable validateWithDb"),
     }
 }
 

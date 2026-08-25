@@ -23,6 +23,14 @@ fn has_kind_typeck(errs: &[crate::error::TypeError], f: impl Fn(&TypeErrorKind) 
     errs.iter().any(|e| f(&e.kind))
 }
 
+/// BACKLOG item 230 — `check_module_warnings` runs directly against the
+/// un-expanded AST (no typeck/resolve dependency at all, mirroring
+/// `check_constraint_scope`'s own design), so this helper just parses.
+fn warnings(src: &str) -> Vec<crate::error::Warning> {
+    let module = parse(src).expect("parse error");
+    crate::infer_decl::check_module_warnings(&module)
+}
+
 // ------------------------------------------------------------------ //
 // Happy-path tests
 // ------------------------------------------------------------------ //
@@ -640,6 +648,111 @@ validator V for Order errors OE {
 }");
     assert!(!errs.is_empty(), "expected type error");
     assert!(errs[0].message().contains("E020"), "expected E020x, got: {}", errs[0].message());
+}
+
+// BACKLOG item 230 — W0100/W0101/W0102 validator warnings.
+use crate::error::WarningKind;
+
+#[test]
+fn w0100_fires_for_an_overrides_relationship_with_no_priority_on_either_rule() {
+    let ws = warnings("module A
+validator V for Order errors OE {
+    rule base { require order.status == Draft else OE.X }
+    rule bypass { overrides base require order.status == Approved else OE.X }
+}");
+    assert!(ws.iter().any(|w| matches!(&w.kind,
+        WarningKind::AmbiguousOverridePriority { rule_name, overridden_name }
+            if rule_name == "bypass" && overridden_name == "base")),
+        "expected W0100, got: {:?}", ws.iter().map(|w| w.message()).collect::<Vec<_>>());
+}
+
+#[test]
+fn w0100_does_not_fire_when_the_overriding_rule_has_an_explicit_priority() {
+    let ws = warnings("module A
+validator V for Order errors OE {
+    rule base { require order.status == Draft else OE.X }
+    rule bypass { overrides base priority 100 require order.status == Approved else OE.X }
+}");
+    assert!(!ws.iter().any(|w| matches!(&w.kind, WarningKind::AmbiguousOverridePriority { .. })),
+        "did not expect W0100 when priority is explicit, got: {:?}", ws.iter().map(|w| w.message()).collect::<Vec<_>>());
+}
+
+#[test]
+fn w0100_does_not_fire_for_a_rule_with_no_overrides_at_all() {
+    let ws = warnings("module A
+validator V for Order errors OE {
+    rule r { require order.status == Draft else OE.X }
+}");
+    assert!(ws.is_empty(), "a rule with no `overrides` at all must never warn, got: {:?}", ws.iter().map(|w| w.message()).collect::<Vec<_>>());
+}
+
+#[test]
+fn w0100_skips_an_overrides_reference_to_a_rule_that_does_not_exist() {
+    // A separate concern (E0702) — not this check's job to flag.
+    let ws = warnings("module A
+validator V for Order errors OE {
+    rule r { overrides doesNotExist priority 100 require true else OE.X }
+}");
+    assert!(!ws.iter().any(|w| matches!(&w.kind, WarningKind::AmbiguousOverridePriority { .. })),
+        "an overrides reference to a non-existent rule must be skipped, not warned about");
+}
+
+#[test]
+fn w0101_fires_when_the_overriding_rules_own_condition_is_a_bare_true() {
+    let ws = warnings("module A
+validator V for Order errors OE {
+    rule base { require order.status == Draft else OE.X }
+    rule bypass { overrides base priority 100 require true else OE.X }
+}");
+    assert!(ws.iter().any(|w| matches!(&w.kind,
+        WarningKind::UnreachableOverriddenRule { overriding_name, overridden_name }
+            if overriding_name == "bypass" && overridden_name == "base")),
+        "expected W0101, got: {:?}", ws.iter().map(|w| w.message()).collect::<Vec<_>>());
+}
+
+#[test]
+fn w0101_does_not_fire_for_a_non_tautological_condition() {
+    let ws = warnings("module A
+validator V for Order errors OE {
+    rule base { require order.status == Draft else OE.X }
+    rule bypass { overrides base priority 100 require order.status == Approved else OE.X }
+}");
+    assert!(!ws.iter().any(|w| matches!(&w.kind, WarningKind::UnreachableOverriddenRule { .. })),
+        "a non-tautological override condition must not warn, got: {:?}", ws.iter().map(|w| w.message()).collect::<Vec<_>>());
+}
+
+#[test]
+fn w0102_fires_for_a_context_field_with_no_loaded_by() {
+    let ws = warnings("module A
+validator V for Order errors OE {
+    context { note: Text }
+    rule r { require true else OE.X }
+}");
+    assert!(ws.iter().any(|w| matches!(&w.kind,
+        WarningKind::ContextFieldMissingLoadedBy { validator_name, field_name }
+            if validator_name == "V" && field_name == "note")),
+        "expected W0102, got: {:?}", ws.iter().map(|w| w.message()).collect::<Vec<_>>());
+}
+
+#[test]
+fn w0102_does_not_fire_when_the_field_has_loaded_by() {
+    let ws = warnings("module A
+fn findNote(id: Int): Text = \"n\"
+validator V for Order errors OE {
+    context { note: Text loaded by findNote(1) }
+    rule r { require true else OE.X }
+}");
+    assert!(!ws.iter().any(|w| matches!(&w.kind, WarningKind::ContextFieldMissingLoadedBy { .. })),
+        "a context field with loaded by must not warn, got: {:?}", ws.iter().map(|w| w.message()).collect::<Vec<_>>());
+}
+
+#[test]
+fn w0102_does_not_fire_for_a_validator_with_no_context_at_all() {
+    let ws = warnings("module A
+validator V for Order errors OE {
+    rule r { require true else OE.X }
+}");
+    assert!(ws.is_empty(), "a validator with no context block at all must never warn, got: {:?}", ws.iter().map(|w| w.message()).collect::<Vec<_>>());
 }
 
 // ------------------------------------------------------------------ //

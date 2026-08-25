@@ -1244,6 +1244,74 @@ references names this validator actually has.
 
 ---
 
+## W0100–W0102  Validator warnings
+
+Unlike every other diagnostic in this document, these three are
+**warnings** — `certo check`/`certo build` print them and continue; they
+never abort compilation on their own.
+
+### W0100  Ambiguous `overrides` priority
+
+```
+warning[W0100]: rule `adminBypass` overrides `mustBeDraft` with no explicit `priority` on either rule
+  --> src/validators.cto:8:5
+   |
+ 8 |     rule adminBypass { overrides mustBeDraft require true else OrderError.NotReady }
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ add `priority` to state evaluation order explicitly
+```
+
+**Cause:** A rule declares `overrides` against another rule, but neither
+rule has an explicit `priority`. `overrides` alone already determines
+evaluation order mechanically (the overriding rule is always checked
+first), but the spec's own recommended pattern (§16.4) pairs every
+`overrides` with an explicit `priority` to state that intent clearly.
+
+**Fix:** Add `priority <n>` to the overriding rule (and, if useful, the
+overridden one too) to make the ordering explicit.
+
+---
+
+### W0101  Unreachable overridden rule
+
+```
+warning[W0101]: rule `adminBypass`'s condition is always true — `mustBeDraft` is never evaluated
+  --> src/validators.cto:8:41
+   |
+ 8 |     rule adminBypass { overrides mustBeDraft require true else OrderError.NotReady }
+   |                                              ^^^^ this condition is a compile-time-obvious tautology
+```
+
+**Cause:** An overriding rule's own `require` condition is a bare `true`
+literal. Since the overriding rule's condition always passes, the rule it
+`overrides` is permanently skipped — it can never actually run.
+
+**Fix:** Give the overriding rule a real, conditional `require` (e.g. a
+role/permission check), or remove the `overrides` relationship if the
+overridden rule is genuinely meant to be replaced entirely.
+
+---
+
+### W0102  Context field missing `loaded by`
+
+```
+warning[W0102]: context field `note` has no `loaded by` — `OrderValidator.validateWithDb` will not be generated
+  --> src/validators.cto:9:9
+   |
+ 9 |         note: Text
+   |         ^^^^^^^^^^ add `loaded by <expr>` to enable validateWithDb
+```
+
+**Cause:** `{Validator}.validateWithDb` (the DB-aware variant of
+`validate`/`validateAll`, spec §16.6) is only generated when *every*
+`context` field declares `loaded by <expr>` — a validator with even one
+field missing it silently gets no `validateWithDb` at all.
+
+**Fix:** Add `loaded by <expr>` to the field, or accept that this
+validator only ever gets the plain `validate`/`validateAll` you pass a
+pre-built context to yourself.
+
+---
+
 ## E0708–E0709  Temporal / `.age` errors
 
 ### E0708  Temporal body is not a Duration
