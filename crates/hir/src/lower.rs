@@ -958,6 +958,49 @@ pub fn lower_module(module: &Module) -> Result<HirModule, Vec<LowerError>> {
     }
 }
 
+/// `db.<table>.<method>(args)` (BACKLOG item 226) — see the matching
+/// doc comment on typeck's own `try_db_accessor_call`
+/// (`crates/typeck/src/infer_expr.rs`) for the full design rationale;
+/// this is the HIR-side mirror, needed because HIR never reuses typeck's
+/// own resolution (the same "independent lowering pass" tradeoff the
+/// adjacent UFCS-rewrite comment already documents). Builds a brand-new,
+/// ordinary `Expr::App` calling the real generated function name directly
+/// (`{table}FindById`/`{table}FindAll`/`{table}DeleteById`), with a call to
+/// the new zero-arg builtin `__certo_db_conn()` spliced in as the leading
+/// argument — the caller re-lowers this synthesized node with `lower_expr`,
+/// reusing all of the existing call-lowering machinery unchanged.
+fn try_db_accessor_rewrite(func: &S<Expr>, args: &[certo_ast::expr::Arg], cx: &Cx) -> Option<S<Expr>> {
+    let Expr::Field { expr: mid, field: method, .. } = &func.node else { return None };
+    let Expr::Field { expr: inner, field: table, .. } = &mid.node else { return None };
+    let Expr::Path { path, .. } = &inner.node else { return None };
+    if path.segments.len() != 1 || path.segments[0].node != "db" { return None; }
+    if cx.lookup_local("db").is_some() { return None; } // shadowed by a real local
+
+    let suffix = match method.node.as_str() {
+        "find"   => "FindById",
+        "all"    => "FindAll",
+        "delete" => "DeleteById",
+        _ => return None, // typeck already rejected this with E0711
+    };
+    let fn_name = format!("{}{}", table.node, suffix);
+    let span = func.span;
+    let path_expr = |name: &str| S::new(
+        Expr::Path {
+            path: certo_ast::types::ModulePath { segments: vec![S::new(name.to_string(), span)], span },
+            span,
+        },
+        span,
+    );
+    let conn_call = certo_ast::expr::Arg {
+        label: None,
+        value: S::new(Expr::App { func: Box::new(path_expr("__certo_db_conn")), args: vec![], span }, span),
+        span,
+    };
+    let mut new_args = vec![conn_call];
+    new_args.extend(args.iter().cloned());
+    Some(S::new(Expr::App { func: Box::new(path_expr(&fn_name)), args: new_args, span }, span))
+}
+
 // ------------------------------------------------------------------ //
 // Expression lowering
 // ------------------------------------------------------------------ //
@@ -1049,6 +1092,21 @@ fn lower_expr(expr: &S<Expr>, cx: &mut Cx) -> HirExpr {
         }
 
         Expr::App { func, args, .. } => {
+            // `db.<table>.<method>(...)` (BACKLOG item 226) — mirrors
+            // typeck's own `try_db_accessor_call`
+            // (`crates/typeck/src/infer_expr.rs`) exactly, checked first for
+            // the identical reason: it must never fall through to the
+            // ordinary UFCS rewrite just below, whose own receiver-lowering
+            // would otherwise try to lower `db.customers` as an ordinary
+            // field access on an unbound `db`. By the time HIR lowering
+            // runs, typeck has already validated the table/method
+            // combination resolves to a real generated function (or
+            // aborted with `E0711`), so this version needs no error path of
+            // its own — only the same table/method → function-name mapping.
+            if let Some(rewritten) = try_db_accessor_rewrite(func, args, cx) {
+                return lower_expr(&rewritten, cx);
+            }
+
             // Dot-call UFCS (BACKLOG item 162) — HIR does its own, entirely
             // independent lowering pass over the original AST (it never
             // reuses typeck's substitution), so it needs the identical

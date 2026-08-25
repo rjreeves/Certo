@@ -292,6 +292,87 @@ fn cmd_run(args: &[String]) {
 // build
 // ------------------------------------------------------------------ //
 
+/// BACKLOG item 226 — is `db` (the ambient DB namespace) referenced
+/// anywhere in this module's own declarations, via `db.transaction { ... }`
+/// or `db.<table>.<method>(...)`? Neither form is ever backed by a real
+/// `import`, so `cmd_build`'s own import-based `uses_db` check can't see
+/// them; this walks every expression in the module looking for a real
+/// `Expr::Transaction` node or the `db.<table>.<method>` call shape
+/// directly, mirroring `collect_referenced_idents`'s own exhaustive
+/// recursion style (`crates/parser/src/parse_decl.rs`). Same scope as the
+/// import check it complements: only this module's own declarations, no
+/// transitive walk through separately-imported files.
+fn module_uses_db_sugar(module: &Module) -> bool {
+    use certo_ast::expr::{Lit, FStringPart};
+    use certo_ast::decl::FnDecl;
+
+    fn is_db_accessor_call(func: &S<Expr>) -> bool {
+        let Expr::Field { expr: mid, .. } = &func.node else { return false };
+        let Expr::Field { expr: inner, .. } = &mid.node else { return false };
+        let Expr::Path { path, .. } = &inner.node else { return false };
+        path.segments.len() == 1 && path.segments[0].node == "db"
+    }
+
+    fn expr_uses_db(expr: &S<Expr>) -> bool {
+        match &expr.node {
+            Expr::Transaction { .. } => true,
+            Expr::Lit { value: Lit::FString(parts), .. } =>
+                parts.iter().any(|p| matches!(p, FStringPart::Interpolated(e) if expr_uses_db(e))),
+            Expr::Lit { .. } | Expr::Path { .. } => false,
+            Expr::App { func, args, .. } =>
+                is_db_accessor_call(func) || expr_uses_db(func) || args.iter().any(|a| expr_uses_db(&a.value)),
+            Expr::Pipe { left, right, .. } | Expr::BinOp { left, right, .. } =>
+                expr_uses_db(left) || expr_uses_db(right),
+            Expr::UnOp { expr, .. }
+            | Expr::Field { expr, .. }
+            | Expr::SafeField { expr, .. }
+            | Expr::Try { expr, .. }
+            | Expr::Await { expr, .. }
+            | Expr::Spawn { expr, .. }
+            | Expr::Ascribe { expr, .. }
+            | Expr::Age { expr, .. } => expr_uses_db(expr),
+            Expr::Unsafe { body, .. } => expr_uses_db(body),
+            Expr::If { cond, then_expr, else_expr, .. } =>
+                expr_uses_db(cond) || expr_uses_db(then_expr) || expr_uses_db(else_expr),
+            Expr::Match { scrutinee, arms, .. } =>
+                expr_uses_db(scrutinee) || arms.iter().any(|a|
+                    a.guard.as_ref().is_some_and(|g| expr_uses_db(g)) || expr_uses_db(&a.body)),
+            Expr::Block { stmts, .. } => stmts.iter().any(|s| match s {
+                Stmt::Val { value, .. } | Stmt::Var { value, .. } | Stmt::Assign { value, .. } => expr_uses_db(value),
+                Stmt::Defer { body, .. } => expr_uses_db(body),
+                Stmt::Expr { expr, .. } => expr_uses_db(expr),
+            }),
+            Expr::Lambda { body, .. } => expr_uses_db(body),
+            Expr::List { elements, .. } | Expr::Tuple { elements, .. } => elements.iter().any(expr_uses_db),
+            Expr::Record { base, fields, .. } =>
+                base.as_ref().is_some_and(|b| expr_uses_db(b)) || fields.iter().any(|f| expr_uses_db(&f.value)),
+            Expr::Guard { cond, else_expr, .. } => expr_uses_db(cond) || expr_uses_db(else_expr),
+            Expr::Require { expr, error, .. } => expr_uses_db(expr) || expr_uses_db(error),
+            Expr::Parallel { tasks, timeout, .. } =>
+                tasks.iter().any(expr_uses_db) || timeout.as_ref().is_some_and(|t| expr_uses_db(t)),
+            Expr::WithTimeout { duration, body, .. } => expr_uses_db(duration) || expr_uses_db(body),
+            Expr::For { iter, body, .. } => expr_uses_db(iter) || expr_uses_db(body),
+            Expr::While { cond, body, .. } => expr_uses_db(cond) || expr_uses_db(body),
+            Expr::ExpectAssertion { actual, matcher, .. } =>
+                expr_uses_db(actual) || matches!(matcher, ExpectMatcher::ToBe(e) if expr_uses_db(e)),
+        }
+    }
+
+    fn fn_uses_db(f: &FnDecl) -> bool { f.body.as_ref().is_some_and(expr_uses_db) }
+
+    module.decls.iter().any(|d| match &d.node {
+        Decl::Fn(f) => fn_uses_db(f),
+        Decl::Val(v) => expr_uses_db(&v.value),
+        Decl::Var(v) => expr_uses_db(&v.value),
+        Decl::Impl(i) => i.methods.iter().any(fn_uses_db),
+        Decl::Validator(v) => {
+            v.context.iter().any(|c| c.loaded_by.as_ref().is_some_and(expr_uses_db))
+                || v.rules.iter().any(|r| expr_uses_db(&r.require) || expr_uses_db(&r.else_))
+        }
+        _ => false,
+    })
+}
+
 /// `quiet`: suppress the "wrote <path>" line (used by `certo run`).
 fn cmd_build(args: &[String], quiet: bool) {
     let mut input:   Option<PathBuf> = None;
@@ -468,18 +549,29 @@ fn cmd_build(args: &[String], quiet: bool) {
     }
 
     // ── Detect stdlib imports (db, etc.) ─────────────────────────────
+    // BACKLOG item 226 — `db.transaction { ... }`/`db.<table>.<method>(...)`
+    // are deliberately zero-ceremony (no `import Db` anywhere in the spec's
+    // own examples, and `certo db pull`'s own generated `db/schema.cto` has
+    // no imports at all) — so unlike every other stdlib feature, an
+    // import-only check would miss real usage entirely and silently produce
+    // a binary that fails to link (`-lpq`/`DB_C` never pulled in). OR the
+    // import-based check with a real AST scan for either form.
     let uses_db = module.imports.iter().any(|imp| {
         let segs: Vec<&str> = imp.path.segments.iter().map(|s| s.node.as_str()).collect();
         segs == ["Stdlib", "Db"] || segs == ["Db"]
             || segs == ["Stdlib", "DbQuery"] || segs == ["DbQuery"]
             || segs == ["Stdlib", "DbMutation"] || segs == ["DbMutation"]
-    });
+    }) || module_uses_db_sugar(&module);
 
     // ── Emit C ────────────────────────────────────────────────────────
     // Order: system includes → runtime typedefs → stdlib impls → user code.
     // Windows: winsock2.h before windows.h avoids IPPROTO_* redefinition.
     // _USE_MATH_DEFINES exposes M_PI / M_E from <math.h> on MSVC/clang-cl.
-    let preamble = "#ifdef _WIN32\n\
+    // CERTO_DB_ENABLED (BACKLOG item 226) gates the ambient-db thread-local
+    // symbols declared in RUNTIME_HEADER and used from HTTP_C's connection
+    // teardown — HTTP_C is linked unconditionally (crates/stdlib/src/lib.rs),
+    // so an ordinary non-DB HTTP program must not reference them at all.
+    let preamble = format!("#ifdef _WIN32\n\
                     #  ifndef WIN32_LEAN_AND_MEAN\n\
                     #    define WIN32_LEAN_AND_MEAN\n\
                     #  endif\n\
@@ -492,7 +584,8 @@ fn cmd_build(args: &[String], quiet: bool) {
                     #endif\n\
                     #include <stdint.h>\n#include <stdbool.h>\n#include <stddef.h>\n\
                     #include <inttypes.h>\n#include <stdarg.h>\n\
-                    #define _CRT_SECURE_NO_WARNINGS\n";
+                    #define _CRT_SECURE_NO_WARNINGS\n\
+                    {}", if uses_db { "#define CERTO_DB_ENABLED 1\n" } else { "" });
     let runtime_header = certo_codegen::RUNTIME_HEADER;
     let stdlib_c  = certo_stdlib::full_c_runtime_with_db(uses_db);
     let module_c  = certo_codegen::emit_module(
@@ -2052,6 +2145,14 @@ pub(crate) fn type_error_to_diagnostic(e: &TypeError) -> Diagnostic {
                 .with_span(e.span)
                 .with_label(format!("no rule named `{overrides_name}` in this validator"))
                 .with_note("`overrides` must name another rule declared in the same validator")
+        }
+
+        TypeErrorKind::DbAccessorNotFound { table, method, expected_fn } => {
+            Diagnostic::error("E0711",
+                format!("no `db.{table}.{method}` — did you run `certo db pull`?"))
+                .with_span(e.span)
+                .with_label(format!("expected a generated function named `{expected_fn}`"))
+                .with_note("db.<table>.find/.all/.delete only work for tables already pulled via `certo db pull`")
         }
     }
 }

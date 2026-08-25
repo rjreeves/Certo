@@ -1865,6 +1865,35 @@ fn every_as_plain_identifier_elsewhere_is_unaffected() {
 }
 
 // ------------------------------------------------------------------ //
+// `db.transaction { body }` — BACKLOG item 226
+// ------------------------------------------------------------------ //
+
+#[test]
+fn db_transaction_block_parses_as_expr_transaction() {
+    let body = parse_fn_body(
+        "module A\nfn f(): Unit = db.transaction {\n println(\"in txn\")\n}");
+    let Expr::Transaction { body, .. } = &body.node else {
+        panic!("expected Expr::Transaction, got {:?}", body.node)
+    };
+    let Expr::Block { stmts, .. } = &body.node else { panic!("expected a block body, got {:?}", body.node) };
+    assert_eq!(stmts.len(), 1, "expected [println(...)], got {:?}", stmts);
+}
+
+#[test]
+fn db_not_followed_by_transaction_brace_is_unaffected() {
+    // `db` is a contextual identifier — only special as exactly
+    // `db.transaction {`. Anything else (an ordinary field access, a local
+    // param named `db`, `db.transaction` with no immediate `{`) still
+    // parses as ordinary `Expr::Field`/`Expr::Path` — this is also what lets
+    // typeck/HIR later distinguish "real ambient db" from "a locally shadowed
+    // `db`" purely by whether `db` resolves as a bound name at all.
+    ok("module A\nfn f(db: Int): Int = db + 1");
+    ok("module A\nfn f(): Int = {\n val db = 5\n db\n}");
+    let body = parse_fn_body("module A\nfn f(): Int = db.transactionCount");
+    assert!(matches!(&body.node, Expr::Field { .. }), "expected ordinary Expr::Field, got {:?}", body.node);
+}
+
+// ------------------------------------------------------------------ //
 // `use name = expr { body }` — BACKLOG item 152
 // ------------------------------------------------------------------ //
 

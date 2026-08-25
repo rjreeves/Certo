@@ -612,4 +612,49 @@ void* certo_with_connection(certo_text_t connstr, certo_fn_t body) {
     certo_db_close(handle);
     return result;
 }
+
+#ifdef CERTO_DB_ENABLED
+/* ---- ambient connection (BACKLOG item 226) ------------------------ */
+
+/* `db.transaction { ... }` / `db.<table>.<method>(...)` are zero-ceremony —
+ * no explicit `db.connect(url)` call appears anywhere in a real program
+ * using them. Each request in the generated HTTP server runs on its own,
+ * never-reused OS thread (crates/stdlib/src/http.rs), so a plain C11
+ * thread-local slot scopes exactly one live connection per concurrent
+ * request with no risk of cross-request interference. Lazily auto-connects
+ * from DATABASE_URL on first use per thread; stays 0 (and every certo_db_*
+ * call already degrades safely on a zero handle) if the env var is unset
+ * or the connect fails, rather than crashing. */
+static _Thread_local int64_t __certo_tls_db_conn = 0;
+
+int64_t __certo_db_conn(void) {
+    if (__certo_tls_db_conn == 0) {
+        const char* url = getenv("DATABASE_URL");
+        if (url) __certo_tls_db_conn = certo_db_connect(url);
+    }
+    return __certo_tls_db_conn;
+}
+
+/* Real implementation of `db.transaction { ... }`'s lowering target
+ * (crates/hir/src/lower.rs's `Expr::Transaction` arm) — previously only
+ * forward-declared (crates/codegen/src/emit_module.rs), never defined.
+ * Delegates entirely to the already-correct, nesting-aware
+ * `certo_with_transaction` above. */
+void* __db_transaction(certo_fn_t thunk) {
+    int64_t conn = __certo_db_conn();
+    return certo_with_transaction(conn, thunk);
+}
+
+/* Called once at the end of each HTTP request thread
+ * (`__certo_http_handle_connection`, crates/stdlib/src/http.rs) so a
+ * connection opened for one request never leaks into whatever the OS does
+ * with that thread slot next. No-op if this thread never actually opened
+ * an ambient connection. */
+void __certo_db_thread_teardown(void) {
+    if (__certo_tls_db_conn != 0) {
+        certo_db_close(__certo_tls_db_conn);
+        __certo_tls_db_conn = 0;
+    }
+}
+#endif
 "#;

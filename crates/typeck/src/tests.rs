@@ -969,6 +969,90 @@ validator V for Order errors OE {
 }
 
 // ------------------------------------------------------------------ //
+// `db.<table>.<method>(...)` sugar — BACKLOG item 226
+//
+// Real usage relies on `certo db pull`-generated functions (`{table}
+// FindById`/`{table}FindAll`/`{table}DeleteById`) being declared elsewhere
+// and imported — these tests declare small stand-in stubs directly in the
+// same module instead, exactly mirroring what a real `db/schema.cto` import
+// would provide. `db` is deliberately never seeded in `crates/typeck`
+// itself (see `try_db_accessor_call`'s own doc comment,
+// `crates/typeck/src/infer_expr.rs`), so these tests exercise the real,
+// structural recognition path, not a bound-global lookup.
+// ------------------------------------------------------------------ //
+
+fn with_db_stubs(body: &str) -> String {
+    format!("module A
+type Customer = {{ id: Int, name: Text }}
+fn __certo_db_conn(): Int = 0
+fn customersFindById(conn: Int, id: Int): Customer? = None
+fn customersFindAll(conn: Int): List<Customer> = []
+fn customersDeleteById(conn: Int, id: Int): Int = 0
+{body}")
+}
+
+#[test]
+fn db_accessor_find_resolves_to_generated_function_return_type() {
+    check(&with_db_stubs("fn f(id: Int): Customer? = db.customers.find(id)")).unwrap();
+}
+
+#[test]
+fn db_accessor_all_resolves_to_generated_function_return_type() {
+    check(&with_db_stubs("fn f(): List<Customer> = db.customers.all()")).unwrap();
+}
+
+#[test]
+fn db_accessor_delete_resolves_to_generated_function_return_type() {
+    check(&with_db_stubs("fn f(id: Int): Int = db.customers.delete(id)")).unwrap();
+}
+
+#[test]
+fn db_accessor_wrong_arity_is_a_type_error() {
+    // The rewritten call is reused, unmodified, by the exact same ordinary
+    // call-checking machinery a hand-written `customersFindById(conn, ...)`
+    // call would go through — a wrong-arity call surfaces as whatever kind
+    // of error that machinery already produces for this shape (a `Fn`-type
+    // mismatch, not a dedicated `ArityMismatch`), confirming no bespoke
+    // arity/unify logic was reimplemented here at all.
+    let kind = first_error_kind(&with_db_stubs("fn f(): Customer? = db.customers.find()"));
+    assert!(matches!(kind, TypeErrorKind::Mismatch { .. }), "expected a type mismatch, got {kind:?}");
+}
+
+#[test]
+fn db_accessor_unknown_table_is_e0711() {
+    // No `widgetsFindById` stub declared anywhere.
+    let kind = first_error_kind(&with_db_stubs("fn f(id: Int): Customer? = db.widgets.find(id)"));
+    assert!(
+        matches!(kind, TypeErrorKind::DbAccessorNotFound { ref table, ref method, .. }
+            if table == "widgets" && method == "find"),
+        "expected DbAccessorNotFound, got {kind:?}"
+    );
+}
+
+#[test]
+fn db_accessor_unrecognized_method_is_e0711() {
+    // `.save` isn't one of the three sugared methods at all.
+    let kind = first_error_kind(&with_db_stubs("fn f(id: Int): Int = db.customers.save(id)"));
+    assert!(
+        matches!(kind, TypeErrorKind::DbAccessorNotFound { ref method, .. } if method == "save"),
+        "expected DbAccessorNotFound, got {kind:?}"
+    );
+}
+
+#[test]
+fn db_accessor_local_param_named_db_shadows_the_sugar() {
+    // A real local named `db` must win — the call falls through to ordinary
+    // field-access resolution instead of the sugar, and errors accordingly
+    // (there is no real `.customers` field on `db`'s own declared type).
+    let kind = first_error_kind(&with_db_stubs(
+        "fn f(db: Customer): Int = db.customers.find(1)"));
+    assert!(
+        !matches!(kind, TypeErrorKind::DbAccessorNotFound { .. }),
+        "shadowed `db` must not trigger the db-accessor sugar at all, got {kind:?}"
+    );
+}
+
+// ------------------------------------------------------------------ //
 // E0704 — named-constraint field scope (BACKLOG item 225)
 // ------------------------------------------------------------------ //
 

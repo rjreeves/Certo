@@ -1393,6 +1393,47 @@ struct/record types.
 
 ---
 
+## E0711  `db.<table>.<method>` accessor not found
+
+```
+error[E0711]: no `db.widgets.find` — did you run `certo db pull`?
+  --> src/main.cto:4:25
+   |
+   = note: expected a generated function named `widgetsFindById`
+   = note: db.<table>.find/.all/.delete only work for tables already
+     pulled via `certo db pull`
+```
+
+**Cause:** `db.<table>.<method>(...)` (the ambient DB accessor sugar,
+§16's `loaded by db.customers.find(...)` style syntax) only sugars three
+methods — `.find(id)`, `.all()`, `.delete(id)` — onto the exact functions
+`certo db pull` generates into `db/schema.cto`: `{table}FindById`,
+`{table}FindAll`, `{table}DeleteById`. This error fires when either the
+method isn't one of those three, or the table hasn't actually been pulled
+(so the expected generated function doesn't exist anywhere in scope).
+
+**Fix:** Run `certo db pull` against your database and make sure
+`db/schema.cto` is imported, then confirm the method name is one of the
+three supported verbs:
+
+```certo
+// Wrong — table never pulled, or `save` isn't a sugared method
+db.widgets.find(id)
+db.customers.save(customer)
+
+// Fix — pull first, then use one of find/all/delete
+// $ certo db pull
+db.customers.find(id)
+db.customers.all()
+db.customers.delete(id)
+```
+
+`db.transaction { ... }` itself needs no pull step — it wraps
+`withTransaction` around an ambient, lazily-auto-connected (via
+`DATABASE_URL`) connection, independent of any specific table.
+
+---
+
 ## L001–L005  Lint warnings
 
 Lint warnings are emitted by `certo lint`. They do not prevent compilation.
