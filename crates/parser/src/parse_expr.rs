@@ -445,6 +445,28 @@ fn parse_atom(cur: &mut Cursor<'_>) -> Result<S<Expr>, ParseError> {
         return Ok(S::new(Expr::Unsafe { body: Box::new(body), span: full }, full));
     }
 
+    // `db.transaction { ... }` (BACKLOG item 226) — a real transaction block,
+    // producing `Expr::Transaction` directly. `db`/`transaction` are both
+    // contextual identifiers (same soft-keyword pattern as `unsafe`/`every`
+    // above), recognised only in this exact 4-token shape, so `db` still
+    // works as an ordinary identifier everywhere else (e.g. a local/param
+    // named `db`, or `db.transactionCount` — the field-name mismatch alone
+    // already disambiguates that case, but the trailing `{` check is what
+    // actually matters: `db.transaction` with no immediate `{` falls through
+    // to ordinary field-access parsing below).
+    if matches!(cur.peek(), Some(Token::Ident(s)) if *s == "db")
+        && cur.peek2() == Some(&Token::Dot)
+        && matches!(cur.peek3(), Some(Token::Ident(s)) if *s == "transaction")
+        && cur.peek4() == Some(&Token::LBrace)
+    {
+        cur.bump(); // `db`
+        cur.bump(); // `.`
+        cur.bump(); // `transaction`
+        let body = parse_block(cur)?;
+        let full = span.to(body.span);
+        return Ok(S::new(Expr::Transaction { body: Box::new(body), span: full }, full));
+    }
+
     // `every(interval) { body }` — a periodic background job. Contextual
     // identifier (same soft-keyword pattern as `unsafe`/`live`/`pk`/
     // `filter`/`layout`), recognised only when directly followed by `(`, so

@@ -237,6 +237,20 @@ pub fn infer(expr: &S<Expr>, ctx: &mut Ctx<'_>) -> Ty {
         }
 
         Expr::App { func, args, span } => {
+            // `db.<table>.<method>(...)` (BACKLOG item 226) — checked first
+            // and unconditionally, before the ordinary UFCS rewrite below
+            // ever runs. That rewrite eagerly calls `infer(expr, ctx)` on
+            // the call's receiver to read its resolved type — for
+            // `db.customers.find(id)` that receiver is `db.customers`,
+            // and inferring it would recurse into `Path("db")` first,
+            // producing a spurious "undefined name `db`" error as a side
+            // effect before this check even gets a chance to run.
+            match try_db_accessor_call(func, args, *span, ctx) {
+                Some(None) => return Ty::Error, // already pushed E0711
+                Some(Some(rewritten)) => return infer(&rewritten, ctx),
+                None => {}
+            }
+
             // Dot-call UFCS (BACKLOG item 162): `xs.map(f)` parses to the
             // exact same `App{ func: Field{expr, field}, args }` shape as
             // the already-working module-qualified form `List.map(xs, f)`
@@ -1045,6 +1059,76 @@ fn resolve_callee(func: &S<Expr>, ctx: &mut Ctx<'_>) -> (Ty, Option<RowCheck>) {
         Some((ty, bounds, subst)) => (ty, Some((bounds, subst))),
         None => (infer(func, ctx), None),
     }
+}
+
+/// `db.<table>.<method>(args)` (BACKLOG item 226) — recognized purely
+/// structurally, not via any bound `db` global (there deliberately is none:
+/// `db` is never seeded into `TypeEnv` at all, which makes "is `db` bound
+/// locally" — `ctx.env.lookup("db").is_some()` — the correct and only
+/// shadowing check needed; a real local/param named `db` naturally wins).
+/// Only three methods are sugared, mapping to the exact function names
+/// `certo db pull` already generates into `db/schema.cto`
+/// (`crates/cli/src/main.rs`'s `cmd_db_pull`): `.find(id)` → `{table}
+/// FindById`, `.all()` → `{table}FindAll`, `.delete(id)` → `{table}
+/// DeleteById`. All three take a leading `conn: Int` the user never writes —
+/// synthesized here as a call to a new zero-arg stdlib builtin,
+/// `__certo_db_conn()` (BACKLOG item 226, `crates/stdlib/src/db.rs`), which
+/// lazily auto-connects via `DATABASE_URL` once per OS thread.
+///
+/// Returns `None` when this call isn't the `db.<table>.<method>` shape at
+/// all (ordinary call resolution should proceed). Returns `Some(None)` when
+/// it IS that shape but names an unrecognized method or a table with no
+/// matching generated function — the `E0711` diagnostic has already been
+/// pushed onto `ctx.errors` in that case, and the caller should stop
+/// (`Ty::Error`) rather than let this cascade into an unrelated "undefined
+/// name" error from ordinary call resolution. Returns `Some(Some(node))`
+/// with a brand-new, ordinary `Expr::App` calling the real generated
+/// function name directly (conn arg spliced in first) on success — the
+/// caller re-enters `infer` on it, reusing 100% of the existing call-
+/// checking machinery (labeled args, default params, arity/unify) with no
+/// duplication at all, exactly as if the user had written that call by hand.
+fn try_db_accessor_call(func: &S<Expr>, args: &[Arg], call_span: Span, ctx: &mut Ctx<'_>) -> Option<Option<S<Expr>>> {
+    let Expr::Field { expr: mid, field: method, .. } = &func.node else { return None };
+    let Expr::Field { expr: inner, field: table, .. } = &mid.node else { return None };
+    let Expr::Path { path, .. } = &inner.node else { return None };
+    if path.segments.len() != 1 || path.segments[0].node != "db" { return None; }
+    if ctx.env.lookup("db").is_some() { return None; } // shadowed by a real local
+
+    let suffix = match method.node.as_str() {
+        "find"   => "FindById",
+        "all"    => "FindAll",
+        "delete" => "DeleteById",
+        _ => {
+            ctx.errors.push(TypeError { kind: TypeErrorKind::DbAccessorNotFound {
+                table: table.node.clone(), method: method.node.clone(),
+                expected_fn: format!("{}FindById|{}FindAll|{}DeleteById", table.node, table.node, table.node),
+            }, span: call_span });
+            return Some(None);
+        }
+    };
+    let fn_name = format!("{}{}", table.node, suffix);
+    if ctx.env.lookup(&fn_name).is_none() {
+        ctx.errors.push(TypeError { kind: TypeErrorKind::DbAccessorNotFound {
+            table: table.node.clone(), method: method.node.clone(), expected_fn: fn_name,
+        }, span: call_span });
+        return Some(None);
+    }
+
+    let path_expr = |name: &str| S::new(
+        Expr::Path {
+            path: certo_ast::types::ModulePath { segments: vec![S::new(name.to_string(), call_span)], span: call_span },
+            span: call_span,
+        },
+        call_span,
+    );
+    let conn_call = Arg {
+        label: None,
+        value: S::new(Expr::App { func: Box::new(path_expr("__certo_db_conn")), args: vec![], span: call_span }, call_span),
+        span: call_span,
+    };
+    let mut new_args = vec![conn_call];
+    new_args.extend(args.iter().cloned());
+    Some(Some(S::new(Expr::App { func: Box::new(path_expr(&fn_name)), args: new_args, span: call_span }, call_span)))
 }
 
 /// If `expr.field` is a module/type-qualified reference — `expr` is a bare

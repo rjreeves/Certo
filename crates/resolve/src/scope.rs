@@ -177,6 +177,13 @@ impl ScopeChain {
             // Built-in functions
             "panic", "unreachable", "todo",
             "messageBox",
+            // Ambient DB namespace (BACKLOG item 226) — `db.transaction {}`/
+            // `db.<table>.<method>(...)`. This crate is dead code for the
+            // real `certo` CLI binary (its only real consumer is the LSP),
+            // so this is purely for LSP parity — the real typechecking path
+            // (`crates/typeck`) deliberately never binds `db` at all, so a
+            // real local/param named `db` can shadow it structurally.
+            "db",
         ];
         let frame = self.frames.first_mut().unwrap();
         for b in builtins {

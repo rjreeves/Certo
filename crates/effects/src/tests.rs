@@ -195,6 +195,27 @@ fn compute(): Int [pure] = {
 }
 
 #[test]
+fn pure_fn_calling_db_accessor_is_checked() {
+    // BACKLOG item 226 — `db.<table>.<method>(...)` is a 3-level receiver
+    // shape (`Field{Field{Path("db"), table}, method}`); `callee_lookup_key`
+    // previously only recognized bare/2-level shapes, so `[io]` inheritance
+    // from the real generated function never fired at all and a "pure"
+    // function calling `db.customers.find(...)` wrongly typechecked as pure.
+    let module = parse("module A
+type Customer = { id: Int, name: Text }
+fn customersFindById(conn: Int, id: Int): Customer? [io] = None
+fn compute(id: Int): Customer? [pure] = db.customers.find(id)").expect("parse error");
+    let env = build_env(&module);
+    let errs = crate::check_effects::check_module(&module, &env);
+
+    assert_eq!(errs.len(), 1, "expected exactly one error, got: {:?}",
+        errs.iter().map(|e| e.message()).collect::<Vec<_>>());
+    assert!(matches!(&errs[0].kind,
+        EffectErrorKind::ImpureCallInPure { caller, callee, .. } if caller == "compute" && callee == "customersFindById"),
+        "expected ImpureCallInPure naming callee `customersFindById`, got: {}", errs[0].message());
+}
+
+#[test]
 fn pure_fn_calling_impure_method_via_ufcs_on_typed_param_is_checked() {
     // BACKLOG item 178 — `w.doIo()` where `w` is a declared parameter of type
     // `Widget` must resolve exactly like `Widget.doIo()` would, since Certo

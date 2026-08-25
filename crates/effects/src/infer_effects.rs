@@ -217,6 +217,28 @@ fn callee_lookup_key(func: &Expr, locals: &LocalTypes) -> Option<String> {
     match func {
         Expr::Path { path, .. } => path.segments.last().map(|s| s.node.clone()),
         Expr::Field { expr, field, .. } => {
+            // `db.<table>.<method>(...)` (BACKLOG item 226) — a 3-level
+            // receiver shape (`Field{Field{Path("db"), table}, method}`),
+            // resolved to the exact same generated function name typeck's
+            // own `try_db_accessor_call` (`crates/typeck/src/infer_expr.rs`)
+            // computes, so `[io]` effect inheritance from that real
+            // generated function actually fires here — without this, a
+            // "pure" function calling `db.customers.find(id)` would wrongly
+            // typecheck as pure, since this crate never sees the HIR-level
+            // rewrite that inserts the real call.
+            if let Expr::Field { expr: inner, field: table, .. } = &expr.node {
+                if let Expr::Path { path, .. } = &inner.node {
+                    if path.segments.len() == 1 && path.segments[0].node == "db" {
+                        let suffix = match field.node.as_str() {
+                            "find"   => Some("FindById"),
+                            "all"    => Some("FindAll"),
+                            "delete" => Some("DeleteById"),
+                            _ => None,
+                        };
+                        return suffix.map(|s| format!("{}{}", table.node, s));
+                    }
+                }
+            }
             let Expr::Path { path, .. } = &expr.node else { return None };
             let first = path.segments.first()?;
             if first.node.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {

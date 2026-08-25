@@ -1014,6 +1014,18 @@ pub fn seed_stdlib(env: &mut TypeEnv, counter: &mut u32) {
         // Null sentinel
         def!("dbNull", Ty::Fn { params: vec![], ret: Box::new(Ty::Text) });
 
+        // Ambient connection accessor (BACKLOG item 226) — the lowering
+        // target `db.<table>.<method>(...)` sugar rewrites to as its
+        // synthesized, auto-inserted leading `conn` argument (see
+        // `try_db_accessor_call`/`try_db_accessor_rewrite` in
+        // `crates/typeck/src/infer_expr.rs`/`crates/hir/src/lower.rs`).
+        // Never written directly by user source, but needs a real seeded
+        // type here since the rewritten AST re-enters ordinary `infer`/
+        // `lower_expr` as if the user had called it by hand. Its real C
+        // implementation (`crates/stdlib/src/db.rs`) lazily auto-connects
+        // via `DATABASE_URL` once per OS thread.
+        def!("__certo_db_conn", Ty::Fn { params: vec![], ret: Box::new(conn.clone()) });
+
         // Connection
         def!("dbConnect",       fn1(Ty::Text, conn.clone()));
         def!("dbClose",         fn1(conn.clone(), Ty::Unit));

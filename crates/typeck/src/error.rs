@@ -162,6 +162,17 @@ pub enum TypeErrorKind {
     /// `crates/resolve` — see `RuleCycle`'s own doc comment for why it
     /// never ran).
     OverridesRuleNotFound { rule_name: String, overrides_name: String },
+
+    /// E0711 — `db.<table>.<method>(...)` (BACKLOG item 226) named a
+    /// table/method combination with no matching generated accessor
+    /// function in scope. Only the three sugared methods (`find`/`all`/
+    /// `delete`, mapping to `{table}FindById`/`{table}FindAll`/
+    /// `{table}DeleteById`) are recognized at all; an unrecognized method
+    /// name reports the same way as a recognized method whose generated
+    /// function is simply missing, since from this check's perspective
+    /// both are "no such accessor exists" — the fix is the same either way
+    /// (run `certo db pull`, or check the spelling).
+    DbAccessorNotFound { table: String, method: String, expected_fn: String },
 }
 
 impl TypeError {
@@ -226,6 +237,8 @@ impl TypeError {
                 format!("E0701: rule `{}` has `after {}` but `{}` does not exist in this validator", rule_name, after_name, after_name),
             TypeErrorKind::OverridesRuleNotFound { rule_name, overrides_name } =>
                 format!("E0702: rule `{}` has `overrides {}` but `{}` does not exist in this validator", rule_name, overrides_name, overrides_name),
+            TypeErrorKind::DbAccessorNotFound { table, method, expected_fn } =>
+                format!("E0711: no `db.{}.{}` — did you run `certo db pull`? (expected a generated function named `{}`)", table, method, expected_fn),
         }
     }
 }

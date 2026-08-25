@@ -57,6 +57,59 @@ fn lower_simple_fn() {
     }
 }
 
+// ------------------------------------------------------------------ //
+// `db.transaction {}` / `db.<table>.<method>(...)` — BACKLOG item 226
+// ------------------------------------------------------------------ //
+
+#[test]
+fn db_transaction_lowers_to_a_call_to_db_transaction() {
+    let m = lower("module A\nfn f(): Unit = db.transaction {\n println(\"in txn\")\n}");
+    let f = m.items.iter().find_map(|it| if let HirItem::Fn(f) = it { Some(f) } else { None }).unwrap();
+    let body = f.body.as_ref().unwrap();
+    let HirExprKind::Call { func, args } = &body.kind else { panic!("expected Call, got {:?}", body.kind) };
+    assert!(matches!(&func.kind, HirExprKind::Global(name) if name == "__db_transaction"));
+    assert_eq!(args.len(), 1, "expected the zero-arg thunk as the sole argument");
+    assert!(matches!(&args[0].kind, HirExprKind::Lambda { .. }), "expected a lambda thunk, got {:?}", args[0].kind);
+}
+
+#[test]
+fn db_accessor_find_lowers_to_generated_fn_with_ambient_conn_prepended() {
+    let m = lower("module A
+type Customer = { id: Int, name: Text }
+fn customersFindById(conn: Int, id: Int): Customer? = None
+fn f(id: Int): Customer? = db.customers.find(id)");
+    let f = m.items.iter().find_map(|it| match it {
+        HirItem::Fn(f) if f.name == "f" => Some(f), _ => None,
+    }).unwrap();
+    let body = f.body.as_ref().unwrap();
+    let HirExprKind::Call { func, args } = &body.kind else { panic!("expected Call, got {:?}", body.kind) };
+    assert!(matches!(&func.kind, HirExprKind::Global(name) if name == "customersFindById"),
+        "expected a call to the real generated function, got {:?}", func.kind);
+    assert_eq!(args.len(), 2, "expected [__certo_db_conn(), id]");
+    let HirExprKind::Call { func: conn_func, args: conn_args } = &args[0].kind else {
+        panic!("expected the leading arg to itself be a Call, got {:?}", args[0].kind)
+    };
+    assert!(matches!(&conn_func.kind, HirExprKind::Global(name) if name == "__certo_db_conn"));
+    assert!(conn_args.is_empty());
+}
+
+#[test]
+fn db_accessor_local_param_named_db_does_not_get_rewritten() {
+    // A real local `db` must shadow the sugar at the HIR layer too, matching
+    // typeck's own shadowing check — confirmed here by asserting the call
+    // does NOT lower to a synthesized call to some generated function.
+    let m = lower("module A
+type Customer = { id: Int, name: Text }
+fn f(db: Customer): Int = db.id");
+    let f = m.items.iter().find_map(|it| match it {
+        HirItem::Fn(f) if f.name == "f" => Some(f), _ => None,
+    }).unwrap();
+    let body = f.body.as_ref().unwrap();
+    assert!(!matches!(&body.kind, HirExprKind::Call { func, .. }
+        if matches!(&func.kind, HirExprKind::Global(name) if name.starts_with("__certo_db_conn"))),
+        "a shadowed `db` local must not trigger the db-accessor rewrite, got {:?}", body.kind);
+}
+
 #[test]
 fn pipe_desugared_to_call() {
     // `a |> f` → `f(a)` — single-arg form

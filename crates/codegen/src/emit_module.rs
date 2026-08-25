@@ -1042,8 +1042,20 @@ void    certo_main_init(int argc, const char** argv);
 int64_t certo_arg_count(void);
 void*   certo_arg(int64_t i);    /* Option<Text> (heap-boxed) */
 
-/* DB transaction stub */
+/* DB transaction — real implementation in crates/stdlib/src/db.rs's DB_C,
+ * only linked in when CERTO_DB_ENABLED (BACKLOG item 226; crates/cli/src/
+ * main.rs defines it whenever the module uses `db.transaction`/
+ * `db.<table>.<method>` sugar, or an explicit `import Db`). This forward
+ * declaration itself is harmless to always emit — it's just a prototype —
+ * but the other two ambient-db symbols below are guarded, since ordinary
+ * non-DB programs never define them and the guard keeps the two matched
+ * (used only from within HTTP_C's own matching guard, crates/stdlib/src/
+ * http.rs, which — unlike DB_C — is always linked in). */
 void* __db_transaction(certo_fn_t thunk);
+#ifdef CERTO_DB_ENABLED
+int64_t __certo_db_conn(void);
+void    __certo_db_thread_teardown(void);
+#endif
 
 /* Record update */
 void* __record_update(void* base, void* updates);

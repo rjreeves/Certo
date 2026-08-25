@@ -2107,6 +2107,44 @@ fn db_query_boxes_option_cells() {
 }
 
 #[test]
+fn ambient_db_conn_registered_as_zero_arg_int_fn() {
+    // BACKLOG item 226 — `__certo_db_conn` is the synthesized leading
+    // argument `db.<table>.<method>(...)`/`db.transaction {}` rewrite to;
+    // typeck/HIR both re-enter ordinary call resolution on it, so it needs
+    // a real seeded type here just like any other stdlib function.
+    let env = seeded_env();
+    match env.lookup("__certo_db_conn").unwrap() {
+        Ty::Fn { params, ret } => {
+            assert!(params.is_empty(), "expected zero params, got {:?}", params);
+            assert_eq!(ret.as_ref(), &Ty::Int);
+        }
+        other => panic!("expected Fn, got {:?}", other),
+    }
+}
+
+#[test]
+fn ambient_db_runtime_pieces_present_and_guarded() {
+    // BACKLOG item 226 — the real `__db_transaction` implementation (never
+    // just a stub) and the thread-local connection slot must exist in
+    // DB_C, and both the connection accessor and the HTTP teardown call
+    // must be gated behind CERTO_DB_ENABLED so an ordinary non-DB program
+    // (which never defines that macro) still links cleanly.
+    assert!(DB_C.contains("_Thread_local"), "missing thread-local connection slot in DB_C");
+    assert!(DB_C.contains("__certo_db_conn"), "missing __certo_db_conn in DB_C");
+    assert!(DB_C.contains("__certo_db_thread_teardown"), "missing teardown fn in DB_C");
+    assert!(
+        DB_C.contains("void* __db_transaction(certo_fn_t thunk) {\n    int64_t conn = __certo_db_conn();"),
+        "expected __db_transaction to delegate to __certo_db_conn + certo_with_transaction, got a stub instead"
+    );
+    assert!(DB_C.contains("#ifdef CERTO_DB_ENABLED"), "ambient-db runtime pieces must be CERTO_DB_ENABLED-guarded");
+    assert!(HTTP_C.contains("__certo_db_thread_teardown"), "missing per-request teardown call in HTTP_C");
+    assert!(
+        HTTP_C.contains("#ifdef CERTO_DB_ENABLED"),
+        "the teardown call in HTTP_C must be guarded, since HTTP_C links unconditionally regardless of uses_db"
+    );
+}
+
+#[test]
 fn make_dir_registered() {
     let env = seeded_env();
     match env.lookup("makeDir").unwrap() {

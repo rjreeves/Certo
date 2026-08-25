@@ -699,6 +699,17 @@ static void* __certo_http_handle_connection(void* arg) {
     CertoHttpResponse* resp = handler(env, req);
     http_srv_send(client, resp);
 
+    /* BACKLOG item 226 — this thread may have opened an ambient DB
+     * connection (`db.transaction`/`db.<table>.<method>`) while handling
+     * this one request; close it now rather than leaking it when the OS
+     * eventually reclaims this (detached, never-reused) thread. No-op for
+     * a request that never touched the DB. Guarded since ordinary non-DB
+     * programs never define this symbol at all (crates/codegen/src/
+     * emit_module.rs's own matching guard on the forward declaration). */
+    #ifdef CERTO_DB_ENABLED
+    __certo_db_thread_teardown();
+    #endif
+
     certo_closesocket(client);
     return NULL;
 }
