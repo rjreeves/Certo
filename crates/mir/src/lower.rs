@@ -1214,6 +1214,32 @@ fn needs_result_box(ty: &Ty) -> bool {
         || matches!(ty, Ty::Named { name, args } if args.is_empty()
             && !matches!(name.as_str(),
                 "HttpRequest" | "HttpResponse" | "Bytes" | "DbResult" | "Query" | "Mutation" | "__CertoTask"))
+        // BACKLOG item 251 — a generic `Ok(v)`/`Err(e)` construction always
+        // heap-boxes `v`/`e` (it's a bare, opaque type-param value at that
+        // construction site — item 119/120's own established convention),
+        // but a directly-concrete `Ok(5)` previously stored these scalar
+        // types inline instead, since neither was in this set — the exact
+        // same resolved type (`Ty::Int`) ended up with two different
+        // runtime representations depending on whether the value flowed
+        // through a generic boundary before reaching the match site that
+        // consumes it (BACKLOG item 247's own type-recovery fix correctly
+        // resolves the *type*, but this separate boxing decision, keyed
+        // only on that resolved type, had no way to know whether the
+        // specific value now matched was actually boxed upstream).
+        // Always boxing them here — this same function gates *both* the
+        // `Ok`/`Err` construction site (just below) and the `?`/match-arm
+        // consumption site (`unwrap_result_into`) — eliminates the
+        // ambiguity by making every construction site agree, matching
+        // `Decimal`/`UUID`'s own already-consistent always-boxed treatment.
+        // `Float` (8-byte double) is deliberately excluded — it has its
+        // own bit-reinterpretation path (`__certo_f2i`/`__certo_i2f`, a
+        // cheaper cast handled before this check is ever consulted at the
+        // `Ok`/`Err` construction site below) rather than a real heap
+        // allocation. `Float32` has no such mechanism of its own, so it's
+        // included here instead, same treatment as `Int`. `Text`/
+        // `BoundedText` are already pointer-sized and need no box either
+        // way, at either construction site.
+        || matches!(ty, Ty::Int | Ty::Int8 | Ty::Int16 | Ty::Int32 | Ty::UInt | Ty::Float32 | Ty::Bool | Ty::Char | Ty::Unit)
 }
 
 /// Extract a `Result` payload from `__result_unwrap` into `dest`, shared by
@@ -1338,7 +1364,24 @@ fn lower_expr(expr: &HirExpr, b: &mut Builder) -> Operand {
                     let payload_ty = args[0].ty.clone();
                     let value = lower_expr(&args[0], b);
                     let dest = b.declare_local("_some", certo_typeck::Ty::Option(Box::new(payload_ty.clone())));
-                    b.assign(dest, Rvalue::BoxSome { value, ty: payload_ty });
+                    // BACKLOG item 251 — a still-generic payload (`Ty::Var`,
+                    // e.g. `v` inside `fn wrapSome<T>(v: T): Option<T> =
+                    // Some(v)`) is *already* a boxed pointer at this
+                    // construction site (item 119/120's own established
+                    // convention for a bare type-param value) — boxing it
+                    // again here double-boxes: `Some`'s own representation
+                    // ends up pointing at a pointer-to-the-real-value, not
+                    // the value itself, while the eventual match site
+                    // (once T resolves to something concrete, e.g. `Ty::Int`
+                    // via item 247's own type-recovery fix) only
+                    // dereferences once — reading the inner pointer's own
+                    // bit pattern as if it were the payload. Use the
+                    // already-boxed pointer directly instead of re-boxing.
+                    if matches!(payload_ty, certo_typeck::Ty::Var(_)) {
+                        b.assign(dest, Rvalue::Use(value));
+                    } else {
+                        b.assign(dest, Rvalue::BoxSome { value, ty: payload_ty });
+                    }
                     return Operand::Local(dest);
                 }
                 // `Ok(f)` / `Err(f)` with a Float payload: bit-cast the double to

@@ -2702,6 +2702,18 @@ fn resolve_bare_generic_return(expr: &mut HirExpr, expected: Option<&Ty>, hard_e
         }
         return;
     }
+    // BACKLOG item 251 — `await withAudit(...)`'s own bound value is
+    // `HirExprKind::Await(inner)`, not a bare `Call`, so the check just
+    // below (requiring `Call` directly) never even looked at it — `await
+    // <plain call>`'s own type already mirrors its inner call's type
+    // exactly (`Expr::Await`'s own lowering, item 191), so resolve through
+    // to the inner call and sync the outer `Await` node's type back
+    // afterward, rather than duplicating the whole resolution logic here.
+    if let HirExprKind::Await(inner) = &mut expr.kind {
+        resolve_bare_generic_return(inner, expected, hard_error_if_unresolvable, cx);
+        expr.ty = inner.ty.clone();
+        return;
+    }
     if !matches!(expr.kind, HirExprKind::Call { .. }) || !ty_contains_var(&expr.ty) {
         return;
     }
