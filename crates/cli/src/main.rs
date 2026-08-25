@@ -2029,6 +2029,30 @@ pub(crate) fn type_error_to_diagnostic(e: &TypeError) -> Diagnostic {
                 .with_label(format!("`{}` has no operator overloading", ty.display()))
                 .with_note("use a named function instead, e.g. `.diff(...)` or `.addDuration(...)`")
         }
+
+        TypeErrorKind::RuleCycle { validator, cycle } => {
+            Diagnostic::error("E0700",
+                format!("cycle in rule dependency graph in validator `{validator}`"))
+                .with_span(e.span)
+                .with_label(format!("cycle: {}", cycle.join(" → ")))
+                .with_note("rules linked by `after` must not depend on each other in a loop")
+        }
+
+        TypeErrorKind::AfterRuleNotFound { rule_name, after_name } => {
+            Diagnostic::error("E0701",
+                format!("rule `{rule_name}` has `after {after_name}` but `{after_name}` does not exist in this validator"))
+                .with_span(e.span)
+                .with_label(format!("no rule named `{after_name}` in this validator"))
+                .with_note("`after` must name another rule declared in the same validator")
+        }
+
+        TypeErrorKind::OverridesRuleNotFound { rule_name, overrides_name } => {
+            Diagnostic::error("E0702",
+                format!("rule `{rule_name}` has `overrides {overrides_name}` but `{overrides_name}` does not exist in this validator"))
+                .with_span(e.span)
+                .with_label(format!("no rule named `{overrides_name}` in this validator"))
+                .with_note("`overrides` must name another rule declared in the same validator")
+        }
     }
 }
 
