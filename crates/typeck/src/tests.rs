@@ -756,6 +756,100 @@ validator V for Order errors OE {
 }
 
 // ------------------------------------------------------------------ //
+// W0103 — shared mutable state across `parallel { }` tasks (BACKLOG item 208)
+// ------------------------------------------------------------------ //
+
+#[test]
+fn w0103_fires_when_two_tasks_reference_the_same_assigned_var() {
+    let ws = warnings("module A
+fn f(): Int = {
+    var total = 0
+    total = total + 1
+    val r = parallel {
+        total,
+        total + 1,
+    }
+    total
+}");
+    assert!(
+        ws.iter().any(|w| matches!(&w.kind, crate::error::WarningKind::ParallelSharedMutableState { name } if name == "total")),
+        "expected W0103 for `total`, got: {:?}", ws.iter().map(|w| w.message()).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn w0103_does_not_fire_when_only_one_task_references_the_var() {
+    let ws = warnings("module A
+fn f(): Int = {
+    var total = 0
+    total = total + 1
+    val r = parallel {
+        total,
+        42,
+    }
+    total
+}");
+    assert!(ws.is_empty(), "only one task references `total` — must not warn, got: {:?}", ws.iter().map(|w| w.message()).collect::<Vec<_>>());
+}
+
+#[test]
+fn w0103_does_not_fire_for_a_name_never_assigned_anywhere() {
+    // Two tasks reference the same name, but it's never a Stmt::Assign
+    // target anywhere in the function — an ordinary immutable val/param,
+    // not "mutable" by this check's own empirical definition.
+    let ws = warnings("module A
+fn f(x: Int): Int = {
+    val r = parallel {
+        x,
+        x + 1,
+    }
+    x
+}");
+    assert!(ws.is_empty(), "an unassigned name shared by two tasks must not warn, got: {:?}", ws.iter().map(|w| w.message()).collect::<Vec<_>>());
+}
+
+#[test]
+fn w0103_does_not_fire_for_a_var_local_to_one_task() {
+    // A var declared and assigned entirely within a single task's own body
+    // is never visible to any other task — must not false-positive just
+    // because the *name* happens to appear in the module's assigned set.
+    let ws = warnings("module A
+fn f(): Int = {
+    val r = parallel {
+        {
+            var localOnly = 0
+            localOnly = localOnly + 1
+            localOnly
+        },
+        42,
+    }
+    0
+}");
+    assert!(ws.is_empty(), "a task-local var must not warn, got: {:?}", ws.iter().map(|w| w.message()).collect::<Vec<_>>());
+}
+
+#[test]
+fn w0103_checks_impl_method_bodies_too() {
+    let ws = warnings("module A
+type Widget = { id: Int }
+impl Widget {
+    fn f(self: Widget): Int = {
+        var total = 0
+        total = total + 1
+        val r = parallel {
+            total,
+            total + 1,
+        }
+        total
+    }
+}");
+    assert!(
+        ws.iter().any(|w| matches!(&w.kind, crate::error::WarningKind::ParallelSharedMutableState { name } if name == "total")),
+        "expected W0103 inside an impl method body too, got: {:?}", ws.iter().map(|w| w.message()).collect::<Vec<_>>()
+    );
+}
+
+// ------------------------------------------------------------------ //
 // `else` branch error-type mismatch (E0703) — BACKLOG item 219
 // ------------------------------------------------------------------ //
 
