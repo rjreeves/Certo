@@ -176,11 +176,23 @@ fn is_void_noreturn_callee(func: &Operand) -> bool {
 fn operand_ty(op: &Operand, locals: &[MirLocalDecl]) -> Ty {
     match op {
         Operand::Local(id) => locals.iter().find(|l| l.id == *id).map(|l| l.ty.clone()).unwrap_or(Ty::Error),
-        Operand::Const(MirConst::Int(_))   => Ty::Int,
-        Operand::Const(MirConst::Float(_)) => Ty::Float,
-        Operand::Const(MirConst::Bool(_))  => Ty::Bool,
-        Operand::Const(MirConst::Str(_))   => Ty::Text,
-        Operand::Const(MirConst::Unit)     => Ty::Unit,
+        Operand::Const(MirConst::Int(_))     => Ty::Int,
+        Operand::Const(MirConst::Float(_))   => Ty::Float,
+        Operand::Const(MirConst::Bool(_))    => Ty::Bool,
+        Operand::Const(MirConst::Str(_))     => Ty::Text,
+        Operand::Const(MirConst::Unit)       => Ty::Unit,
+        // BACKLOG item 254 — these two were missing entirely, silently
+        // falling to the `Ty::Error` catch-all below. `needs_heap_box()`
+        // only ever returns `true` for `Ty::Decimal`/`Ty::Uuid` (matched
+        // regardless of `Decimal`'s own precision/scale param — `ty_to_c`
+        // maps every `Ty::Decimal(_)` to the same `certo_decimal_t`
+        // either way, so `None` here is exactly as correct as any `Some`
+        // would be), so `box_value`/`unbox_value` never recognized a bare
+        // `Decimal`/`Uuid` *constant* operand (e.g. a list-literal element
+        // built directly from a `d"..."`/`uuid"..."` literal, never bound
+        // to a local first) as needing real heap-boxing at all.
+        Operand::Const(MirConst::Decimal(_)) => Ty::Decimal(None),
+        Operand::Const(MirConst::Uuid(_))    => Ty::Uuid,
         _ => Ty::Error,
     }
 }
