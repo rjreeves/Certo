@@ -281,6 +281,14 @@ pub enum WarningKind {
     /// gate exactly — `validateWithDb` requires every context field to
     /// have `loaded by`, not just some).
     ContextFieldMissingLoadedBy { validator_name: String, field_name: String },
+
+    /// W0103 — BACKLOG item 208. A name assigned to somewhere in this
+    /// function (`Stmt::Assign`) is referenced by two or more of a
+    /// `parallel { ... }` block's own sibling task expressions — those
+    /// tasks run concurrently on real OS threads, so this is a genuine,
+    /// unsynchronized shared-mutable-state risk, exactly what spec §7.2's
+    /// own "compiler verifies tasks do not share mutable state" promises.
+    ParallelSharedMutableState { name: String },
 }
 
 impl Warning {
@@ -292,6 +300,8 @@ impl Warning {
                 format!("W0101: rule `{}`'s condition is always true — rule `{}` (which it overrides) is never evaluated", overriding_name, overridden_name),
             WarningKind::ContextFieldMissingLoadedBy { validator_name, field_name } =>
                 format!("W0102: context field `{}` has no `loaded by` — `{}.validateWithDb` will not be generated", field_name, validator_name),
+            WarningKind::ParallelSharedMutableState { name } =>
+                format!("W0103: `{}` is referenced by more than one task in this `parallel {{ }}` block — these tasks run concurrently, so this is unsynchronized shared mutable state", name),
         }
     }
 }

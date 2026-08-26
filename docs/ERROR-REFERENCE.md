@@ -1244,7 +1244,7 @@ references names this validator actually has.
 
 ---
 
-## W0100–W0102  Validator warnings
+## W0100–W0103  Validator/concurrency warnings
 
 Unlike every other diagnostic in this document, these three are
 **warnings** — `certo check`/`certo build` print them and continue; they
@@ -1309,6 +1309,55 @@ field missing it silently gets no `validateWithDb` at all.
 **Fix:** Add `loaded by <expr>` to the field, or accept that this
 validator only ever gets the plain `validate`/`validateAll` you pass a
 pre-built context to yourself.
+
+---
+
+### W0103  Shared mutable state across `parallel {}` tasks
+
+```
+warning[W0103]: `total` is referenced by more than one task in this `parallel { }` block
+  --> src/report.cto:5:25
+   |
+ 5 |     val results = await parallel {
+   |                         ^^^^^^^^^^ these tasks run concurrently on real OS threads — this is unsynchronized shared mutable state
+   |
+   = note: copy the value into an immutable val before the parallel block, or restructure so only one task touches it
+```
+
+**Cause:** each task inside a `parallel { }` block runs concurrently on a
+real OS thread. A name that's assigned to somewhere in the enclosing
+function (`var name = ...` reassigned via `name = expr`) and referenced by
+two or more of the block's own sibling tasks is unsynchronized shared
+mutable state — a real data race, matching spec §7.2's own "compiler
+verifies tasks do not share mutable state" promise.
+
+Scoped to what this language actually allows: Certo's entire mutation
+surface is reassigning a bare local name — there's no mutable record-field
+assignment and no references exposed to user code — so this check is
+purely syntactic, not general aliasing analysis. It's deliberately
+approximate ("assigned anywhere in this function," not precisely
+lexically scoped), so it may occasionally flag a same-named local in an
+unrelated nested scope; restructure to a differently-named local to
+silence a genuine false positive.
+
+**Fix:** Copy the value into a fresh, task-local binding before the
+`parallel { }` block instead of sharing one mutable variable across tasks,
+or restructure so only one task ever touches it:
+
+```certo
+// Wrong — both tasks touch the same var concurrently
+var total = 0
+val results = await parallel {
+    { total = total + 1  total },
+    { total = total + 2  total },
+}
+
+// Fix — each task owns its own local
+val results = await parallel {
+    { var a = 0  a = a + 1  a },
+    { var b = 0  b = b + 2  b },
+}
+```
 
 ---
 

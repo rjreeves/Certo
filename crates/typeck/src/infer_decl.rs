@@ -1,6 +1,6 @@
 use certo_ast::module::Module;
 use certo_ast::decl::Decl;
-use certo_ast::span::S;
+use certo_ast::span::{S, Span};
 use certo_ast::expr::{Expr, ExpectMatcher};
 use certo_ast::types::TypeExpr;
 use crate::ty::Ty;
@@ -516,9 +516,25 @@ fn dfs_rule_cycle<'a>(
 pub fn check_module_warnings(module: &Module) -> Vec<Warning> {
     let mut warnings = Vec::new();
     for sdecl in &module.decls {
-        let Decl::Validator(v) = &sdecl.node else { continue };
-        check_validator_overrides(v, &mut warnings);
-        check_validator_context_loaded_by(v, &mut warnings);
+        match &sdecl.node {
+            Decl::Validator(v) => {
+                check_validator_overrides(v, &mut warnings);
+                check_validator_context_loaded_by(v, &mut warnings);
+            }
+            Decl::Fn(f) => {
+                if let Some(body) = &f.body {
+                    check_parallel_shared_mutable_state(&body.node, &mut warnings);
+                }
+            }
+            Decl::Impl(i) => {
+                for m in &i.methods {
+                    if let Some(body) = &m.body {
+                        check_parallel_shared_mutable_state(&body.node, &mut warnings);
+                    }
+                }
+            }
+            _ => {}
+        }
     }
     warnings
 }
@@ -573,6 +589,369 @@ fn check_validator_context_loaded_by(v: &certo_ast::decl::ValidatorDecl, warning
                 },
                 span: field.span,
             });
+        }
+    }
+}
+
+// ------------------------------------------------------------------ //
+// W0103 — shared mutable state across `parallel { }` tasks (BACKLOG item 208)
+//
+// `parallel { task1, task2, ... }` runs each task expression concurrently
+// on a real OS thread (`crates/codegen`/`crates/stdlib`'s own
+// `__certo_thread_spawn`, the same primitive `spawn`/`withTimeout` share) —
+// spec §7.2's own comment promises "compiler verifies tasks do not share
+// mutable state," but nothing ever implemented this.
+//
+// Scoped narrowly and precisely because of what this language actually
+// allows: Certo's entire mutation surface is `name = expr` reassignment of
+// a bare local (`Stmt::Assign { target: S<String>, .. }` — confirmed no
+// mutable record-field assignment, no references exposed to user code, a
+// record's own only "mutation" is the immutable `.with(...)` copy-update).
+// So this is a purely syntactic, well-defined check, not general aliasing
+// analysis: collect every name assigned to *anywhere* in the enclosing
+// function, then for each `parallel { }` block found in that same
+// function, flag any such name referenced by two or more of its own
+// sibling task expressions.
+//
+// Deliberately does NOT attempt general `val`/parameter mutability
+// enforcement — a real, separate, larger gap found while scoping this item
+// (confirmed directly: reassigning a `val` or an ordinary function
+// parameter is accepted silently everywhere in this compiler today, not
+// just here) — filed separately as BACKLOG item 255. This check identifies
+// "mutable" empirically, from `Stmt::Assign` targets actually present in
+// the source, independent of that gap; it would keep working correctly
+// even after item 255 lands.
+//
+// Deliberately approximate rather than fully lexically-scoped, mirroring
+// `collect_referenced_idents`'s own documented tradeoff
+// (`crates/parser/src/parse_decl.rs`) — "assigned anywhere in this
+// function" is coarser than "assigned in a scope actually visible to this
+// parallel block," so an unrelated same-named local in a distant nested
+// scope could in principle produce a false positive. An accepted cost for
+// a real, useful check where none existed before, not a design blocker.
+// ------------------------------------------------------------------ //
+
+fn check_parallel_shared_mutable_state(body: &Expr, warnings: &mut Vec<Warning>) {
+    // First pass: every name assigned to anywhere in this whole function —
+    // must be fully populated before any parallel block's own tasks are
+    // checked, so this genuinely has to be a separate pass, not folded into
+    // the second walk below (which finds the parallel blocks themselves),
+    // matching this function's "assigned anywhere in this function" intent
+    // regardless of whether a parallel block textually precedes or follows
+    // the relevant assignment.
+    let mut assigned = std::collections::HashSet::new();
+    collect_assigned_names(body, &mut assigned);
+
+    // Second pass: every `parallel { }` block anywhere in this function.
+    let mut found: Vec<(Vec<S<Expr>>, Span)> = Vec::new();
+    collect_parallels(body, &mut found);
+    for (tasks, span) in &found {
+        let mut refs_by_name: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        for task in tasks {
+            let mut refs = std::collections::HashSet::new();
+            collect_referenced_names(&task.node, &mut refs);
+            for name in refs {
+                if assigned.contains(&name) {
+                    *refs_by_name.entry(name).or_insert(0) += 1;
+                }
+            }
+        }
+        for (name, count) in refs_by_name {
+            if count >= 2 {
+                warnings.push(Warning {
+                    kind: WarningKind::ParallelSharedMutableState { name },
+                    span: *span,
+                });
+            }
+        }
+    }
+}
+
+/// Collects every `Stmt::Assign` target reachable anywhere inside `expr`
+/// into `out` — see `check_parallel_shared_mutable_state`'s own doc
+/// comment for why "anywhere in the function," not precise lexical scope,
+/// is the right granularity here.
+fn collect_assigned_names(expr: &Expr, out: &mut std::collections::HashSet<String>) {
+    match expr {
+        Expr::Lit { value, .. } => {
+            if let certo_ast::expr::Lit::FString(parts) = value {
+                for p in parts {
+                    if let certo_ast::expr::FStringPart::Interpolated(e) = p { collect_assigned_names(&e.node, out); }
+                }
+            }
+        }
+        Expr::Path { .. } => {}
+        Expr::App { func, args, .. } => {
+            collect_assigned_names(&func.node, out);
+            for a in args { collect_assigned_names(&a.value.node, out); }
+        }
+        Expr::Pipe { left, right, .. } | Expr::BinOp { left, right, .. } => {
+            collect_assigned_names(&left.node, out);
+            collect_assigned_names(&right.node, out);
+        }
+        Expr::UnOp { expr, .. }
+        | Expr::Field { expr, .. }
+        | Expr::SafeField { expr, .. }
+        | Expr::Try { expr, .. }
+        | Expr::Await { expr, .. }
+        | Expr::Spawn { expr, .. }
+        | Expr::Ascribe { expr, .. }
+        | Expr::Age { expr, .. } => collect_assigned_names(&expr.node, out),
+        Expr::Transaction { body, .. } | Expr::Unsafe { body, .. } => collect_assigned_names(&body.node, out),
+        Expr::If { cond, then_expr, else_expr, .. } => {
+            collect_assigned_names(&cond.node, out);
+            collect_assigned_names(&then_expr.node, out);
+            collect_assigned_names(&else_expr.node, out);
+        }
+        Expr::Match { scrutinee, arms, .. } => {
+            collect_assigned_names(&scrutinee.node, out);
+            for arm in arms {
+                if let Some(g) = &arm.guard { collect_assigned_names(&g.node, out); }
+                collect_assigned_names(&arm.body.node, out);
+            }
+        }
+        Expr::Block { stmts, .. } => {
+            for s in stmts {
+                match s {
+                    certo_ast::expr::Stmt::Val { value, .. } | certo_ast::expr::Stmt::Var { value, .. } =>
+                        collect_assigned_names(&value.node, out),
+                    certo_ast::expr::Stmt::Assign { target, value, .. } => {
+                        out.insert(target.node.clone());
+                        collect_assigned_names(&value.node, out);
+                    }
+                    certo_ast::expr::Stmt::Defer { body, .. } => collect_assigned_names(&body.node, out),
+                    certo_ast::expr::Stmt::Expr { expr, .. } => collect_assigned_names(&expr.node, out),
+                }
+            }
+        }
+        Expr::Lambda { body, .. } => collect_assigned_names(&body.node, out),
+        Expr::List { elements, .. } | Expr::Tuple { elements, .. } => {
+            for e in elements { collect_assigned_names(&e.node, out); }
+        }
+        Expr::Record { base, fields, .. } => {
+            if let Some(b) = base { collect_assigned_names(&b.node, out); }
+            for f in fields { collect_assigned_names(&f.value.node, out); }
+        }
+        Expr::Guard { cond, else_expr, .. } => {
+            collect_assigned_names(&cond.node, out);
+            collect_assigned_names(&else_expr.node, out);
+        }
+        Expr::Require { expr, error, .. } => {
+            collect_assigned_names(&expr.node, out);
+            collect_assigned_names(&error.node, out);
+        }
+        Expr::Parallel { tasks, timeout, .. } => {
+            for t in tasks { collect_assigned_names(&t.node, out); }
+            if let Some(t) = timeout { collect_assigned_names(&t.node, out); }
+        }
+        Expr::WithTimeout { duration, body, .. } => {
+            collect_assigned_names(&duration.node, out);
+            collect_assigned_names(&body.node, out);
+        }
+        Expr::For { iter, body, .. } => {
+            collect_assigned_names(&iter.node, out);
+            collect_assigned_names(&body.node, out);
+        }
+        Expr::While { cond, body, .. } => {
+            collect_assigned_names(&cond.node, out);
+            collect_assigned_names(&body.node, out);
+        }
+        Expr::ExpectAssertion { actual, matcher, .. } => {
+            collect_assigned_names(&actual.node, out);
+            if let ExpectMatcher::ToBe(e) = matcher { collect_assigned_names(&e.node, out); }
+        }
+    }
+}
+
+/// Collects every `Expr::Parallel { tasks, .. }` occurrence anywhere inside
+/// `expr`, cloning its task list and span, for a later, separate pass over
+/// `collect_assigned_names`'s own fully-populated result — see
+/// `check_parallel_shared_mutable_state`'s doc comment for why this needs
+/// to be a genuinely separate second walk.
+fn collect_parallels(expr: &Expr, out: &mut Vec<(Vec<S<Expr>>, Span)>) {
+    match expr {
+        Expr::Parallel { tasks, timeout, span } => {
+            out.push((tasks.clone(), *span));
+            for t in tasks { collect_parallels(&t.node, out); }
+            if let Some(t) = timeout { collect_parallels(&t.node, out); }
+        }
+        Expr::Lit { value, .. } => {
+            if let certo_ast::expr::Lit::FString(parts) = value {
+                for p in parts {
+                    if let certo_ast::expr::FStringPart::Interpolated(e) = p { collect_parallels(&e.node, out); }
+                }
+            }
+        }
+        Expr::Path { .. } => {}
+        Expr::App { func, args, .. } => {
+            collect_parallels(&func.node, out);
+            for a in args { collect_parallels(&a.value.node, out); }
+        }
+        Expr::Pipe { left, right, .. } | Expr::BinOp { left, right, .. } => {
+            collect_parallels(&left.node, out);
+            collect_parallels(&right.node, out);
+        }
+        Expr::UnOp { expr, .. }
+        | Expr::Field { expr, .. }
+        | Expr::SafeField { expr, .. }
+        | Expr::Try { expr, .. }
+        | Expr::Await { expr, .. }
+        | Expr::Spawn { expr, .. }
+        | Expr::Ascribe { expr, .. }
+        | Expr::Age { expr, .. } => collect_parallels(&expr.node, out),
+        Expr::Transaction { body, .. } | Expr::Unsafe { body, .. } => collect_parallels(&body.node, out),
+        Expr::If { cond, then_expr, else_expr, .. } => {
+            collect_parallels(&cond.node, out);
+            collect_parallels(&then_expr.node, out);
+            collect_parallels(&else_expr.node, out);
+        }
+        Expr::Match { scrutinee, arms, .. } => {
+            collect_parallels(&scrutinee.node, out);
+            for arm in arms {
+                if let Some(g) = &arm.guard { collect_parallels(&g.node, out); }
+                collect_parallels(&arm.body.node, out);
+            }
+        }
+        Expr::Block { stmts, .. } => {
+            for s in stmts {
+                match s {
+                    certo_ast::expr::Stmt::Val { value, .. }
+                    | certo_ast::expr::Stmt::Var { value, .. }
+                    | certo_ast::expr::Stmt::Assign { value, .. } => collect_parallels(&value.node, out),
+                    certo_ast::expr::Stmt::Defer { body, .. } => collect_parallels(&body.node, out),
+                    certo_ast::expr::Stmt::Expr { expr, .. } => collect_parallels(&expr.node, out),
+                }
+            }
+        }
+        Expr::Lambda { body, .. } => collect_parallels(&body.node, out),
+        Expr::List { elements, .. } | Expr::Tuple { elements, .. } => {
+            for e in elements { collect_parallels(&e.node, out); }
+        }
+        Expr::Record { base, fields, .. } => {
+            if let Some(b) = base { collect_parallels(&b.node, out); }
+            for f in fields { collect_parallels(&f.value.node, out); }
+        }
+        Expr::Guard { cond, else_expr, .. } => {
+            collect_parallels(&cond.node, out);
+            collect_parallels(&else_expr.node, out);
+        }
+        Expr::Require { expr, error, .. } => {
+            collect_parallels(&expr.node, out);
+            collect_parallels(&error.node, out);
+        }
+        Expr::WithTimeout { duration, body, .. } => {
+            collect_parallels(&duration.node, out);
+            collect_parallels(&body.node, out);
+        }
+        Expr::For { iter, body, .. } => {
+            collect_parallels(&iter.node, out);
+            collect_parallels(&body.node, out);
+        }
+        Expr::While { cond, body, .. } => {
+            collect_parallels(&cond.node, out);
+            collect_parallels(&body.node, out);
+        }
+        Expr::ExpectAssertion { actual, matcher, .. } => {
+            collect_parallels(&actual.node, out);
+            if let ExpectMatcher::ToBe(e) = matcher { collect_parallels(&e.node, out); }
+        }
+    }
+}
+
+/// Every free identifier referenced inside `expr` — a typeck-local mirror
+/// of `crates/parser/src/parse_decl.rs`'s own `collect_referenced_idents`
+/// (typeck has no dependency on `crates/parser` outside its own tests, so
+/// that function isn't reachable from here; duplicated rather than
+/// refactored into a shared crate, matching this codebase's own
+/// established convention of small, independent per-crate AST walkers
+/// rather than one shared traversal library).
+fn collect_referenced_names(expr: &Expr, out: &mut std::collections::HashSet<String>) {
+    match expr {
+        Expr::Lit { value, .. } => {
+            if let certo_ast::expr::Lit::FString(parts) = value {
+                for p in parts {
+                    if let certo_ast::expr::FStringPart::Interpolated(e) = p { collect_referenced_names(&e.node, out); }
+                }
+            }
+        }
+        Expr::Path { path, .. } => {
+            if path.segments.len() == 1 { out.insert(path.segments[0].node.clone()); }
+        }
+        Expr::App { func, args, .. } => {
+            collect_referenced_names(&func.node, out);
+            for a in args { collect_referenced_names(&a.value.node, out); }
+        }
+        Expr::Pipe { left, right, .. } | Expr::BinOp { left, right, .. } => {
+            collect_referenced_names(&left.node, out);
+            collect_referenced_names(&right.node, out);
+        }
+        Expr::UnOp { expr, .. }
+        | Expr::Field { expr, .. }
+        | Expr::SafeField { expr, .. }
+        | Expr::Try { expr, .. }
+        | Expr::Await { expr, .. }
+        | Expr::Spawn { expr, .. }
+        | Expr::Ascribe { expr, .. }
+        | Expr::Age { expr, .. } => collect_referenced_names(&expr.node, out),
+        Expr::Transaction { body, .. } | Expr::Unsafe { body, .. } => collect_referenced_names(&body.node, out),
+        Expr::If { cond, then_expr, else_expr, .. } => {
+            collect_referenced_names(&cond.node, out);
+            collect_referenced_names(&then_expr.node, out);
+            collect_referenced_names(&else_expr.node, out);
+        }
+        Expr::Match { scrutinee, arms, .. } => {
+            collect_referenced_names(&scrutinee.node, out);
+            for arm in arms {
+                if let Some(g) = &arm.guard { collect_referenced_names(&g.node, out); }
+                collect_referenced_names(&arm.body.node, out);
+            }
+        }
+        Expr::Block { stmts, .. } => {
+            for s in stmts {
+                match s {
+                    certo_ast::expr::Stmt::Val { value, .. }
+                    | certo_ast::expr::Stmt::Var { value, .. }
+                    | certo_ast::expr::Stmt::Assign { value, .. } => collect_referenced_names(&value.node, out),
+                    certo_ast::expr::Stmt::Defer { body, .. } => collect_referenced_names(&body.node, out),
+                    certo_ast::expr::Stmt::Expr { expr, .. } => collect_referenced_names(&expr.node, out),
+                }
+            }
+        }
+        Expr::Lambda { body, .. } => collect_referenced_names(&body.node, out),
+        Expr::List { elements, .. } | Expr::Tuple { elements, .. } => {
+            for e in elements { collect_referenced_names(&e.node, out); }
+        }
+        Expr::Record { base, fields, .. } => {
+            if let Some(b) = base { collect_referenced_names(&b.node, out); }
+            for f in fields { collect_referenced_names(&f.value.node, out); }
+        }
+        Expr::Guard { cond, else_expr, .. } => {
+            collect_referenced_names(&cond.node, out);
+            collect_referenced_names(&else_expr.node, out);
+        }
+        Expr::Require { expr, error, .. } => {
+            collect_referenced_names(&expr.node, out);
+            collect_referenced_names(&error.node, out);
+        }
+        Expr::Parallel { tasks, timeout, .. } => {
+            for t in tasks { collect_referenced_names(&t.node, out); }
+            if let Some(t) = timeout { collect_referenced_names(&t.node, out); }
+        }
+        Expr::WithTimeout { duration, body, .. } => {
+            collect_referenced_names(&duration.node, out);
+            collect_referenced_names(&body.node, out);
+        }
+        Expr::For { iter, body, .. } => {
+            collect_referenced_names(&iter.node, out);
+            collect_referenced_names(&body.node, out);
+        }
+        Expr::While { cond, body, .. } => {
+            collect_referenced_names(&cond.node, out);
+            collect_referenced_names(&body.node, out);
+        }
+        Expr::ExpectAssertion { actual, matcher, .. } => {
+            collect_referenced_names(&actual.node, out);
+            if let ExpectMatcher::ToBe(e) = matcher { collect_referenced_names(&e.node, out); }
         }
     }
 }

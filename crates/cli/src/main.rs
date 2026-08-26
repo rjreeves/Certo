@@ -2186,6 +2186,12 @@ pub(crate) fn warning_to_diagnostic(w: &certo_typeck::Warning) -> Diagnostic {
                 format!("context field `{}` has no `loaded by` — `{}.validateWithDb` will not be generated", field_name, validator_name))
                 .with_span(w.span)
                 .with_label("add `loaded by <expr>` to enable validateWithDb"),
+        WarningKind::ParallelSharedMutableState { name } =>
+            Diagnostic::warning("W0103",
+                format!("`{}` is referenced by more than one task in this `parallel {{ }}` block", name))
+                .with_span(w.span)
+                .with_label("these tasks run concurrently on real OS threads — this is unsynchronized shared mutable state")
+                .with_note("copy the value into an immutable val before the parallel block, or restructure so only one task touches it"),
     }
 }
 
