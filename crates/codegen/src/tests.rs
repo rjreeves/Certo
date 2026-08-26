@@ -1594,6 +1594,27 @@ fn list_literal_emits_list_of() {
 }
 
 #[test]
+fn decimal_list_literal_heap_boxes_its_elements() {
+    // BACKLOG item 254 — `operand_ty` previously had no match arm for a bare
+    // `Decimal` *constant* operand (as opposed to one already bound to a
+    // local), so `box_value` never recognized it needed real heap-boxing at
+    // list-literal construction time — it fell straight to the same
+    // `(void*)(intptr_t)(...)` cast a pointer-sized scalar gets, which
+    // doesn't even compile for a `certo_decimal_t` struct operand.
+    let c = codegen("module A\nfn f(): List<Decimal> = [d\"1.50\", d\"2.75\"]");
+    assert_contains(&c, "certo_decimal_t* _cb = (certo_decimal_t*)malloc(sizeof(certo_decimal_t));");
+    assert_not_contains(&c, "(void*)(intptr_t)(CERTO_DECIMAL");
+}
+
+#[test]
+fn uuid_list_literal_heap_boxes_its_elements() {
+    // Same gap, same fix, for the other `needs_heap_box()` constant kind
+    // `operand_ty` was missing.
+    let c = codegen("module A\nfn f(): List<UUID> = [uuid\"11111111-1111-1111-1111-111111111111\"]");
+    assert_contains(&c, "certo_uuid_t* _cb = (certo_uuid_t*)malloc(sizeof(certo_uuid_t));");
+}
+
+#[test]
 fn string_concat_emits_text_concat() {
     let c = codegen("module A\nfn f(a: Text, b: Text): Text = a ++ b");
     assert_contains(&c, "certo_text_concat");
