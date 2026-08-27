@@ -407,3 +407,47 @@ fn nested_field_idempotent() {
     let out2 = fmt(&out1);
     assert_eq!(out1, out2, "nested field formatting not idempotent");
 }
+
+// ------------------------------------------------------------------ //
+// Leading-dot shorthand round-trips — BACKLOG item 203
+// ------------------------------------------------------------------ //
+
+#[test]
+fn leading_dot_field_shorthand_round_trips() {
+    // Regression for a real, confirmed leak: without this, `.lineTotal`
+    // formatted back out as `__dot => __dot.lineTotal`, exposing the
+    // parser's own internal synthesized parameter name in the user's source.
+    let out = fmt("module A\nfn f(items: List<Item>): Int = items.sumBy(.lineTotal)");
+    assert_contains(&out, ".lineTotal");
+    assert_not_contains(&out, "__dot");
+}
+
+#[test]
+fn leading_dot_method_call_shorthand_round_trips() {
+    let out = fmt("module A\nfn g(items: List<Item>, subtotal: Int): List<Int> = items.map(.discount(subtotal))");
+    assert_contains(&out, ".discount(subtotal)");
+    assert_not_contains(&out, "__dot");
+}
+
+#[test]
+fn leading_dot_shorthand_as_labeled_arg_round_trips() {
+    let out = fmt("module A\nfn f(items: List<Item>, newItem: Item): List<Item> = items.upsert(newItem, on: .productId)");
+    assert_contains(&out, "on: .productId");
+    assert_not_contains(&out, "__dot");
+}
+
+#[test]
+fn leading_dot_shorthand_idempotent() {
+    let src  = "module A\nfn f(items: List<Item>): Int = items.sumBy(.lineTotal)";
+    let out1 = fmt(src);
+    let out2 = fmt(&out1);
+    assert_eq!(out1, out2, "leading-dot shorthand formatting not idempotent");
+}
+
+#[test]
+fn a_hand_written_lambda_still_prints_normally() {
+    // Regression guard: an ordinary, hand-written lambda (not matching the
+    // parser's own exact desugar shape) must still print as a lambda.
+    let out = fmt("module A\nfn f(items: List<Item>): Int = items.sumBy((item) => item.lineTotal)");
+    assert_contains(&out, "item => item.lineTotal");
+}
