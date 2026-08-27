@@ -2131,6 +2131,14 @@ pub(crate) fn type_error_to_diagnostic(e: &TypeError) -> Diagnostic {
                 .with_note("use a named function instead, e.g. `.diff(...)` or `.addDuration(...)`")
         }
 
+        TypeErrorKind::AssignToImmutable { name } => {
+            Diagnostic::error("E0219",
+                format!("cannot assign to `{name}` — it was never declared with `var`"))
+                .with_span(e.span)
+                .with_label(format!("`{name}` is not mutable"))
+                .with_note(format!("declare it with `var {name} = ...` instead of `val`, or don't reassign it"))
+        }
+
         TypeErrorKind::RuleCycle { validator, cycle } => {
             Diagnostic::error("E0700",
                 format!("cycle in rule dependency graph in validator `{validator}`"))

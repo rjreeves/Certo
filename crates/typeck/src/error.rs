@@ -91,6 +91,14 @@ pub enum TypeErrorKind {
     /// arithmetic is, so it's out of this check's scope.
     OpaqueTemporalArithmetic { ty: Ty, op: String },
 
+    /// E0219 — `name = expr` where `name` was never declared with `var`
+    /// (BACKLOG item 255). Found while scoping item 208's own parallel-task
+    /// shared-mutable-state check: confirmed via a direct repro that
+    /// reassigning a `val` or an ordinary function parameter was accepted
+    /// silently everywhere in this compiler before now — no mutability
+    /// tracking existed at all.
+    AssignToImmutable { name: String },
+
     /// E0703 — a validator rule's `else` clause produces a type other than
     /// the validator's own declared `errors` type (BACKLOG item 219).
     /// Deliberately its own variant, not a reuse of `Mismatch`/E0200 —
@@ -212,6 +220,8 @@ impl TypeError {
                 format!("E0216: an interpolated f-string was passed directly as the `sql` argument to `{}` — use `?` placeholders and pass values via `params` instead", fn_name),
             TypeErrorKind::OpaqueTemporalArithmetic { ty, op } =>
                 format!("E0218: `{}` does not support the `{}` operator — it has no operator overloading, use a named function instead (e.g. `.diff(...)`, `.addDuration(...)`)", ty.display(), op),
+            TypeErrorKind::AssignToImmutable { name } =>
+                format!("E0219: cannot assign to `{}` — it was never declared with `var`", name),
             TypeErrorKind::ElseTypeMismatch { rule_name, expected, found } =>
                 format!("E0703: rule `{}`'s `else` branch produces `{}`, but this validator declares `errors {}`",
                     rule_name, found.display(), expected.display()),
