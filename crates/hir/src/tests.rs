@@ -375,6 +375,75 @@ fn list_group_by_and_sum_by_recover_return_type_from_named_function_callback() {
 }
 
 // ------------------------------------------------------------------ //
+// Option.map (BACKLOG item 256) — same hint/return-type-recovery
+// machinery as List.map just above, sourced from the receiver's
+// `Option<A>` instead of a list's element type.
+// ------------------------------------------------------------------ //
+
+#[test]
+fn option_map_return_type_recovered_via_lambda_param_hint() {
+    let m = lower("module A\nfn f(o: Option<Float>): Option<Float> = Option.map(o, (x) => x * 2.0)");
+    if let HirItem::Fn(f) = &m.items[0] {
+        assert_eq!(f.body.as_ref().unwrap().ty, Ty::Option(Box::new(Ty::Float)));
+    }
+}
+
+#[test]
+fn option_map_dot_call_lowers_to_same_shape_as_qualified_call() {
+    let qualified = lower(
+        "module A\nfn f(o: Option<Int>): Option<Int> = Option.map(o, (x) => x)");
+    let dotted = lower(
+        "module A\nfn f(o: Option<Int>): Option<Int> = o.map((x) => x)");
+    let get_call = |m: &crate::HirModule| -> (String, usize) {
+        if let HirItem::Fn(f) = &m.items[0] {
+            if let HirExprKind::Call { func, args } = &f.body.as_ref().unwrap().kind {
+                if let HirExprKind::Global(name) = &func.kind {
+                    return (name.clone(), args.len());
+                }
+            }
+        }
+        panic!("expected a Call to a Global callee");
+    };
+    assert_eq!(get_call(&qualified), ("Option.map".to_string(), 2));
+    assert_eq!(get_call(&dotted), ("Option.map".to_string(), 2));
+}
+
+#[test]
+fn option_map_callback_can_resolve_a_method_call_on_its_element() {
+    // Regression test for a real bug found verifying item 256 end-to-end:
+    // `Option.map` was listed in `needs_lambda_hint`'s match arms but never
+    // registered in `stdlib_param_names()`, so `cx.stdlib_params.get(
+    // "Option.map")` was always `None` and the entire hint-seeding branch
+    // (gated on `stdlib_names` being `Some`) never ran — the callback
+    // param's type never got seeded from the receiver's `Option<A>`. Bare
+    // field access on the param happened to keep working regardless (MIR's
+    // own separate, independent `elem_ty_hint` recovers it for unboxing
+    // purposes), which masked the bug until a *method call* inside the
+    // callback (needing the dot-call UFCS rewrite's own type lookup) was
+    // tried — that produced field-access-then-call-as-function-pointer
+    // codegen instead of a real call, segfaulting/failing to compile.
+    let m = lower(
+        "module A\n\
+         type Coupon = { discount: Int }\n\
+         impl Coupon {\n  fn applyTo(self, subtotal: Int): Int = subtotal - self.discount\n}\n\
+         fn f(o: Option<Coupon>, subtotal: Int): Option<Int> = Option.map(o, (c) => c.applyTo(subtotal))");
+    let f = m.items.iter().find_map(|it| if let HirItem::Fn(f) = it { if f.name == "f" { Some(f) } else { None } } else { None }).unwrap();
+    let body = f.body.as_ref().unwrap();
+    assert_eq!(body.ty, Ty::Option(Box::new(Ty::Int)));
+    if let HirExprKind::Call { args, .. } = &body.kind {
+        let HirExprKind::Lambda { body: lam_body, .. } = &args[1].kind else {
+            panic!("expected the 2nd Option.map argument to be a Lambda");
+        };
+        // The regression: without the fix, this call never resolves to
+        // a real callee — it stays a plain Field-access expression.
+        assert!(matches!(&lam_body.kind, HirExprKind::Call { .. }),
+            "expected a resolved Call to Coupon.applyTo, got {:?}", lam_body.kind);
+    } else {
+        panic!("expected Option.map's own Call node");
+    }
+}
+
+// ------------------------------------------------------------------ //
 // Dot-call UFCS (BACKLOG item 162) — `xs.map(f)` must lower to the exact
 // same `HirExprKind::Call{ func: Global("List.map"), args: [xs, f] }`
 // shape the already-working qualified form `List.map(xs, f)` produces,

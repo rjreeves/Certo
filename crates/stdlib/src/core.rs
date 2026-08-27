@@ -382,4 +382,39 @@ void* certo_identity(void* x) { return x; }
    useful pair of predicates, not just plumbing for expect(...).toBeSome(). */
 bool certo_option_is_some(void* o) { return o != NULL; }
 bool certo_option_is_none(void* o) { return o == NULL; }
+
+/* Option.map (BACKLOG item 256) — found missing entirely while verifying
+ * item 203's own leading-dot shorthand against the spec's own
+ * `coupon.map(.discount(subtotal))` example. `None` (a NULL pointer,
+ * see above) maps to `None` with no call at all.
+ *
+ * A `Some(x)`'s own box is NOT uniform the way `List<T>`'s element storage
+ * is: a scalar payload (`Some(42)`) is boxed as a single `int64_t` cell
+ * holding the raw value, needing one deref to reach the bit pattern `f`'s
+ * boxed-ABI param expects — this function handles exactly that case. A
+ * struct-shaped payload (record/Decimal/UUID/Fn — anything the codegen's
+ * `needs_heap_box()` says needs real heap boxing) is instead malloc'd at
+ * its own full size (`Rvalue::BoxSome`, `crates/mir/src/lower.rs`), so
+ * `opt` is *already* the exact pointer `f`'s boxed-ABI param wants —
+ * dereferencing it as `int64_t` first would read the struct's own first
+ * field as if it were a pointer and segfault. `certo_option_map_boxed`
+ * below is the counterpart for that case; `crates/mir/src/lower.rs`
+ * picks between the two at the call site since only it still has the
+ * receiver's real `Option<T>` type. Both give the result the identical
+ * one-layer `certo_some` box back, since the return type is itself an
+ * `Option` either way. */
+void* certo_option_map(void* opt, certo_fn_t f) {
+    if (!opt) return NULL;
+    void* (*fn)(void*, void*) = (void* (*)(void*, void*))f.fn;
+    int64_t raw = *(int64_t*)opt;
+    void* result = fn(f.env, (void*)(intptr_t)raw);
+    return certo_some(result);
+}
+
+void* certo_option_map_boxed(void* opt, certo_fn_t f) {
+    if (!opt) return NULL;
+    void* (*fn)(void*, void*) = (void* (*)(void*, void*))f.fn;
+    void* result = fn(f.env, opt);
+    return certo_some(result);
+}
 "#;
