@@ -756,6 +756,84 @@ validator V for Order errors OE {
 }
 
 // ------------------------------------------------------------------ //
+// E0219 — reassigning a non-`var` name (BACKLOG item 255)
+// ------------------------------------------------------------------ //
+
+#[test]
+fn reassigning_a_val_is_e0219() {
+    let kind = first_error_kind("module A
+fn f(): Int = {
+    val y = 5
+    y = y + 1
+    y
+}");
+    assert!(matches!(kind, TypeErrorKind::AssignToImmutable { ref name } if name == "y"), "expected E0219, got {kind:?}");
+}
+
+#[test]
+fn reassigning_a_parameter_is_e0219() {
+    let kind = first_error_kind("module A
+fn f(x: Int): Int = {
+    x = x + 1
+    x
+}");
+    assert!(matches!(kind, TypeErrorKind::AssignToImmutable { ref name } if name == "x"), "expected E0219, got {kind:?}");
+}
+
+#[test]
+fn reassigning_a_var_is_ok() {
+    check("module A
+fn f(): Int = {
+    var total = 0
+    total = total + 1
+    total
+}").unwrap();
+}
+
+#[test]
+fn a_val_shadowing_an_outer_var_still_rejects_reassignment() {
+    // The inner `val x` must be the one consulted, not the outer `var x` —
+    // a flat "was `x` ever declared `var` anywhere" set would wrongly
+    // allow this.
+    let kind = first_error_kind("module A
+fn f(): Int = {
+    var x = 1
+    val result = {
+        val x = 2
+        x = x + 1
+        x
+    }
+    result
+}");
+    assert!(matches!(kind, TypeErrorKind::AssignToImmutable { ref name } if name == "x"), "expected E0219, got {kind:?}");
+}
+
+#[test]
+fn a_var_shadowing_an_outer_val_may_be_reassigned() {
+    check("module A
+fn f(): Int = {
+    val x = 1
+    val result = {
+        var x = 2
+        x = x + 1
+        x
+    }
+    result
+}").unwrap();
+}
+
+#[test]
+fn reassigning_a_name_bound_by_a_destructuring_val_is_e0219() {
+    let kind = first_error_kind("module A
+fn f(): Int = {
+    val (a, b) = (1, 2)
+    a = a + 1
+    b
+}");
+    assert!(matches!(kind, TypeErrorKind::AssignToImmutable { ref name } if name == "a"), "expected E0219, got {kind:?}");
+}
+
+// ------------------------------------------------------------------ //
 // W0103 — shared mutable state across `parallel { }` tasks (BACKLOG item 208)
 // ------------------------------------------------------------------ //
 

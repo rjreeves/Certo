@@ -399,6 +399,44 @@ something to reach for by default.
 
 ---
 
+## E0219  Cannot assign to immutable binding
+
+```
+error[E0219]: cannot assign to `y` — it was never declared with `var`
+  --> src/main.cto:4:5
+   |
+ 4 |     y = y + 1
+   |     ^^^^^^^^^ `y` is not mutable
+   |
+   = note: declare it with `var y = ...` instead of `val`, or don't reassign it
+```
+
+**Cause:** `name = expr` where `name` was declared with `val`, is an
+ordinary function/lambda parameter, or a match-arm binding — none of which
+are ever reassignable in Certo. Only a `var name = ...` binding is.
+Reassigning anything else was previously accepted silently everywhere in
+the compiler (BACKLOG item 255) — this now catches it as a real error.
+
+Scoping is precisely lexical: a `val x` in an inner scope that happens to
+share a name with an outer `var x` is checked on its own — reassigning it
+still errors, and a `var` shadowing an outer `val` may be freely reassigned.
+
+**Fix:** Declare the binding with `var` if it genuinely needs to be
+reassigned, or restructure the code so it doesn't need reassigning at all
+(e.g. compute the final value directly instead of building it up):
+
+```certo
+// Wrong — y was declared with val
+val y = 5
+y = y + 1
+
+// Fix — declare it var
+var y = 5
+y = y + 1
+```
+
+---
+
 ## E0216  SQL injection risk
 
 ### E0216  Interpolated f-string passed as raw SQL

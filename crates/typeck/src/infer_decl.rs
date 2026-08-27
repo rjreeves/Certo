@@ -84,6 +84,13 @@ pub fn check_module_seeded(
     // from `crates/resolve`, which never actually ran for the real CLI).
     check_rule_dependencies(module, &mut errors);
 
+    // Pass 7 — E0219: reassigning (`name = expr`) a name that was never
+    // declared with `var` — a `val`, a function parameter, a match/lambda
+    // binding — is a real, blocking error (BACKLOG item 255; found while
+    // scoping item 208's own parallel-task check — confirmed this was
+    // accepted completely silently everywhere before now).
+    check_mutable_assignments(module, &mut errors);
+
     if errors.is_empty() { Ok(()) } else { Err(errors) }
 }
 
@@ -498,6 +505,226 @@ fn dfs_rule_cycle<'a>(
 
     rec_stack.pop();
     None
+}
+
+// ------------------------------------------------------------------ //
+// E0219 — reassigning a non-`var` name (BACKLOG item 255)
+//
+// Found while scoping item 208's own parallel-task shared-mutable-state
+// check: confirmed via a direct repro that reassigning a `val` or an
+// ordinary function parameter (never declared `var`) was accepted
+// silently *everywhere* in this compiler — no mutability tracking existed
+// at all (`TypeEnv`'s own `frames: Vec<HashMap<String, Ty>>` records a
+// name's type, never whether it was declared `var`).
+//
+// Deliberately built as its own small, self-contained scope-tracking walk
+// over the raw AST, not by threading a "declared mutable" flag through
+// `TypeEnv::define` — that function is the one shared entry point for
+// *every* kind of binding this compiler has (locals, function params, type
+// params, generic-record-field shorthand, state-machine names, and more,
+// confirmed via `grep -rn "env.define" crates/typeck/src` returning
+// dozens of call sites across `infer_expr.rs`/`infer_decl.rs`), and most of
+// those don't correspond to a "declared mutable or not" local variable at
+// all. A parallel, purpose-built walk mirrors this session's own
+// established pattern (`check_constraint_scope`, `check_module_warnings`,
+// item 208's own `check_parallel_shared_mutable_state`) of a small,
+// additive, AST-only pass rather than an invasive core-pipeline change.
+//
+// Real (not approximate) lexical scoping, including shadowing: every
+// binding a scope introduces — `Stmt::Val`'s own (possibly destructuring)
+// pattern too, not just `Stmt::Var` — is recorded in that scope's own
+// frame together with whether *that* binding is mutable, so looking up a
+// name always finds its *innermost* declaration first. A `val x` shadowing
+// an outer `var x` must correctly report the inner `x` as immutable, not
+// find the outer `var` and consider `x` mutable everywhere — a `HashSet`
+// of "names declared `var` anywhere on the scope stack" (an earlier,
+// simpler draft of this check) gets this wrong; a `HashMap<String, bool>`
+// per frame, looked up innermost-first, does not. Only `Expr::Block` can
+// hold `Stmt`s at all, so pushing a fresh frame on `Expr::Block` entry and
+// popping it on exit is the only scope handling needed anywhere in this
+// walk — function/lambda parameters and match-arm bindings are never
+// registered at all, so looking them up correctly finds nothing (treated
+// as immutable, exactly right, since none of them are ever mutable here).
+// ------------------------------------------------------------------ //
+
+fn check_mutable_assignments(module: &Module, errors: &mut Vec<TypeError>) {
+    for sdecl in &module.decls {
+        match &sdecl.node {
+            Decl::Fn(f) => {
+                if let Some(body) = &f.body {
+                    check_mutable_assignments_in_expr(&body.node, &mut vec![std::collections::HashMap::new()], errors);
+                }
+            }
+            Decl::Impl(i) => {
+                for m in &i.methods {
+                    if let Some(body) = &m.body {
+                        check_mutable_assignments_in_expr(&body.node, &mut vec![std::collections::HashMap::new()], errors);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// `true`/`false` for the *innermost* scope that declares `name` at all;
+/// `None` if no scope on the stack ever declared it (a function/lambda
+/// parameter, a match-arm binding, or a genuinely undefined name — all
+/// correctly treated as immutable by the caller either way).
+fn lookup_mutability(scopes: &[std::collections::HashMap<String, bool>], name: &str) -> Option<bool> {
+    scopes.iter().rev().find_map(|s| s.get(name).copied())
+}
+
+/// Every name a (possibly destructuring/nested) pattern binds — needed so
+/// `val (a, b) = ...`/`val { x, y } = ...`/etc. register *all* their bound
+/// names as immutable, not just a bare `val x = ...`.
+fn collect_pattern_names(pattern: &certo_ast::pattern::Pattern, out: &mut Vec<String>) {
+    use certo_ast::pattern::Pattern;
+    match pattern {
+        Pattern::Wildcard { .. } | Pattern::Literal { .. } => {}
+        Pattern::Ident { name, .. } => out.push(name.node.clone()),
+        Pattern::Constructor { fields, .. } => {
+            for f in fields { collect_pattern_names(&f.node, out); }
+        }
+        Pattern::Record { fields, .. } => {
+            for f in fields {
+                match &f.pattern {
+                    Some(p) => collect_pattern_names(&p.node, out),
+                    None => out.push(f.name.node.clone()), // shorthand `{ x }` = `{ x: x }`
+                }
+            }
+        }
+        Pattern::Tuple { elements, .. } => {
+            for e in elements { collect_pattern_names(&e.node, out); }
+        }
+        Pattern::List { head, tail, .. } => {
+            for e in head { collect_pattern_names(&e.node, out); }
+            if let Some(t) = tail { collect_pattern_names(&t.node, out); }
+        }
+        Pattern::Guard { pattern, .. } => collect_pattern_names(&pattern.node, out),
+        Pattern::As { pattern, name, .. } => {
+            collect_pattern_names(&pattern.node, out);
+            out.push(name.node.clone());
+        }
+        Pattern::Or { left, right, .. } => {
+            // Both sides of an or-pattern bind the same set of names by
+            // language convention; recursing into both is harmless either way.
+            collect_pattern_names(&left.node, out);
+            collect_pattern_names(&right.node, out);
+        }
+    }
+}
+
+fn check_mutable_assignments_in_expr(
+    expr: &Expr,
+    scopes: &mut Vec<std::collections::HashMap<String, bool>>,
+    errors: &mut Vec<TypeError>,
+) {
+    match expr {
+        Expr::Lit { value, .. } => {
+            if let certo_ast::expr::Lit::FString(parts) = value {
+                for p in parts {
+                    if let certo_ast::expr::FStringPart::Interpolated(e) = p { check_mutable_assignments_in_expr(&e.node, scopes, errors); }
+                }
+            }
+        }
+        Expr::Path { .. } => {}
+        Expr::App { func, args, .. } => {
+            check_mutable_assignments_in_expr(&func.node, scopes, errors);
+            for a in args { check_mutable_assignments_in_expr(&a.value.node, scopes, errors); }
+        }
+        Expr::Pipe { left, right, .. } | Expr::BinOp { left, right, .. } => {
+            check_mutable_assignments_in_expr(&left.node, scopes, errors);
+            check_mutable_assignments_in_expr(&right.node, scopes, errors);
+        }
+        Expr::UnOp { expr, .. }
+        | Expr::Field { expr, .. }
+        | Expr::SafeField { expr, .. }
+        | Expr::Try { expr, .. }
+        | Expr::Await { expr, .. }
+        | Expr::Spawn { expr, .. }
+        | Expr::Ascribe { expr, .. }
+        | Expr::Age { expr, .. } => check_mutable_assignments_in_expr(&expr.node, scopes, errors),
+        Expr::Transaction { body, .. } | Expr::Unsafe { body, .. } => check_mutable_assignments_in_expr(&body.node, scopes, errors),
+        Expr::If { cond, then_expr, else_expr, .. } => {
+            check_mutable_assignments_in_expr(&cond.node, scopes, errors);
+            check_mutable_assignments_in_expr(&then_expr.node, scopes, errors);
+            check_mutable_assignments_in_expr(&else_expr.node, scopes, errors);
+        }
+        Expr::Match { scrutinee, arms, .. } => {
+            check_mutable_assignments_in_expr(&scrutinee.node, scopes, errors);
+            for arm in arms {
+                if let Some(g) = &arm.guard { check_mutable_assignments_in_expr(&g.node, scopes, errors); }
+                check_mutable_assignments_in_expr(&arm.body.node, scopes, errors);
+            }
+        }
+        Expr::Block { stmts, .. } => {
+            scopes.push(std::collections::HashMap::new());
+            for s in stmts {
+                match s {
+                    certo_ast::expr::Stmt::Val { pattern, value, .. } => {
+                        check_mutable_assignments_in_expr(&value.node, scopes, errors);
+                        let mut names = Vec::new();
+                        collect_pattern_names(&pattern.node, &mut names);
+                        let frame = scopes.last_mut().unwrap();
+                        for n in names { frame.insert(n, false); }
+                    }
+                    certo_ast::expr::Stmt::Var { name, value, .. } => {
+                        check_mutable_assignments_in_expr(&value.node, scopes, errors);
+                        scopes.last_mut().unwrap().insert(name.node.clone(), true);
+                    }
+                    certo_ast::expr::Stmt::Assign { target, value, span } => {
+                        check_mutable_assignments_in_expr(&value.node, scopes, errors);
+                        if !lookup_mutability(scopes, &target.node).unwrap_or(false) {
+                            errors.push(TypeError {
+                                kind: TypeErrorKind::AssignToImmutable { name: target.node.clone() },
+                                span: *span,
+                            });
+                        }
+                    }
+                    certo_ast::expr::Stmt::Defer { body, .. } => check_mutable_assignments_in_expr(&body.node, scopes, errors),
+                    certo_ast::expr::Stmt::Expr { expr, .. } => check_mutable_assignments_in_expr(&expr.node, scopes, errors),
+                }
+            }
+            scopes.pop();
+        }
+        Expr::Lambda { body, .. } => check_mutable_assignments_in_expr(&body.node, scopes, errors),
+        Expr::List { elements, .. } | Expr::Tuple { elements, .. } => {
+            for e in elements { check_mutable_assignments_in_expr(&e.node, scopes, errors); }
+        }
+        Expr::Record { base, fields, .. } => {
+            if let Some(b) = base { check_mutable_assignments_in_expr(&b.node, scopes, errors); }
+            for f in fields { check_mutable_assignments_in_expr(&f.value.node, scopes, errors); }
+        }
+        Expr::Guard { cond, else_expr, .. } => {
+            check_mutable_assignments_in_expr(&cond.node, scopes, errors);
+            check_mutable_assignments_in_expr(&else_expr.node, scopes, errors);
+        }
+        Expr::Require { expr, error, .. } => {
+            check_mutable_assignments_in_expr(&expr.node, scopes, errors);
+            check_mutable_assignments_in_expr(&error.node, scopes, errors);
+        }
+        Expr::Parallel { tasks, timeout, .. } => {
+            for t in tasks { check_mutable_assignments_in_expr(&t.node, scopes, errors); }
+            if let Some(t) = timeout { check_mutable_assignments_in_expr(&t.node, scopes, errors); }
+        }
+        Expr::WithTimeout { duration, body, .. } => {
+            check_mutable_assignments_in_expr(&duration.node, scopes, errors);
+            check_mutable_assignments_in_expr(&body.node, scopes, errors);
+        }
+        Expr::For { iter, body, .. } => {
+            check_mutable_assignments_in_expr(&iter.node, scopes, errors);
+            check_mutable_assignments_in_expr(&body.node, scopes, errors);
+        }
+        Expr::While { cond, body, .. } => {
+            check_mutable_assignments_in_expr(&cond.node, scopes, errors);
+            check_mutable_assignments_in_expr(&body.node, scopes, errors);
+        }
+        Expr::ExpectAssertion { actual, matcher, .. } => {
+            check_mutable_assignments_in_expr(&actual.node, scopes, errors);
+            if let ExpectMatcher::ToBe(e) = matcher { check_mutable_assignments_in_expr(&e.node, scopes, errors); }
+        }
+    }
 }
 
 // ------------------------------------------------------------------ //
