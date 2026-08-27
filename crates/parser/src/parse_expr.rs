@@ -200,8 +200,54 @@ fn parse_unary(cur: &mut Cursor<'_>) -> Result<S<Expr>, ParseError> {
 }
 
 fn parse_postfix(cur: &mut Cursor<'_>) -> Result<S<Expr>, ParseError> {
-    let mut expr = parse_atom(cur)?;
+    // Leading-dot shorthand (BACKLOG item 203, spec §8.5 — `.lineTotal`,
+    // `.discount(subtotal)`, `on: .productId`): a bare `.` at expression-atom
+    // position, with no receiver written at all, desugars this *entire*
+    // postfix chain into a one-param lambda over a synthesized receiver —
+    // `.lineTotal` becomes `(__dot) => __dot.lineTotal`, `.discount(x)`
+    // becomes `(__dot) => __dot.discount(x)`. Deliberately pure parser sugar,
+    // producing an ordinary `Expr::Lambda` node no different from one the
+    // user hand-wrote: every existing downstream mechanism (typeck's
+    // ordinary `Expr::Lambda` inference, and — critically — the *existing*
+    // per-call-site lambda-param-type hint `crates/hir/src/lower.rs` already
+    // applies for `List.map`/`sortBy`/`minBy`/`maxBy`/`sumBy`/`groupBy`/
+    // `upsert` and `Result.flatMap`/`recover`/`mapErr`) already makes a
+    // hand-written single-param lambda like this typecheck and compile
+    // correctly — confirmed directly before implementing this. Elsewhere
+    // (a callee not on that list) this parses fine but the field access
+    // inside won't resolve, exactly like a hand-written lambda wouldn't
+    // either — a real, pre-existing, separate limitation, not something
+    // this sugar needs to work around.
+    //
+    // Deliberately does NOT cover the db-query "predicate shorthand" a
+    // *comparison* like `.status == Pending` would need (used only in
+    // spec §10.2's dashboard vision section) — spec §9's own text
+    // explicitly disclaims that form as unimplemented, and this sugar's
+    // "wrap the whole postfix chain" scope naturally stops before ever
+    // reaching a binary operator, so it can't accidentally reach that far.
+    if matches!(cur.peek(), Some(Token::Dot)) {
+        let start = cur.peek_span();
+        let ident = |s: &str, span: Span| S::new(s.to_string(), span);
+        let receiver = S::new(
+            Expr::Path { path: ModulePath { segments: vec![ident("__dot", start)], span: start }, span: start },
+            start,
+        );
+        let body = parse_postfix_continuation(cur, receiver)?;
+        let full = start.to(body.span);
+        let param = LambdaParam { name: ident("__dot", start), ty: None, span: start };
+        return Ok(S::new(Expr::Lambda { params: vec![param], body: Box::new(body), span: full }, full));
+    }
 
+    let expr = parse_atom(cur)?;
+    parse_postfix_continuation(cur, expr)
+}
+
+/// The postfix-chain continuation loop itself (`.field`, `.with(...)`,
+/// `(args)`, a trailing lambda, `?`) — factored out so the leading-dot
+/// shorthand above can feed it a synthesized receiver directly, reusing
+/// 100% of the same chain-building logic an ordinary atom-rooted chain
+/// already goes through.
+fn parse_postfix_continuation(cur: &mut Cursor<'_>, mut expr: S<Expr>) -> Result<S<Expr>, ParseError> {
     loop {
         match cur.peek() {
             // `expr.age` — temporal age property (only valid on Timestamp fields; type checker enforces)

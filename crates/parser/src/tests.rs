@@ -2174,3 +2174,59 @@ fn lowercase_field_access_is_unaffected() {
     let Decl::Val(v) = &m.decls[0].node else { panic!("expected Decl::Val") };
     assert!(matches!(&v.value.node, Expr::Field { .. }), "expected Expr::Field, got {:?}", v.value.node);
 }
+
+// ------------------------------------------------------------------ //
+// Leading-dot property/method shorthand — BACKLOG item 203
+// ------------------------------------------------------------------ //
+
+#[test]
+fn leading_dot_field_desugars_to_a_one_param_lambda() {
+    let body = parse_fn_body("module A\nfn f(): Int = List.sumBy(items, .lineTotal)");
+    let Expr::App { args, .. } = &body.node else { panic!("expected Expr::App, got {:?}", body.node) };
+    let Expr::Lambda { params, body: lam_body, .. } = &args[1].value.node else {
+        panic!("expected the second arg to be a synthesized Expr::Lambda, got {:?}", args[1].value.node)
+    };
+    assert_eq!(params.len(), 1, "expected exactly one synthesized param");
+    let Expr::Field { expr, field, .. } = &lam_body.node else {
+        panic!("expected the lambda body to be Expr::Field, got {:?}", lam_body.node)
+    };
+    assert_eq!(field.node, "lineTotal");
+    assert!(matches!(&expr.node, Expr::Path { path, .. } if path.segments.len() == 1 && path.segments[0].node == params[0].name.node),
+        "expected the field access's receiver to reference the synthesized param");
+}
+
+#[test]
+fn leading_dot_method_call_desugars_to_a_one_param_lambda() {
+    let body = parse_fn_body("module A\nfn f(): Int = coupon.map(.discount(subtotal))");
+    let Expr::App { args, .. } = &body.node else { panic!("expected Expr::App, got {:?}", body.node) };
+    let Expr::Lambda { params, body: lam_body, .. } = &args[0].value.node else {
+        panic!("expected the arg to be a synthesized Expr::Lambda, got {:?}", args[0].value.node)
+    };
+    assert_eq!(params.len(), 1);
+    let Expr::App { func, args: call_args, .. } = &lam_body.node else {
+        panic!("expected the lambda body to be a call, got {:?}", lam_body.node)
+    };
+    let Expr::Field { field, .. } = &func.node else { panic!("expected Expr::Field callee, got {:?}", func.node) };
+    assert_eq!(field.node, "discount");
+    assert_eq!(call_args.len(), 1);
+}
+
+#[test]
+fn leading_dot_shorthand_as_a_labeled_argument() {
+    // `on: .productId` (spec §8.5) — the shorthand desugars the same way
+    // regardless of whether it's positional or a labeled argument's value.
+    let body = parse_fn_body("module A\nfn f(): Int = items.upsert(newItem, on: .productId)");
+    let Expr::App { args, .. } = &body.node else { panic!("expected Expr::App, got {:?}", body.node) };
+    let on_arg = args.iter().find(|a| a.label.as_ref().map(|l| l.node.as_str()) == Some("on"))
+        .expect("expected a labeled `on:` argument");
+    assert!(matches!(&on_arg.value.node, Expr::Lambda { .. }), "expected `on:`'s value to be a synthesized lambda, got {:?}", on_arg.value.node);
+}
+
+#[test]
+fn ordinary_field_access_after_a_real_receiver_is_unaffected() {
+    // A leading dot is only special at expression-*atom* position (nothing
+    // written before it at all) — `order.status` must still parse as
+    // ordinary field access on `order`, not somehow trigger the shorthand.
+    let body = parse_fn_body("module A\nfn f(order: Order): OrderStatus = order.status");
+    assert!(matches!(&body.node, Expr::Field { .. }), "expected ordinary Expr::Field, got {:?}", body.node);
+}

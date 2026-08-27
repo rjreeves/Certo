@@ -81,6 +81,26 @@ pub fn fmt_expr(expr: &Expr, indent: usize) -> String {
         }
 
         Expr::Lambda { params, body, .. } => {
+            // BACKLOG item 203 — a lambda synthesized by the parser's own
+            // leading-dot shorthand desugar (`.lineTotal` -> `(__dot) =>
+            // __dot.lineTotal`, `crates/parser/src/parse_expr.rs`) round-
+            // trips back to its original shorthand spelling here, instead
+            // of printing the internal `__dot` parameter name into the
+            // user's own source — confirmed directly this would otherwise
+            // happen (`certo fmt` turning `.lineTotal` into `__dot =>
+            // __dot.lineTotal`), a real, visible leak of an implementation
+            // detail a user never wrote. Only ever matches the *exact*
+            // shape the parser's own desugar produces (one unannotated
+            // param literally named `__dot`, whose body is a direct field
+            // access or single call rooted at a reference to that same
+            // param) — anything else prints as an ordinary lambda.
+            if let [p] = params.as_slice() {
+                if p.name.node == "__dot" && p.ty.is_none() {
+                    if let Some(shorthand) = fmt_dot_shorthand(&body.node, indent) {
+                        return shorthand;
+                    }
+                }
+            }
             let ps: Vec<String> = params.iter().map(fmt_lambda_param).collect();
             let param_str = if ps.len() == 1 { ps[0].clone() } else { format!("({})", ps.join(", ")) };
             let b = fmt_expr(&body.node, indent);
@@ -284,6 +304,32 @@ fn fmt_lambda_param(p: &LambdaParam) -> String {
         format!("{}: {}", p.name.node, fmt_type(&ty.node, 0))
     } else {
         p.name.node.clone()
+    }
+}
+
+/// `true` for a bare reference to the leading-dot shorthand's own
+/// synthesized receiver (`__dot`) — see `Expr::Lambda`'s own doc comment
+/// above for why this exact name is safe to key off of.
+fn is_dot_shorthand_receiver(expr: &Expr) -> bool {
+    matches!(expr, Expr::Path { path, .. } if path.segments.len() == 1 && path.segments[0].node == "__dot")
+}
+
+/// Prints `body` back in its original leading-dot shorthand spelling
+/// (`.field` / `.method(args)`) when it's exactly the shape the parser's
+/// own desugar produces — `None` for anything else, so the caller falls
+/// back to printing an ordinary lambda.
+fn fmt_dot_shorthand(body: &Expr, indent: usize) -> Option<String> {
+    match body {
+        Expr::Field { expr, field, .. } if is_dot_shorthand_receiver(&expr.node) =>
+            Some(format!(".{}", field.node)),
+        Expr::App { func, args, .. } => {
+            let Expr::Field { expr, field, .. } = &func.node else { return None };
+            if !is_dot_shorthand_receiver(&expr.node) { return None; }
+            let formatted_args: Vec<String> = args.iter().map(|a| fmt_arg(a, indent)).collect();
+            let args_str = group(&formatted_args, "(", ")", ", ", indent, false);
+            Some(format!(".{}{}", field.node, args_str))
+        }
+        _ => None,
     }
 }
 
