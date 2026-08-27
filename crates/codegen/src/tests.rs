@@ -477,6 +477,58 @@ fn callback_to_list_flat_map_is_boxed() {
 }
 
 // ------------------------------------------------------------------ //
+// Option.map (BACKLOG item 256)
+// ------------------------------------------------------------------ //
+
+#[test]
+fn scalar_callback_to_option_map_calls_the_scalar_runtime_fn() {
+    // `Some(x)`'s box for a scalar payload is a single `int64_t` cell
+    // (needs a deref to reach the bit pattern the boxed-ABI callback
+    // expects) — must route through plain `certo_option_map`, not the
+    // struct-shaped `_boxed` variant.
+    let c = codegen(
+        "module A\nfn f(o: Option<Int>): Option<Int> = Option.map(o, (x) => x * 2)");
+    assert_contains(&c, "__lam_f_0_boxed");
+    assert_contains(&c, "certo_option_map(");
+    assert_not_contains(&c, "certo_option_map_boxed(");
+}
+
+#[test]
+fn record_callback_to_option_map_calls_the_boxed_runtime_fn() {
+    // A struct-shaped payload (anything `needs_heap_box()`) is boxed at its
+    // own real size (`Rvalue::BoxSome`), not a fixed `int64_t` cell — `opt`
+    // is already the exact pointer the boxed-ABI callback expects, so this
+    // must route through `certo_option_map_boxed` instead, which skips the
+    // `certo_option_map` scalar deref entirely (dereferencing a record's
+    // own first field as if it were a pointer segfaults at runtime —
+    // confirmed directly before this fix).
+    let c = codegen(
+        "module A\ntype Coupon = { discount: Int }\n\
+         fn f(o: Option<Coupon>): Option<Int> = Option.map(o, (c) => c.discount)");
+    assert_contains(&c, "certo_option_map_boxed(");
+    assert_not_contains(&c, "certo_option_map(");
+}
+
+#[test]
+fn option_map_callback_method_call_reaches_the_real_function() {
+    // Regression test (found during item 256's own end-to-end
+    // verification): `Option.map` was missing from
+    // `stdlib_param_names()`, so the callback param's type never got
+    // seeded from the receiver's `Option<A>` — a method call inside the
+    // callback couldn't resolve via the dot-call UFCS rewrite and instead
+    // compiled to nonsensical field-access-then-call-as-function-pointer
+    // codegen. Bare field access happened to keep working regardless (a
+    // separate, independent MIR-level hint recovers it for unboxing), so
+    // only a real method call inside the callback exposed the gap.
+    let c = codegen(
+        "module A\ntype Coupon = { discount: Int }\n\
+         impl Coupon {\n  fn applyTo(self, subtotal: Int): Int = subtotal - self.discount\n}\n\
+         fn f(o: Option<Coupon>, subtotal: Int): Option<Int> = Option.map(o, (c) => c.applyTo(subtotal))");
+    assert_contains(&c, "certo_coupon_apply_to(");
+    assert_not_contains(&c, ".applyTo;");
+}
+
+// ------------------------------------------------------------------ //
 // Result combinator dot-call reachability — BACKLOG item 199
 // ------------------------------------------------------------------ //
 

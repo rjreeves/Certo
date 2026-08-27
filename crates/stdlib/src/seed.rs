@@ -108,6 +108,20 @@ pub fn seed_stdlib(env: &mut TypeEnv, counter: &mut u32) {
         let a = fresh();
         env.define("Option.isNone", poly1(a, fn1(Ty::Option(Box::new(Ty::Var(a))), Ty::Bool)));
     }
+    // BACKLOG item 256 — `Option.map`, mirroring `List.map`'s own exact
+    // shape just below (found missing entirely while verifying item 203's
+    // own leading-dot shorthand against the spec's own `coupon.map(...)`
+    // example — confirmed via a direct repro that `coupon.map(f)` on a
+    // `Coupon?` failed with "no field `map`", since nothing registered it).
+    {
+        let a = fresh(); let b = fresh();
+        let f_ty = fn1(Ty::Var(a), Ty::Var(b));
+        env.define("Option.map", Ty::Forall {
+            vars: vec![a, b],
+            body: Box::new(fn2(Ty::Option(Box::new(Ty::Var(a))), f_ty,
+                              Ty::Option(Box::new(Ty::Var(b))))),
+        });
+    }
     {
         let a = fresh(); let b = fresh();
         env.define("Result.isOk", poly2(a, b, fn1(Ty::Result(Box::new(Ty::Var(a)), Box::new(Ty::Var(b))), Ty::Bool)));
@@ -1430,6 +1444,7 @@ pub fn seed_stdlib(env: &mut TypeEnv, counter: &mut u32) {
     pm!("List.slice",      "list", "from", "to");
     pm!("List.contains",   "list", "item");
     pm!("List.map",        "list", "f");
+    pm!("Option.map",      "opt",  "f");
     pm!("List.filter",     "list", "pred");
     pm!("List.fold",       "list", "init", "f");
     pm!("List.find",       "list", "pred");

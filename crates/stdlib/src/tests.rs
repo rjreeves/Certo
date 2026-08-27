@@ -471,6 +471,34 @@ fn option_is_some_type() {
 }
 
 #[test]
+fn option_map_registered() {
+    // BACKLOG item 256.
+    let env = seeded_env();
+    assert!(env.lookup("Option.map").is_some());
+    assert!(matches!(env.lookup("Option.map").unwrap(), Ty::Forall { .. }));
+}
+
+#[test]
+fn option_map_type() {
+    let env = seeded_env();
+    match env.lookup("Option.map").unwrap() {
+        Ty::Forall { vars, body } => {
+            assert_eq!(vars.len(), 2, "Option.map should be generic over both A and B");
+            match body.as_ref() {
+                Ty::Fn { params, ret } => {
+                    assert_eq!(params.len(), 2);
+                    assert!(matches!(&params[0], Ty::Option(_)), "first param should be Option<A>");
+                    assert!(matches!(&params[1], Ty::Fn { .. }), "second param should be A -> B");
+                    assert!(matches!(ret.as_ref(), Ty::Option(_)), "return should be Option<B>");
+                }
+                other => panic!("expected Fn, got {:?}", other),
+            }
+        }
+        other => panic!("expected Forall, got {:?}", other),
+    }
+}
+
+#[test]
 fn result_is_ok_type() {
     let env = seeded_env();
     match env.lookup("Result.isOk").unwrap() {
@@ -548,6 +576,18 @@ fn core_c_contains_expect_bridge_and_option_predicates() {
     assert!(CORE_C.contains("#define certo_expect certo_identity"), "missing expect bridge");
     assert!(CORE_C.contains("bool certo_option_is_some(void* o)"), "missing certo_option_is_some");
     assert!(CORE_C.contains("bool certo_option_is_none(void* o)"), "missing certo_option_is_none");
+}
+
+#[test]
+fn core_c_contains_option_map_and_boxed_variant() {
+    // BACKLOG item 256 — two runtime functions are needed since `Some(x)`'s
+    // own box isn't uniform: `certo_option_map` handles a scalar payload
+    // (one `int64_t` cell, needs a deref to reach `f`'s expected bit
+    // pattern), `certo_option_map_boxed` handles a struct-shaped payload
+    // (already boxed at its own real size, handed to `f` untouched) —
+    // `crates/mir/src/lower.rs` picks between them per call site.
+    assert!(CORE_C.contains("void* certo_option_map(void* opt, certo_fn_t f)"), "missing certo_option_map");
+    assert!(CORE_C.contains("void* certo_option_map_boxed(void* opt, certo_fn_t f)"), "missing certo_option_map_boxed");
 }
 
 #[test]

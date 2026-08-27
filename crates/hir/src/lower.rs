@@ -340,6 +340,9 @@ fn generic_container_ret(full: Option<&str>, args: &[HirExpr]) -> Option<Ty> {
         // hinted param propagated through, e.g. a direct arithmetic/literal
         // body) rather than unconditionally `Ty::Error`.
         Some("List.map") => args.get(1).and_then(callback_ret_ty).map(|t| Ty::List(Box::new(t))),
+        // `Option.map` (BACKLOG item 256) — identical recovery to `List.map`
+        // just above, wrapped in `Ty::Option` instead of `Ty::List`.
+        Some("Option.map") => args.get(1).and_then(callback_ret_ty).map(|t| Ty::Option(Box::new(t))),
         Some("List.groupBy") => {
             let elem = args.first().and_then(list_elem)?;
             args.get(1).and_then(callback_ret_ty)
@@ -613,6 +616,20 @@ fn stdlib_param_names() -> HashMap<&'static str, &'static [&'static str]> {
     m.insert("List.slice",      &["list", "from", "to"]);
     m.insert("List.contains",   &["list", "item"]);
     m.insert("List.map",        &["list", "f"]);
+    // BACKLOG item 256 — without this entry, `cx.stdlib_params.get("Option.map")`
+    // is always `None`, so the `needs_lambda_hint`/hint-seeding branch below
+    // (which checks `stdlib_names` is `Some` before it ever runs) is dead code
+    // for `Option.map` despite `Some("Option.map")` being listed there — the
+    // callback param's type never gets seeded from the receiver's `Option<A>`,
+    // so a method call inside the callback (`opt.map((c) => c.method(x))`)
+    // can't resolve via the dot-call UFCS rewrite (it needs the receiver's
+    // type to look up `"Coupon.method"`) and silently falls back to plain
+    // field-access-then-call codegen instead — confirmed by a real segfault/
+    // compile-error repro. Bare field access (`opt.map((c) => c.field)`)
+    // happened to keep working regardless, since MIR's own separate
+    // `elem_ty_hint` (BACKLOG item 256, `crates/mir/src/lower.rs`) recovers
+    // the lambda's real param type independently for unboxing purposes.
+    m.insert("Option.map",      &["opt", "f"]);
     m.insert("List.filter",     &["list", "pred"]);
     m.insert("List.fold",       &["list", "init", "f"]);
     m.insert("List.find",       &["list", "pred"]);
@@ -1257,7 +1274,13 @@ fn lower_expr(expr: &S<Expr>, cx: &mut Cx) -> HirExpr {
                 let needs_lambda_hint = matches!(fn_full_path.as_deref(),
                     Some("List.map") | Some("List.groupBy")
                     | Some("List.sortBy") | Some("List.minBy") | Some("List.maxBy") | Some("List.sumBy")
-                    | Some("List.upsert")) || result_hint_side.is_some();
+                    | Some("List.upsert")
+                    // BACKLOG item 256 — `Option.map`'s own callback param
+                    // needs the identical hint treatment, sourced from the
+                    // receiver's `Option<A>` element type instead of a
+                    // list's; see the hint-computation match arms below,
+                    // both extended to also accept `Ty::Option(_)`.
+                    | Some("Option.map")) || result_hint_side.is_some();
                 // Every one of the above takes its lambda as the 2nd
                 // positional argument (index 1) — except `List.upsert`
                 // (BACKLOG item 209), whose signature is `(list, item, on)`,
@@ -1292,7 +1315,7 @@ fn lower_expr(expr: &S<Expr>, cx: &mut Cx) -> HirExpr {
                         slot_for_arg[ai] = idx;
                     }
 
-                    let list_slot_idx = if needs_lambda_hint { snames.iter().position(|&n| n == "list") } else { None };
+                    let list_slot_idx = if needs_lambda_hint { snames.iter().position(|&n| n == "list" || n == "opt") } else { None };
                     let lambda_slot_idx = if needs_lambda_hint {
                         snames.iter().position(|&n| n == "f" || n == "key" || n == "on")
                     } else { None };
@@ -1305,7 +1328,10 @@ fn lower_expr(expr: &S<Expr>, cx: &mut Cx) -> HirExpr {
                     }
                     let list_ty_hint: Ty = list_slot_idx
                         .and_then(|i| slots[i].as_ref())
-                        .and_then(|e| match &e.ty { Ty::List(inner) => Some((**inner).clone()), _ => None })
+                        .and_then(|e| match &e.ty {
+                            Ty::List(inner) | Ty::Option(inner) => Some((**inner).clone()),
+                            _ => None,
+                        })
                         .unwrap_or(Ty::Error);
 
                     for (ai, arg) in args.iter().enumerate() {
@@ -1368,7 +1394,7 @@ fn lower_expr(expr: &S<Expr>, cx: &mut Cx) -> HirExpr {
                                     }).unwrap_or(Ty::Error)
                                 } else {
                                     out.first().and_then(|a: &HirExpr| match &a.ty {
-                                        Ty::List(inner) => Some((**inner).clone()),
+                                        Ty::List(inner) | Ty::Option(inner) => Some((**inner).clone()),
                                         _ => None,
                                     }).unwrap_or(Ty::Error)
                                 };

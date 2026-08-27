@@ -272,6 +272,10 @@ pub fn lower_fn(
 /// type is a struct, not a pointer-sized value.
 const BOXED_ABI_CALLEES: &[&str] = &[
     "List.map", "List.filter", "List.find", "List.any", "List.all", "List.groupBy",
+    // `Option.map` (BACKLOG item 256) — the exact same single-element-typed-
+    // param-closure shape as `List.map` immediately above, just over an
+    // `Option<A>` receiver instead of a `List<A>` one.
+    "Option.map",
     // `List.flatMap` (BACKLOG item 162) — single-element-typed-param closure
     // returning something not itself derivable from the list's own element
     // type, same shape as `List.map` immediately above; needs the identical
@@ -1460,17 +1464,44 @@ fn lower_expr(expr: &HirExpr, b: &mut Builder) -> Operand {
                     return lower_sum_by_call(&args[0], &args[1], b);
                 }
             }
-            let func_op = lower_expr(func, b);
+            // `Option.map`'s receiver crosses two genuinely different box
+            // conventions depending on its payload type: a scalar payload's
+            // `Some(x)` cell holds the raw value itself (needs one `int64_t`
+            // deref to reach the bit pattern `f` expects — `certo_option_map`
+            // does that), but a struct-shaped payload (record/Decimal/UUID/
+            // Fn — anything `needs_heap_box()`) is *already* stored as a
+            // direct pointer to its own C representation (`Rvalue::BoxSome`
+            // mallocs `sizeof(cty)`, not a fixed `int64_t` cell, for those),
+            // which is exactly the pointer `f`'s own boxed-ABI param already
+            // expects — dereferencing it as `int64_t` first reads garbage
+            // and segfaults. Route to a second runtime function that skips
+            // that deref entirely, chosen here since only this call site
+            // still has the receiver's real `Ty::Option(inner)`.
+            let func_op = if let HirExprKind::Global(name) = &func.kind {
+                if name == "Option.map"
+                    && args.first().is_some_and(|a| matches!(&a.ty, Ty::Option(inner) if inner.needs_heap_box()))
+                {
+                    Operand::Global("Option.mapBoxed".to_string())
+                } else {
+                    lower_expr(func, b)
+                }
+            } else {
+                lower_expr(func, b)
+            };
             // A lambda literal passed directly to one of BOXED_ABI_CALLEES
             // needs the boxed-ABI lift instead of the normal native one —
             // see lower_lambda_boxed's doc comment (BACKLOG item 112).
             let needs_boxed_callback = matches!(&func.kind, HirExprKind::Global(name) if BOXED_ABI_CALLEES.contains(&name.as_str()));
             // The callback's param type is almost never annotated in source
-            // (`(x) => ...`) — recover it from the scrutinee list's own
-            // known element type instead (all BOXED_ABI_CALLEES take
-            // `(List<T>, T => ...)`, so it's always the first argument).
+            // (`(x) => ...`) — recover it from the scrutinee's own known
+            // element type instead (every BOXED_ABI_CALLEES entry takes
+            // `(List<T>, T => ...)` or `(Option<T>, T => ...)`, so it's
+            // always the first argument).
             let elem_ty_hint: Option<Ty> = if needs_boxed_callback {
-                args.first().and_then(|a| match &a.ty { Ty::List(inner) => Some((**inner).clone()), _ => None })
+                args.first().and_then(|a| match &a.ty {
+                    Ty::List(inner) | Ty::Option(inner) => Some((**inner).clone()),
+                    _ => None,
+                })
             } else {
                 None
             };
@@ -1610,7 +1641,13 @@ fn lower_expr(expr: &HirExpr, b: &mut Builder) -> Operand {
             // UnwrapOptStructBox`) so an empty list / not-found `None`
             // isn't mistaken for a real value.
             const OPT_UNWRAP_CALLEES: &[&str] =
-                &["List.first", "List.last", "List.get", "List.find", "Map.get", "Query.first"];
+                &["List.first", "List.last", "List.get", "List.find", "Map.get", "Query.first",
+                  // `Option.map` (both `certo_option_map` and
+                  // `certo_option_map_boxed`) always returns via
+                  // `certo_some`'s own always-`int64_t`-cell `__certo_
+                  // opt_box`, same as the callees above — double-boxes
+                  // identically when the *result* type needs heap-boxing.
+                  "Option.map"];
             let needs_opt_unwrap = matches!(&func.kind, HirExprKind::Global(name) if OPT_UNWRAP_CALLEES.contains(&name.as_str()))
                 && matches!(&expr.ty, Ty::Option(inner) if inner.needs_heap_box());
 
