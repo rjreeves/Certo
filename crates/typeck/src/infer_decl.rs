@@ -1,9 +1,10 @@
+use std::collections::HashMap;
 use certo_ast::module::Module;
 use certo_ast::decl::Decl;
 use certo_ast::span::{S, Span};
 use certo_ast::expr::{Expr, ExpectMatcher};
 use certo_ast::types::TypeExpr;
-use crate::ty::Ty;
+use crate::ty::{Ty, TyVar};
 use crate::env::TypeEnv;
 use crate::unify::UnionFind;
 use crate::error::{TypeError, TypeErrorKind, Warning, WarningKind};
@@ -1643,10 +1644,22 @@ fn check_decl(decl: &Decl, ctx: &mut Ctx<'_>) {
                 ctx.env.push();
                 // Pre-define type params as fresh vars so every occurrence of T
                 // in the params and return type resolves to the same inference var.
-                for tp in &f.type_params {
+                let type_param_vars: Vec<TyVar> = f.type_params.iter().map(|tp| {
                     let fresh = ctx.fresh();
+                    let Ty::Var(v) = fresh else { unreachable!("ctx.fresh() always returns Ty::Var") };
                     ctx.env.define(tp.name.node.clone(), fresh);
-                }
+                    v
+                }).collect();
+                // BACKLOG item 257 — validate row-bound field access against
+                // *these* fresh vars (not `hoist_decl`'s own, unrelated
+                // ones) for the duration of this body check.
+                let var_names: HashMap<TyVar, String> = f.type_params.iter().zip(&type_param_vars)
+                    .map(|(tp, &v)| (v, tp.name.node.clone())).collect();
+                let row_bounds = collect_row_bounds(&f.type_params, &type_param_vars, ctx);
+                let named_bounds: HashMap<TyVar, (String, Vec<(String, Ty)>)> = row_bounds.into_iter()
+                    .map(|(var, fields)| (var, (var_names.get(&var).cloned().unwrap_or_default(), fields)))
+                    .collect();
+                ctx.env.set_current_body_row_bounds(named_bounds);
                 // Bind parameters
                 for p in &f.params {
                     let ty = type_expr_to_ty(&p.ty.node, ctx);
@@ -1669,6 +1682,7 @@ fn check_decl(decl: &Decl, ctx: &mut Ctx<'_>) {
                     });
                 }
 
+                ctx.env.clear_current_body_row_bounds();
                 ctx.env.pop();
             }
         }
@@ -1873,10 +1887,22 @@ fn check_decl(decl: &Decl, ctx: &mut Ctx<'_>) {
             for m in &i.methods {
                 if let Some(body) = &m.body {
                     ctx.env.push();
-                    for tp in i.type_params.iter().chain(m.type_params.iter()) {
+                    let all_type_params: Vec<certo_ast::types::TypeParam> =
+                        i.type_params.iter().chain(m.type_params.iter()).cloned().collect();
+                    let type_param_vars: Vec<TyVar> = all_type_params.iter().map(|tp| {
                         let fresh = ctx.fresh();
+                        let Ty::Var(v) = fresh else { unreachable!("ctx.fresh() always returns Ty::Var") };
                         ctx.env.define(tp.name.node.clone(), fresh);
-                    }
+                        v
+                    }).collect();
+                    // BACKLOG item 257 — same validation as Decl::Fn above.
+                    let var_names: HashMap<TyVar, String> = all_type_params.iter().zip(&type_param_vars)
+                        .map(|(tp, &v)| (v, tp.name.node.clone())).collect();
+                    let row_bounds = collect_row_bounds(&all_type_params, &type_param_vars, ctx);
+                    let named_bounds: HashMap<TyVar, (String, Vec<(String, Ty)>)> = row_bounds.into_iter()
+                        .map(|(var, fields)| (var, (var_names.get(&var).cloned().unwrap_or_default(), fields)))
+                        .collect();
+                    ctx.env.set_current_body_row_bounds(named_bounds);
                     for p in &m.params {
                         let ty = type_expr_to_ty(&p.ty.node, ctx);
                         ctx.env.define(p.name.node.clone(), ty);
@@ -1888,6 +1914,7 @@ fn check_decl(decl: &Decl, ctx: &mut Ctx<'_>) {
                             ctx.unify(body_ty, declared, m.span);
                         }
                     }
+                    ctx.env.clear_current_body_row_bounds();
                     ctx.env.pop();
                 }
             }

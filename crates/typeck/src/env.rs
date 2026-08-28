@@ -46,6 +46,24 @@ pub struct TypeEnv {
     /// call site once the function's type params are instantiated and the call's
     /// arguments are unified (see `infer_expr`'s `Expr::App` handling).
     pub row_bounds: HashMap<String, Vec<(TyVar, Vec<(String, Ty)>)>>,
+    /// Row bounds for the function/method body *currently being checked*
+    /// (BACKLOG item 257), keyed by the **fresh** `TyVar` `check_decl`
+    /// allocates for each type param right before checking that body —
+    /// deliberately *not* `row_bounds` above, whose own keys are the
+    /// hoisting pass's own, entirely different `TyVar`s (`hoist_decl`
+    /// allocates one set of vars to build the function's registered
+    /// `Ty::Forall` signature for callers; body-checking allocates a brand
+    /// new, unrelated set via `ctx.fresh()` for checking the body itself —
+    /// confirmed directly these never correspond). Each entry also carries
+    /// the type param's own source name (`"R"`), purely so a rejected
+    /// out-of-bound field access can name it in a real diagnostic instead of
+    /// an internal `?t7`-style var id. Set right after `check_decl`
+    /// allocates a function's fresh type-param vars, cleared once its body
+    /// is fully checked; consulted by `resolve_field_ty`'s own `Ty::Var(v)`
+    /// arm so a field access on a row-bound param is validated against the
+    /// bound instead of always returning an unconstrained fresh var,
+    /// regardless of whether the field was ever declared in it.
+    current_body_row_bounds: HashMap<TyVar, (String, Vec<(String, Ty)>)>,
     /// Sum type variant names: type_name → [variant_name, ...], in declaration
     /// order. Used for match exhaustiveness checking.
     pub sum_variants: HashMap<String, Vec<String>>,
@@ -61,6 +79,7 @@ impl TypeEnv {
             computed_fields: HashMap::new(),
             type_param_vars: HashMap::new(),
             row_bounds: HashMap::new(),
+            current_body_row_bounds: HashMap::new(),
             sum_variants: HashMap::new(),
         }
     }
@@ -148,6 +167,29 @@ impl TypeEnv {
     /// Retrieve a function's row-polymorphism bounds, if it has any.
     pub fn get_row_bounds(&self, fn_name: &str) -> Option<&Vec<(TyVar, Vec<(String, Ty)>)>> {
         self.row_bounds.get(fn_name)
+    }
+
+    /// Set the row bounds in scope for the body currently being checked
+    /// (BACKLOG item 257) — see `current_body_row_bounds`'s own doc comment.
+    /// Replaces whatever was set for the previous body outright (bodies are
+    /// checked one at a time, never nested), rather than merging.
+    pub fn set_current_body_row_bounds(&mut self, bounds: HashMap<TyVar, (String, Vec<(String, Ty)>)>) {
+        self.current_body_row_bounds = bounds;
+    }
+
+    /// Clear the current body's row bounds once it's done being checked, so
+    /// a *different* function's field access can never accidentally consult
+    /// a stale entry (harmless in practice, since `TyVar`s are never reused
+    /// across functions either, but keeps the invariant explicit).
+    pub fn clear_current_body_row_bounds(&mut self) {
+        self.current_body_row_bounds.clear();
+    }
+
+    /// Look up the type param's own name and required fields for `var`, if
+    /// it's a row-bound type param of the function/method body currently
+    /// being checked.
+    pub fn lookup_current_body_row_bound(&self, var: TyVar) -> Option<&(String, Vec<(String, Ty)>)> {
+        self.current_body_row_bounds.get(&var)
     }
 
     /// Seed the environment with built-in types/values.
