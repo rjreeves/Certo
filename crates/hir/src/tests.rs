@@ -2026,3 +2026,116 @@ fn awaited_generic_result_return_with_no_expected_type_is_still_a_hard_error() {
     let m = try_lower("module A\nasync fn wrapOk<T, E>(v: T): Result<T, E> = Ok(v)\nfn f(): Unit = { val r = await wrapOk(42) }");
     assert!(m.is_err(), "an awaited generic Result-returning call with no expected type anywhere must still be a hard error");
 }
+
+// ------------------------------------------------------------------ //
+// Row polymorphism codegen via call-site field accessors — BACKLOG item 200
+// ------------------------------------------------------------------ //
+
+#[test]
+fn row_bound_fn_gains_an_extra_accessor_param() {
+    let m = lower("module A\nfn getName<R: { name: Text }>(record: R): Text = record.name");
+    let f = m.items.iter().find_map(|it| match it {
+        HirItem::Fn(f) if f.name == "getName" => Some(f),
+        _ => None,
+    }).expect("expected fn `getName`");
+    assert_eq!(f.params.len(), 2, "expected the ordinary `record` param plus one synthesized accessor param, got {:?}", f.params);
+    assert!(matches!(&f.params[1].ty, Ty::Fn { params, ret } if params.is_empty() && matches!(ret.as_ref(), Ty::Var(_))),
+        "expected the accessor param's type to be an erased zero-arg closure, got {:?}", f.params[1].ty);
+}
+
+#[test]
+fn row_bound_field_access_lowers_to_a_call_on_the_accessor_not_a_field_node() {
+    let m = lower("module A\nfn getName<R: { name: Text }>(record: R): Text = record.name");
+    let f = m.items.iter().find_map(|it| match it {
+        HirItem::Fn(f) if f.name == "getName" => Some(f),
+        _ => None,
+    }).expect("expected fn `getName`");
+    let body = f.body.as_ref().expect("expected a body");
+    assert_eq!(body.ty, Ty::Text, "record.name's own type must resolve to Text (the bound's declared field type), got {:?}", body.ty);
+    let HirExprKind::Call { func, args } = &body.kind else {
+        panic!("expected record.name to lower to a Call on the accessor, got {:?}", body.kind);
+    };
+    assert!(args.is_empty(), "the accessor call takes no arguments");
+    let accessor_local = f.params[1].local;
+    assert!(matches!(&func.kind, HirExprKind::Local(id) if *id == accessor_local),
+        "expected the call's own callee to be the synthesized accessor param, got {:?}", func.kind);
+}
+
+#[test]
+fn row_bound_call_site_synthesizes_one_accessor_arg_per_bound_field() {
+    let m = lower(
+        "module A\ntype Coupon = { name: Text, discount: Int }\n\
+         fn describe<R: { name: Text, discount: Int }>(record: R): Text = record.name\n\
+         fn f(c: Coupon): Text = describe(c)");
+    let f = m.items.iter().find_map(|it| match it {
+        HirItem::Fn(f) if f.name == "f" => Some(f),
+        _ => None,
+    }).expect("expected fn `f`");
+    let HirExprKind::Call { args, .. } = &f.body.as_ref().unwrap().kind else {
+        panic!("expected f's body to be a Call");
+    };
+    // The ordinary `c` argument, plus one synthesized accessor per bound
+    // field (`name`, `discount` — 2 fields on this bound).
+    assert_eq!(args.len(), 3, "expected 1 ordinary arg + 2 accessor args, got {:?}", args);
+    for a in &args[1..] {
+        assert!(matches!(&a.kind, HirExprKind::Lambda { params, ret_hint, .. } if params.is_empty() && matches!(ret_hint, Ty::Var(_))),
+            "expected a zero-arg, erased-return accessor lambda, got {:?}", a.kind);
+    }
+}
+
+#[test]
+fn row_bound_call_site_accessor_reads_the_concrete_receivers_real_field() {
+    // The accessor's own body must resolve the field against the *concrete*
+    // receiver type (Coupon) at this call site, not the erased Ty::Var the
+    // generic function's own body sees — confirming the whole point of this
+    // item: the accessor closure carries the byte-offset knowledge the
+    // generic function body itself can never have.
+    let m = lower(
+        "module A\ntype Coupon = { name: Text, discount: Int }\n\
+         fn getName<R: { name: Text }>(record: R): Text = record.name\n\
+         fn f(c: Coupon): Text = getName(c)");
+    let f = m.items.iter().find_map(|it| match it {
+        HirItem::Fn(f) if f.name == "f" => Some(f),
+        _ => None,
+    }).expect("expected fn `f`");
+    let HirExprKind::Call { args, .. } = &f.body.as_ref().unwrap().kind else {
+        panic!("expected f's body to be a Call");
+    };
+    let HirExprKind::Lambda { body, .. } = &args[1].kind else {
+        panic!("expected the 2nd arg to be the synthesized accessor lambda, got {:?}", args[1].kind);
+    };
+    assert_eq!(body.ty, Ty::Text, "the accessor's own body must resolve record.name's real type (Text), got {:?}", body.ty);
+    assert!(matches!(&body.kind, HirExprKind::Field { field, .. } if field == "name"),
+        "expected the accessor body to be an ordinary Field read on the concrete receiver, got {:?}", body.kind);
+}
+
+#[test]
+fn non_bound_field_access_on_a_row_bound_param_is_unaffected() {
+    // A field the bound never declared falls through to the ordinary
+    // (pre-existing, separately-tracked) `resolve_field_ty` path unchanged —
+    // confirms the accessor rewrite only fires for genuinely bound fields,
+    // not any field access on a row-bound-typed local whatsoever.
+    let m = lower("module A\nfn getDiscount<R: { name: Text }>(record: R): Int = record.discount");
+    let f = m.items.iter().find_map(|it| match it {
+        HirItem::Fn(f) if f.name == "getDiscount" => Some(f),
+        _ => None,
+    }).expect("expected fn `getDiscount`");
+    let body = f.body.as_ref().unwrap();
+    assert!(matches!(&body.kind, HirExprKind::Field { field, .. } if field == "discount"),
+        "a non-bound field access must still lower as an ordinary Field node, got {:?}", body.kind);
+}
+
+#[test]
+fn row_bound_on_an_impl_method_also_gains_an_accessor_param() {
+    let m = lower(
+        "module A\ntype Namer = { tag: Text }\n\
+         impl Namer {\n  fn greet<R: { name: Text }>(self, record: R): Text = self.tag\n}\n\
+         fn f(): Unit = {}");
+    let greet = m.items.iter().find_map(|it| match it {
+        HirItem::Fn(f) if f.name == "Namer.greet" => Some(f),
+        _ => None,
+    }).expect("expected fn `Namer.greet`");
+    // `self` (index 0), `record` (index 1), plus the synthesized accessor.
+    assert_eq!(greet.params.len(), 3, "expected self + record + one accessor param, got {:?}", greet.params);
+    assert!(matches!(&greet.params[2].ty, Ty::Fn { params, ret } if params.is_empty() && matches!(ret.as_ref(), Ty::Var(_))));
+}

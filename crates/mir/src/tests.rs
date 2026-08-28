@@ -50,6 +50,28 @@ fn binop_produces_assign() {
 }
 
 #[test]
+fn row_bound_field_accessor_call_gets_unbox_some_not_unbox() {
+    // BACKLOG item 200 — the accessor's own return is boxed via `Rvalue::
+    // BoxSome` (item 76's HKT-closure convention, since its `ret_hint` is
+    // `Ty::Var(0)`), so calling it needs the unconditional-dereference
+    // `UnboxSome` pairing, not `Unbox`'s bit-pattern cast — using `Unbox`
+    // here would read the malloc'd cell's own heap address as if it were
+    // the field's raw bits (confirmed directly: this exact mismatch
+    // segfaulted before `local_closure_raw_return` was added).
+    let mf = mir_fn_named(
+        "module A\nfn getName<R: { name: Text }>(record: R): Text = record.name",
+        "getName");
+    let has_unbox_some = mf.blocks.iter().any(|bb| bb.stmts.iter().any(|s| matches!(s,
+        crate::MirStmt::Assign { rvalue: Rvalue::UnboxSome { .. }, .. }
+    )));
+    assert!(has_unbox_some, "expected the accessor call's result to be unboxed via UnboxSome");
+    let has_unbox = mf.blocks.iter().any(|bb| bb.stmts.iter().any(|s| matches!(s,
+        crate::MirStmt::Assign { rvalue: Rvalue::Unbox { .. }, .. }
+    )));
+    assert!(!has_unbox, "expected no plain Unbox for the accessor call — that's the wrong pairing for BoxSome");
+}
+
+#[test]
 fn if_expr_creates_three_blocks() {
     let mf = mir_fn("module A\nfn f(b: Bool): Int = if b then 1 else 2");
     // entry + then + else + join = at least 4 blocks

@@ -1628,7 +1628,23 @@ fn lower_expr(expr: &HirExpr, b: &mut Builder) -> Operand {
             };
             let user_raw_return = matches!(user_generic_return, Some(Ty::Var(_)))
                 && !matches!(expr.ty, Ty::Var(_) | Ty::Error);
-            let needs_return_unbox = stdlib_raw_return || user_raw_return;
+            // Same idea again, generalized one step further: a call through
+            // a *locally held* closure value (not a named global) whose own
+            // declared return is erased (`Ty::Fn{ret: Ty::Var(_), ..}`) —
+            // this is exactly the shape of the row-bound field-accessor
+            // closures BACKLOG item 200 synthesizes (`crates/hir/src/
+            // lower.rs`'s `Expr::Field` row-accessor arm calls one to read
+            // `record.name`), boxed the same unconditional way `user_raw_
+            // return`'s own callees are (via `Rvalue::BoxSome` in the
+            // Lambda-lowering arm below, whenever `ret_hint` is `Ty::Var(_)`
+            // — item 76's own HKT-closure convention), so it needs the
+            // identical `UnboxSome` pairing, not `user_raw_return`'s
+            // name-keyed lookup (which can't apply here at all — there's no
+            // name to key on).
+            let local_closure_raw_return = matches!(&func.kind, HirExprKind::Local(_))
+                && matches!(&func.ty, Ty::Fn { ret, .. } if matches!(ret.as_ref(), Ty::Var(_)))
+                && !matches!(expr.ty, Ty::Var(_) | Ty::Error);
+            let needs_return_unbox = stdlib_raw_return || user_raw_return || local_closure_raw_return;
 
             // `List.first`/`.last`/`.get`/`.find`, `Map.get`, `Query.first`
             // all box their `Option<T>` payload via the C runtime's generic
@@ -1673,7 +1689,7 @@ fn lower_expr(expr: &HirExpr, b: &mut Builder) -> Operand {
                 // int it pointed to. `UnboxSome` always dereferences,
                 // matching `BoxSome` unconditionally — the correct pairing
                 // here.
-                if user_raw_return {
+                if user_raw_return || local_closure_raw_return {
                     b.assign(real, Rvalue::UnboxSome { opt: Operand::Local(dest), ty: expr.ty.clone() });
                 } else {
                     b.assign(real, Rvalue::Unbox { value: Operand::Local(dest), ty: expr.ty.clone() });
