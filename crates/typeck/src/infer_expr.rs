@@ -178,9 +178,34 @@ fn resolve_field_ty(obj_ty: Ty, field: &S<String>, span: Span, ctx: &mut Ctx<'_>
                 ctx.fresh()
             }
         }
-        Ty::Var(_) => {
-            // Not yet resolved — return a fresh var; may be resolved later
-            ctx.fresh()
+        Ty::Var(v) => {
+            // BACKLOG item 257 — if `v` is a row-bound type param of the
+            // function/method body currently being checked, its field
+            // access must be validated against that bound's own declared
+            // fields (only those are guaranteed present on *every* concrete
+            // type that could ever satisfy the bound) — anything else here
+            // is an ordinary not-yet-resolved inference var unrelated to row
+            // polymorphism (may still be resolved later via unification, so
+            // stays exactly as permissive as before).
+            match ctx.env.lookup_current_body_row_bound(*v) {
+                Some((type_param, bound_fields)) => {
+                    match bound_fields.iter().find(|(n, _)| n == &field.node) {
+                        Some((_, ty)) => ty.clone(),
+                        None => {
+                            ctx.errors.push(TypeError {
+                                kind: TypeErrorKind::FieldNotInRowBound {
+                                    type_param: type_param.clone(),
+                                    field: field.node.clone(),
+                                    bound_fields: bound_fields.iter().map(|(n, _)| n.clone()).collect(),
+                                },
+                                span,
+                            });
+                            Ty::Error
+                        }
+                    }
+                }
+                None => ctx.fresh(),
+            }
         }
         other => {
             ctx.errors.push(TypeError {

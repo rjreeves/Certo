@@ -475,6 +475,35 @@ which is safe by construction either way.
 
 ---
 
+### E0220  Field not declared in row bound
+
+```
+error[E0220]: `age` is not declared in `R`'s own row bound
+  --> src/main.cto:5:38
+    = `R` only guarantees `name`
+```
+
+**Cause:** Inside a row-polymorphic generic function's own body, a field
+access on the row-bound parameter names a field the bound never declared
+(`fn f<R: { name: Text }>(r: R): Int = r.age` — `age` isn't in `R`'s
+bound). No concrete type satisfying only `{ name: Text }` is guaranteed to
+have an `age` field at all, so this is rejected the same way as any other
+unknown-field access.
+
+**Fix:** Only access fields the type parameter's own bound actually
+declares, or widen the bound to include the field every caller must
+provide:
+
+```certo
+// Before (rejected):
+fn f<R: { name: Text }>(r: R): Int = r.age
+
+// After:
+fn f<R: { name: Text, age: Int }>(r: R): Int = r.age
+```
+
+---
+
 ## E0300–E0306  Trait errors
 
 ### E0300  Unknown method in impl

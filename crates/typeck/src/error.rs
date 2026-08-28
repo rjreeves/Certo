@@ -99,6 +99,19 @@ pub enum TypeErrorKind {
     /// tracking existed at all.
     AssignToImmutable { name: String },
 
+    /// E0220 — inside a row-polymorphic generic function's own body, a field
+    /// access on the row-bound param names a field its own bound never
+    /// declared (BACKLOG item 257). Found while implementing item 200's
+    /// codegen fix: `resolve_field_ty`'s `Ty::Var(_)` arm returned an
+    /// unconstrained fresh var for *any* field access on the erased receiver,
+    /// bound or not — so `fn f<R: {name: Text}>(r: R): Int = r.age` (`age`
+    /// isn't in the bound) typechecked exactly as cleanly as a legitimate
+    /// `r.name`, purely because the fresh var happened to unify against the
+    /// function's own declared return type. No concrete type satisfying only
+    /// `{name: Text}` is guaranteed to have an `age` field at all, so this
+    /// was a real, silent soundness gap, not just a missing convenience check.
+    FieldNotInRowBound { type_param: String, field: String, bound_fields: Vec<String> },
+
     /// E0703 — a validator rule's `else` clause produces a type other than
     /// the validator's own declared `errors` type (BACKLOG item 219).
     /// Deliberately its own variant, not a reuse of `Mismatch`/E0200 —
@@ -222,6 +235,10 @@ impl TypeError {
                 format!("E0218: `{}` does not support the `{}` operator — it has no operator overloading, use a named function instead (e.g. `.diff(...)`, `.addDuration(...)`)", ty.display(), op),
             TypeErrorKind::AssignToImmutable { name } =>
                 format!("E0219: cannot assign to `{}` — it was never declared with `var`", name),
+            TypeErrorKind::FieldNotInRowBound { type_param, field, bound_fields } =>
+                format!("E0220: `{}` is not declared in `{}`'s own row bound (only {} may be accessed)",
+                    field, type_param,
+                    bound_fields.iter().map(|f| format!("`{f}`")).collect::<Vec<_>>().join(", ")),
             TypeErrorKind::ElseTypeMismatch { rule_name, expected, found } =>
                 format!("E0703: rule `{}`'s `else` branch produces `{}`, but this validator declares `errors {}`",
                     rule_name, found.display(), expected.display()),

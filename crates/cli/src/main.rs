@@ -2139,6 +2139,14 @@ pub(crate) fn type_error_to_diagnostic(e: &TypeError) -> Diagnostic {
                 .with_note(format!("declare it with `var {name} = ...` instead of `val`, or don't reassign it"))
         }
 
+        TypeErrorKind::FieldNotInRowBound { type_param, field, bound_fields } => {
+            Diagnostic::error("E0220",
+                format!("`{field}` is not declared in `{type_param}`'s own row bound"))
+                .with_span(e.span)
+                .with_label(format!("`{type_param}` only guarantees {}", bound_fields.iter().map(|f| format!("`{f}`")).collect::<Vec<_>>().join(", ")))
+                .with_note(format!("add `{field}` to `{type_param}`'s own bound (`{type_param}: {{ {field}: ... }}`) if every caller must provide it"))
+        }
+
         TypeErrorKind::RuleCycle { validator, cycle } => {
             Diagnostic::error("E0700",
                 format!("cycle in rule dependency graph in validator `{validator}`"))
@@ -4495,6 +4503,14 @@ mod flag_tests {
             assert!(text.starts_with(&format!("### {code}")), "{code}: {text}");
             assert!(text.contains(needle), "{code} should mention '{needle}': {text}");
         }
+    }
+
+    #[test]
+    fn explain_code_finds_e0220() {
+        // BACKLOG item 257.
+        let text = explain_code("E0220").expect("E0220 should be in the error reference");
+        assert!(text.starts_with("### E0220"));
+        assert!(text.contains("row bound"));
     }
 
     #[test]

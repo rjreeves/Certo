@@ -1605,6 +1605,78 @@ fn f(): Text = NoName { id: 1 } |> getName"
 }
 
 // ------------------------------------------------------------------ //
+// Row-bound field access validated *inside* the generic body — BACKLOG
+// item 257
+// ------------------------------------------------------------------ //
+
+#[test]
+fn row_bound_field_access_on_a_field_not_in_the_bound_e0220() {
+    // `discount` isn't declared in `R`'s own bound (`{ name: Text }`) — no
+    // concrete type satisfying only that bound is guaranteed to have a
+    // `discount` field, so this must be rejected, not silently typecheck
+    // via an unconstrained fresh var.
+    let kind = first_error_kind(
+        "module A
+fn getDiscount<R: { name: Text }>(record: R): Int = record.discount
+fn f(): Int = 0"
+    );
+    assert!(matches!(kind, TypeErrorKind::FieldNotInRowBound { .. }), "expected E0220, got {kind:?}");
+}
+
+#[test]
+fn row_bound_field_access_on_a_field_not_in_the_bound_names_the_type_param_and_bound_fields() {
+    let kind = first_error_kind(
+        "module A
+fn getDiscount<R: { name: Text }>(record: R): Int = record.discount
+fn f(): Int = 0"
+    );
+    let TypeErrorKind::FieldNotInRowBound { type_param, field, bound_fields } = kind else {
+        panic!("expected FieldNotInRowBound, got {kind:?}");
+    };
+    assert_eq!(type_param, "R");
+    assert_eq!(field, "discount");
+    assert_eq!(bound_fields, vec!["name".to_string()]);
+}
+
+#[test]
+fn row_bound_field_access_on_a_field_in_the_bound_is_still_ok() {
+    // Regression guard: the legitimate case (item 200's own motivating
+    // example) must keep typechecking cleanly.
+    check("module A\nfn getName<R: { name: Text }>(record: R): Text = record.name").unwrap();
+}
+
+#[test]
+fn row_bound_field_access_on_one_of_several_bound_fields_is_still_ok() {
+    check(
+        "module A
+fn describe<R: { name: Text, discount: Int }>(record: R): Text = record.name
+fn describe2<R: { name: Text, discount: Int }>(record: R): Int = record.discount"
+    ).unwrap();
+}
+
+#[test]
+fn row_bound_field_access_inside_an_impl_method_is_also_validated() {
+    let kind = first_error_kind(
+        "module A
+type Namer = { tag: Text }
+impl Namer {
+  fn greet<R: { name: Text }>(self, record: R): Int = record.discount
+}
+fn f(): Int = 0"
+    );
+    assert!(matches!(kind, TypeErrorKind::FieldNotInRowBound { .. }),
+        "expected E0220 inside an impl method body too, got {kind:?}");
+}
+
+#[test]
+fn field_access_on_a_completely_unbound_type_param_is_unaffected() {
+    // Deliberately out of scope for item 257 (confirmed with the user): an
+    // unbound generic's field access stays exactly as permissive as before
+    // — it's a different, separate soundness question, not touched here.
+    check("module A\nfn getName<T>(record: T): Text = record.name").unwrap();
+}
+
+// ------------------------------------------------------------------ //
 // `??` chaining with an optional fallback (right-associative parse)
 // ------------------------------------------------------------------ //
 
