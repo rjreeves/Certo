@@ -69,6 +69,25 @@ struct Cx {
     /// function params). Lets a variable *reference* carry its type — needed so
     /// `match q { Some(x) => … }` knows `q`'s Option payload type.
     local_types: HashMap<LocalId, Ty>,
+    /// Row-bound function name → (declared-param index, field name, field's
+    /// declared type) for every field named in that param's row bound
+    /// (`fn f<R: {name: Text}>(record: R): ...`) — BACKLOG item 200. Consulted
+    /// at each call site to synthesize the field-accessor closures a
+    /// row-bound generic function's own body needs (see `row_field_accessors`
+    /// below), since this compiler does true type erasure — one compiled C
+    /// body per function, never monomorphized per call site — so `record`'s
+    /// real field offsets can't be known at the function's own definition site.
+    fn_row_bounds: HashMap<String, Vec<(usize, String, Ty)>>,
+    /// Row-bound param's own LocalId → its accessors: (field name,
+    /// accessor's own LocalId, field's declared type) — BACKLOG item 200.
+    /// Populated once per row-bound function, right after its own params are
+    /// defined; consulted by `Expr::Field` lowering so `record.name` reads
+    /// via a call to the accessor closure instead of a direct (impossible,
+    /// since `record`'s own static type here is an erased `Ty::Var`) struct
+    /// member access. Never needs clearing — `next_local` is a single
+    /// module-wide counter (see `fresh_local` below), so an old entry's
+    /// `LocalId` can never recur for a different function's own param.
+    row_field_accessors: HashMap<LocalId, Vec<(String, LocalId, Ty)>>,
     errors:        Vec<LowerError>,
 }
 
@@ -92,6 +111,8 @@ impl Cx {
             record_field_types:  HashMap::new(),
             computed_field_names: HashMap::new(),
             local_types:         HashMap::new(),
+            fn_row_bounds:       HashMap::new(),
+            row_field_accessors: HashMap::new(),
             errors:              Vec::new(),
         }
     }
@@ -757,6 +778,11 @@ pub fn lower_module(module: &Module) -> Result<HirModule, Vec<LowerError>> {
             if let Some(ret) = &f.ret_ty {
                 cx.fn_ret_types.insert(f.name.node.clone(), ast_ty_to_ty_with_params(&ret.node, &tp_names));
             }
+            // BACKLOG item 200 — row-polymorphism codegen.
+            let row_fields = collect_row_bound_fields(&f.params, f.type_params.iter(), &tp_names);
+            if !row_fields.is_empty() {
+                cx.fn_row_bounds.insert(f.name.node.clone(), row_fields);
+            }
         }
         // Impl methods register as qualified globals `Type.method`.
         if let Decl::Impl(i) = &sdecl.node {
@@ -779,7 +805,12 @@ pub fn lower_module(module: &Module) -> Result<HirModule, Vec<LowerError>> {
                 cx.fn_param_tys.insert(qname.clone(),
                     m.params.iter().map(|p| ast_ty_to_ty_with_params(&p.ty.node, &tp_names)).collect());
                 if let Some(ret) = &m.ret_ty {
-                    cx.fn_ret_types.insert(qname, ast_ty_to_ty_with_params(&ret.node, &tp_names));
+                    cx.fn_ret_types.insert(qname.clone(), ast_ty_to_ty_with_params(&ret.node, &tp_names));
+                }
+                // BACKLOG item 200 — row-polymorphism codegen.
+                let row_fields = collect_row_bound_fields(&m.params, i.type_params.iter().chain(m.type_params.iter()), &tp_names);
+                if !row_fields.is_empty() {
+                    cx.fn_row_bounds.insert(qname, row_fields);
                 }
             }
         }
@@ -856,12 +887,13 @@ pub fn lower_module(module: &Module) -> Result<HirModule, Vec<LowerError>> {
                     .map(|tp| tp.name.node.as_str())
                     .collect();
 
-                let params: Vec<HirParam> = f.params.iter().map(|p| {
+                let mut params: Vec<HirParam> = f.params.iter().map(|p| {
                     let local = cx.define_local(&p.name.node);
                     let ty = ast_ty_to_ty_with_params(&p.ty.node, &tp_names);
                     if !matches!(ty, Ty::Error) { cx.local_types.insert(local, ty.clone()); }
                     HirParam { local, name: p.name.node.clone(), ty, span: p.span }
                 }).collect();
+                add_row_bound_accessor_params(&f.name.node, &mut params, f.span, &mut cx);
 
                 let mut body = f.body.as_ref().map(|b| lower_expr(b, &mut cx));
                 let ret_ty = f.ret_ty.as_ref().map(|t| ast_ty_to_ty_with_params(&t.node, &tp_names)).unwrap_or(Ty::Error);
@@ -929,12 +961,13 @@ pub fn lower_module(module: &Module) -> Result<HirModule, Vec<LowerError>> {
                     // item 120 (needed to distinguish "already-opaque
                     // argument, don't re-box" from "concrete argument, box
                     // it", which requires this type to be right).
-                    let params: Vec<HirParam> = m.params.iter().map(|p| {
+                    let mut params: Vec<HirParam> = m.params.iter().map(|p| {
                         let local = cx.define_local(&p.name.node);
                         let ty = ast_ty_to_ty_with_params(&p.ty.node, &tp_names);
                         if !matches!(ty, Ty::Error) { cx.local_types.insert(local, ty.clone()); }
                         HirParam { local, name: p.name.node.clone(), ty, span: p.span }
                     }).collect();
+                    add_row_bound_accessor_params(&qname, &mut params, m.span, &mut cx);
                     let mut body = Some(lower_expr(body_ast, &mut cx));
                     let ret_ty = m.ret_ty.as_ref().map(|t| ast_ty_to_ty_with_params(&t.node, &tp_names)).unwrap_or(Ty::Error);
                     // BACKLOG item 235 — same fixed-width literal-body
@@ -1558,6 +1591,42 @@ fn lower_expr(expr: &S<Expr>, cx: &mut Cx) -> HirExpr {
             // field access/pattern-matching substitute the type param back.
             let call_ty = recover_generic_variant_call_ty(short, &lowered_args, cx).unwrap_or(call_ty);
 
+            // Row-polymorphism (BACKLOG item 200) — a call to a row-bound
+            // function needs one extra field-accessor argument per bound
+            // field, appended after every ordinary (and any labeled-arg-
+            // normalized/default-inserted) argument above, in the exact
+            // same order `add_row_bound_accessor_params` appended the
+            // matching hidden params to the callee's own definition.
+            // Building a synthetic `Expr::Field` AST node over the
+            // *original, untouched* source AST for the row-bound argument
+            // and re-lowering it reuses the ordinary field-access path
+            // (`resolve_field_ty`) with zero special-casing, since this
+            // argument's own concrete type (e.g. `Coupon`) is fully known at
+            // this call site — unlike inside the row-bound function's own
+            // body, where it's erased. Re-lowering the receiver a second
+            // time (once for its own ordinary positional arg, once here) is
+            // the same accepted tradeoff the dot-call UFCS rewrite above
+            // already relies on: `lower_expr` only builds a tree, it never
+            // executes anything, so this can't double-evaluate a real
+            // side effect.
+            if let Some(row_fields) = fn_full_path.as_deref().and_then(|fp| cx.fn_row_bounds.get(fp)).cloned() {
+                for (param_index, field_name, _field_ty) in &row_fields {
+                    let Some(orig_arg_ast) = args.get(*param_index).map(|a| a.value.clone()) else { continue };
+                    let field_access_ast = S::new(
+                        Expr::Field { expr: Box::new(orig_arg_ast), field: S::new(field_name.clone(), span), span },
+                        span,
+                    );
+                    let capture_threshold = cx.next_local;
+                    let body = lower_expr(&field_access_ast, cx);
+                    let captures = collect_lambda_captures(&body, capture_threshold);
+                    lowered_args.push(HirExpr {
+                        kind: HirExprKind::Lambda { params: vec![], body: Box::new(body), captures, ret_hint: Ty::Var(0) },
+                        ty: Ty::Error,
+                        span,
+                    });
+                }
+            }
+
             HirExpr { kind: HirExprKind::Call { func: Box::new(func_hir), args: lowered_args }, ty: call_ty, span }
         }
 
@@ -1671,13 +1740,41 @@ fn lower_expr(expr: &S<Expr>, cx: &mut Cx) -> HirExpr {
                 // is needed here either (MIR's own `Expr::App` lowering
                 // already handles a generic method's raw return the same
                 // way for every other call).
+                // Row-bound field access (BACKLOG item 200) — `record.name`
+                // where `record`'s own static type here is an erased
+                // `Ty::Var` (its real concrete type is never known at this
+                // function's own definition site — see `fn_row_bounds`'s doc
+                // comment) reads via a call to the field's own accessor
+                // closure (synthesized per call site — see the
+                // `HirExprKind::Call` arm below) instead of an impossible
+                // direct struct-member read. A field access on a row-bound
+                // local for a field name *not* in this table (i.e. not
+                // actually part of the bound) falls through unchanged to the
+                // ordinary path below, same as it did before this item —
+                // typeck's own `resolve_field_ty` doesn't actually validate
+                // that a field access on an unresolved `Ty::Var` names a
+                // bound field either (a separate, pre-existing soundness gap,
+                // out of scope here), so this isn't a regression.
+                let row_accessor = match &base.kind {
+                    HirExprKind::Local(id) => cx.row_field_accessors.get(id)
+                        .and_then(|accessors| accessors.iter().find(|(name, _, _)| name == &field.node))
+                        .map(|(_, accessor_local, field_ty)| (*accessor_local, field_ty.clone())),
+                    _ => None,
+                };
                 let is_computed = match &base.ty {
                     Ty::Named { name, .. } => cx.computed_field_names.get(name)
                         .map(|ns| ns.iter().any(|n| n == &field.node))
                         .unwrap_or(false),
                     _ => false,
                 };
-                if is_computed {
+                if let Some((accessor_local, field_ty)) = row_accessor {
+                    let func = HirExpr {
+                        kind: HirExprKind::Local(accessor_local),
+                        ty: Ty::Fn { params: vec![], ret: Box::new(Ty::Var(0)) },
+                        span,
+                    };
+                    HirExpr { kind: HirExprKind::Call { func: Box::new(func), args: vec![] }, ty: field_ty, span }
+                } else if is_computed {
                     let type_name = match &base.ty { Ty::Named { name, .. } => name.clone(), _ => unreachable!() };
                     let qname = format!("{type_name}.{}", field.node);
                     let call_ty = cx.fn_ret_types.get(&qname).cloned().unwrap_or(Ty::Error);
@@ -2924,6 +3021,70 @@ fn ast_ty_to_ty_with_params(te: &certo_ast::types::TypeExpr, type_params: &[&str
         TypeExpr::DecimalParam { precision, scale, .. } => Ty::Decimal(Some((*precision, *scale))),
         TypeExpr::BoundedTextParam { max_len, .. } => Ty::BoundedText(Some(*max_len)),
         _ => Ty::Error,
+    }
+}
+
+/// Collect a row-bound function's own (param index, field name, field's
+/// declared type) triples, one per field named across every `Bound::Row` on
+/// its type params — BACKLOG item 200. Mirrors `crates/typeck/src/
+/// infer_decl.rs`'s own `collect_row_bounds` (same `Bound::Row(row).fields`
+/// AST shape), but keyed by **param index** rather than a `TyVar`: HIR needs
+/// to know, at each call site, which positional argument to build a field
+/// accessor from, not which inference variable a bound was attached to (HIR
+/// erases every type param to the same `Ty::Var(0)` sentinel — see
+/// `ast_ty_to_ty_with_params` just above — so it can't distinguish bound
+/// type params from unbound ones by `Ty` alone). A param is "this type
+/// param" using the exact same shape `ast_ty_to_ty_with_params` itself
+/// checks to decide whether to erase to `Ty::Var(0)`: a single-segment,
+/// no-args `TypeExpr::Named` whose name matches the type param's own name.
+fn collect_row_bound_fields<'a>(
+    params: &[FnParam],
+    type_params: impl Iterator<Item = &'a certo_ast::types::TypeParam>,
+    tp_names: &[&str],
+) -> Vec<(usize, String, Ty)> {
+    use certo_ast::types::{Bound, TypeExpr};
+    let mut out = Vec::new();
+    for tp in type_params {
+        let row_fields: Vec<&certo_ast::types::RecordTypeField> = tp.bounds.iter()
+            .filter_map(|b| match b {
+                Bound::Row(row) => Some(row.fields.iter()),
+                Bound::Trait(_) => None,
+            })
+            .flatten()
+            .collect();
+        if row_fields.is_empty() { continue; }
+        for (i, p) in params.iter().enumerate() {
+            let is_this_param = matches!(&p.ty.node, TypeExpr::Named { path, args, .. }
+                if args.is_empty() && path.segments.len() == 1
+                && path.segments[0].node == tp.name.node);
+            if !is_this_param { continue; }
+            for f in &row_fields {
+                out.push((i, f.name.node.clone(), ast_ty_to_ty_with_params(&f.ty.node, tp_names)));
+            }
+        }
+    }
+    out
+}
+
+/// Append a row-bound function's own field-accessor params to `params` and
+/// register `cx.row_field_accessors` for them — BACKLOG item 200. Shared by
+/// the top-level `Decl::Fn` and `Decl::Impl` method lowering (both build
+/// `params` identically but can't share the surrounding loop). Each accessor
+/// is a zero-arg closure (`Ty::Fn{params: vec![], ret: Ty::Var(0)}` — the
+/// same erased-closure shape item 76's HKT params already use); the matching
+/// argument gets synthesized at each call site (see `HirExprKind::Call`'s
+/// own lowering below) and `Expr::Field` lowering consumes it via
+/// `row_field_accessors` instead of an impossible direct struct-member read
+/// on the row-bound param's own erased `Ty::Var` type.
+fn add_row_bound_accessor_params(fn_name: &str, params: &mut Vec<HirParam>, span: Span, cx: &mut Cx) {
+    let Some(row_fields) = cx.fn_row_bounds.get(fn_name).cloned() else { return };
+    for (param_index, field_name, field_ty) in row_fields {
+        let Some(record_local) = params.get(param_index).map(|p| p.local) else { continue };
+        let accessor_local = cx.define_local(&format!("__row_{field_name}"));
+        let accessor_ty = Ty::Fn { params: vec![], ret: Box::new(Ty::Var(0)) };
+        cx.local_types.insert(accessor_local, accessor_ty.clone());
+        params.push(HirParam { local: accessor_local, name: format!("__row_{field_name}"), ty: accessor_ty, span });
+        cx.row_field_accessors.entry(record_local).or_default().push((field_name, accessor_local, field_ty));
     }
 }
 
