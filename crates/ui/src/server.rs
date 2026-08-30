@@ -16,6 +16,7 @@ use certo_ast::decl::{Decl, ViewDecl, FormDecl, FormField, TypeBody, RecordField
 use certo_ast::expr::{Expr, Stmt};
 use certo_ast::module::Module;
 use certo_ast::span::S;
+use certo_ast::types::TypeExpr;
 use crate::error::UiError;
 
 /// Entry point — compile all `view`/`form` decls (including any lowered
@@ -72,7 +73,7 @@ pub fn emit_server(module: &Module) -> Result<String, UiError> {
     // gets exactly the write-handler output it had before this item.
     let has_live = views.iter().any(|v| !v.live.is_empty());
     for f in &forms {
-        emit_form_get_handler(f, &mut out);
+        emit_form_get_handler(f, module, &mut out);
         emit_form_post_handler(f, has_live, &mut out);
     }
 
@@ -420,7 +421,7 @@ fn emit_row_actions_for_view(v: &ViewDecl, forms: &[&FormDecl], all_views: &[&Vi
 
 // ── Form GET handler ──────────────────────────────────────────────────────────
 
-fn emit_form_get_handler(f: &FormDecl, out: &mut String) {
+fn emit_form_get_handler(f: &FormDecl, module: &Module, out: &mut String) {
     let name    = &f.name.node;
     let fn_name = format!("handle{}Get", name);
     let slug    = slugify(name);
@@ -451,7 +452,8 @@ fn emit_form_get_handler(f: &FormDecl, out: &mut String) {
             for (i, field) in f.fields.iter().enumerate() {
                 let fcol    = camel_to_snake(&field.name.node);
                 let prefill = format!("colValue(_rows, _cols, \"{fcol}\")");
-                let expr    = field_html_expr(field, Some(&prefill));
+                let max_len = bounded_text_max_len(module, target, &field.name.node);
+                let expr    = field_html_expr(field, Some(&prefill), max_len);
                 writeln!(out, "    val _ef{i} = {expr}").unwrap();
             }
 
@@ -470,7 +472,8 @@ fn emit_form_get_handler(f: &FormDecl, out: &mut String) {
 
     // Create form (no pre-fill) — emit each field as its own val
     for (i, field) in f.fields.iter().enumerate() {
-        let expr = field_html_expr(field, None);
+        let max_len = bounded_text_max_len(module, target, &field.name.node);
+        let expr = field_html_expr(field, None, max_len);
         writeln!(out, "    val _ef{i} = {expr}").unwrap();
     }
 
@@ -755,17 +758,52 @@ fn infer_input_type(name: &str, field_type: &Option<certo_ast::span::S<certo_ast
     "text"
 }
 
+/// The `BoundedText(n)` bound declared for `field_name` on `target_type` in
+/// `module`, if any — unwraps a `?`-suffixed optional field too, since
+/// `BoundedText(n)?` still bounds every non-null value the same way.
+/// BACKLOG item 272 — the real, mechanical half of spec §10.3's own
+/// "auto-derived validation" claim: a client-side `maxlength` hint only,
+/// matching `BoundedText`'s own documented design (`TypeExpr::
+/// BoundedTextParam`'s doc comment, `crates/ast/src/types.rs`) as a
+/// compile-time refinement with "no runtime length check... performed
+/// anywhere" — adding real server-side rejection here would make this
+/// generated handler the first runtime enforcement point for `BoundedText`
+/// anywhere in the compiler, confirmed with the user to be a bigger,
+/// separate step not taken here. The spec's other claim in the same
+/// example ("Min(0) auto-derived from Money type constraints") is not
+/// attempted at all — `Money` (spec §8.4: `{amount: Decimal(19,4),
+/// currency: Currency}`) has no non-negative bound anywhere in the type
+/// system to derive from, and legitimately goes negative in the domain
+/// (refunds, discounts) — confirmed with the user this isn't a real
+/// derivation to build.
+fn bounded_text_max_len(module: &Module, target_type: &str, field_name: &str) -> Option<u32> {
+    let fields = find_type_fields(module, target_type)?;
+    let field = fields.iter().find(|f| f.name.node == field_name)?;
+    bounded_text_max_len_of(&field.ty.node)
+}
+
+fn bounded_text_max_len_of(te: &TypeExpr) -> Option<u32> {
+    match te {
+        TypeExpr::BoundedTextParam { max_len, .. } => Some(*max_len),
+        TypeExpr::Option { inner, .. } => bounded_text_max_len_of(&inner.node),
+        _ => None,
+    }
+}
+
 /// One field's `<div class="field">...</div>` as a *Certo source
 /// expression* (this whole function generates text that gets compiled as
 /// part of the handler, not real HTML directly) — BACKLOG item 166.
 /// `prefill`, when given, is a raw Certo expression snippet (e.g.
 /// `colValue(_rows, _cols, "col")`) spliced in via `++` for the edit form's
 /// pre-filled value; `None` for the create form, which has nothing to fill.
-fn field_html_expr(field: &FormField, prefill: Option<&str>) -> String {
+/// `max_len`, when given (BACKLOG item 272), renders a `maxlength="n"`
+/// attribute derived from the target type's own `BoundedText(n)` field.
+fn field_html_expr(field: &FormField, prefill: Option<&str>, max_len: Option<u32>) -> String {
     let fname = &field.name.node;
     let label = field.label.as_deref().unwrap_or(fname.as_str());
     let itype = infer_input_type(fname, &field.field_type);
     let head  = format!("<div class=\\\"field\\\"><label for=\\\"{fname}\\\">{label}</label>");
+    let maxlen_attr = max_len.map(|n| format!(" maxlength=\\\"{n}\\\"")).unwrap_or_default();
 
     if itype == "select" {
         // BACKLOG item 166 — `options:` is parsed (`FormField.options`) but
@@ -782,20 +820,20 @@ fn field_html_expr(field: &FormField, prefill: Option<&str>) -> String {
         let rows = field.rows.unwrap_or(3);
         return match prefill {
             Some(pf) => format!(
-                "\"{head}<textarea id=\\\"{fname}\\\" name=\\\"{fname}\\\" rows=\\\"{rows}\\\">\" ++ {pf} ++ \"</textarea></div>\""
+                "\"{head}<textarea id=\\\"{fname}\\\" name=\\\"{fname}\\\" rows=\\\"{rows}\\\"{maxlen_attr}>\" ++ {pf} ++ \"</textarea></div>\""
             ),
             None => format!(
-                "\"{head}<textarea id=\\\"{fname}\\\" name=\\\"{fname}\\\" rows=\\\"{rows}\\\"></textarea></div>\""
+                "\"{head}<textarea id=\\\"{fname}\\\" name=\\\"{fname}\\\" rows=\\\"{rows}\\\"{maxlen_attr}></textarea></div>\""
             ),
         };
     }
 
     match prefill {
         Some(pf) => format!(
-            "\"{head}<input id=\\\"{fname}\\\" name=\\\"{fname}\\\" type=\\\"{itype}\\\" value=\\\"\" ++ {pf} ++ \"\\\" required></div>\""
+            "\"{head}<input id=\\\"{fname}\\\" name=\\\"{fname}\\\" type=\\\"{itype}\\\"{maxlen_attr} value=\\\"\" ++ {pf} ++ \"\\\" required></div>\""
         ),
         None => format!(
-            "\"{head}<input id=\\\"{fname}\\\" name=\\\"{fname}\\\" type=\\\"{itype}\\\" required></div>\""
+            "\"{head}<input id=\\\"{fname}\\\" name=\\\"{fname}\\\" type=\\\"{itype}\\\"{maxlen_attr} required></div>\""
         ),
     }
 }
@@ -941,6 +979,51 @@ mod tests {
     fn form_post_handler_does_not_notify_with_no_live_views_in_the_module() {
         let out = server_source("module M\nform CreateWidget -> Widget {\n name: Text\n}");
         assert!(!out.contains("Http.liveNotify"), "should not emit a notify call with no live val anywhere\n{}", out);
+    }
+
+    #[test]
+    fn bounded_text_field_gets_maxlength_attribute() {
+        // BACKLOG item 272 — the real, mechanical half of spec §10.3's own
+        // "auto-derived validation" claim: a client-side `maxlength` hint
+        // derived from the target type's own `BoundedText(n)` field.
+        let out = server_source(
+            "module M\ntype Product = { name: BoundedText(5) }\nform CreateProduct -> Product {\n field name {\n label: \"Name\"\n }\n}"
+        );
+        assert!(out.contains("maxlength=\\\"5\\\""), "expected a maxlength=\\\"5\\\" attribute\n{}", out);
+    }
+
+    #[test]
+    fn optional_bounded_text_field_still_gets_maxlength() {
+        let out = server_source(
+            "module M\ntype Product = { description: BoundedText(2000)? }\nform CreateProduct -> Product {\n field description {\n label: \"Description\"\n }\n}"
+        );
+        assert!(out.contains("maxlength=\\\"2000\\\""), "expected an optional BoundedText field to still carry maxlength\n{}", out);
+    }
+
+    #[test]
+    fn non_bounded_field_has_no_maxlength_attribute() {
+        let out = server_source(
+            "module M\ntype Product = { price: Decimal(10,2) }\nform CreateProduct -> Product {\n field price {\n label: \"Price\"\n }\n}"
+        );
+        assert!(!out.contains("maxlength"), "a plain Decimal field must not get a maxlength attribute\n{}", out);
+    }
+
+    #[test]
+    fn bounded_text_maxlength_appears_on_textarea_too() {
+        let out = server_source(
+            "module M\ntype Product = { description: BoundedText(500) }\nform CreateProduct -> Product {\n field description {\n label: \"Description\"\n type: RichText\n rows: 6\n }\n}"
+        );
+        assert!(out.contains("<textarea") && out.contains("maxlength=\\\"500\\\""),
+            "expected the RichText textarea to carry maxlength too\n{}", out);
+    }
+
+    #[test]
+    fn form_without_a_matching_type_declaration_has_no_maxlength() {
+        // Regression guard: a form field with no corresponding `type`
+        // declaration in the module (already-existing tests above use this
+        // exact shape) must not error or spuriously add a maxlength.
+        let out = server_source("module M\nform CreateWidget -> Widget {\n name: Text\n}");
+        assert!(!out.contains("maxlength"), "no type declaration exists for Widget — nothing to derive from\n{}", out);
     }
 
     #[test]
