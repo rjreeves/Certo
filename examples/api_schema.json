@@ -2,6 +2,16 @@
   "module":   "TaskApi",
   "base_url": "https://api.example.com",
   "auth":     "bearer",
+  "models": {
+    "Task": { "fields": [
+      { "name": "id",    "ty": "Int" },
+      { "name": "title", "ty": "Text" },
+      { "name": "done",  "ty": "Bool" }
+    ] },
+    "CreateTaskRequest": { "fields": [
+      { "name": "title", "ty": "Text" }
+    ] }
+  },
   "endpoints": [
     {
       "name":        "listTasks",
@@ -11,7 +21,7 @@
         { "name": "page",     "ty": "Int",  "optional": true },
         { "name": "done",     "ty": "Bool", "optional": true }
       ],
-      "response": "List<Task>"
+      "response": "List<Text>"
     },
     {
       "name":        "getTask",
