@@ -116,6 +116,27 @@ fn generic_call_boxes_concrete_argument() {
     assert!(has_boxsome, "expected a BoxSome for the concrete argument passed into Box.wrap's bare-T param");
 }
 
+// ------------------------------------------------------------------ //
+// BACKLOG item 262 — positional record construction call-site boxing.
+// ------------------------------------------------------------------ //
+
+#[test]
+fn positional_record_constructor_boxes_concrete_argument_into_bare_field() {
+    // `Box(42)` is a positional call to the record type's own new
+    // constructor — its declared field (`value: T`) is a bare type param,
+    // so the concrete `42` argument must be heap-boxed exactly like a
+    // generic sum-variant constructor call already is (see
+    // `generic_call_boxes_concrete_argument` above), via the new
+    // `record_field_types` fallback in the same boxing check.
+    let mf = mir_fn_named(
+        "module A\ntype Box<T> = { value: T }\nfn f(): Box<Int> = Box(42)",
+        "f");
+    let has_boxsome = mf.blocks.iter().any(|bb| bb.stmts.iter().any(|s| matches!(s,
+        crate::MirStmt::Assign { rvalue: Rvalue::BoxSome { .. }, .. }
+    )));
+    assert!(has_boxsome, "expected a BoxSome for the concrete argument passed into Box's bare-T field");
+}
+
 #[test]
 fn generic_call_does_not_double_box_already_opaque_argument() {
     // `wrapTwice`'s own body calls `Box.wrap(v)` where `v` is `wrapTwice`'s

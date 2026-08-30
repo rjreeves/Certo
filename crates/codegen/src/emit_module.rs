@@ -137,6 +137,33 @@ pub fn emit_module(module: &Module, opts: &CodegenOptions) -> String {
                         writeln!(out).unwrap();
                         eq_types.insert(t.name.node.clone());
                     }
+
+                    // BACKLOG item 262 — positional record construction
+                    // (spec §8.4, e.g. `Money(d"10.00", USD)`). Mirrors a
+                    // sum-type variant-with-fields constructor's own
+                    // codegen exactly (see the `TypeBody::Sum` arm below):
+                    // an ordinary real C function, named to match how HIR/
+                    // MIR reference the record type's own bare name as a
+                    // call target (`c_fn_name`), taking every declared
+                    // field positionally in declaration order. `computed`
+                    // fields are never parameters (they have no backing
+                    // storage to initialize); this matches typeck/HIR's own
+                    // exclusion of them from the constructor's registered
+                    // arity.
+                    let tname = c_ident(&t.name.node);
+                    let cname = crate::emit_mir::c_fn_name(&t.name.node);
+                    let params: Vec<String> = rec.fields.iter().map(|f| {
+                        let cty = field_c_ty(&f.ty.node, &type_params);
+                        format!("{cty} {}", f.name.node)
+                    }).collect();
+                    let inits: Vec<String> = rec.fields.iter()
+                        .map(|f| format!(".{0} = {0}", f.name.node))
+                        .collect();
+                    writeln!(out, "static inline {tname} {cname}({}) {{", params.join(", ")).unwrap();
+                    writeln!(out, "    {tname} _v = {{ {} }};", inits.join(", ")).unwrap();
+                    writeln!(out, "    return _v;").unwrap();
+                    writeln!(out, "}}").unwrap();
+                    writeln!(out).unwrap();
                 }
                 TypeBody::Sum(variants) => {
                     let tname = c_ident(&t.name.node);

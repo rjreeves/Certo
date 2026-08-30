@@ -1866,6 +1866,81 @@ fn f(): Shape = Circle(1.0)"
 }
 
 // ------------------------------------------------------------------ //
+// BACKLOG item 262 — positional record construction (spec §8.4, e.g.
+// `Money(d"10.00", USD)`), mirroring a sum-type variant's own
+// already-working constructor-call machinery.
+// ------------------------------------------------------------------ //
+
+#[test]
+fn positional_record_construction_ok() {
+    check(
+        "module A
+type Money = { amount: Int, currency: Text }
+val m: Money = Money(1000, \"USD\")"
+    ).unwrap();
+}
+
+#[test]
+fn positional_record_construction_field_order_matters() {
+    // Args are positional — swapping the (differently-typed) field order
+    // must be a genuine type mismatch, not silently accepted.
+    let errs = check_err(
+        "module A
+type Money = { amount: Int, currency: Text }
+val m: Money = Money(\"USD\", 1000)"
+    );
+    assert!(!errs.is_empty());
+}
+
+#[test]
+fn positional_record_construction_wrong_arity_is_error() {
+    let errs = check_err(
+        "module A
+type Money = { amount: Int, currency: Text }
+val m: Money = Money(1000)"
+    );
+    assert!(!errs.is_empty());
+}
+
+#[test]
+fn named_field_record_construction_still_works_alongside_positional() {
+    // The pre-existing named-field construction path must be completely
+    // unaffected by also registering the type name as a callable
+    // constructor.
+    check(
+        "module A
+type Money = { amount: Int, currency: Text }
+val m: Money = Money { amount: 1000, currency: \"USD\" }"
+    ).unwrap();
+}
+
+#[test]
+fn positional_generic_record_construction_ok() {
+    check(
+        "module A
+type Box<T> = { value: T }
+val b: Box<Int> = Box(42)"
+    ).unwrap();
+}
+
+#[test]
+fn record_static_method_call_unaffected_by_positional_constructor() {
+    // The type's own bare name is repurposed from an inert `Ty::Named`
+    // placeholder into a callable constructor — static-method-call
+    // resolution (`Money.zero()`) must still work since it resolves via a
+    // separate qualified `"Money.zero"` lookup, never through that bare
+    // binding.
+    check(
+        "module A
+type Money = { amount: Int, currency: Text }
+impl Money {
+    fn zero(): Money = Money(0, \"USD\")
+}
+val z: Money = Money.zero()"
+    ).unwrap();
+}
+
+// ------------------------------------------------------------------ //
 // Impl method body checking + generic impls (found while implementing
 // item 78's Secret<T> prerequisite — see BACKLOG)
 // ------------------------------------------------------------------ //

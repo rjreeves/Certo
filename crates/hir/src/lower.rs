@@ -845,6 +845,18 @@ pub fn lower_module(module: &Module) -> Result<HirModule, Vec<LowerError>> {
                     .map(|f| ast_ty_to_ty_with_params(&f.ty.node, &tp_names))
                     .collect();
                 cx.record_field_types.insert(t.name.node.clone(), field_types);
+                // BACKLOG item 262 — positional record construction
+                // (`Money(d"10.00", USD)`). Mirrors a sum-type variant
+                // constructor's own `fn_ret_types` registration below: a
+                // call to the record type's own bare name now typechecks
+                // (via `hoist_decl`'s matching `Ty::Fn` registration) as an
+                // ordinary `Expr::App`, so HIR just needs its return type
+                // recovered here the same way any other constructor call's
+                // is — `record_field_types` (just populated above) already
+                // holds the declared field types in the right order for
+                // MIR's own generic-erasure boxing check to reuse directly,
+                // with no separate table needed.
+                cx.fn_ret_types.insert(t.name.node.clone(), Ty::Named { name: t.name.node.clone(), args: vec![] });
                 if !rec.computed.is_empty() {
                     let computed_names: Vec<String> = rec.computed.iter().map(|c| c.name.node.clone()).collect();
                     cx.computed_field_names.insert(t.name.node.clone(), computed_names);
