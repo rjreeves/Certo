@@ -64,6 +64,31 @@ fn list_map_registered() {
 }
 
 #[test]
+fn list_for_each_registered() {
+    // BACKLOG item 266 — spec §3.2's own `List.forEach(xs) { x => println(x)
+    // }` example didn't exist anywhere in stdlib.
+    let env = seeded_env();
+    match env.lookup("List.forEach").unwrap() {
+        Ty::Forall { vars, body } => {
+            assert_eq!(vars.len(), 1);
+            match body.as_ref() {
+                Ty::Fn { params, ret } => {
+                    assert_eq!(params.len(), 2);
+                    assert!(matches!(&params[0], Ty::List(_)), "first param should be List<A>");
+                    assert!(matches!(&params[1], Ty::Fn { ret, .. } if matches!(ret.as_ref(), Ty::Unit)),
+                        "second param should be A -> Unit");
+                    assert_eq!(ret.as_ref(), &Ty::Unit);
+                }
+                other => panic!("expected Fn, got {:?}", other),
+            }
+        }
+        other => panic!("expected Forall, got {:?}", other),
+    }
+    assert!(COLLECTIONS_C.contains("int64_t certo_list_for_each(CertoList* l, certo_fn_t f)"),
+        "missing certo_list_for_each");
+}
+
+#[test]
 fn result_combinators_registered() {
     let env = seeded_env();
     for name in ["flatMap", "mapErr", "getOrElse", "recover", "Result.all", "Result.allSettled"] {
@@ -1232,12 +1257,35 @@ fn duration_functions_registered() {
     let env = seeded_env();
     for name in &["Duration.milliseconds",
                   "Duration.seconds", "Duration.minutes", "Duration.hours", "Duration.days",
+                  "Duration.months",
                   "Duration.toSeconds", "Duration.toMinutes", "Duration.toHours", "Duration.toDays",
                   "Duration.add", "Duration.sub", "Duration.negate",
                   "Duration.eq", "Duration.lt", "Duration.gt",
                   "DateTime.addDuration", "DateTime.diff", "Date.addDuration"] {
         assert!(env.lookup(name).is_some(), "missing: {}", name);
     }
+}
+
+#[test]
+fn duration_months_type_and_runtime_present() {
+    // BACKLOG item 271 — section-16-validators.md §16.9's own worked
+    // example (`Duration.months(12)`) didn't exist at all.
+    let env = seeded_env();
+    let dur = Ty::Named { name: "Duration".into(), args: vec![] };
+    match env.lookup("Duration.months").unwrap() {
+        Ty::Fn { params, ret } => {
+            assert_eq!(params, &vec![Ty::Int]);
+            assert_eq!(**ret, dur);
+        }
+        other => panic!("expected Ty::Fn, got {other:?}"),
+    }
+    // A fixed 30-day approximation (2,592,000,000 ms), the same
+    // "fixed-length, not calendar-aware" convention every other Duration
+    // unit already uses.
+    assert!(
+        DATETIME_C.contains("certo_duration_months (int64_t n) { return (CertoDuration)(n * 2592000000LL); }"),
+        "certo_duration_months must scale to milliseconds via a fixed 30-day month"
+    );
 }
 
 #[test]

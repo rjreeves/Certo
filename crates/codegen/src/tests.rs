@@ -465,6 +465,17 @@ fn int_callback_to_list_map_is_still_boxed_but_no_float_conversion() {
 }
 
 #[test]
+fn callback_to_list_for_each_is_boxed() {
+    // BACKLOG item 266 — `List.forEach` needs the same boxed-ABI lift as
+    // `List.map` (added to BOXED_ABI_CALLEES).
+    let c = codegen(
+        "module A\nimport Stdlib.Collections.{ List }\n\
+         fn f(xs: List<Int>): Unit [io] = List.forEach(xs) { x => println(intToText(x)) }");
+    assert_contains(&c, "__lam_f_0_boxed");
+    assert_contains(&c, "certo_list_for_each");
+}
+
+#[test]
 fn callback_to_list_flat_map_is_boxed() {
     // BACKLOG item 162: List.flatMap needs the same boxed-ABI lift as
     // List.map (added to BOXED_ABI_CALLEES) — same single-element-typed-
@@ -474,6 +485,27 @@ fn callback_to_list_flat_map_is_boxed() {
          fn f(xs: List<Int>): Int = List.len(List.flatMap(xs, (x) => [x, x]))");
     assert_contains(&c, "__lam_f_0_boxed");
     assert_contains(&c, "certo_list_flat_map");
+}
+
+#[test]
+fn list_flat_map_result_type_is_known_downstream_not_ty_error() {
+    // BACKLOG item 267 — same deeper finding as item 199's own
+    // `Result.flatMap` fix: even though `certo_list_flat_map` itself
+    // computed the right runtime value, the *call's own type* silently
+    // stayed `Ty::Error` (no `generic_container_ret` arm existed for
+    // `List.flatMap`), so a `val` bound to its result got a plain
+    // `int64_t` C local instead of a real list pointer — a real segfault
+    // the moment that `val` was consumed downstream (e.g. a `for` loop),
+    // confirmed by a direct repro before this fix. An f-string
+    // interpolating an element read back out must emit a real
+    // `certo_int_to_text` conversion, proof the element type survived too.
+    let c = codegen(
+        "module A\nimport Stdlib.Collections.{ List }\n\
+         fn f(xs: List<Int>): Unit [io] = {\n\
+         \x20   val ys = List.flatMap(xs, (x) => [x, x])\n\
+         \x20   for y in ys { println(f\"{y}\") }\n\
+         }");
+    assert_contains(&c, "certo_int_to_text(");
 }
 
 // ------------------------------------------------------------------ //

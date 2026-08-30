@@ -109,6 +109,14 @@ CertoDuration certo_duration_seconds(int64_t n) { return (CertoDuration)(n * 100
 CertoDuration certo_duration_minutes(int64_t n) { return (CertoDuration)(n * 60000); }
 CertoDuration certo_duration_hours  (int64_t n) { return (CertoDuration)(n * 3600000); }
 CertoDuration certo_duration_days   (int64_t n) { return (CertoDuration)(n * 86400000); }
+/* `Duration.months` (BACKLOG item 271, section-16-validators.md §16.9's own
+   `Duration.months(12)` example) — a fixed 30-day approximation, the same
+   "fixed-length, not calendar-aware" convention every other Duration unit
+   already uses (`.days`/`.hours` don't account for a real month's 28-31 day
+   variance or a DST-shifted day either); there is no real calendar-month
+   concept anywhere in this Duration representation to derive an exact value
+   from. */
+CertoDuration certo_duration_months (int64_t n) { return (CertoDuration)(n * 2592000000LL); }
 
 /* ---- Duration: accessors (truncating to the coarser unit) ---- */
 

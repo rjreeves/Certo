@@ -339,6 +339,15 @@ pub fn seed_stdlib(env: &mut TypeEnv, counter: &mut u32) {
                               Ty::List(Box::new(Ty::Var(b))))),
         });
     }
+    // `List.forEach` (BACKLOG item 266, spec §3.2's own `List.forEach(xs)
+    // { x => println(x) }` example) — same shape as `List.map`, but the
+    // callback returns `Unit` and the call itself is for side effects only.
+    {
+        let a = fresh();
+        let f_ty = fn1(Ty::Var(a), Ty::Unit);
+        env.define("List.forEach", poly1(a,
+            fn2(Ty::List(Box::new(Ty::Var(a))), f_ty, Ty::Unit)));
+    }
     {
         let a = fresh();
         let pred = fn1(Ty::Var(a), Ty::Bool);
@@ -798,6 +807,9 @@ pub fn seed_stdlib(env: &mut TypeEnv, counter: &mut u32) {
     def!("Duration.minutes",   fn1(Ty::Int, dur()));
     def!("Duration.hours",     fn1(Ty::Int, dur()));
     def!("Duration.days",      fn1(Ty::Int, dur()));
+    // BACKLOG item 271 — `Duration.months` (§16.9's own worked example,
+    // `Duration.months(12)`), mirroring `Duration.days`'s exact shape.
+    def!("Duration.months",    fn1(Ty::Int, dur()));
     def!("Duration.toSeconds", fn1(dur(), Ty::Int));
     def!("Duration.toMinutes", fn1(dur(), Ty::Int));
     def!("Duration.toHours",   fn1(dur(), Ty::Int));
@@ -1444,6 +1456,7 @@ pub fn seed_stdlib(env: &mut TypeEnv, counter: &mut u32) {
     pm!("List.slice",      "list", "from", "to");
     pm!("List.contains",   "list", "item");
     pm!("List.map",        "list", "f");
+    pm!("List.forEach",    "list", "f");
     pm!("Option.map",      "opt",  "f");
     pm!("List.filter",     "list", "pred");
     pm!("List.fold",       "list", "init", "f");

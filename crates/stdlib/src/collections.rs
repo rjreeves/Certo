@@ -169,6 +169,17 @@ CertoList* certo_list_map(CertoList* l, certo_fn_t f) {
     return n;
 }
 
+/* `List.forEach` (BACKLOG item 266, spec §3.2's own `List.forEach(xs) { x
+ * => println(x) }` example) — same iteration shape as `certo_list_map`
+ * just above, but the callback's own return (always `Unit`) is never read;
+ * only its own side effects matter. */
+int64_t certo_list_for_each(CertoList* l, certo_fn_t f) {
+    if (!l) return 0;
+    CertoFn1 fn = (CertoFn1)f.fn;
+    for (int64_t i = 0; i < l->len; i++) fn(f.env, l->data[i]);
+    return 0;
+}
+
 CertoList* certo_list_filter(CertoList* l, certo_fn_t f) {
     if (!l) return list_alloc(0);
     CertoPred pred = (CertoPred)f.fn;

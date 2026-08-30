@@ -289,6 +289,10 @@ const BOXED_ABI_CALLEES: &[&str] = &[
     // mechanism entirely, for a numeric-only key restriction that doesn't
     // apply here).
     "List.upsert",
+    // `List.forEach` (BACKLOG item 266) — same single-element-typed-param
+    // closure shape as `List.map`, called for its side effects only (its
+    // own return is always `Unit`).
+    "List.forEach",
     "dbQueryTyped", "Query.list", "Query.first", "Query.groupedList",
 ];
 
