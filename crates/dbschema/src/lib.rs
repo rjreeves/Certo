@@ -8,6 +8,12 @@ mod error;
 pub use schema::{Schema, SchemaTable, SchemaColumn, LiveTable, LiveColumn, snake_to_pascal, snake_to_camel, decimal_bare_vs_param, bounded_text_bare_vs_param};
 pub use error::{DbError, DbErrorKind};
 pub use check_schema_sync::check_schema_sync;
+// BACKLOG item 264 — exported so `crates/cli` can validate migration files
+// (which live in their own separate `migrations/*.cto` modules, never part
+// of the main application module `check_module` below checks) against the
+// application's own schema directly, without needing a full `check_module`
+// call over a module that also happens to declare `type`s.
+pub use check_migrations::check_migrations;
 
 use certo_ast::module::Module;
 

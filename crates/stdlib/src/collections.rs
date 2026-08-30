@@ -362,20 +362,25 @@ CertoList* certo_list_upsert(CertoList* l, void* item, certo_fn_t f) {
     return n;
 }
 
-/* ---- zip (pairs stored as heap-allocated {fst, snd}) ---- */
+/* ---- zip ---- */
 
-typedef struct { void* fst; void* snd; } CertoPair;
-
+/* BACKLOG item 268 — pairs must be ordinary Certo tuples: a `CertoList*` of
+ * length 2 with boxed elements, the exact same representation
+ * `Rvalue::Aggregate(AggregateKind::Tuple)` (`crates/codegen/src/
+ * emit_mir.rs`) and `certo_list_partition` just above already use for every
+ * *other* 2-tuple this runtime produces. The previous version boxed each
+ * pair as its own heap-allocated `{void* fst; void* snd;}` struct instead —
+ * a genuinely different, incompatible layout — so destructuring a zipped
+ * pair (`val (a, b) = pair`, which reads a `CertoList*` via
+ * `certo_list_get_or_panic`) read garbage from what was actually a
+ * `CertoPair*`, a real runtime panic ("list index out of bounds"),
+ * confirmed live before this fix. */
 CertoList* certo_list_zip(CertoList* a, CertoList* b) {
     if (!a || !b) return list_alloc(0);
     int64_t len = a->len < b->len ? a->len : b->len;
     CertoList* n = list_alloc(len);
     for (int64_t i = 0; i < len; i++) {
-        CertoPair* p = (CertoPair*)malloc(sizeof(CertoPair));
-        if (!p) certo_panic("out of memory");
-        p->fst = a->data[i];
-        p->snd = b->data[i];
-        n->data[n->len++] = p;
+        n->data[n->len++] = certo_list_of(2, a->data[i], b->data[i]);
     }
     return n;
 }
@@ -475,10 +480,19 @@ CertoMap* certo_map_from_list(CertoList* l) {
     if (!l) return map_alloc(16);
     CertoMap* m = map_alloc(l->len > 0 ? l->len * 2 : 16);
     for (int64_t i = 0; i < l->len; i++) {
-        CertoPair* p = (CertoPair*)l->data[i];
-        int64_t h = map_probe(m, p->fst);
+        /* BACKLOG item 268 — each element is an ordinary Certo 2-tuple
+         * (`CertoList*` of length 2, matching `Rvalue::Aggregate(Tuple)`'s
+         * own real representation), not a `CertoPair*` — the same
+         * representation mismatch fixed in `certo_list_zip` above.
+         * Confirmed live: `Map.fromList([(1, "a")])` silently built a map
+         * whose lookups never found anything, reading garbage struct
+         * fields out of what was actually a `CertoList*`. */
+        CertoList* pair = (CertoList*)l->data[i];
+        void* k = pair->data[0];
+        void* v = pair->data[1];
+        int64_t h = map_probe(m, k);
         if (!m->entries[h].occupied) m->len++;
-        m->entries[h] = (MapEntry){ .key = p->fst, .value = p->snd, .occupied = true };
+        m->entries[h] = (MapEntry){ .key = k, .value = v, .occupied = true };
     }
     return m;
 }

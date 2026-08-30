@@ -7,6 +7,9 @@
 ///                                   written value is never subsequently read
 ///   L004  unreachable statement   — statement after a call to panic/todo/unreachable
 ///   L005  guard clause always true/false — guard condition is a literal bool
+///   L006  `todo()` left in code   — spec §9.1's own documented "compile warning"
+///                                   (BACKLOG item 270), previously a pure runtime
+///                                   panic with zero static/lint-time signal at all
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -64,6 +67,9 @@ fn lint_fn(f: &HirFn, path: &Path, src: &str, color: bool) -> usize {
 
     // ── Pass 2: walk stmts for unused vars and unreachable code ───────
     warnings += lint_block_stmts(body, path, src, &reads, color);
+
+    // ── L006: todo() left in code (BACKLOG item 270) ──────────────────
+    warnings += collect_todo_calls(body, path, src, color);
 
     warnings
 }
@@ -340,6 +346,78 @@ fn is_terminal_call(expr: &HirExpr) -> bool {
     false
 }
 
+/// L006 (BACKLOG item 270) — walk the *entire* function body (not just
+/// top-level block statements, unlike L002-L004 above, since `todo()` can
+/// legitimately appear anywhere an expression can — `if cond then todo()
+/// else realValue`, a match arm, a lambda body) emitting a warning for
+/// every direct call to `todo()` found. `todo()`'s own runtime behavior (a
+/// real, unconditional panic, BACKLOG item 210) is completely unaffected —
+/// this only adds the static signal spec §9.1 itself documents ("Marks
+/// unimplemented code — compile warning") but which never existed before:
+/// confirmed live that a function whose entire body was `todo()` passed
+/// both plain `certo check` and `certo lint` with zero warnings.
+fn collect_todo_calls(expr: &HirExpr, path: &Path, src: &str, color: bool) -> usize {
+    let mut count = 0;
+    if let HirExprKind::Call { func, args } = &expr.kind {
+        if let HirExprKind::Global(name) = &func.kind {
+            let leaf = name.rsplit('.').next().unwrap_or(name.as_str());
+            if leaf == "todo" {
+                emit(path, src, expr.span, "L006", "`todo()` left in code", color);
+                count += 1;
+            }
+        }
+        count += collect_todo_calls(func, path, src, color);
+        for a in args { count += collect_todo_calls(a, path, src, color); }
+        return count;
+    }
+    match &expr.kind {
+        HirExprKind::Block { stmts, tail } => {
+            for stmt in stmts {
+                count += match stmt {
+                    HirStmt::Let { init, .. } => collect_todo_calls(init, path, src, color),
+                    HirStmt::Assign { value, .. } => collect_todo_calls(value, path, src, color),
+                    HirStmt::Expr(e) => collect_todo_calls(e, path, src, color),
+                    HirStmt::Defer { body } => collect_todo_calls(body, path, src, color),
+                };
+            }
+            count += collect_todo_calls(tail, path, src, color);
+        }
+        HirExprKind::BinOp { lhs, rhs, .. } => {
+            count += collect_todo_calls(lhs, path, src, color);
+            count += collect_todo_calls(rhs, path, src, color);
+        }
+        HirExprKind::UnOp { arg, .. } => count += collect_todo_calls(arg, path, src, color),
+        HirExprKind::Field { base, .. } => count += collect_todo_calls(base, path, src, color),
+        HirExprKind::Record { fields, .. } => {
+            for (_, e) in fields { count += collect_todo_calls(e, path, src, color); }
+        }
+        HirExprKind::Tuple(elems) | HirExprKind::List(elems) => {
+            for e in elems { count += collect_todo_calls(e, path, src, color); }
+        }
+        HirExprKind::If { cond, then_expr, else_expr } => {
+            count += collect_todo_calls(cond, path, src, color);
+            count += collect_todo_calls(then_expr, path, src, color);
+            count += collect_todo_calls(else_expr, path, src, color);
+        }
+        HirExprKind::Match { scrutinee, arms } => {
+            count += collect_todo_calls(scrutinee, path, src, color);
+            for arm in arms { count += collect_todo_calls(&arm.body, path, src, color); }
+        }
+        HirExprKind::For { iter, body, .. } => {
+            count += collect_todo_calls(iter, path, src, color);
+            count += collect_todo_calls(body, path, src, color);
+        }
+        HirExprKind::While { cond, body } => {
+            count += collect_todo_calls(cond, path, src, color);
+            count += collect_todo_calls(body, path, src, color);
+        }
+        HirExprKind::Lambda { body, .. } => count += collect_todo_calls(body, path, src, color),
+        HirExprKind::Try(e) | HirExprKind::Unsafe(e) => count += collect_todo_calls(e, path, src, color),
+        _ => {}
+    }
+    count
+}
+
 fn stmt_span(stmt: &HirStmt) -> Span {
     match stmt {
         HirStmt::Let    { init, .. }  => init.span,
@@ -384,4 +462,55 @@ fn emit(path: &Path, src: &str, span: Span, code: &str, msg: &str, color: bool) 
         eprintln!("   {}{}", indent, carets);
     }
     eprintln!();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn lint_count(src: &str) -> usize {
+        let module = certo_parser::parse(src).expect("parse error");
+        lint_hir(&module, Path::new("test.cto"), src, false)
+    }
+
+    #[test]
+    fn bare_todo_call_is_flagged_l006() {
+        // BACKLOG item 270 — spec §9.1's own documented "compile warning"
+        // for `todo()` didn't exist anywhere before this: confirmed live
+        // that a function whose entire body was `todo()` passed both plain
+        // `certo check` and `certo lint` with zero warnings.
+        assert_eq!(lint_count("module A\nfn f(): Int = todo()"), 1);
+    }
+
+    #[test]
+    fn todo_call_inside_a_non_terminal_branch_is_still_flagged() {
+        // L004 only ever looks at top-level block *statements* after a
+        // terminal call — `todo()` used as an ordinary sub-expression
+        // (here, one arm of an `if`) is never itself a "statement after a
+        // terminal call", so L006 has to walk the *whole* expression tree,
+        // not just block-statement position, to catch this.
+        assert_eq!(lint_count("module A\nfn f(cond: Bool): Int = if cond then 1 else todo()"), 1);
+    }
+
+    #[test]
+    fn multiple_todo_calls_are_each_flagged_once() {
+        assert_eq!(
+            lint_count("module A\nfn f(): Int = todo()\nfn g(): Int = todo()"),
+            2
+        );
+    }
+
+    #[test]
+    fn no_todo_calls_means_no_l006_warnings() {
+        assert_eq!(lint_count("module A\nfn f(x: Int): Int = x + 1"), 0);
+    }
+
+    #[test]
+    fn panic_and_unreachable_are_not_mistaken_for_todo() {
+        // L006 is specifically about `todo()` — `panic`/`unreachable` are
+        // already covered by their own, pre-existing L004 "unreachable
+        // statement" check and must not double up under L006 too.
+        assert_eq!(lint_count("module A\nfn f(): Int = panic(\"nope\")"), 0);
+        assert_eq!(lint_count("module A\nfn f(): Int = unreachable()"), 0);
+    }
 }

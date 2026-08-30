@@ -14,15 +14,24 @@ pub enum Direction { Up, Down }
 /// Compute the list of migration steps needed to bring the database up to date.
 ///
 /// Migrations are applied in declaration order. Any migration not yet in
-/// `state.applied` is included.
+/// `state.applied` is included. `step_limit` (BACKLOG item 265 — spec
+/// §11.2's own documented `certo db migrate | --dry-run --step 1` row) caps
+/// how many of those pending migrations are actually applied, in the same
+/// declaration order — `None` means "all of them," matching this
+/// function's own pre-item-265 behavior exactly, so every existing caller
+/// that doesn't care about `--step` is unaffected.
 pub fn plan_up<'a>(
     migrations: &'a [MigrationDecl],
     state: &MigrationState,
+    step_limit: Option<usize>,
 ) -> Vec<MigrationStep<'a>> {
-    migrations.iter()
+    let pending = migrations.iter()
         .filter(|m| !state.is_applied(&m.name))
-        .map(|m| MigrationStep { migration: m, direction: Direction::Up })
-        .collect()
+        .map(|m| MigrationStep { migration: m, direction: Direction::Up });
+    match step_limit {
+        Some(n) => pending.take(n).collect(),
+        None => pending.collect(),
+    }
 }
 
 /// Compute the steps needed to roll back `n` migrations (most-recently-applied first).

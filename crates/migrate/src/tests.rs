@@ -223,7 +223,7 @@ fn make_migration(name: &str) -> MigrationDecl {
 fn plan_up_all_pending() {
     let migrations = vec![make_migration("m001"), make_migration("m002")];
     let state = MigrationState::default();
-    let steps = plan_up(&migrations, &state);
+    let steps = plan_up(&migrations, &state, None);
     assert_eq!(steps.len(), 2);
     assert_eq!(steps[0].migration.name, "m001");
     assert!(matches!(steps[0].direction, Direction::Up));
@@ -234,7 +234,7 @@ fn plan_up_skips_applied() {
     let migrations = vec![make_migration("m001"), make_migration("m002")];
     let mut state = MigrationState::default();
     state.mark_applied("m001");
-    let steps = plan_up(&migrations, &state);
+    let steps = plan_up(&migrations, &state, None);
     assert_eq!(steps.len(), 1);
     assert_eq!(steps[0].migration.name, "m002");
 }
@@ -256,8 +256,38 @@ fn plan_up_nothing_to_do() {
     let migrations = vec![make_migration("m001")];
     let mut state = MigrationState::default();
     state.mark_applied("m001");
-    let steps = plan_up(&migrations, &state);
+    let steps = plan_up(&migrations, &state, None);
     assert!(steps.is_empty());
+}
+
+#[test]
+fn plan_up_step_limit_caps_the_pending_set() {
+    // BACKLOG item 265 — spec §11.2's own documented
+    // `certo db migrate | --dry-run --step 1` row was silently ignored;
+    // `plan_up` always applied every pending migration regardless.
+    let migrations = vec![make_migration("m001"), make_migration("m002"), make_migration("m003")];
+    let state = MigrationState::default();
+    let steps = plan_up(&migrations, &state, Some(1));
+    assert_eq!(steps.len(), 1);
+    assert_eq!(steps[0].migration.name, "m001", "step limit must keep declaration order, earliest first");
+}
+
+#[test]
+fn plan_up_step_limit_larger_than_pending_set_is_a_no_op() {
+    let migrations = vec![make_migration("m001"), make_migration("m002")];
+    let state = MigrationState::default();
+    let steps = plan_up(&migrations, &state, Some(10));
+    assert_eq!(steps.len(), 2, "a step limit larger than the pending set must not error or lose migrations");
+}
+
+#[test]
+fn plan_up_step_limit_only_counts_pending_migrations_not_already_applied_ones() {
+    let migrations = vec![make_migration("m001"), make_migration("m002"), make_migration("m003")];
+    let mut state = MigrationState::default();
+    state.mark_applied("m001");
+    let steps = plan_up(&migrations, &state, Some(1));
+    assert_eq!(steps.len(), 1);
+    assert_eq!(steps[0].migration.name, "m002", "the limit applies to the pending set, not the full migration list");
 }
 
 // ------------------------------------------------------------------ //
@@ -288,7 +318,7 @@ fn make_migration_with_ops(name: &str) -> MigrationDecl {
 fn plan_sql_generates_real_ddl_for_up_steps() {
     let migrations = vec![make_migration_with_ops("m001")];
     let state = MigrationState::default();
-    let steps = plan_up(&migrations, &state);
+    let steps = plan_up(&migrations, &state, None);
     let sql = plan_sql(&steps);
     assert_eq!(sql.len(), 1);
     assert!(sql[0].contains("CREATE TABLE widgets"), "got: {}", sql[0]);
@@ -312,7 +342,7 @@ fn plan_sql_does_not_mutate_state() {
     // the old run_steps(dry_run: false) which marked-applied unconditionally.
     let migrations = vec![make_migration_with_ops("m001")];
     let state = MigrationState::default();
-    let steps = plan_up(&migrations, &state);
+    let steps = plan_up(&migrations, &state, None);
     let _ = plan_sql(&steps);
     assert!(!state.is_applied("m001"));
 }
@@ -323,7 +353,7 @@ fn commit_steps_persists_applied_state() {
     let manifest = dir.path().join("migrations.json");
     let migrations = vec![make_migration_with_ops("m001")];
     let state = MigrationState::default();
-    let steps = plan_up(&migrations, &state);
+    let steps = plan_up(&migrations, &state, None);
 
     commit_steps(&steps, &manifest).unwrap();
 

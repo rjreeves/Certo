@@ -1119,6 +1119,40 @@ fn map_from_list_registered() {
 }
 
 #[test]
+fn list_zip_produces_ordinary_certo_list_tuples_not_a_separate_pair_struct() {
+    // BACKLOG item 268 — `certo_list_zip` used to box each pair as its own
+    // `{void* fst; void* snd;}` struct (`CertoPair`), a different,
+    // incompatible representation from the `CertoList*`-of-length-2 every
+    // *other* Certo tuple uses (`Rvalue::Aggregate(Tuple)`,
+    // `crates/codegen/src/emit_mir.rs`, and `certo_list_partition` just
+    // above it in the same file) — destructuring a zipped pair
+    // (`val (a, b) = pair`) read garbage from what was really a
+    // `CertoList*`, a real runtime panic. Confirmed fixed: each pair is now
+    // built via the same `certo_list_of` helper `certo_list_partition`
+    // already uses for its own 2-tuple return.
+    assert!(!COLLECTIONS_C.contains("typedef struct { void* fst; void* snd; } CertoPair;"),
+        "the old, incompatible CertoPair struct definition must be gone entirely");
+    assert!(
+        COLLECTIONS_C.contains("n->data[n->len++] = certo_list_of(2, a->data[i], b->data[i]);"),
+        "certo_list_zip must build each pair as an ordinary certo_list_of(2, ...) tuple"
+    );
+}
+
+#[test]
+fn map_from_list_reads_ordinary_certo_list_tuples_not_a_separate_pair_struct() {
+    // BACKLOG item 268 — the identical representation mismatch on the
+    // *reading* side: `certo_map_from_list` used to cast each list element
+    // to the old `CertoPair*` shape, so `Map.fromList([(1, "a")])` (an
+    // ordinary Certo tuple literal, always a `CertoList*`) silently built a
+    // map whose every lookup missed — confirmed live before this fix, not
+    // just a hypothetical.
+    assert!(
+        COLLECTIONS_C.contains("CertoList* pair = (CertoList*)l->data[i];"),
+        "certo_map_from_list must read each element as an ordinary CertoList* tuple"
+    );
+}
+
+#[test]
 fn list_new_collection_functions_registered() {
     let env = seeded_env();
     for name in &["List.distinct", "List.partition", "List.chunked", "List.groupBy"] {
