@@ -1078,6 +1078,24 @@ fn record_with_a_list_field_is_not_given_an_eq_function() {
 }
 
 #[test]
+fn self_referential_sum_type_does_not_crash_codegen() {
+    // BACKLOG item 259 — `ty_is_comparable`'s own unguarded structural
+    // recursion through a self-referential sum type's declared field types
+    // (`Node(left: Tree, right: Tree)`, spec §3.3's own `Tree` example) was
+    // a real, direct Rust stack overflow in the compiler itself — this test
+    // merely running to completion (rather than crashing the whole test
+    // process) is the regression guard. A recursive type has no single
+    // correct comparison with today's inline-by-value payload
+    // representation (a genuinely infinite-size struct if it did try to
+    // embed itself), so it must fall out conservatively "not comparable",
+    // the same as any other type this codegen can't compare — not crash.
+    let c = codegen(
+        "module A\ntype Tree = | Leaf | Node(value: Int, left: Tree, right: Tree)\n\
+         fn f(): Tree = Leaf");
+    assert_not_contains(&c, "certo_eq_Tree");
+}
+
+#[test]
 fn generic_record_is_not_given_an_eq_function() {
     let c = codegen(
         "module A\ntype Box<T> = { value: T }\n\
