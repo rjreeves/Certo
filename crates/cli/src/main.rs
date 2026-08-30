@@ -16,7 +16,7 @@ use certo_ast::decl::{Decl, MigrationDecl};
 use certo_ast::expr::{Expr, ExpectMatcher, Stmt};
 use certo_ast::module::Module;
 use certo_ast::pattern::Pattern;
-use certo_ast::span::S;
+use certo_ast::span::{S, Span};
 use certo_ast::types::ModulePath;
 use certo_migrate::{
     plan_up, plan_down, plan_sql, commit_steps, status,
@@ -4200,10 +4200,27 @@ fn cmd_migrate(args: &[String]) {
     match sub {
         "up" => {
             let dry_run = args.contains(&"--dry-run".to_string());
+            // BACKLOG item 265 — spec §11.2's own documented
+            // `certo db migrate | --dry-run --step 1` row was silently
+            // ignored: this arm never looked for `--step`/any count at all
+            // and always applied every pending migration. An explicit
+            // `--step <n>` flag (not `"down"`'s own looser "any parseable
+            // integer among the args" scan) matches the spec's own
+            // flag-with-value syntax and avoids misreading an unrelated
+            // numeric-looking argument as a step count.
+            let step: Option<usize> = args.iter().position(|a| a == "--step")
+                .and_then(|i| args.get(i + 1))
+                .map(|v| v.parse().unwrap_or_else(|_| {
+                    eprintln!("error: --step requires a number");
+                    process::exit(2);
+                }));
             let migrations = load_migrations(&project_root);
+            if !check_migrations_against_app_schema(&project_root, &migrations) {
+                process::exit(1);
+            }
             let state = certo_migrate::MigrationState::load(&manifest)
                 .unwrap_or_else(|e| { eprintln!("error: {}", e); process::exit(1); });
-            let steps = plan_up(&migrations, &state);
+            let steps = plan_up(&migrations, &state, step);
             let sql = plan_sql(&steps);
             // BACKLOG item 221 — a trigger-bearing `validator` "installs
             // itself as a database trigger when you run `certo db migrate`"
@@ -4254,6 +4271,9 @@ fn cmd_migrate(args: &[String]) {
                 .and_then(|a| a.parse().ok())
                 .unwrap_or(1);
             let migrations = load_migrations(&project_root);
+            if !check_migrations_against_app_schema(&project_root, &migrations) {
+                process::exit(1);
+            }
             let state = certo_migrate::MigrationState::load(&manifest)
                 .unwrap_or_else(|e| { eprintln!("error: {}", e); process::exit(1); });
             let steps = plan_down(&migrations, &state, count);
@@ -4387,6 +4407,57 @@ fn warn_if_schema_stale(project_root: &Path) {
             eprintln!("warning: could not check db/schema.cto for drift: {}", msg);
         }
     }
+}
+
+/// Validate every loaded migration against the application's own declared
+/// schema (E0500-E0507) — BACKLOG item 264. Spec §6.5 documents this
+/// checking as part of `certo db migrate`'s own real workflow, but the
+/// machinery (`certo_dbschema::check_migrations`) was only ever reachable
+/// via `check_module`, called on the *main application module* by
+/// `certo build`/`check` — which only ever covers a migration declared
+/// *inline* in that module, never the dedicated `migrations/*.cto` files
+/// this command actually loads via `load_migrations`. Confirmed live before
+/// this fix: a migration referencing a table with no matching `type`
+/// anywhere in the project compiled, dry-ran, and (would have) executed
+/// with zero diagnostics.
+///
+/// Returns `true` when it's safe to proceed. Skips silently (returns
+/// `true`) when no `[build] entry` can be resolved at all — `certo db
+/// migrate` has never required a full application entry point to exist,
+/// and this shouldn't newly demand one; it only enforces the check when
+/// there's a real schema to check against.
+fn check_migrations_against_app_schema(project_root: &Path, migrations: &[MigrationDecl]) -> bool {
+    let Some(cfg) = load_certo_toml_or_die(project_root) else { return true };
+    let Some(entry) = cfg.build.as_ref().and_then(|b| b.entry.as_deref()) else { return true };
+    let entry_path = project_root.join(entry);
+    if !entry_path.exists() { return true; }
+
+    let colour = stderr_is_tty();
+    let (mut module, _src) = parse_file_or_exit(&entry_path, colour);
+    resolve_local_imports(&mut module, &entry_path, colour, false);
+    let schema = certo_dbschema::Schema::build(&module);
+
+    // A synthetic module wrapping every already-loaded migration, in the
+    // same order `load_migrations` produced them (sorted file order) — this
+    // matters for correctness, not just convenience: `check_migrations`
+    // tracks which tables have been created *so far* across the whole
+    // sequence to validate a later `alterTable`, so every migration must be
+    // checked together in one pass, not file-by-file in isolation.
+    let synthetic = Module {
+        path: module.path.clone(),
+        imports: vec![],
+        decls: migrations.iter().map(|m| S::new(Decl::Migration(m.clone()), m.span)).collect(),
+        span: Span::DUMMY,
+    };
+    let errors = certo_dbschema::check_migrations(&synthetic, &schema);
+    if errors.is_empty() { return true; }
+
+    for e in &errors {
+        let diag = db_error_to_diagnostic(e);
+        eprintln!("error[{}]: {}", diag.code, diag.message);
+    }
+    eprintln!("{} migration schema error(s) found against {}", errors.len(), entry_path.display());
+    false
 }
 
 fn load_migrations(project_root: &Path) -> Vec<MigrationDecl> {
