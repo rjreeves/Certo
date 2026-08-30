@@ -2942,13 +2942,14 @@ fn cmd_test(args: &[String]) {
     let mut timeout_ms: u64 = 5000;
     let mut filter: Option<String> = None;
     let mut coverage = false;
+    let mut watch = false;
 
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
             "--no-color" => color = false,
             "--help" | "-h" => {
-                println!("Usage: certo test <file.cto>... [--filter <substring>] [--timeout=<ms>] [--coverage]");
+                println!("Usage: certo test <file.cto>... [--filter <substring>] [--timeout=<ms>] [--coverage] [--watch]");
                 println!();
                 println!("Compile and run all `test` blocks in the given source files.");
                 println!("Exits 0 if all tests pass, 1 otherwise.");
@@ -2958,6 +2959,7 @@ fn cmd_test(args: &[String]) {
                 println!("  --timeout=<ms>         Per-test timeout in milliseconds (default 5000)");
                 println!("  --coverage             Print a per-line coverage report (clang/llvm-cov required)");
                 println!("                         mapped back to your .cto source, not the generated C");
+                println!("  --watch, -w            Re-run tests on every change to any input file");
                 return;
             }
             "--filter" => {
@@ -2965,6 +2967,7 @@ fn cmd_test(args: &[String]) {
                 filter = Some(args.get(i).unwrap_or_else(|| die("--filter requires a substring", 2)).clone());
             }
             "--coverage" => coverage = true,
+            "--watch" | "-w" => watch = true,
             other if other.starts_with("--timeout=") => {
                 let v = other.trim_start_matches("--timeout=");
                 timeout_ms = v.parse().unwrap_or_else(|_| {
@@ -2984,6 +2987,24 @@ fn cmd_test(args: &[String]) {
     if files.is_empty() {
         eprintln!("error: no input files");
         process::exit(2);
+    }
+
+    // Watch mode: re-invoke this binary (minus --watch) on every change to
+    // any of the input files — same re-invoke-self pattern `cmd_build`/
+    // `cmd_run` already use for their own `--watch` (BACKLOG item 273).
+    if watch {
+        let self_exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("certo"));
+        let test_args: Vec<String> = std::iter::once("test".to_string())
+            .chain(args.iter().filter(|a| *a != "--watch" && *a != "-w").cloned())
+            .collect();
+        cmd_watch::watch_loop(files.clone(), move || {
+            std::process::Command::new(&self_exe)
+                .args(&test_args)
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false)
+        });
+        return;
     }
 
     let opts = certo_testrunner::run::RunOptions {
