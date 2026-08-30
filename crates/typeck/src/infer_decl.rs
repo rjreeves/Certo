@@ -1458,6 +1458,40 @@ fn hoist_decl(
             // — `define` always targets the innermost frame, so defining them
             // before the `pop()` would silently discard them with it.
             let mut variant_defs: Vec<(String, Ty)> = Vec::new();
+
+            // BACKLOG item 262 — positional record construction (spec §8.4,
+            // e.g. `Money(d"10.00", USD)`). Mirrors a sum-type variant's own
+            // constructor registration exactly (see the `TypeBody::Sum` arm
+            // below): the type's own bare name is bound to a callable
+            // `Ty::Fn` over its declared fields, in declaration order, so a
+            // positional call typechecks through the ordinary `Expr::App`
+            // path with no special-casing needed here. This *overwrites* the
+            // plain `Ty::Named` placeholder `env.define`d for this name
+            // above — that placeholder is never consulted by static-method
+            // calls (`Money.zero()` resolves via a separate qualified
+            // `"Money.zero"` lookup, see `qualified_call_name` in
+            // `infer_expr.rs`) or by type-annotation resolution (a bare
+            // named type resolves via `type_expr_to_ty`'s catch-all, which
+            // never calls `env.lookup` for a non-type-param name), so
+            // repurposing it is safe. `computed` fields are deliberately
+            // excluded (same reasoning as `record_fields` above), and
+            // construction requires the full field arity — no partial/
+            // optional-field positional construction, matching the
+            // sum-variant precedent (named-field/`.with()` construction
+            // remains the only way to omit fields).
+            if let certo_ast::decl::TypeBody::Record(rec) = &t.body {
+                let param_tys: Vec<Ty> = rec.fields.iter()
+                    .map(|f| type_expr_to_ty(&f.ty.node, &mut ctx))
+                    .collect();
+                let fn_ty = Ty::Fn { params: param_tys, ret: Box::new(parent_ty.clone()) };
+                let fn_ty = if type_param_vars.is_empty() {
+                    fn_ty
+                } else {
+                    Ty::Forall { vars: type_param_vars.clone(), body: Box::new(fn_ty) }
+                };
+                variant_defs.push((t.name.node.clone(), fn_ty));
+            }
+
             if let certo_ast::decl::TypeBody::Sum(variants) = &t.body {
                 ctx.env.sum_variants.insert(
                     t.name.node.clone(),

@@ -1103,6 +1103,33 @@ fn generic_record_is_not_given_an_eq_function() {
     assert_not_contains(&c, "certo_eq_Box");
 }
 
+// ------------------------------------------------------------------ //
+// BACKLOG item 262 — positional record construction (spec §8.4). Mirrors
+// a sum-type variant-with-fields constructor's own codegen exactly.
+// ------------------------------------------------------------------ //
+
+#[test]
+fn record_positional_constructor_function_is_emitted() {
+    let c = codegen(
+        "module A\ntype Money = { amount: Int, currency: Text }\n\
+         fn f(): Money = Money(1000, \"USD\")");
+    assert_contains(&c, "static inline Money certo_money(int64_t amount, certo_text_t currency)");
+    assert_contains(&c, ".amount = amount");
+    assert_contains(&c, ".currency = currency");
+}
+
+#[test]
+fn record_constructor_field_order_matches_declaration_order_not_call_order() {
+    // The constructor's own C parameter order is fixed by the record's
+    // *declared* field order — a call site can only ever supply args in
+    // that same order (typeck rejects anything else), but this guards the
+    // generated function signature itself stays declaration-ordered.
+    let c = codegen(
+        "module A\ntype Point = { x: Int, y: Int, z: Int }\n\
+         fn f(): Point = Point(1, 2, 3)");
+    assert_contains(&c, "static inline Point certo_point(int64_t x, int64_t y, int64_t z)");
+}
+
 #[test]
 fn optional_field_is_not_given_an_eq_function() {
     let c = codegen(

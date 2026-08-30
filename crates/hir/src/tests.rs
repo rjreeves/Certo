@@ -2183,3 +2183,25 @@ fn row_bound_on_an_impl_method_also_gains_an_accessor_param() {
     assert_eq!(greet.params.len(), 3, "expected self + record + one accessor param, got {:?}", greet.params);
     assert!(matches!(&greet.params[2].ty, Ty::Fn { params, ret } if params.is_empty() && matches!(ret.as_ref(), Ty::Var(_))));
 }
+
+// ------------------------------------------------------------------ //
+// BACKLOG item 262 — positional record construction (spec §8.4). Mirrors
+// a sum-type variant constructor's own HIR-level return-type resolution.
+// ------------------------------------------------------------------ //
+
+#[test]
+fn positional_record_call_resolves_its_real_return_type_not_ty_error() {
+    let m = lower(
+        "module A\ntype Money = { amount: Int, currency: Text }\n\
+         fn f(): Money = Money(1000, \"USD\")"
+    );
+    let f = m.items.iter().find_map(|it| match it {
+        HirItem::Fn(f) if f.name == "f" => Some(f),
+        _ => None,
+    }).expect("expected fn `f`");
+    let body = f.body.as_ref().unwrap();
+    assert_eq!(body.ty, Ty::Named { name: "Money".into(), args: vec![] },
+        "positional record construction must resolve the record's own type, not Ty::Error, got {:?}", body.ty);
+    assert!(matches!(&body.kind, HirExprKind::Call { .. }),
+        "positional record construction lowers as an ordinary Call, got {:?}", body.kind);
+}

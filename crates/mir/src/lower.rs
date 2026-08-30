@@ -1515,8 +1515,16 @@ fn lower_expr(expr: &HirExpr, b: &mut Builder) -> Operand {
             // storage is `void*` regardless of the concrete type instantiated
             // here, mirroring how `Some`/`Ok`/`Err` box their own payload
             // above — BACKLOG item 119.
+            // BACKLOG item 262 — a positional record constructor call
+            // (`Money(d"10.00", USD)`) needs the identical boxing treatment
+            // for a generic record (`type Box<T> = {value: T}`) as a sum
+            // variant does — `record_field_types` (from HIR, already in
+            // declaration order) is the record equivalent of
+            // `variant_field_types` here, checked as a fallback since a
+            // callee name is never registered in both tables at once.
             let variant_field_types: Option<Vec<Ty>> = match &func.kind {
-                HirExprKind::Global(name) => b.variant_field_types.get(name).cloned(),
+                HirExprKind::Global(name) => b.variant_field_types.get(name).cloned()
+                    .or_else(|| b.record_field_types.get(name).cloned()),
                 _ => None,
             };
             // Declared param types for a plain (non-constructor) call to a
