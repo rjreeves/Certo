@@ -151,11 +151,33 @@ fn resolve_field_ty(obj_ty: Ty, field: &S<String>, span: Span, ctx: &mut Ctx<'_>
                 }
             }
         }
-        Ty::Named { name, .. } => {
+        Ty::Named { name, args } => {
+            // BACKLOG item 278 — a generic record's declared field types
+            // (`record_fields`/`computed_fields`) are computed exactly once,
+            // at `hoist_decl` time, against that type's own hoisting-time
+            // `TyVar`s (e.g. `type Box<T> = { value: T }` stores `value:
+            // Ty::Var(v)` for one fixed `v`, shared by every occurrence of
+            // `Box` anywhere in the module) — returning that raw, unsubsti-
+            // tuted type ignored *this* receiver's own concrete type
+            // arguments entirely. Confirmed as a real, live bug: after a
+            // first access on a `Box<Int>` unifies `v` with `Int` in the
+            // (module-wide, mutable) union-find, a *second*, later access on
+            // an unrelated `Box<Text>` returned the exact same
+            // already-Int-bound field type instead of `Text`, silently
+            // wrong rather than a type error. Fixed by substituting the
+            // declared field type through a map from the type's own
+            // declared param vars (`ctx.env.type_param_vars`, populated in
+            // declared order at hoist time) to *this* receiver's own
+            // concrete `args` (in the same order) — mirroring exactly how a
+            // generic function call's own return type is instantiated per
+            // call site, just applied to a field read instead of a call.
+            let subst: HashMap<TyVar, Ty> = ctx.env.type_param_vars.get(name.as_str())
+                .map(|vars| vars.iter().cloned().zip(args.iter().cloned()).collect())
+                .unwrap_or_default();
             // Look up the record definition for this named type.
             if let Some(fields) = ctx.env.record_fields.get(name.as_str()).cloned() {
                 match fields.iter().find(|(n, _)| n == &field.node) {
-                    Some((_, ty)) => ty.clone(),
+                    Some((_, ty)) => ty.apply_subst(&subst),
                     // `computed` properties (BACKLOG item 143) — a real
                     // stored field never wins over a computed one of the
                     // same name (the parser rejects that shape earlier),
@@ -163,7 +185,7 @@ fn resolve_field_ty(obj_ty: Ty, field: &S<String>, span: Span, ctx: &mut Ctx<'_>
                     // and keeps this the sole extra lookup on the hot path.
                     None => match ctx.env.computed_fields.get(name.as_str())
                         .and_then(|cs| cs.iter().find(|(n, _)| n == &field.node)) {
-                        Some((_, ty)) => ty.clone(),
+                        Some((_, ty)) => ty.apply_subst(&subst),
                         None => {
                             ctx.errors.push(TypeError {
                                 kind: TypeErrorKind::UnknownField { field: field.node.clone(), on: obj_ty },

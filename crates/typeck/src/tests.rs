@@ -2580,6 +2580,93 @@ fn boolBox(): Box<Bool> = Box { value: true }").unwrap();
 }
 
 // ------------------------------------------------------------------ //
+// Generic record field-access instantiation (BACKLOG item 278)
+// ------------------------------------------------------------------ //
+
+#[test]
+fn generic_record_field_access_resolves_to_this_receivers_own_concrete_type() {
+    // The real bug: `record_fields`'s declared field type (`value: Ty::Var(v)`)
+    // is computed once, at hoist time, for one shared `v` — resolving a field
+    // access must substitute through *this* receiver's own concrete type
+    // args (from its `Ty::Named { args, .. }`), not return the raw,
+    // unsubstituted hoisting-time var.
+    check(
+        "module A
+type Box<T> = { value: T }
+fn f(): Text = {
+    val b: Box<Text> = Box { value: \"hi\" }
+    b.value
+}"
+    ).unwrap();
+}
+
+#[test]
+fn second_generic_record_instantiation_does_not_inherit_the_first_ones_field_type() {
+    // The exact repro that surfaced item 278: a first access on `Box<Int>`
+    // must not permanently bind the record's own shared hoisting-time type
+    // var, corrupting a *later*, unrelated `Box<Text>` access's own field
+    // type. Previously `bs.value` resolved as `Int` here, a genuine silent
+    // type-safety violation caught only by the caller's own use of it as Text.
+    check(
+        "module A
+type Box<T> = { value: T }
+fn f(): Text = {
+    val b: Box<Int> = Box { value: 42 }
+    val ignoreInt: Int = b.value
+    val bs: Box<Text> = Box { value: \"hello\" }
+    bs.value
+}"
+    ).unwrap();
+}
+
+#[test]
+fn generic_record_field_access_still_rejects_a_real_type_mismatch() {
+    // Regression guard: substitution must not become so permissive that a
+    // genuine mismatch (using a `Box<Int>`'s own field as Text) slips
+    // through uncaught.
+    let errs = check_err(
+        "module A
+type Box<T> = { value: T }
+fn f(): Text = {
+    val b: Box<Int> = Box { value: 42 }
+    b.value
+}"
+    );
+    assert!(!errs.is_empty(), "Box<Int>.value is Int, must not type-check as the declared Text return");
+}
+
+#[test]
+fn generic_record_with_two_type_params_substitutes_each_field_independently() {
+    check(
+        "module A
+type Pair<A, B> = { first: A, second: B }
+fn f(): Text = {
+    val p1: Pair<Int, Text> = Pair { first: 1, second: \"one\" }
+    val p2: Pair<Text, Int> = Pair { first: \"two\", second: 2 }
+    val ignoreInt: Int = p1.first
+    val ignoreInt2: Int = p2.second
+    p1.second
+}"
+    ).unwrap();
+}
+
+#[test]
+fn generic_record_field_access_substitutes_through_a_nested_container_type() {
+    // `items: List<T>` — the substitution must recurse into the field's own
+    // declared type (`apply_subst` already walks `Ty::List`), not just
+    // handle a bare `T` field directly.
+    check(
+        "module A
+import Stdlib.Collections.{ List }
+type Wrapper<T> = { items: List<T> }
+fn f(): List<Text> = {
+    val w: Wrapper<Text> = Wrapper { items: [\"a\", \"b\"] }
+    w.items
+}"
+    ).unwrap();
+}
+
+// ------------------------------------------------------------------ //
 // Safe field access `?.` (BACKLOG item 146)
 // ------------------------------------------------------------------ //
 
