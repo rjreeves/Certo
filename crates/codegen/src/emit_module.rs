@@ -658,12 +658,18 @@ enum TypeShape<'a> {
 
 /// One pass over every `type` declaration, before any C is emitted, so
 /// `ty_is_comparable` can look *forward* to a type declared later in the
-/// file too, not just backward through whatever's already been emitted —
-/// deliberately not memoized/depth-guarded against a cyclic type
-/// referencing itself by value (`type A = { b: B }`, `type B = { a: A }`):
-/// such a type would already be an infinite-size C struct and fail to
-/// compile at the struct-definition stage above, before this code ever
-/// runs, so it isn't a real case this needs to defend against.
+/// file too, not just backward through whatever's already been emitted.
+/// `ty_is_comparable` itself (via `ty_is_comparable_inner`) is the one that
+/// guards against a cyclic type — BACKLOG item 259 found a self-referential
+/// *sum* type (`Node(left: Tree, right: Tree)`, a perfectly valid recursive
+/// data structure) is not the "already an infinite-size C struct, so it's
+/// someone else's problem" case this comment used to assume: a payload
+/// field needing heap-boxing is already stored as a pointer in C, so the
+/// struct itself is finite and compiles fine — it was `ty_is_comparable`'s
+/// own unguarded structural recursion through the *declared* field types
+/// (not the C memory layout) that looped forever, a real Rust stack
+/// overflow in the compiler itself, confirmed live via `certo build` on
+/// the spec's own `Tree` example.
 fn build_type_shapes(module: &Module) -> std::collections::HashMap<String, TypeShape<'_>> {
     let mut shapes = std::collections::HashMap::new();
     for sdecl in &module.decls {
@@ -692,6 +698,29 @@ fn build_type_shapes(module: &Module) -> std::collections::HashMap<String, TypeS
 /// opaque pointer with no single correct comparison without the same
 /// generic-erasure machinery item 200's own design sketch describes.
 fn ty_is_comparable(te: &certo_ast::types::TypeExpr, shapes: &std::collections::HashMap<String, TypeShape<'_>>) -> bool {
+    let mut visiting = std::collections::HashSet::new();
+    ty_is_comparable_inner(te, shapes, &mut visiting)
+}
+
+/// The real recursive worker behind `ty_is_comparable` — split out purely
+/// to thread `visiting` (BACKLOG item 259) without changing that function's
+/// own two-arg call sites above. `visiting` is the set of type names whose
+/// own field-comparability check is *currently in progress* on this call
+/// stack — a self-referential sum type (`Node(left: Tree, right: Tree)`,
+/// spec §3.3's own `Tree<T>` example, a perfectly valid recursive data
+/// structure since a payload field needing heap-boxing is already stored as
+/// a pointer in C, not inline) previously recursed into the exact same
+/// `ty_is_comparable(Tree, shapes)` call forever — a real, direct Rust
+/// stack overflow in the compiler itself, confirmed live via `certo build`
+/// on the spec's own example. Hitting a name already in `visiting` means a
+/// cycle was found before any base case — conservatively "not comparable"
+/// (matching this function's own already-established conservative stance
+/// for anything without a single correct comparison), not a crash.
+fn ty_is_comparable_inner(
+    te: &certo_ast::types::TypeExpr,
+    shapes: &std::collections::HashMap<String, TypeShape<'_>>,
+    visiting: &mut std::collections::HashSet<String>,
+) -> bool {
     use certo_ast::types::TypeExpr;
     match te {
         TypeExpr::Named { path, args, .. } => {
@@ -699,12 +728,21 @@ fn ty_is_comparable(te: &certo_ast::types::TypeExpr, shapes: &std::collections::
             let name = path.segments.last().map(|s| s.node.as_str()).unwrap_or("");
             match name {
                 "Int" | "Float" | "Bool" | "Unit" | "Text" | "BoundedText" | "Decimal" | "UUID" => true,
+                _ if visiting.contains(name) => false,
                 _ => match shapes.get(name) {
-                    Some(TypeShape::Record(fields)) =>
-                        fields.iter().all(|f| !f.optional && ty_is_comparable(&f.ty.node, shapes)),
+                    Some(TypeShape::Record(fields)) => {
+                        visiting.insert(name.to_string());
+                        let result = fields.iter().all(|f| !f.optional && ty_is_comparable_inner(&f.ty.node, shapes, visiting));
+                        visiting.remove(name);
+                        result
+                    }
                     Some(TypeShape::NullaryEnum) => true,
-                    Some(TypeShape::PayloadEnum(variants)) =>
-                        variants.iter().all(|v| v.fields.iter().all(|f| ty_is_comparable(&f.ty.node, shapes))),
+                    Some(TypeShape::PayloadEnum(variants)) => {
+                        visiting.insert(name.to_string());
+                        let result = variants.iter().all(|v| v.fields.iter().all(|f| ty_is_comparable_inner(&f.ty.node, shapes, visiting)));
+                        visiting.remove(name);
+                        result
+                    }
                     None => false, // unknown name (a stdlib opaque type like DateTime, or truly undeclared)
                 }
             }
