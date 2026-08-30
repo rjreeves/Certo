@@ -364,6 +364,18 @@ fn generic_container_ret(full: Option<&str>, args: &[HirExpr]) -> Option<Ty> {
         // `Option.map` (BACKLOG item 256) — identical recovery to `List.map`
         // just above, wrapped in `Ty::Option` instead of `Ty::List`.
         Some("Option.map") => args.get(1).and_then(callback_ret_ty).map(|t| Ty::Option(Box::new(t))),
+        // `List.flatMap` (BACKLOG item 267) — unlike `List.map`, the
+        // callback's own declared return is already `List<B>` (`A =>
+        // List<B>`, see its signature in `crates/stdlib/src/seed.rs`), so
+        // `flatMap`'s own result type *is* `callback_ret_ty` directly, with
+        // no extra `Ty::List` wrapping — recovering it at all (even
+        // imprecisely, e.g. `List<Error>` when the callback's own element
+        // type isn't otherwise resolvable) is what matters: without any
+        // arm here, `val ys = List.flatMap(...)`'s own local fell all the
+        // way to `Ty::Error`, which codegen maps to a plain `int64_t` local
+        // instead of a real list pointer — a real segfault the moment `ys`
+        // was ever consumed downstream (not just measured via `List.len`).
+        Some("List.flatMap") => args.get(1).and_then(callback_ret_ty),
         Some("List.groupBy") => {
             let elem = args.first().and_then(list_elem)?;
             args.get(1).and_then(callback_ret_ty)
@@ -651,6 +663,14 @@ fn stdlib_param_names() -> HashMap<&'static str, &'static [&'static str]> {
     // `elem_ty_hint` (BACKLOG item 256, `crates/mir/src/lower.rs`) recovers
     // the lambda's real param type independently for unboxing purposes.
     m.insert("Option.map",      &["opt", "f"]);
+    // BACKLOG item 267 — same reason as `Option.map` just above: without
+    // this entry, `List.flatMap`'s own `needs_lambda_hint` listing was
+    // dead code (`cx.stdlib_params.get("List.flatMap")` always `None`),
+    // so its callback param never got hinted from the receiver list's
+    // element type at all.
+    m.insert("List.flatMap",    &["list", "f"]);
+    // BACKLOG item 266 — same reason as `List.flatMap`/`Option.map` above.
+    m.insert("List.forEach",    &["list", "f"]);
     m.insert("List.filter",     &["list", "pred"]);
     m.insert("List.fold",       &["list", "init", "f"]);
     m.insert("List.find",       &["list", "pred"]);
@@ -1313,7 +1333,26 @@ fn lower_expr(expr: &S<Expr>, cx: &mut Cx) -> HirExpr {
                     // receiver's `Option<A>` element type instead of a
                     // list's; see the hint-computation match arms below,
                     // both extended to also accept `Ty::Option(_)`.
-                    | Some("Option.map")) || result_hint_side.is_some();
+                    | Some("Option.map")
+                    // BACKLOG item 267 — `List.flatMap`'s callback param
+                    // (`A => List<B>`) needs the identical hint, sourced
+                    // from the receiver list's own element type exactly
+                    // like `List.map`'s. Without it, an unhinted callback
+                    // param (e.g. `x` in `(x) => [x, x]`) stays `Ty::Error`,
+                    // so the callback body's own resolved type is
+                    // `List<Error>`, not `List<Int>` — `generic_container_
+                    // ret`'s new `List.flatMap` arm then recovers
+                    // `List<Error>` for the whole call, and a `for` loop
+                    // over that result gives its own loop variable
+                    // `Ty::Error` too, which an f-string interpolating it
+                    // can't tell needs `certo_int_to_text` — the exact
+                    // "read a raw Int as a Text pointer" segfault class
+                    // documented on `Expr::WithTimeout`'s own lowering above.
+                    | Some("List.flatMap")
+                    // BACKLOG item 266 — `List.forEach`'s own callback param
+                    // needs the identical hint, sourced from the receiver
+                    // list's own element type exactly like `List.map`'s.
+                    | Some("List.forEach")) || result_hint_side.is_some();
                 // Every one of the above takes its lambda as the 2nd
                 // positional argument (index 1) — except `List.upsert`
                 // (BACKLOG item 209), whose signature is `(list, item, on)`,

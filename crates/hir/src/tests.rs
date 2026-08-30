@@ -342,6 +342,50 @@ fn list_map_return_type_recovered_via_lambda_param_hint() {
 }
 
 #[test]
+fn list_for_each_callback_param_hinted_from_element_type() {
+    // BACKLOG item 266 — `List.forEach`'s own callback param must be
+    // hinted from the receiver list's element type the same way
+    // `List.map`'s is, so a method call or field access inside the
+    // callback body resolves correctly rather than staying `Ty::Error`.
+    let m = lower(
+        "module A\nimport Stdlib.Collections.{ List }\n\
+         type Coupon = { name: Text }\n\
+         fn f(xs: List<Coupon>): Unit = List.forEach(xs) { x => println(x.name) }");
+    let f = m.items.iter().find_map(|it| match it {
+        HirItem::Fn(f) if f.name == "f" => Some(f),
+        _ => None,
+    }).expect("expected fn `f`");
+    let HirExprKind::Call { args, .. } = &f.body.as_ref().unwrap().kind else {
+        panic!("expected f's body to be a Call");
+    };
+    let HirExprKind::Lambda { body, .. } = &args[1].kind else {
+        panic!("expected the 2nd arg to be the callback lambda, got {:?}", args[1].kind);
+    };
+    // `println(x.name)`'s own argument type resolving to Text (not
+    // Ty::Error) proves `x` was correctly hinted to `Coupon`.
+    let HirExprKind::Call { args: println_args, .. } = &body.kind else {
+        panic!("expected the callback body to be a Call to println, got {:?}", body.kind);
+    };
+    assert_eq!(println_args[0].ty, Ty::Text, "x.name must resolve to Text, not Ty::Error");
+}
+
+#[test]
+fn list_flat_map_return_type_recovered_via_lambda_param_hint() {
+    // BACKLOG item 267 — `List.flatMap` had no `generic_container_ret` arm
+    // and no `needs_lambda_hint` entry at all: the callback's own param
+    // (`x`) stayed unhinted (`Ty::Error`), so `[x, x]`'s own body type
+    // resolved to `List<Error>`, not `List<Int>` — a real segfault once the
+    // result was consumed downstream (e.g. a `for` loop + f-string
+    // interpolation misreading a raw Int as a Text pointer), confirmed by a
+    // direct repro before this fix.
+    let m = lower("module A\nimport Stdlib.Collections.{ List }\nfn f(xs: List<Int>): List<Int> = List.flatMap(xs, (x) => [x, x])");
+    if let HirItem::Fn(f) = &m.items[0] {
+        assert_eq!(f.body.as_ref().unwrap().ty, Ty::List(Box::new(Ty::Int)),
+            "List.flatMap's own call type must fully resolve to List<Int>, not collapse to Ty::Error/List<Error>");
+    }
+}
+
+#[test]
 fn list_map_return_type_recovered_via_named_function_callback() {
     // BACKLOG item 180 — the lambda-only recovery above left a *named*
     // function callback (`xs.map(double)`) silently `Ty::Error`-typed
