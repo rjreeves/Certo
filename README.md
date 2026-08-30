@@ -124,7 +124,26 @@ See [docs/GUIDE.md](docs/GUIDE.md) for the full developer guide, including:
 ```powershell
 scripts/release.ps1          # build release binaries → dist/
 scripts/dist-package.ps1     # create zip/tar.gz distribution package
+scripts/run-toolchain.ps1    # build, test, and smoke-test every CLI tool
+scripts/run-certo-program.ps1 # validate, compile, and run one .cto program
 ```
+
+The toolchain runner is non-destructive: formatting runs in check mode and all
+generated files go to `out/toolchain/`. Use `-Profile release` for release
+binaries, `-SkipBuild` to reuse existing binaries, or `-KeepGoing` to collect
+all failures in one run.
+
+To run the toolchain against your own Certo entry file:
+
+```powershell
+.\scripts\run-certo-program.ps1 .\src\main.cto
+.\scripts\run-certo-program.ps1 .\src\main.cto -ProgramArguments @("--port", "8080")
+```
+
+The program runner checks formatting, types, lints, runs embedded tests,
+compiles a native executable, and runs it from the source file's directory.
+Use `-BuildOnly` to stop after compilation or the individual `-Skip...`
+switches when a stage is not appropriate for a program.
 
 ## License
 
