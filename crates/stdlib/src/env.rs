@@ -5,6 +5,36 @@ pub const ENV_C: &str = r#"
 
 #include <stdlib.h>
 #include <string.h>
+#ifdef _WIN32
+#include <windows.h>
+#else
+#include <unistd.h>
+#include <errno.h>
+#endif
+
+certo_text_t certo_get_current_dir(void) {
+#ifdef _WIN32
+    DWORD needed = GetCurrentDirectoryA(0, NULL);
+    if (needed == 0) certo_panic("failed to get current directory");
+    char* buf = (char*)malloc((size_t)needed);
+    if (!buf) certo_panic("out of memory");
+    DWORD got = GetCurrentDirectoryA(needed, buf);
+    if (got == 0 || got >= needed) { free(buf); certo_panic("failed to get current directory"); }
+    return buf;
+#else
+    size_t cap = 256;
+    char* buf = (char*)malloc(cap);
+    if (!buf) certo_panic("out of memory");
+    while (!getcwd(buf, cap)) {
+        if (errno != ERANGE) { free(buf); certo_panic("failed to get current directory"); }
+        cap *= 2;
+        char* nb = (char*)realloc(buf, cap);
+        if (!nb) { free(buf); certo_panic("out of memory"); }
+        buf = nb;
+    }
+    return buf;
+#endif
+}
 
 void* certo_get_env(certo_text_t key) {   /* Option<Text> */
     if (!key) return NULL;

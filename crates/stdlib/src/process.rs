@@ -8,6 +8,9 @@ pub const PROCESS_C: &str = r#"
 #include <string.h>
 #ifdef _WIN32
 #include <windows.h>
+#else
+#include <unistd.h>
+#include <sys/wait.h>
 #endif
 
 typedef struct {
@@ -131,6 +134,80 @@ CertoProcessResult* certo_process_exec(certo_text_t cmd, CertoList* args) {
 int64_t      certo_process_result_exit_code(CertoProcessResult* r) { return r ? r->exit_code : -1; }
 certo_text_t certo_process_result_stdout(CertoProcessResult* r)    { return r ? r->out : ""; }
 certo_text_t certo_process_result_stderr(CertoProcessResult* r)    { return r ? r->err : ""; }
+
+/* ------------------------------------------------------------------ *
+ * Process.execInherit — run a command with stdin/stdout/stderr
+ * connected directly to this process's own handles (no capture, no
+ * buffering). Built for shims: the child sees a real console, prompts
+ * and progress bars work, and the exact exit code comes back.
+ * ------------------------------------------------------------------ */
+int64_t certo_process_exec_inherit(certo_text_t cmd, CertoList* args) {
+#ifdef _WIN32
+    size_t cap = 256, pos = 0;
+    char* cbuf = (char*)malloc(cap);
+    if (!cbuf) certo_panic("out of memory");
+    append_arg(&cbuf, &cap, &pos, cmd);
+    if (args) {
+        for (int64_t i = 0; i < args->len; i++) {
+            cbuf[pos++] = ' ';
+            if (pos + 4 > cap) { cap *= 2; char* nb = (char*)realloc(cbuf, cap); if (!nb) certo_panic("out of memory"); cbuf = nb; }
+            append_arg(&cbuf, &cap, &pos, (certo_text_t)args->data[i]);
+        }
+    }
+    cbuf[pos] = '\0';
+
+    STARTUPINFOA si;
+    PROCESS_INFORMATION pi;
+    memset(&si, 0, sizeof(si));
+    memset(&pi, 0, sizeof(pi));
+    si.cb = sizeof(si);
+    si.dwFlags    = STARTF_USESTDHANDLES;
+    si.hStdInput  = GetStdHandle(STD_INPUT_HANDLE);
+    si.hStdOutput = GetStdHandle(STD_OUTPUT_HANDLE);
+    si.hStdError  = GetStdHandle(STD_ERROR_HANDLE);
+
+    BOOL ok = CreateProcessA(
+        NULL, cbuf, NULL, NULL,
+        TRUE  /* inherit handles, incl. stdio set above */,
+        0, NULL, NULL, &si, &pi
+    );
+    free(cbuf);
+
+    if (!ok) {
+        fprintf(stderr, "failed to launch '%s' (error %lu)\n", cmd, (unsigned long)GetLastError());
+        return 127;
+    }
+    CloseHandle(pi.hThread);
+    WaitForSingleObject(pi.hProcess, INFINITE);
+    DWORD code = 0;
+    GetExitCodeProcess(pi.hProcess, &code);
+    CloseHandle(pi.hProcess);
+    return (int64_t)code;
+#else
+    int64_t argc = 1 + (args ? args->len : 0);
+    char** argv = (char**)malloc(sizeof(char*) * (size_t)(argc + 1));
+    if (!argv) certo_panic("out of memory");
+    argv[0] = (char*)cmd;
+    for (int64_t i = 0; i < (args ? args->len : 0); i++) {
+        argv[1 + i] = (char*)args->data[i];
+    }
+    argv[argc] = NULL;
+
+    pid_t pid = fork();
+    if (pid < 0) {
+        free(argv);
+        return -1;
+    }
+    if (pid == 0) {
+        execvp(cmd, argv);
+        _exit(127); /* only reached if exec failed */
+    }
+    free(argv);
+    int status = 0;
+    waitpid(pid, &status, 0);
+    return WIFEXITED(status) ? (int64_t)WEXITSTATUS(status) : -1;
+#endif
+}
 
 int64_t certo_process_quit(int64_t code) {
     exit((int)code);
