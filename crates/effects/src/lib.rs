@@ -17,8 +17,11 @@ pub fn check_module(module: &Module) -> Result<EffectEnv, Vec<EffectError>> {
 /// when stdlib function effects (via `certo_stdlib::seed_stdlib_effects`)
 /// need to be visible to calls made from `module`.
 pub fn check_module_seeded(module: &Module, seed: EffectEnv) -> Result<EffectEnv, Vec<EffectError>> {
-    let env    = build_env_seeded(module, seed);
-    let errors = check_effects::check_module(module, &env);
+    let env = build_env_seeded(module, seed);
+    let mut errors = check_effects::check_module(module, &env);
+    // BACKLOG item 261 — a signature-shape check, independent of the
+    // body-effect-inference walk above.
+    errors.extend(check_effects::check_fallible_return_types(module));
     if errors.is_empty() { Ok(env) } else { Err(errors) }
 }
 
