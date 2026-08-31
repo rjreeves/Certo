@@ -30,6 +30,11 @@ pub enum EffectErrorKind {
 
     /// E0404 — `unsafe` block used outside an [unsafe] function.
     UnsafeOutsideUnsafe { fn_name: String },
+
+    /// E0405 — `[fallible]` declared on a function whose own return type
+    /// isn't `Result<T, E>` (BACKLOG item 261, spec §4.6's own documented
+    /// restriction).
+    FallibleReturnMustBeResult { fn_name: String },
 }
 
 impl EffectError {
@@ -45,6 +50,8 @@ impl EffectError {
                 format!("E0403: `db.transaction` in `{}` requires [db.write] annotation", fn_name),
             EffectErrorKind::UnsafeOutsideUnsafe { fn_name } =>
                 format!("E0404: `unsafe` block in `{}` requires [unsafe] annotation", fn_name),
+            EffectErrorKind::FallibleReturnMustBeResult { fn_name } =>
+                format!("E0405: function `{}` is declared [fallible] but its return type is not `Result<T, E>`", fn_name),
         }
     }
 }

@@ -1,6 +1,6 @@
-use certo_ast::decl::{Decl, FnParam};
+use certo_ast::decl::{Decl, FnDecl, FnParam};
 use certo_ast::module::Module;
-use certo_ast::types::Effect;
+use certo_ast::types::{Effect, TypeExpr};
 use crate::effect_env::{EffectEnv, DeclaredEffects};
 use crate::infer_effects::{infer_expr, type_expr_simple_name, InferredEffects, LocalTypes};
 use crate::error::{EffectError, EffectErrorKind};
@@ -45,6 +45,57 @@ pub fn check_module(module: &Module, env: &EffectEnv) -> Vec<EffectError> {
         }
     }
     errors
+}
+
+/// BACKLOG item 261 — spec §4.6's own documented restriction on `[fallible]`
+/// ("return type must be `Result`") was never enforced anywhere: a function
+/// declared `[fallible]` but returning a plain, non-`Result` type (e.g. `fn
+/// risky(x: Int): Int [fallible] = x + 1`) passed `certo check` with zero
+/// errors. This is a signature-shape check — independent of `check_module`'s
+/// own body-effect-inference walk above, and unaffected by that walk's own
+/// blanket `Effect::Fallible` skip (line ~64: `?` itself is allowed in a pure
+/// function, since fallibility isn't a side effect to trace through calls the
+/// way `Io`/`Async`/etc. are) — so it runs as its own separate pass here,
+/// over every declared signature directly (including a bodyless trait method
+/// signature, which still documents a real contract callers rely on).
+pub fn check_fallible_return_types(module: &Module) -> Vec<EffectError> {
+    let mut errors = Vec::new();
+    for sdecl in &module.decls {
+        match &sdecl.node {
+            Decl::Fn(f) => check_one_fallible_return_type(&f.name.node, f, &mut errors),
+            Decl::Trait(t) => {
+                for m in &t.methods {
+                    check_one_fallible_return_type(&m.name.node, m, &mut errors);
+                }
+            }
+            Decl::Impl(i) => {
+                let type_name = i.type_path.segments.last().map(|s| s.node.as_str()).unwrap_or("");
+                for m in &i.methods {
+                    let qname = format!("{}.{}", type_name, m.name.node);
+                    check_one_fallible_return_type(&qname, m, &mut errors);
+                }
+            }
+            _ => {}
+        }
+    }
+    errors
+}
+
+fn check_one_fallible_return_type(fn_name: &str, f: &FnDecl, errors: &mut Vec<EffectError>) {
+    let Some(effects) = &f.effects else { return };
+    if !effects.effects.iter().any(|e| e.node == Effect::Fallible) { return; }
+    let is_result = f.ret_ty.as_ref().is_some_and(|t| is_result_type(&t.node));
+    if !is_result {
+        errors.push(EffectError {
+            kind: EffectErrorKind::FallibleReturnMustBeResult { fn_name: fn_name.to_string() },
+            span: f.span,
+        });
+    }
+}
+
+fn is_result_type(te: &TypeExpr) -> bool {
+    matches!(te, TypeExpr::Named { path, .. }
+        if path.segments.last().map(|s| s.node.as_str()) == Some("Result"))
 }
 
 fn check_fn_body(

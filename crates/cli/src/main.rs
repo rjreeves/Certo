@@ -1808,6 +1808,12 @@ fn effect_error_to_diagnostic(e: &EffectError) -> Diagnostic {
                 format!("`unsafe` block in `{}` requires `[unsafe]`", fn_name))
                 .with_span(e.span)
                 .with_note(format!("add `[unsafe]` to `{}`'s signature", fn_name)),
+        EffectErrorKind::FallibleReturnMustBeResult { fn_name } =>
+            Diagnostic::error("E0405",
+                format!("function `{}` is declared `[fallible]` but its return type is not `Result<T, E>`", fn_name))
+                .with_span(e.span)
+                .with_label("`[fallible]` requires a `Result<T, E>` return type")
+                .with_note(format!("change `{}`'s return type to `Result<T, E>`, or remove `[fallible]`", fn_name)),
     }
 }
 

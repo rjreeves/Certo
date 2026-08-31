@@ -341,3 +341,92 @@ fn parsed_unannotated_fn_is_ok() {
 fn parsed_fn_with_db_read_annotation() {
     parse_ok("module A\nfn query(id: Int): Int [db.read] = id");
 }
+
+// ------------------------------------------------------------------ //
+// BACKLOG item 261 — `[fallible]`'s own documented restriction (spec §4.6:
+// "return type must be Result") was entirely unenforced.
+// ------------------------------------------------------------------ //
+
+#[test]
+fn fallible_fn_with_non_result_return_type_is_rejected() {
+    // The item's own exact repro.
+    let module = parse("module A\nfn risky(x: Int): Int [fallible] = x + 1").expect("parse error");
+    let errs = crate::check_effects::check_fallible_return_types(&module);
+    assert_eq!(errs.len(), 1, "expected exactly one error, got: {:?}",
+        errs.iter().map(|e| e.message()).collect::<Vec<_>>());
+    assert!(matches!(&errs[0].kind,
+        EffectErrorKind::FallibleReturnMustBeResult { fn_name } if fn_name == "risky"),
+        "expected FallibleReturnMustBeResult naming `risky`, got: {}", errs[0].message());
+}
+
+#[test]
+fn fallible_fn_with_result_return_type_is_ok() {
+    let module = parse(
+        "module A
+type MyError = { message: Text }
+fn safe(x: Int): Result<Int, MyError> [fallible] =
+    if x > 0 then Ok(x) else Err(MyError { message: \"bad\" })"
+    ).expect("parse error");
+    let errs = crate::check_effects::check_fallible_return_types(&module);
+    assert!(errs.is_empty(), "expected no errors, got: {:?}",
+        errs.iter().map(|e| e.message()).collect::<Vec<_>>());
+}
+
+#[test]
+fn fallible_impl_method_with_non_result_return_type_is_rejected_with_qualified_name() {
+    let module = parse(
+        "module A
+type Widget = { id: Int }
+impl Widget {
+    fn risky(self): Int [fallible] = self.id
+}"
+    ).expect("parse error");
+    let errs = crate::check_effects::check_fallible_return_types(&module);
+    assert_eq!(errs.len(), 1, "expected exactly one error, got: {:?}",
+        errs.iter().map(|e| e.message()).collect::<Vec<_>>());
+    assert!(matches!(&errs[0].kind,
+        EffectErrorKind::FallibleReturnMustBeResult { fn_name } if fn_name == "Widget.risky"),
+        "expected FallibleReturnMustBeResult naming `Widget.risky`, got: {}", errs[0].message());
+}
+
+#[test]
+fn fallible_trait_method_signature_with_non_result_return_type_is_rejected() {
+    // A trait method has no body — the check must still run against its own
+    // declared signature, since it documents a real contract callers rely on.
+    let module = parse(
+        "module A
+trait Doer {
+    fn doIt(x: Int): Int [fallible]
+}"
+    ).expect("parse error");
+    let errs = crate::check_effects::check_fallible_return_types(&module);
+    assert_eq!(errs.len(), 1, "expected exactly one error, got: {:?}",
+        errs.iter().map(|e| e.message()).collect::<Vec<_>>());
+    assert!(matches!(&errs[0].kind,
+        EffectErrorKind::FallibleReturnMustBeResult { fn_name } if fn_name == "doIt"),
+        "expected FallibleReturnMustBeResult naming `doIt`, got: {}", errs[0].message());
+}
+
+#[test]
+fn non_fallible_fn_with_non_result_return_type_is_unaffected() {
+    // Regression guard: this check must only fire for a function actually
+    // declared `[fallible]` — an ordinary function returning a plain type is
+    // completely untouched.
+    let module = parse("module A\nfn add(a: Int, b: Int): Int = a + b").expect("parse error");
+    let errs = crate::check_effects::check_fallible_return_types(&module);
+    assert!(errs.is_empty(), "expected no errors, got: {:?}",
+        errs.iter().map(|e| e.message()).collect::<Vec<_>>());
+}
+
+#[test]
+fn check_module_seeded_surfaces_the_fallible_return_type_error() {
+    // End-to-end wiring guard: the public `check_module`/`check_module_seeded`
+    // entry points (what the CLI actually calls) must surface this new check's
+    // errors too, not just the standalone `check_fallible_return_types`.
+    let module = parse("module A\nfn risky(x: Int): Int [fallible] = x + 1").expect("parse error");
+    let errs = crate::check_module(&module).expect_err("expected an effect error");
+    assert!(errs.iter().any(|e| matches!(&e.kind,
+        EffectErrorKind::FallibleReturnMustBeResult { fn_name } if fn_name == "risky")),
+        "expected check_module to surface FallibleReturnMustBeResult, got: {:?}",
+        errs.iter().map(|e| e.message()).collect::<Vec<_>>());
+}
