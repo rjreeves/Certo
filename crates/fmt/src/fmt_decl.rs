@@ -271,12 +271,72 @@ fn fmt_statemachine(sm: &StateMachineDecl, indent: usize) -> String {
     format!("statemachine {} {{\n{}\n{}}}", sm.name.node, lines.join("\n"), ind(indent))
 }
 
+// BACKLOG item 279 — previously formatted as `validator V for ... errors
+// ... { rule active { ... } }`, discarding the real `for`/`errors` types
+// and every rule's own `after`/`overrides`/`priority`/`require`/`else`
+// body on every `certo fmt` run. Now round-trips the full decl.
 fn fmt_validator(v: &ValidatorDecl, indent: usize) -> String {
     let pub_ = if v.is_pub { "pub " } else { "" };
-    let rules: Vec<String> = v.rules.iter()
-        .map(|r| format!("{}    rule {} {{ ... }}", ind(indent), r.name.node))
+    let entity_ty = fmt_type(&v.entity.node, indent);
+    let errors_ty = fmt_type(&v.errors.node, indent);
+    let trigger_str = v.trigger.as_ref()
+        .map(|t| format!(" {}", fmt_trigger(t)))
+        .unwrap_or_default();
+
+    let mut parts: Vec<String> = Vec::new();
+    if !v.context.is_empty() {
+        parts.push(fmt_context_block(&v.context, indent));
+    }
+    parts.extend(v.rules.iter().map(|r| fmt_rule_decl(r, indent)));
+
+    format!(
+        "{pub_}validator {} for {entity_ty} errors {errors_ty}{trigger_str} {{\n{}\n{}}}",
+        v.name.node, parts.join("\n"), ind(indent),
+    )
+}
+
+fn fmt_trigger(t: &TriggerDecl) -> String {
+    let op = match t.op {
+        TriggerOp::Insert => "Insert",
+        TriggerOp::Update => "Update",
+    };
+    let cond = t.condition.as_ref().map(|c| {
+        let cond_op = match c.op {
+            TriggerCondOp::Eq    => "==",
+            TriggerCondOp::NotEq => "!=",
+        };
+        format!(" when {} {} {}", c.field.node, cond_op, fmt_expr(&c.value.node, 0))
+    }).unwrap_or_default();
+    format!("trigger on {op}{cond}")
+}
+
+fn fmt_context_block(fields: &[ContextField], indent: usize) -> String {
+    let body_indent = ind(indent + 1);
+    let field_indent = ind(indent + 2);
+    let fields_str: Vec<String> = fields.iter().map(|f| {
+        let loaded = f.loaded_by.as_ref()
+            .map(|e| format!(" loaded by {}", fmt_expr(&e.node, indent + 2)))
+            .unwrap_or_default();
+        format!("{field_indent}{}: {}{loaded}", f.name.node, fmt_type(&f.type_ref.node, indent + 2))
+    }).collect();
+    format!("{body_indent}context {{\n{}\n{body_indent}}}", fields_str.join("\n"))
+}
+
+fn fmt_rule_decl(r: &RuleDecl, indent: usize) -> String {
+    let body_indent = ind(indent + 1);
+    let clause_indent = ind(indent + 2);
+    let mut clauses: Vec<String> = r.after.iter()
+        .map(|a| format!("{clause_indent}after {}", a.node))
         .collect();
-    format!("{}validator {} for ... errors ... {{\n{}\n{}}}", pub_, v.name.node, rules.join("\n"), ind(indent))
+    if let Some(o) = &r.overrides {
+        clauses.push(format!("{clause_indent}overrides {}", o.node));
+    }
+    if let Some(p) = r.priority {
+        clauses.push(format!("{clause_indent}priority {p}"));
+    }
+    clauses.push(format!("{clause_indent}require {}", fmt_expr(&r.require.node, indent + 2)));
+    clauses.push(format!("{clause_indent}else {}", fmt_expr(&r.else_.node, indent + 2)));
+    format!("{body_indent}rule {} {{\n{}\n{body_indent}}}", r.name.node, clauses.join("\n"))
 }
 
 fn fmt_constraint(c: &ConstraintDecl) -> String {

@@ -504,3 +504,77 @@ fn rule_test_is_idempotent() {
     let out2 = fmt(&out1);
     assert_eq!(out1, out2, "ruleTest formatting not idempotent");
 }
+
+// ------------------------------------------------------------------ //
+// BACKLOG item 279 — `validator` declaration real round-tripping.
+// Previously formatted as `validator V for ... errors ... { rule active
+// { ... } }`, destroying the real for/errors types and every rule's
+// after/overrides/priority/require/else body on every `certo fmt` run.
+// ------------------------------------------------------------------ //
+
+const VALIDATOR_DECL_SRC: &str = "\
+    module A\n\
+    validator V for Order errors OE {\n\
+        context {\n\
+            customer: Customer loaded by db.customers.find(order.customerId)\n\
+        }\n\
+        rule active {\n\
+            after other\n\
+            overrides legacy\n\
+            priority 5\n\
+            require customer.status == \"active\"\n\
+            else OE.NotActive\n\
+        }\n\
+        rule creditLimit {\n\
+            require order.total <= 100\n\
+            else OE.OverLimit\n\
+        }\n\
+    }";
+
+#[test]
+fn validator_decl_round_trips_its_real_for_and_errors_types() {
+    let out = fmt(VALIDATOR_DECL_SRC);
+    assert_not_contains(&out, "for ... errors ...");
+    assert_contains(&out, "validator V for Order errors OE");
+}
+
+#[test]
+fn validator_decl_round_trips_context_block() {
+    let out = fmt(VALIDATOR_DECL_SRC);
+    assert_contains(&out, "context {");
+    assert_contains(&out, "customer: Customer loaded by db.customers.find(order.customerId)");
+}
+
+#[test]
+fn validator_decl_round_trips_rule_bodies_not_a_placeholder() {
+    let out = fmt(VALIDATOR_DECL_SRC);
+    assert_not_contains(&out, "{ ... }");
+    assert_contains(&out, "after other");
+    assert_contains(&out, "overrides legacy");
+    assert_contains(&out, "priority 5");
+    assert_contains(&out, "require customer.status == \"active\"");
+    assert_contains(&out, "else OE.NotActive");
+}
+
+#[test]
+fn validator_decl_rule_without_after_overrides_priority_omits_them() {
+    let out = fmt(VALIDATOR_DECL_SRC);
+    assert_contains(&out, "rule creditLimit {");
+    assert_contains(&out, "require order.total <= 100");
+    assert_contains(&out, "else OE.OverLimit");
+}
+
+#[test]
+fn validator_decl_with_trigger_round_trips() {
+    let out = fmt(
+        "module A\nvalidator V for Order errors OE trigger on Update when status == Submitted {\n    rule active { require true else OE.NotActive }\n}"
+    );
+    assert_contains(&out, "trigger on Update when status == Submitted");
+}
+
+#[test]
+fn validator_decl_is_idempotent() {
+    let out1 = fmt(VALIDATOR_DECL_SRC);
+    let out2 = fmt(&out1);
+    assert_eq!(out1, out2, "validator formatting not idempotent");
+}
