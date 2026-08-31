@@ -1373,6 +1373,78 @@ fn unknown_field_e0205() {
     assert!(matches!(kind, TypeErrorKind::UnknownField { .. }), "expected E0205, got {kind:?}");
 }
 
+// ------------------------------------------------------------------ //
+// BACKLOG item 260 — field/method access on a sum type (including a
+// single-variant "opaque newtype") was completely unchecked, silently
+// accepting any name via `ctx.fresh()` instead of a real error.
+// ------------------------------------------------------------------ //
+
+#[test]
+fn bogus_field_access_on_a_single_variant_newtype_is_e0205() {
+    // The spec's own §4.5 illustrating shape: `type UserId = UserId(UUID)`.
+    // Previously `id.thisFieldDoesNotExist` passed `certo check` cleanly,
+    // only failing two build stages later at the C-compiler stage.
+    let kind = first_error_kind(
+        "module A
+type UserId = UserId(UUID)
+fn f(id: UserId): Int = { val bogus = id.thisFieldDoesNotExist\n 1 }"
+    );
+    assert!(matches!(kind, TypeErrorKind::UnknownField { .. }), "expected E0205, got {kind:?}");
+}
+
+#[test]
+fn specs_own_unwrap_example_without_a_real_impl_method_is_now_rejected() {
+    // The spec's own literal §4.5 example (`id.unwrap()`) previously also
+    // passed `certo check` cleanly despite no `unwrap` method existing
+    // anywhere — this is the exact case this item's own validation must
+    // catch, not just a synthetic "bogus" name.
+    let kind = first_error_kind(
+        "module A
+type UserId = UserId(UUID)
+fn f(id: UserId): UUID = id.unwrap()"
+    );
+    assert!(matches!(kind, TypeErrorKind::UnknownField { .. }), "expected E0205, got {kind:?}");
+}
+
+#[test]
+fn bogus_field_access_on_a_plain_nullary_sum_type_is_e0205() {
+    let kind = first_error_kind(
+        "module A
+type Color = | Red | Green | Blue
+fn f(c: Color): Int = { val bogus = c.nonsense\n 1 }"
+    );
+    assert!(matches!(kind, TypeErrorKind::UnknownField { .. }), "expected E0205, got {kind:?}");
+}
+
+#[test]
+fn a_real_impl_method_on_a_sum_type_still_works() {
+    // Regression guard: the new validation must not reject a genuine,
+    // user-declared accessor — only names with no matching `impl` method.
+    check(
+        "module A
+type UserId = UserId(UUID)
+impl UserId {
+    fn unwrap(self): UUID = match self { UserId(u) => u }
+}
+fn f(id: UserId): UUID = id.unwrap()"
+    ).unwrap();
+}
+
+#[test]
+fn pattern_matching_on_a_sum_type_is_unaffected_by_the_field_access_check() {
+    // Regression guard: this item only tightens *field/method* access —
+    // ordinary `match` against a sum type's own variants must be untouched.
+    check(
+        "module A
+type Color = | Red | Green | Blue
+fn describe(c: Color): Text = match c {
+    Red => \"red\"
+    Green => \"green\"
+    Blue => \"blue\"
+}"
+    ).unwrap();
+}
+
 #[test]
 fn explicit_arity_mismatch_e0204_or_mismatch() {
     // Calling a 2-arg fn with 3 args.

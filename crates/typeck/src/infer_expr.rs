@@ -195,8 +195,37 @@ fn resolve_field_ty(obj_ty: Ty, field: &S<String>, span: Span, ctx: &mut Ctx<'_>
                         }
                     }
                 }
+            } else if ctx.env.sum_variants.contains_key(name.as_str()) {
+                // BACKLOG item 260 — a sum type (including a single-variant
+                // "opaque newtype" like `type UserId = UserId(UUID)`) has no
+                // fields to read at all; its only legitimate accessors are
+                // pattern-matching or a real, explicitly declared `impl`
+                // method (already resolved separately, via the dot-call
+                // UFCS rewrite above, before this function is ever reached
+                // for a *call* — this arm only runs for a bare, non-call
+                // field read, or a call whose UFCS rewrite already failed
+                // to find a matching `impl` method). Previously this fell
+                // through to the exact same permissive `ctx.fresh()` used
+                // below for a genuinely unknown/unregistered name — silently
+                // accepting *any* field/method name with zero validation,
+                // confirmed live: both the spec's own `id.unwrap()` (§4.5,
+                // no such method actually exists anywhere) and a nonsense
+                // `id.thisFieldDoesNotExist` passed `certo check` cleanly,
+                // only failing two build stages later at the C-compiler
+                // stage. Now a real, immediate error — reusing `UnknownField`
+                // rather than a new error kind, since the shape (bad name,
+                // wrong type) is identical to a record's own missing-field
+                // case just above.
+                ctx.errors.push(TypeError {
+                    kind: TypeErrorKind::UnknownField { field: field.node.clone(), on: obj_ty },
+                    span,
+                });
+                Ty::Error
             } else {
-                // Named type not registered as a record — may be a statemachine type etc.
+                // Named type not registered as a record or sum type — may be
+                // a statemachine type etc.; left exactly as permissive as
+                // before (unaudited — BACKLOG item 260 only scopes sum
+                // types/opaque newtypes, not every other kind of `Ty::Named`).
                 ctx.fresh()
             }
         }

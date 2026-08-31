@@ -612,7 +612,7 @@ certo db create add_users_table     # scaffold a new migration file
 
 ## **8.3 Smart Constructors**
 
-| // Prevent invalid values at the boundary type Email = priv Email(Text)    // Private constructor  // Only way to create an Email is through the validated constructor fn Email.new(raw: Text): Result\<Email, ValidationError\> =     if raw.contains("@") and raw.length \> 3     then Ok(Email(raw))     else Err(ValidationError("email", f"Invalid email: \{raw\}"))  // Usage val email = Email.new("alice@example.com")?  // Validated // val bad = Email("bad")  // Compile error — constructor is private |
+| // Prevent invalid values at the boundary type Email = priv Email(Text)    // Private constructor  // Only way to create an Email is through the validated constructor fn Email.new(raw: Text): Result\<Email, ValidationError\> =     if raw.contains("@") and raw.len() \> 3     then Ok(Email(raw))     else Err(ValidationError("email", f"Invalid email: \{raw\}"))  // Usage val email = Email.new("alice@example.com")?  // Validated // val bad = Email("bad")  // Compile error — constructor is private |
 | - |
 
 
