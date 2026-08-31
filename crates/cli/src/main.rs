@@ -6,7 +6,6 @@ mod cmd_generate;
 mod certo_toml;
 mod diff;
 mod static_serve;
-mod span_rewrite;
 
 
 use std::collections::{HashMap, HashSet};
@@ -1161,62 +1160,25 @@ fn rewrite_decls_free_refs(decls: &mut [S<Decl>], renames: &HashMap<String, Rena
 }
 
 /// Expand each `validator { … }` declaration into executable functions
-/// (`V_validate`, `V_validateAll`, optional `VContext` type) by generating Certo
-/// source from the validator, parsing it, and splicing the decls into the module.
-/// Call sites use `V.validate(...)`, which links to `V_validate` via `c_fn_name`.
+/// (`V_validate`, `V_validateAll`, per-rule functions, optional `VContext`
+/// type). Call sites use `V.validate(...)`, which links to `V_validate` via
+/// `c_fn_name`.
 ///
-/// `combined_src` is the growing "real file + every generated chunk so far"
-/// source string a caller threads through `expand_state_machines` and this
-/// function in order (BACKLOG item 223) — every spliced decl's spans are
-/// rewritten (`span_rewrite::offset_decl_spans`) to index into it correctly,
-/// so a type error inside generated validator code renders against the real
-/// generated text instead of colliding with the real file's own span range.
+/// BACKLOG item 222 — the real expansion (and `span_rewrite`) now live in
+/// `certo_codegen::expand` so `crates/testrunner` can reuse the identical
+/// logic (`certo test` previously never expanded validators at all — a real,
+/// independent bug this move fixes). This is now a thin wrapper that keeps
+/// this file's own exact previous render-and-exit behavior on failure.
 fn expand_validators(module: &mut Module, colour: bool, combined_src: &mut String) {
-    use certo_ast::decl::Decl;
-    let constraints: Vec<&certo_ast::decl::ConstraintDecl> = module.decls.iter()
-        .filter_map(|d| if let Decl::Constraint(c) = &d.node { Some(c) } else { None })
-        .collect();
-    let constraint_bodies = certo_codegen::build_constraint_bodies(&constraints);
-    // BACKLOG item 243 — parallel, AST-level maps for the trigger-SQL
-    // translator (`constraint_bodies` above holds already-rendered Certo
-    // *source text*, only useful for the text-splicing path below).
-    let constraint_asts: std::collections::HashMap<&str, &certo_ast::span::S<certo_ast::expr::Expr>> =
-        constraints.iter().map(|c| (c.name.node.as_str(), &c.body)).collect();
-    let temporal_asts: std::collections::HashMap<&str, &certo_ast::span::S<certo_ast::expr::Expr>> = module.decls.iter()
-        .filter_map(|d| if let Decl::Temporal(t) = &d.node { Some((t.name.node.as_str(), &t.body)) } else { None })
-        .collect();
-    let mut generated = String::new();
-    for d in &module.decls {
-        if let Decl::Validator(v) = &d.node {
-            generated.push_str(&certo_codegen::emit_validator(v, &constraint_bodies, &constraint_asts, &temporal_asts).to_source());
-            generated.push('\n');
-        }
-    }
-    if generated.trim().is_empty() { return; }
-
-    let wrapped = format!("module __validators\n{}", generated);
-    match certo_parser::parse(&wrapped) {
-        Ok(mut gen_module) => {
-            if !combined_src.is_empty() && !combined_src.ends_with('\n') {
-                combined_src.push('\n');
-            }
-            let offset = combined_src.len() as u32;
-            for d in &mut gen_module.decls {
-                span_rewrite::offset_decl_spans(d, offset);
-            }
-            combined_src.push_str(&wrapped);
-            module.decls.extend(gen_module.decls);
-        }
-        Err(errs) => {
-            // A failure here is a compiler bug in the validator generator, not a
-            // user error — surface it clearly rather than silently dropping rules.
-            let diags: Vec<Diagnostic> = errs.iter()
-                .map(|e| Diagnostic::error("", format!("{}", e)).with_span(e.span))
-                .collect();
-            eprint!("{}", render_all(&diags, &wrapped, "<generated validator>", colour));
-            eprintln!("internal error: generated validator source failed to parse");
-            process::exit(1);
-        }
+    if let Err((wrapped, errs)) = certo_codegen::expand_validators(module, combined_src) {
+        // A failure here is a compiler bug in the validator generator, not a
+        // user error — surface it clearly rather than silently dropping rules.
+        let diags: Vec<Diagnostic> = errs.iter()
+            .map(|e| Diagnostic::error("", format!("{}", e)).with_span(e.span))
+            .collect();
+        eprint!("{}", render_all(&diags, &wrapped, "<generated validator>", colour));
+        eprintln!("internal error: generated validator source failed to parse");
+        process::exit(1);
     }
 }
 
@@ -1225,46 +1187,19 @@ fn expand_validators(module: &mut Module, colour: bool, combined_src: &mut Strin
 /// module contains only ordinary types and functions, so the rest of the
 /// pipeline needs no special state-machine handling.
 ///
-/// `combined_src` — see `expand_validators`'s own doc comment above (BACKLOG
-/// item 223); this function must run first so its own generated chunk lands
-/// first in the combined source, ahead of `expand_validators`'s.
+/// BACKLOG item 222 — see `expand_validators`'s own doc comment above; this
+/// is now also a thin wrapper over the shared `certo_codegen::expand`
+/// implementation, keeping this file's own exact previous render-and-exit
+/// behavior on failure. Must still run before `expand_validators` so its own
+/// generated chunk lands first in the combined source (BACKLOG item 223).
 fn expand_state_machines(module: &mut Module, colour: bool, combined_src: &mut String) {
-    use certo_ast::decl::Decl;
-    let mut generated = String::new();
-    let mut kept = Vec::with_capacity(module.decls.len());
-    for decl in std::mem::take(&mut module.decls) {
-        if let Decl::StateMachine(sm) = &decl.node {
-            generated.push_str(&certo_codegen::emit_state_machine(sm));
-            generated.push('\n');
-            // drop the original decl — it is fully expanded
-        } else {
-            kept.push(decl);
-        }
-    }
-    module.decls = kept;
-    if generated.trim().is_empty() { return; }
-
-    let wrapped = format!("module __statemachines\n{}", generated);
-    match certo_parser::parse(&wrapped) {
-        Ok(mut gen_module) => {
-            if !combined_src.is_empty() && !combined_src.ends_with('\n') {
-                combined_src.push('\n');
-            }
-            let offset = combined_src.len() as u32;
-            for d in &mut gen_module.decls {
-                span_rewrite::offset_decl_spans(d, offset);
-            }
-            combined_src.push_str(&wrapped);
-            module.decls.extend(gen_module.decls);
-        }
-        Err(errs) => {
-            let diags: Vec<Diagnostic> = errs.iter()
-                .map(|e| Diagnostic::error("", format!("{}", e)).with_span(e.span))
-                .collect();
-            eprint!("{}", render_all(&diags, &wrapped, "<generated state machine>", colour));
-            eprintln!("internal error: generated state-machine source failed to parse");
-            process::exit(1);
-        }
+    if let Err((wrapped, errs)) = certo_codegen::expand_state_machines(module, combined_src) {
+        let diags: Vec<Diagnostic> = errs.iter()
+            .map(|e| Diagnostic::error("", format!("{}", e)).with_span(e.span))
+            .collect();
+        eprint!("{}", render_all(&diags, &wrapped, "<generated state machine>", colour));
+        eprintln!("internal error: generated state-machine source failed to parse");
+        process::exit(1);
     }
 }
 

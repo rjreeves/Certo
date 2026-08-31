@@ -1293,18 +1293,18 @@ in isolation using the `ruleTest` block.
 
 ```certo
 ruleTest OrderSubmit.customer_active "passes for active customer" {
-    entity: Order { ...defaultOrder }
-    context: {
-        customer: Customer { ...defaultCustomer, status: Active }
+    entity: Order { ..defaultOrder }
+    context: OrderSubmitContext {
+        customer: Customer { ..defaultCustomer, status: Active }
         user:     defaultUser
     }
     expect: pass
 }
 
 ruleTest OrderSubmit.customer_active "fails for suspended customer" {
-    entity: Order { ...defaultOrder }
-    context: {
-        customer: Customer { ...defaultCustomer, status: Suspended }
+    entity: Order { ..defaultOrder }
+    context: OrderSubmitContext {
+        customer: Customer { ..defaultCustomer, status: Suspended }
         user:     defaultUser
     }
     expect: fail with OrderError.CustomerNotActive
@@ -1318,20 +1318,20 @@ Test all rules at once with a full context:
 ```certo
 validatorTest OrderSubmit "passes for valid order" {
     entity:  validDraftOrder
-    context: { customer: activeCustomer, user: salesUser }
+    context: OrderSubmitContext { customer: activeCustomer, user: salesUser }
     expect:  pass
 }
 
 validatorTest OrderSubmit "fails when credit limit exceeded" {
-    entity:  Order { ...validDraftOrder, total: Money(d"99999.00", GBP) }
-    context: { customer: Customer { ...activeCustomer, availableCredit: Money(d"100.00", GBP) }
+    entity:  Order { ..validDraftOrder, total: Money(d"99999.00", GBP) }
+    context: OrderSubmitContext { customer: Customer { ..activeCustomer, availableCredit: Money(d"100.00", GBP) }
                user: salesUser }
     expect:  fail with OrderError.CreditLimitExceeded
 }
 
 validatorTest OrderSubmit "admin bypasses credit limit" {
-    entity:  Order { ...validDraftOrder, total: Money(d"99999.00", GBP) }
-    context: { customer: Customer { ...activeCustomer, availableCredit: Money(d"100.00", GBP) }
+    entity:  Order { ..validDraftOrder, total: Money(d"99999.00", GBP) }
+    context: OrderSubmitContext { customer: Customer { ..activeCustomer, availableCredit: Money(d"100.00", GBP) }
                user: adminUser }
     expect:  pass
 }

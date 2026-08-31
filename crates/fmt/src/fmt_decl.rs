@@ -19,8 +19,8 @@ pub fn fmt_decl(decl: &Decl, indent: usize) -> String {
         Decl::Validator(v)      => fmt_validator(v, indent),
         Decl::Constraint(c)     => fmt_constraint(c),
         Decl::Temporal(t)       => fmt_temporal(t),
-        Decl::RuleTest(rt)      => fmt_rule_test(rt),
-        Decl::ValidatorTest(vt) => fmt_validator_test(vt),
+        Decl::RuleTest(rt)      => fmt_rule_test(rt, indent),
+        Decl::ValidatorTest(vt) => fmt_validator_test(vt, indent),
         Decl::View(v)           => fmt_view(v, indent),
         Decl::Form(f)           => fmt_form(f, indent),
         Decl::UiGenerate(g)     => fmt_ui_generate(g, indent),
@@ -289,13 +289,42 @@ fn fmt_temporal(t: &TemporalDecl) -> String {
     format!("{}temporal {} = {}", pub_, t.name.node, fmt_expr(&t.body.node, 0))
 }
 
-fn fmt_rule_test(rt: &RuleTestDecl) -> String {
+// BACKLOG item 222 — previously formatted both block kinds as a literal
+// `{ ... }` placeholder, destroying the real `entity`/`context`/`expect`
+// body on every `certo fmt` run instead of round-tripping it (unlike every
+// other block-bodied decl kind in this file). Mirrors `fmt_test_decl`'s own
+// `"kw \"name\" { ... }"` shape.
+fn fmt_rule_test(rt: &RuleTestDecl, indent: usize) -> String {
     let path: Vec<_> = rt.validator.iter().map(|s| s.node.as_str()).collect();
-    format!("ruleTest {} \"{}\" {{ ... }}", path.join("."), rt.label)
+    fmt_test_fixture_block(&format!("ruleTest {}", path.join(".")), &rt.label, &rt.entity.node, &rt.context.node, &rt.expect, indent)
 }
 
-fn fmt_validator_test(vt: &ValidatorTestDecl) -> String {
-    format!("validatorTest {} \"{}\" {{ ... }}", vt.validator.node, vt.label)
+fn fmt_validator_test(vt: &ValidatorTestDecl, indent: usize) -> String {
+    fmt_test_fixture_block(&format!("validatorTest {}", vt.validator.node), &vt.label, &vt.entity.node, &vt.context.node, &vt.expect, indent)
+}
+
+fn fmt_test_fixture_block(
+    header: &str, label: &str,
+    entity: &certo_ast::expr::Expr, context: &certo_ast::expr::Expr,
+    expect: &TestExpectation, indent: usize,
+) -> String {
+    let body_indent = ind(indent + 1);
+    let expect_str = match expect {
+        TestExpectation::Pass => "pass".to_string(),
+        TestExpectation::Fail { with: None } => "fail".to_string(),
+        TestExpectation::Fail { with: Some(e) } => format!("fail with {}", fmt_expr(&e.node, indent + 1)),
+    };
+    format!(
+        "{header} \"{label}\" {{\n\
+         {body_indent}entity: {entity}\n\
+         {body_indent}context: {context}\n\
+         {body_indent}expect: {expect}\n\
+         {close}}}",
+        entity = fmt_expr(entity, indent + 1),
+        context = fmt_expr(context, indent + 1),
+        expect = expect_str,
+        close = ind(indent),
+    )
 }
 
 // ------------------------------------------------------------------ //

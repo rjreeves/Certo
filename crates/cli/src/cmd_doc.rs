@@ -116,15 +116,28 @@ pub enum ItemKind {
     Type,
     Val,
     Var,
+    // BACKLOG item 222 — validator awareness. Same crude, line-based
+    // recognition already used for `fn`/`type`/`val`/`var` above (this
+    // scanner never parses a real AST); `Rule` is a *nested* declaration
+    // (inside a `validator { ... }` body) but gets picked up the same
+    // way `fn`/`type` already are regardless of nesting, matching the
+    // spec's own promise ("certo docs produces a rule catalogue from your
+    // validator declarations," docs/section-16-validators.md §16.11).
+    Validator,
+    Rule,
+    Constraint,
 }
 
 impl ItemKind {
     fn label(&self) -> &'static str {
         match self {
-            ItemKind::Function => "fn",
-            ItemKind::Type     => "type",
-            ItemKind::Val      => "val",
-            ItemKind::Var      => "var",
+            ItemKind::Function   => "fn",
+            ItemKind::Type       => "type",
+            ItemKind::Val        => "val",
+            ItemKind::Var        => "var",
+            ItemKind::Validator  => "validator",
+            ItemKind::Rule       => "rule",
+            ItemKind::Constraint => "constraint",
         }
     }
 }
@@ -175,7 +188,7 @@ pub fn extract_doc_items(src: &str) -> Vec<DocItem> {
 }
 
 fn should_always_include(kind: &ItemKind) -> bool {
-    matches!(kind, ItemKind::Function | ItemKind::Type)
+    matches!(kind, ItemKind::Function | ItemKind::Type | ItemKind::Validator | ItemKind::Rule | ItemKind::Constraint)
 }
 
 /// Try to parse a declaration line and return a partial DocItem (no doc/anchor yet).
@@ -214,6 +227,31 @@ fn try_parse_decl_line(trimmed: &str) -> Option<DocItem> {
         let name = extract_word_after(s, "var ")?;
         let name = name.split([':']).next()?.trim().to_string();
         return Some(DocItem { kind: ItemKind::Var, name, signature: sig, doc: String::new(), anchor: String::new() });
+    }
+
+    // BACKLOG item 222 — validator awareness.
+    if s.starts_with("validator ") {
+        let sig = trimmed.to_string();
+        let name = extract_word_after(s, "validator ")?;
+        let name = name.trim().to_string();
+        return Some(DocItem { kind: ItemKind::Validator, name, signature: sig, doc: String::new(), anchor: String::new() });
+    }
+
+    if s.starts_with("constraint ") {
+        let sig = trimmed.to_string();
+        let name = extract_word_after(s, "constraint ")?;
+        let name = name.split(['=']).next()?.trim().to_string();
+        return Some(DocItem { kind: ItemKind::Constraint, name, signature: sig, doc: String::new(), anchor: String::new() });
+    }
+
+    // `rule name {` — nested inside a `validator { ... }` body; this
+    // scanner has no notion of nesting for `fn`/`type` either, so a rule
+    // is picked up the same crude, line-based way.
+    if s.starts_with("rule ") {
+        let sig = trimmed.to_string();
+        let name = extract_word_after(s, "rule ")?;
+        let name = name.trim().to_string();
+        return Some(DocItem { kind: ItemKind::Rule, name, signature: sig, doc: String::new(), anchor: String::new() });
     }
 
     None
@@ -294,6 +332,9 @@ nav .badge-fn   {{ background: #ede9fe; color: #7c3aed; }}
 nav .badge-type {{ background: #fef3c7; color: #b45309; }}
 nav .badge-val  {{ background: #d1fae5; color: #065f46; }}
 nav .badge-var  {{ background: #fce7f3; color: #9d174d; }}
+nav .badge-validator  {{ background: #dbeafe; color: #1d4ed8; }}
+nav .badge-rule       {{ background: #e0e7ff; color: #4338ca; }}
+nav .badge-constraint {{ background: #fee2e2; color: #b91c1c; }}
 main {{
   flex: 1;
   padding: 40px 60px;
@@ -381,10 +422,13 @@ footer {{
 fn render_sidebar(items: &[DocItem]) -> String {
     items.iter().map(|item| {
         let badge_class = match item.kind {
-            ItemKind::Function => "badge-fn",
-            ItemKind::Type     => "badge-type",
-            ItemKind::Val      => "badge-val",
-            ItemKind::Var      => "badge-var",
+            ItemKind::Function   => "badge-fn",
+            ItemKind::Type       => "badge-type",
+            ItemKind::Val        => "badge-val",
+            ItemKind::Var        => "badge-var",
+            ItemKind::Validator  => "badge-validator",
+            ItemKind::Rule       => "badge-rule",
+            ItemKind::Constraint => "badge-constraint",
         };
         format!(
             "    <li><a href=\"#{anchor}\"><span class=\"badge {badge_class}\">{kind}</span>{name}</a></li>",
@@ -399,10 +443,13 @@ fn render_sidebar(items: &[DocItem]) -> String {
 fn render_content(items: &[DocItem]) -> String {
     items.iter().map(|item| {
         let badge_class = match item.kind {
-            ItemKind::Function => "badge-fn",
-            ItemKind::Type     => "badge-type",
-            ItemKind::Val      => "badge-val",
-            ItemKind::Var      => "badge-var",
+            ItemKind::Function   => "badge-fn",
+            ItemKind::Type       => "badge-type",
+            ItemKind::Val        => "badge-val",
+            ItemKind::Var        => "badge-var",
+            ItemKind::Validator  => "badge-validator",
+            ItemKind::Rule       => "badge-rule",
+            ItemKind::Constraint => "badge-constraint",
         };
         let doc_html = if item.doc.is_empty() {
             r#"<p class="no-doc">No documentation.</p>"#.to_string()
@@ -480,4 +527,55 @@ fn html_escape(s: &str) -> String {
      .replace('<', "&lt;")
      .replace('>', "&gt;")
      .replace('"', "&quot;")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ------------------------------------------------------------------ //
+    // BACKLOG item 222 — `certo doc` validator/rule/constraint awareness.
+    // ------------------------------------------------------------------ //
+
+    #[test]
+    fn validator_declaration_is_recognized() {
+        let src = "validator OrderSubmit for Order errors OrderError {\n    rule active { require true else OrderError.X }\n}\n";
+        let items = extract_doc_items(src);
+        assert!(items.iter().any(|i| i.kind == ItemKind::Validator && i.name == "OrderSubmit"),
+            "expected an OrderSubmit validator item, got: {:?}", items.iter().map(|i| (&i.kind, &i.name)).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn rule_declaration_nested_in_a_validator_is_recognized() {
+        let src = "validator OrderSubmit for Order errors OrderError {\n    rule customer_active { require true else OrderError.X }\n}\n";
+        let items = extract_doc_items(src);
+        assert!(items.iter().any(|i| i.kind == ItemKind::Rule && i.name == "customer_active"),
+            "expected a customer_active rule item, got: {:?}", items.iter().map(|i| (&i.kind, &i.name)).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn constraint_declaration_is_recognized() {
+        let src = "constraint UserIsAdmin = user.role == Admin\n";
+        let items = extract_doc_items(src);
+        assert!(items.iter().any(|i| i.kind == ItemKind::Constraint && i.name == "UserIsAdmin"),
+            "expected a UserIsAdmin constraint item, got: {:?}", items.iter().map(|i| (&i.kind, &i.name)).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn validator_rule_constraint_are_always_included_without_a_doc_comment() {
+        // Matches fn/type's own existing convention — a rule catalogue is
+        // useful even undocumented.
+        let src = "constraint Foo = true\nvalidator V for Order errors E {\n    rule r { require true else E.X }\n}\n";
+        let items = extract_doc_items(src);
+        assert_eq!(items.len(), 3, "expected all 3 items included with no doc comments, got: {:?}",
+            items.iter().map(|i| (&i.kind, &i.name)).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn documented_validator_keeps_its_doc_comment() {
+        let src = "/// Validates a submitted order.\nvalidator OrderSubmit for Order errors OrderError {\n}\n";
+        let items = extract_doc_items(src);
+        let v = items.iter().find(|i| i.kind == ItemKind::Validator).expect("expected a validator item");
+        assert_eq!(v.doc, "Validates a submitted order.");
+    }
 }

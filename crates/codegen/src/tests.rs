@@ -1272,7 +1272,7 @@ fn uuid_equality_uses_certo_uuid_eq_not_bare_c_equals() {
 // Phase 5 — Validator source generation
 // ------------------------------------------------------------------ //
 
-fn gen_validator(src: &str) -> String {
+fn gen_validator_output(src: &str) -> crate::ValidatorOutput {
     let module = parse(src).expect("parse error");
     let v = module.decls.iter().find_map(|d| {
         if let Decl::Validator(v) = &d.node { Some(v) } else { None }
@@ -1286,7 +1286,11 @@ fn gen_validator(src: &str) -> String {
     let temporal_asts: HashMap<&str, &certo_ast::span::S<certo_ast::expr::Expr>> = module.decls.iter()
         .filter_map(|d| if let Decl::Temporal(t) = &d.node { Some((t.name.node.as_str(), &t.body)) } else { None })
         .collect();
-    emit_validator(v, &constraint_bodies, &constraint_asts, &temporal_asts).to_source()
+    emit_validator(v, &constraint_bodies, &constraint_asts, &temporal_asts)
+}
+
+fn gen_validator(src: &str) -> String {
+    gen_validator_output(src).to_source()
 }
 
 fn gen_trigger_sql(src: &str) -> String {
@@ -1544,14 +1548,19 @@ fn override_rule_never_appears_as_its_own_failure() {
     // Confirmed against the spec's own flagship example: an override
     // rule's own require/else is purely a skip-switch for the rule it
     // names — it must never independently contribute a failure. `OE.NA`
-    // (the override rule's own error) must not appear anywhere in either
-    // generated function.
+    // (the override rule's own error) must not appear in `validate`/
+    // `validateAll` specifically (BACKLOG item 222's own new per-rule
+    // functions are a real, separate exception — `ruleTest` explicitly
+    // tests a rule, including an override rule, "in isolation," so its own
+    // standalone `adminOverride` function legitimately does reference
+    // `OE.NA` — that's not the bug this test guards against).
     let src = "module A\nvalidator V for Order errors OE {\n\
         rule creditLimit { require order.total <= 100 else OE.OverLimit }\n\
         rule adminOverride { overrides creditLimit priority 110 require isAdmin else OE.NA }\n\
     }";
-    let out = gen_validator(src);
-    assert_not_contains(&out, "OE.NA");
+    let out = gen_validator_output(src);
+    assert_not_contains(&out.validate_fn, "OE.NA");
+    assert_not_contains(&out.validate_all_fn, "OE.NA");
 }
 
 #[test]
@@ -1564,6 +1573,66 @@ fn overridden_rule_gates_on_the_overriders_negated_condition() {
     // Both validate and validateAll must guard creditLimit's own check with
     // `!(isAdmin)` — it only fires when the override isn't active.
     assert_contains(&out, "!(isAdmin)");
+}
+
+// ------------------------------------------------------------------ //
+// BACKLOG item 222 — per-rule callable functions, for `ruleTest`.
+// ------------------------------------------------------------------ //
+
+#[test]
+fn each_named_rule_gets_its_own_standalone_function() {
+    let src = "module A\nvalidator V for Order errors OE {\n\
+        rule creditLimit { require order.total <= 100 else OE.OverLimit }\n\
+        rule inStock { require order.inStock else OE.OutOfStock }\n\
+    }";
+    let out = gen_validator_output(src);
+    assert_eq!(out.rule_fns.len(), 2, "expected one function per rule");
+    assert!(out.rule_fns.iter().any(|f| f.contains("fn V_creditLimit(")), "missing V_creditLimit\n{:?}", out.rule_fns);
+    assert!(out.rule_fns.iter().any(|f| f.contains("fn V_inStock(")), "missing V_inStock\n{:?}", out.rule_fns);
+}
+
+#[test]
+fn rule_function_is_isolated_if_else_matching_its_own_require_else() {
+    let src = "module A\nvalidator V for Order errors OE {\n\
+        rule creditLimit { require order.total <= 100 else OE.OverLimit }\n\
+    }";
+    let out = gen_validator_output(src);
+    let f = &out.rule_fns[0];
+    assert_contains(f, "if order.total <= 100 then Ok(unit) else Err(OE.OverLimit)");
+}
+
+#[test]
+fn override_rule_still_gets_its_own_isolated_rule_function() {
+    // BACKLOG item 218's own "never independently contributes to validate/
+    // validateAll" semantics must NOT leak into rule-isolation testing —
+    // an override rule's own require/else is exactly what `ruleTest` needs
+    // to exercise "in isolation" (spec §16.12's own wording).
+    let src = "module A\nvalidator V for Order errors OE {\n\
+        rule creditLimit { require order.total <= 100 else OE.OverLimit }\n\
+        rule adminOverride { overrides creditLimit priority 110 require isAdmin else OE.NA }\n\
+    }";
+    let out = gen_validator_output(src);
+    assert!(out.rule_fns.iter().any(|f| f.contains("fn V_adminOverride(") && f.contains("OE.NA")),
+        "expected adminOverride's own standalone function to reference OE.NA, got: {:?}", out.rule_fns);
+}
+
+#[test]
+fn rule_function_takes_context_param_when_the_validator_declares_one() {
+    let src = "module A\nvalidator V for Order errors OE {\n\
+        context { customer: Customer }\n\
+        rule active { require customer.status == Active else OE.NotActive }\n\
+    }";
+    let out = gen_validator_output(src);
+    assert_contains(&out.rule_fns[0], "fn V_active(order: Order, ctx: VContext): Result<Unit, OE>");
+}
+
+#[test]
+fn rule_function_has_no_context_param_when_the_validator_declares_none() {
+    let src = "module A\nvalidator V for Order errors OE {\n\
+        rule positive { require order.total > 0 else OE.Invalid }\n\
+    }";
+    let out = gen_validator_output(src);
+    assert_contains(&out.rule_fns[0], "fn V_positive(order: Order): Result<Unit, OE>");
 }
 
 #[test]

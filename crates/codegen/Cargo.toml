@@ -9,7 +9,10 @@ certo-typeck = { path = "../typeck" }
 certo-hir    = { path = "../hir" }
 certo-mir    = { path = "../mir" }
 certo-fmt    = { path = "../fmt" }
+# BACKLOG item 222 — promoted from a dev-dependency: `expand::expand_validators`/
+# `expand_state_machines` re-parse their own generated source, so a real
+# (non-test) dependency on the parser is now needed.
+certo-parser = { path = "../parser" }
 
 [dev-dependencies]
-certo-parser  = { path = "../parser" }
 certo-resolve = { path = "../resolve" }
