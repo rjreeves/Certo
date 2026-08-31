@@ -1095,6 +1095,74 @@ fn self_referential_sum_type_does_not_crash_codegen() {
     assert_not_contains(&c, "certo_eq_Tree");
 }
 
+// ------------------------------------------------------------------ //
+// BACKLOG item 277 — recursive sum types couldn't actually be constructed
+// or used at all (item 259 only fixed the compiler crash).
+// ------------------------------------------------------------------ //
+
+#[test]
+fn self_referential_field_is_stored_as_a_pointer_not_inline() {
+    let c = codegen(
+        "module A\ntype Tree = | Leaf | Node(value: Int, left: Tree, right: Tree)\n\
+         fn f(): Tree = Leaf");
+    assert_contains(&c, "struct Tree* left");
+    assert_contains(&c, "struct Tree* right");
+    assert_not_contains(&c, "Tree left;");
+    assert_not_contains(&c, "Tree right;");
+}
+
+#[test]
+fn self_referential_sum_type_gets_a_named_struct_tag() {
+    // Needed so `struct Tree*` (the self-ref field's own type) can name this
+    // struct from inside its own body — the eventual typedef alias `Tree`
+    // isn't a valid type name until the whole `typedef ... ;` completes.
+    let c = codegen(
+        "module A\ntype Tree = | Leaf | Node(value: Int, left: Tree, right: Tree)\n\
+         fn f(): Tree = Leaf");
+    assert_contains(&c, "typedef struct Tree {");
+}
+
+#[test]
+fn non_recursive_sum_type_fields_stay_by_value_not_pointers() {
+    // The struct tag (`typedef struct Shape { ... }`, needed so a *self-
+    // referential* field elsewhere can name it from inside its own body) is
+    // added unconditionally — harmless for an ordinary, non-recursive type.
+    // What must stay unaffected is the field representation itself: no
+    // field here is self-referential, so both stay plain by-value doubles,
+    // never pointers.
+    let c = codegen(
+        "module A\ntype Shape = | Circle(radius: Float) | Square(side: Float)\n\
+         fn f(): Shape = Circle(1.0)");
+    assert_contains(&c, "double radius;");
+    assert_contains(&c, "double side;");
+    assert_not_contains(&c, "double* radius");
+    assert_not_contains(&c, "double* side");
+}
+
+#[test]
+fn ordinary_nested_field_of_the_same_type_elsewhere_stays_by_value() {
+    // A record whose own field happens to be the *same* recursive type is
+    // not itself self-referential (Forest doesn't cycle back to Forest) —
+    // must stay a plain by-value field, not a pointer.
+    let c = codegen(
+        "module A\ntype Tree = | Leaf | Node(value: Int, left: Tree, right: Tree)\n\
+         type Forest = { first: Tree, second: Tree }\n\
+         fn f(): Forest = Forest { first: Leaf, second: Leaf }");
+    assert_contains(&c, "Tree first;");
+    assert_contains(&c, "Tree second;");
+    assert_not_contains(&c, "Tree* first");
+    assert_not_contains(&c, "Tree* second");
+}
+
+#[test]
+fn self_referential_constructor_still_correctly_initializes_the_non_recursive_field() {
+    let c = codegen(
+        "module A\ntype Tree = | Leaf | Node(value: Int, left: Tree, right: Tree)\n\
+         fn f(): Tree = Leaf");
+    assert_contains(&c, "int64_t value");
+    assert_not_contains(&c, "int64_t* value");
+}
+
 #[test]
 fn generic_record_is_not_given_an_eq_function() {
     let c = codegen(

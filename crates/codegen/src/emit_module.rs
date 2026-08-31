@@ -106,7 +106,7 @@ pub fn emit_module(module: &Module, opts: &CodegenOptions) -> String {
                 TypeBody::Record(rec) => {
                     writeln!(out, "typedef struct {{").unwrap();
                     for f in &rec.fields {
-                        let cty = field_c_ty(&f.ty.node, &type_params);
+                        let cty = field_c_ty(&f.ty.node, &type_params, None);
                         writeln!(out, "    {} {};", cty, f.name.node).unwrap();
                     }
                     writeln!(out, "}} {};", c_ident(&t.name.node)).unwrap();
@@ -153,7 +153,7 @@ pub fn emit_module(module: &Module, opts: &CodegenOptions) -> String {
                     let tname = c_ident(&t.name.node);
                     let cname = crate::emit_mir::c_fn_name(&t.name.node);
                     let params: Vec<String> = rec.fields.iter().map(|f| {
-                        let cty = field_c_ty(&f.ty.node, &type_params);
+                        let cty = field_c_ty(&f.ty.node, &type_params, None);
                         format!("{cty} {}", f.name.node)
                     }).collect();
                     let inits: Vec<String> = rec.fields.iter()
@@ -180,7 +180,16 @@ pub fn emit_module(module: &Module, opts: &CodegenOptions) -> String {
                             writeln!(out, "    {}_{},", tname, c_ident(&v.name.node)).unwrap();
                         }
                         writeln!(out, "}} {}_tag_t;", tname).unwrap();
-                        writeln!(out, "typedef struct {{").unwrap();
+                        // BACKLOG item 277 — a named struct tag (not just the
+                        // eventual typedef alias), so a *direct* self-
+                        // referential field further down (`struct {tname}*`)
+                        // can reference this same struct from inside its own
+                        // body — the typedef name `{tname}` itself isn't a
+                        // valid type until this whole `typedef ... ;`
+                        // completes. Harmless to add unconditionally: a
+                        // non-recursive payload type never references the
+                        // tag at all.
+                        writeln!(out, "typedef struct {} {{", tname).unwrap();
                         writeln!(out, "    {}_tag_t tag;", tname).unwrap();
                         writeln!(out, "    union {{").unwrap();
                         for v in variants {
@@ -189,7 +198,7 @@ pub fn emit_module(module: &Module, opts: &CodegenOptions) -> String {
                                 for (i, f) in v.fields.iter().enumerate() {
                                     let fname = f.name.as_ref().map(|n| n.node.clone())
                                         .unwrap_or_else(|| format!("f{}", i));
-                                    let cty = field_c_ty(&f.ty.node, &type_params);
+                                    let cty = field_c_ty(&f.ty.node, &type_params, Some(t.name.node.as_str()));
                                     writeln!(out, "            {} {};", cty, fname).unwrap();
                                 }
                                 writeln!(out, "        }} {};", c_ident(&v.name.node).to_lowercase()).unwrap();
@@ -259,7 +268,7 @@ pub fn emit_module(module: &Module, opts: &CodegenOptions) -> String {
                             let cname = crate::emit_mir::c_fn_name(&v.name.node);
                             let params: Vec<String> = v.fields.iter().enumerate().map(|(i, f)| {
                                 let fname = f.name.as_ref().map(|n| n.node.clone()).unwrap_or_else(|| format!("f{i}"));
-                                let cty = field_c_ty(&f.ty.node, &type_params);
+                                let cty = field_c_ty(&f.ty.node, &type_params, Some(t.name.node.as_str()));
                                 format!("{cty} {fname}")
                             }).collect();
                             let inits: Vec<String> = v.fields.iter().enumerate().map(|(i, f)| {
@@ -302,7 +311,7 @@ pub fn emit_module(module: &Module, opts: &CodegenOptions) -> String {
     let mut lifted_fns: Vec<certo_mir::MirFn> = Vec::new();
     let fn_mirs: Vec<(certo_mir::MirFn, &str)> = hir.items.iter()
         .filter_map(|item| if let HirItem::Fn(f) = item {
-            let (mir, lifted) = lower_fn(f, &hir.record_field_types, &hir.variant_field_types, &hir.fn_param_tys, &hir.fn_ret_tys);
+            let (mir, lifted) = lower_fn(f, &hir.record_field_types, &hir.variant_field_types, &hir.fn_param_tys, &hir.fn_ret_tys, &hir.variant_to_type);
             lifted_fns.extend(lifted);
             Some((mir, f.name.as_str()))
         } else {
@@ -353,7 +362,7 @@ pub fn emit_module(module: &Module, opts: &CodegenOptions) -> String {
                     body: Some(c.value.clone()),
                     span: c.span,
                 };
-                let (mir, lifted) = lower_fn(&init_fn, &hir.record_field_types, &hir.variant_field_types, &hir.fn_param_tys, &hir.fn_ret_tys);
+                let (mir, lifted) = lower_fn(&init_fn, &hir.record_field_types, &hir.variant_field_types, &hir.fn_param_tys, &hir.fn_ret_tys, &hir.variant_to_type);
                 lifted_fns.extend(lifted);
                 const_init_fns.push((c.name.clone(), mir));
             }
@@ -871,12 +880,32 @@ fn ast_ty_to_c_str(te: &certo_ast::types::TypeExpr) -> String {
 /// alone has no way to tell that apart from a real (and here, undeclared) type
 /// name. Its C storage is `void*` regardless of what it's instantiated to,
 /// matching how `crates/mir/src/lower.rs` heap-boxes/unboxes such fields.
-fn field_c_ty(te: &certo_ast::types::TypeExpr, type_params: &[String]) -> String {
+/// `self_ref_name` is `Some(parent_type_name)` only when called for a
+/// sum-type variant's own field — BACKLOG item 277: a *direct* self-
+/// referential field (e.g. `Node(left: Tree, right: Tree)`, where `left`'s
+/// declared type is `Tree`, `Node`'s own enclosing type) can't be embedded
+/// inline-by-value the way an ordinary nested field is — that's an
+/// infinite-size C struct — so it's stored as a pointer instead. The value
+/// itself is never exposed as a raw pointer to Certo source: construction
+/// heap-boxes it (MIR's call-site argument lowering) and pattern-matching
+/// dereferences it back to a plain value (MIR's field-binding lowering).
+fn field_c_ty(te: &certo_ast::types::TypeExpr, type_params: &[String], self_ref_name: Option<&str>) -> String {
     if let certo_ast::types::TypeExpr::Named { path, args, .. } = te {
         if args.is_empty() && path.segments.len() == 1 {
             if let Some(seg) = path.segments.first() {
                 if type_params.iter().any(|p| p == &seg.node) {
                     return "void*".into();
+                }
+                if self_ref_name == Some(seg.node.as_str()) {
+                    // `struct {name}*`, not the bare `{name}*` typedef alias
+                    // — at this point in the generated C, we're still
+                    // *inside* the `typedef struct {name} { ... } {name};`
+                    // that declares this very type, so only its struct tag
+                    // (added specifically for this case, see the `TypeBody::
+                    // Sum` arm above) is a valid type name yet; the typedef
+                    // alias itself isn't usable until that whole statement
+                    // completes.
+                    return format!("struct {}*", c_ident(&seg.node));
                 }
             }
         }

@@ -1034,6 +1034,7 @@ pub fn lower_module(module: &Module) -> Result<HirModule, Vec<LowerError>> {
             variant_field_types: cx.variant_field_types,
             fn_param_tys:        cx.fn_param_tys,
             fn_ret_tys:          cx.fn_ret_types,
+            variant_to_type:     cx.variant_to_type,
         })
     } else {
         Err(cx.errors)

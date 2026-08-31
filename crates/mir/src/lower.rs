@@ -56,6 +56,12 @@ struct Builder {
     /// when a call needs its return value unboxed, generalizing the
     /// previous `RAW_RETURN_CALLEES` stdlib-only special case below.
     fn_ret_tys: std::collections::HashMap<String, Ty>,
+    /// Sum variant name → its own enclosing/parent type name (BACKLOG item
+    /// 277) — lets a constructor call/pattern-match know whether one of its
+    /// own declared field positions is a *direct* self-reference (the field's
+    /// type is the same as the variant's own parent type), which needs
+    /// heap-boxing/unboxing since it's stored as a pointer, not inline, in C.
+    variant_to_type: std::collections::HashMap<String, String>,
     /// The span of the Certo *statement* currently being lowered (BACKLOG
     /// item 126) — updated only at statement boundaries (`lower_stmt`, a
     /// block's tail expression, a function/lambda's own top-level body),
@@ -85,6 +91,7 @@ impl Builder {
         variant_field_types: std::collections::HashMap<String, Vec<Ty>>,
         fn_param_tys:        std::collections::HashMap<String, Vec<Ty>>,
         fn_ret_tys:          std::collections::HashMap<String, Ty>,
+        variant_to_type:     std::collections::HashMap<String, String>,
     ) -> Self {
         let entry = BasicBlock { id: 0, ..Default::default() };
         Builder {
@@ -108,6 +115,7 @@ impl Builder {
             variant_field_types,
             fn_param_tys,
             fn_ret_tys,
+            variant_to_type,
             current_span: Span::DUMMY,
             cancel_check_local: None,
         }
@@ -221,8 +229,9 @@ pub fn lower_fn(
     variant_field_types: &std::collections::HashMap<String, Vec<Ty>>,
     fn_param_tys:        &std::collections::HashMap<String, Vec<Ty>>,
     fn_ret_tys:          &std::collections::HashMap<String, Ty>,
+    variant_to_type:     &std::collections::HashMap<String, String>,
 ) -> (MirFn, Vec<MirFn>) {
-    let mut b = Builder::new(&f.name, record_field_types.clone(), variant_field_types.clone(), fn_param_tys.clone(), fn_ret_tys.clone());
+    let mut b = Builder::new(&f.name, record_field_types.clone(), variant_field_types.clone(), fn_param_tys.clone(), fn_ret_tys.clone(), variant_to_type.clone());
 
     // Declare params as locals (index 0 = return slot, type patched below).
     let ret_slot = b.declare_local("_ret", Ty::Error);
@@ -372,7 +381,7 @@ fn wrap_named_fn_as_closure(name: &str, real_param_tys: &[Ty], real_ret_ty: &Ty,
     b.lambda_count += 1;
     let wrap_name = format!("__fnref_{}_{}", b.fn_name, idx);
 
-    let mut lb = Builder::new(&wrap_name, b.record_field_types.clone(), b.variant_field_types.clone(), b.fn_param_tys.clone(), b.fn_ret_tys.clone());
+    let mut lb = Builder::new(&wrap_name, b.record_field_types.clone(), b.variant_field_types.clone(), b.fn_param_tys.clone(), b.fn_ret_tys.clone(), b.variant_to_type.clone());
     let ret_slot = lb.declare_local("_ret", real_ret_ty.clone());
     let _env_param = lb.declare_local("_env", Ty::Error); // ignored — a named function never captures
 
@@ -428,7 +437,7 @@ fn wrap_named_fn_as_erased_closure(name: &str, real_param_tys: &[Ty], real_ret_t
     b.lambda_count += 1;
     let wrap_name = format!("__fnref_erased_{}_{}", b.fn_name, idx);
 
-    let mut lb = Builder::new(&wrap_name, b.record_field_types.clone(), b.variant_field_types.clone(), b.fn_param_tys.clone(), b.fn_ret_tys.clone());
+    let mut lb = Builder::new(&wrap_name, b.record_field_types.clone(), b.variant_field_types.clone(), b.fn_param_tys.clone(), b.fn_ret_tys.clone(), b.variant_to_type.clone());
     let ret_slot = lb.declare_local("_ret", Ty::Var(0));
     let _env_param = lb.declare_local("_env", Ty::Error);
 
@@ -517,7 +526,7 @@ fn lower_compose_call(f_expr: &HirExpr, g_expr: &HirExpr, b: &mut Builder) -> Op
     b.lambda_count += 1;
     let wrap_name = format!("__compose_{}_{}", b.fn_name, idx);
 
-    let mut lb = Builder::new(&wrap_name, b.record_field_types.clone(), b.variant_field_types.clone(), b.fn_param_tys.clone(), b.fn_ret_tys.clone());
+    let mut lb = Builder::new(&wrap_name, b.record_field_types.clone(), b.variant_field_types.clone(), b.fn_param_tys.clone(), b.fn_ret_tys.clone(), b.variant_to_type.clone());
     let ret_slot = lb.declare_local("_ret", c_ty.clone());
     let env_param = lb.declare_local("_env", Ty::Error);
     let x_param = lb.declare_local("_x", a_ty.clone());
@@ -589,7 +598,7 @@ fn lower_const_call(a_expr: &HirExpr, b: &mut Builder) -> Operand {
     b.lambda_count += 1;
     let wrap_name = format!("__const_{}_{}", b.fn_name, idx);
 
-    let mut lb = Builder::new(&wrap_name, b.record_field_types.clone(), b.variant_field_types.clone(), b.fn_param_tys.clone(), b.fn_ret_tys.clone());
+    let mut lb = Builder::new(&wrap_name, b.record_field_types.clone(), b.variant_field_types.clone(), b.fn_param_tys.clone(), b.fn_ret_tys.clone(), b.variant_to_type.clone());
     let ret_slot = lb.declare_local("_ret", a_ty.clone());
     let env_param = lb.declare_local("_env", Ty::Error);
     let _ignored_param = lb.declare_local("_ignored", Ty::Var(0));
@@ -644,7 +653,7 @@ fn lower_flip_call(f_expr: &HirExpr, b: &mut Builder) -> Operand {
     let idx1 = b.lambda_count;
     b.lambda_count += 1;
     let inner_name = format!("__flip_inner_{}_{}", b.fn_name, idx1);
-    let mut ib = Builder::new(&inner_name, b.record_field_types.clone(), b.variant_field_types.clone(), b.fn_param_tys.clone(), b.fn_ret_tys.clone());
+    let mut ib = Builder::new(&inner_name, b.record_field_types.clone(), b.variant_field_types.clone(), b.fn_param_tys.clone(), b.fn_ret_tys.clone(), b.variant_to_type.clone());
     let inner_ret = ib.declare_local("_ret", c_ty.clone());
     let inner_env_param = ib.declare_local("_env", Ty::Error);
     let x_param = ib.declare_local("_x", a_ty.clone());
@@ -674,7 +683,7 @@ fn lower_flip_call(f_expr: &HirExpr, b: &mut Builder) -> Operand {
     let idx2 = b.lambda_count;
     b.lambda_count += 1;
     let outer_name = format!("__flip_outer_{}_{}", b.fn_name, idx2);
-    let mut ob = Builder::new(&outer_name, b.record_field_types.clone(), b.variant_field_types.clone(), b.fn_param_tys.clone(), b.fn_ret_tys.clone());
+    let mut ob = Builder::new(&outer_name, b.record_field_types.clone(), b.variant_field_types.clone(), b.fn_param_tys.clone(), b.fn_ret_tys.clone(), b.variant_to_type.clone());
     let outer_ret = ob.declare_local("_ret", inner_closure_ty.clone());
     let outer_env_param = ob.declare_local("_env", Ty::Error);
     let y_param = ob.declare_local("_y", b_ty.clone());
@@ -739,7 +748,7 @@ fn lower_sort_by_call(list_expr: &HirExpr, key_expr: &HirExpr, b: &mut Builder) 
     b.lambda_count += 1;
     let wrap_name = format!("__sort_by_cmp_{}_{}", b.fn_name, idx);
 
-    let mut lb = Builder::new(&wrap_name, b.record_field_types.clone(), b.variant_field_types.clone(), b.fn_param_tys.clone(), b.fn_ret_tys.clone());
+    let mut lb = Builder::new(&wrap_name, b.record_field_types.clone(), b.variant_field_types.clone(), b.fn_param_tys.clone(), b.fn_ret_tys.clone(), b.variant_to_type.clone());
     // `CertoCmp` returns a plain `int64_t`, not the generic boxed-`Var(0)`
     // convention `lower_lambda_boxed`'s own return uses — a real, narrower
     // type is fine here since `certo_list_sort`'s C body only ever treats
@@ -877,7 +886,7 @@ fn lower_sum_by_call(list_expr: &HirExpr, key_expr: &HirExpr, b: &mut Builder) -
     b.lambda_count += 1;
     let wrap_name = format!("__sum_by_{}_{}", b.fn_name, idx);
 
-    let mut lb = Builder::new(&wrap_name, b.record_field_types.clone(), b.variant_field_types.clone(), b.fn_param_tys.clone(), b.fn_ret_tys.clone());
+    let mut lb = Builder::new(&wrap_name, b.record_field_types.clone(), b.variant_field_types.clone(), b.fn_param_tys.clone(), b.fn_ret_tys.clone(), b.variant_to_type.clone());
     let ret_slot = lb.declare_local("_ret", n_ty.clone());
     let list_param = lb.declare_local("_list", Ty::List(Box::new(t_ty.clone())));
     let key_param = lb.declare_local("_key", key_ty.clone());
@@ -1009,7 +1018,7 @@ fn lower_lambda_boxed(params: &[certo_hir::HirParam], body: &HirExpr, captures: 
     let capture_tys = capture_types(captures, b);
     let env = build_capture_env(captures, &capture_tys, b);
 
-    let mut lb = Builder::new(&lam_name, b.record_field_types.clone(), b.variant_field_types.clone(), b.fn_param_tys.clone(), b.fn_ret_tys.clone());
+    let mut lb = Builder::new(&lam_name, b.record_field_types.clone(), b.variant_field_types.clone(), b.fn_param_tys.clone(), b.fn_ret_tys.clone(), b.variant_to_type.clone());
     let ret_slot = lb.declare_local("_ret", Ty::Var(0));
     let env_param = lb.declare_local("_env", Ty::Error);
 
@@ -1081,7 +1090,7 @@ fn lower_named_fn_boxed(name: &str, real_param_tys: &[Ty], real_ret_ty: &Ty, b: 
     b.lambda_count += 1;
     let wrap_name = format!("__fnref_{}_{}_boxed", b.fn_name, idx);
 
-    let mut lb = Builder::new(&wrap_name, b.record_field_types.clone(), b.variant_field_types.clone(), b.fn_param_tys.clone(), b.fn_ret_tys.clone());
+    let mut lb = Builder::new(&wrap_name, b.record_field_types.clone(), b.variant_field_types.clone(), b.fn_param_tys.clone(), b.fn_ret_tys.clone(), b.variant_to_type.clone());
     let ret_slot = lb.declare_local("_ret", Ty::Var(0));
     // A named function reference never captures anything, but the
     // generated wrapper's own signature must still match every other
@@ -1148,7 +1157,7 @@ fn lift_spawn_body(body: &HirExpr, captures: &[LocalId], b: &mut Builder) -> (St
     let capture_tys = capture_types(captures, b);
     let arg_ops: Vec<Operand> = captures.iter().map(|cid| Operand::Local(b.get_local(*cid))).collect();
 
-    let mut lb = Builder::new(&fn_name, b.record_field_types.clone(), b.variant_field_types.clone(), b.fn_param_tys.clone(), b.fn_ret_tys.clone());
+    let mut lb = Builder::new(&fn_name, b.record_field_types.clone(), b.variant_field_types.clone(), b.fn_param_tys.clone(), b.fn_ret_tys.clone(), b.variant_to_type.clone());
     let ret_slot = lb.declare_local("_ret", Ty::Error);
     for (cid, ty) in captures.iter().zip(&capture_tys) {
         lb.map_hir_local(*cid, "_cap", ty.clone());
@@ -1541,6 +1550,17 @@ fn lower_expr(expr: &HirExpr, b: &mut Builder) -> Operand {
                 HirExprKind::Global(name) => b.fn_param_tys.get(name).cloned(),
                 _ => None,
             };
+            // BACKLOG item 277 — this call's own enclosing sum type, if
+            // `func` is a variant constructor (e.g. `Node` -> `Tree`). Lets
+            // the arg-lowering closure below detect a *direct* self-
+            // referential field position (a declared field typed as the
+            // same type currently being constructed) and heap-box it —
+            // it's stored as a pointer, not inline, in C, since an inline
+            // self-referential field would be an infinite-size struct.
+            let enclosing_type: Option<String> = match &func.kind {
+                HirExprKind::Global(name) => b.variant_to_type.get(name).cloned(),
+                _ => None,
+            };
             let arg_ops: Vec<Operand> = args.iter().enumerate().map(|(i, a)| {
                 if needs_boxed_callback {
                     if let HirExprKind::Lambda { params, body, captures, .. } = &a.kind {
@@ -1592,6 +1612,23 @@ fn lower_expr(expr: &HirExpr, b: &mut Builder) -> Operand {
                     let boxed = b.declare_local("_boxed_arg", Ty::Var(0));
                     b.assign(boxed, Rvalue::BoxSome { value: value_op, ty: a.ty.clone() });
                     return Operand::Local(boxed);
+                }
+                // BACKLOG item 277 — a *direct* self-referential variant
+                // field (e.g. `Node(left: Tree, right: Tree)`, where `left`'s
+                // own declared type is `Tree`, the same type `Node` itself
+                // belongs to) is stored as a pointer in C (`crates/codegen/
+                // src/emit_module.rs`'s `field_c_ty`), never inline-by-value
+                // — an inline `Tree` field inside `Node`'s own struct would
+                // be an infinite-size type. Heap-box the argument here (the
+                // plain, already-generic `Rvalue::Box`/`box_value`, not the
+                // Option-specific `BoxSome`) so the constructor receives the
+                // pointer its own C signature now expects.
+                if let Some(Ty::Named { name: field_ty_name, args: field_ty_args }) = declared {
+                    if field_ty_args.is_empty() && Some(field_ty_name.as_str()) == enclosing_type.as_deref() {
+                        let boxed = b.declare_local("_boxed_self_field", Ty::Var(0));
+                        b.assign(boxed, Rvalue::Box { value: value_op, ty: a.ty.clone() });
+                        return Operand::Local(boxed);
+                    }
                 }
                 // The inverse direction (BACKLOG item 76): the argument is
                 // itself still an erased `Ty::Var(0)` value (e.g. a
@@ -1930,6 +1967,15 @@ fn lower_expr(expr: &HirExpr, b: &mut Builder) -> Operand {
                                 // `name` here is the fully-qualified `Type__Variant`, so take
                                 // the last segment.
                                 let variant = name.rsplit("__").next().unwrap_or(name).to_lowercase();
+                                // BACKLOG item 277 — the enclosing sum type's
+                                // own name (the `Tree` half of `Tree__Node`),
+                                // needed below to detect a *direct* self-
+                                // referential field (one whose own declared
+                                // type is this same enclosing type) — such a
+                                // field is stored as a pointer in C, never
+                                // inline, so reading it needs an unbox, just
+                                // like a bare-type-param field does.
+                                let enclosing_type_name = name.split("__").next().unwrap_or(name);
                                 // Substitute a bare-type-param field's declared
                                 // `Ty::Var(_)` with the scrutinee's own recovered
                                 // instantiation argument (single-type-param scope
@@ -1946,33 +1992,57 @@ fn lower_expr(expr: &HirExpr, b: &mut Builder) -> Operand {
                                 // unboxing here would strip a level of pointer
                                 // indirection that was never added — BACKLOG item 120.
                                 let scrut_args: &[Ty] = match &scrutinee.ty { Ty::Named { args, .. } => args, _ => &[] };
+                                // BACKLOG item 277 — three field-read shapes:
+                                // no unboxing (an ordinary, inline-by-value
+                                // field), `UnboxSome` (a bare type-param
+                                // field, item 119's existing convention), or
+                                // `Unbox` (a *direct* self-referential field
+                                // — stored as a plain heap pointer, not an
+                                // Option-style box, so it needs the plain
+                                // unbox pairing that matches how the
+                                // constructor call site boxed it).
+                                enum FieldUnbox { None, OptionBoxed, SelfRefBoxed }
                                 for (i, field_pat) in fields.iter().enumerate() {
                                     if let HirPat::Bind { local, name: fname } = field_pat {
                                         let declared = &field_types[i];
-                                        let (real_ty, needs_unbox) = match declared {
+                                        let (real_ty, unbox) = match declared {
                                             Ty::Var(_) => {
                                                 let concrete = scrut_args.first().cloned().unwrap_or(Ty::Error);
-                                                let needs_unbox = !matches!(concrete, Ty::Var(_));
-                                                (concrete, needs_unbox)
+                                                let unbox = if !matches!(concrete, Ty::Var(_)) { FieldUnbox::OptionBoxed } else { FieldUnbox::None };
+                                                (concrete, unbox)
                                             }
-                                            other => (other.clone(), false),
+                                            Ty::Named { name: field_ty_name, args } if args.is_empty() && field_ty_name == enclosing_type_name => {
+                                                (declared.clone(), FieldUnbox::SelfRefBoxed)
+                                            }
+                                            other => (other.clone(), FieldUnbox::None),
                                         };
                                         let ml = b.map_hir_local(*local, fname, real_ty.clone());
                                         // Read the payload directly via a nested path
                                         // `scrut.<variant>.<field>` — avoids an intermediate
                                         // local whose (anonymous struct) type we can't name.
-                                        if needs_unbox {
-                                            let raw = b.declare_local("_variant_field_raw", Ty::Var(0));
-                                            b.assign(raw, Rvalue::Field {
-                                                base: scrut_op.clone(),
-                                                field: format!("{}.{}", variant, field_names[i]),
-                                            });
-                                            b.assign(ml, Rvalue::UnboxSome { opt: Operand::Local(raw), ty: real_ty });
-                                        } else {
-                                            b.assign(ml, Rvalue::Field {
-                                                base: scrut_op.clone(),
-                                                field: format!("{}.{}", variant, field_names[i]),
-                                            });
+                                        match unbox {
+                                            FieldUnbox::OptionBoxed => {
+                                                let raw = b.declare_local("_variant_field_raw", Ty::Var(0));
+                                                b.assign(raw, Rvalue::Field {
+                                                    base: scrut_op.clone(),
+                                                    field: format!("{}.{}", variant, field_names[i]),
+                                                });
+                                                b.assign(ml, Rvalue::UnboxSome { opt: Operand::Local(raw), ty: real_ty });
+                                            }
+                                            FieldUnbox::SelfRefBoxed => {
+                                                let raw = b.declare_local("_variant_field_raw", Ty::Var(0));
+                                                b.assign(raw, Rvalue::Field {
+                                                    base: scrut_op.clone(),
+                                                    field: format!("{}.{}", variant, field_names[i]),
+                                                });
+                                                b.assign(ml, Rvalue::Unbox { value: Operand::Local(raw), ty: real_ty });
+                                            }
+                                            FieldUnbox::None => {
+                                                b.assign(ml, Rvalue::Field {
+                                                    base: scrut_op.clone(),
+                                                    field: format!("{}.{}", variant, field_names[i]),
+                                                });
+                                            }
                                         }
                                     }
                                 }
@@ -2265,7 +2335,7 @@ fn lower_expr(expr: &HirExpr, b: &mut Builder) -> Operand {
             let env = build_capture_env(captures, &capture_tys, b);
 
             // Build MIR for the lambda body using a fresh builder.
-            let mut lb = Builder::new(&lam_name, b.record_field_types.clone(), b.variant_field_types.clone(), b.fn_param_tys.clone(), b.fn_ret_tys.clone());
+            let mut lb = Builder::new(&lam_name, b.record_field_types.clone(), b.variant_field_types.clone(), b.fn_param_tys.clone(), b.fn_ret_tys.clone(), b.variant_to_type.clone());
             let ret_slot = lb.declare_local("_ret", Ty::Error);
             // The env parameter always comes first, ahead of the lambda's
             // own real parameters — every generated lambda function agrees
