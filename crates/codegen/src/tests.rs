@@ -2562,3 +2562,16 @@ fn bare_record_pattern_match_arm_compiles_the_same_as_the_prefixed_form() {
     let bare_sig = bare.lines().find(|l| l.contains("certo_run(")).expect("expected a certo_run() signature");
     assert_eq!(prefixed_sig, bare_sig);
 }
+
+// ------------------------------------------------------------------ //
+// BACKLOG item 258 — `Char` is a real Unicode scalar value (4-byte
+// `int32_t`), not a 1-byte C `char` (which can only ever hold one raw UTF-8
+// byte, corrupting any multi-byte character it represented).
+// ------------------------------------------------------------------ //
+
+#[test]
+fn char_typed_function_signature_uses_int32_not_a_byte() {
+    let c = codegen("module A\nfn identity(c: Char): Char = c");
+    assert_contains(&c, "int32_t certo_identity(int32_t");
+    assert_not_contains(&c, "char certo_identity");
+}

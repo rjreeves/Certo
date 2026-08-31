@@ -12,7 +12,12 @@ pub fn ty_to_c(ty: &Ty) -> String {
         Ty::Float32 => "float".into(),
         Ty::Decimal(_) => "certo_decimal_t".into(),
         Ty::Bool    => "bool".into(),
-        Ty::Char    => "char".into(),
+        // BACKLOG item 258 — spec §4.1 defines `Char` as "4 bytes, a Unicode
+        // scalar value, not a byte"; a plain 1-byte C `char` can only ever
+        // hold a single UTF-8 *byte*, corrupting any multi-byte character it
+        // represents. `int32_t` (already used for `Ty::Int32` above — no new
+        // C type needed) holds a full Unicode scalar value (max 0x10FFFF).
+        Ty::Char    => "int32_t".into(),
         Ty::Text    => "certo_text_t".into(),
         Ty::BoundedText(_) => "certo_text_t".into(), // same runtime representation as Text
         Ty::Unit    => "int64_t".into(), // Unit locals stored as 0; certo_unit_t only in function sigs

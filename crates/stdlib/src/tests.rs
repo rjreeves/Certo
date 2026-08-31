@@ -327,6 +327,61 @@ fn char_c_contains_expected_symbols() {
     }
 }
 
+// ------------------------------------------------------------------ //
+// BACKLOG item 258 — `Char` is a real Unicode scalar value (spec §4.1:
+// "4 bytes... not a byte"), not a raw UTF-8 byte.
+// ------------------------------------------------------------------ //
+
+#[test]
+fn char_runtime_functions_take_int32_not_a_byte() {
+    // The previous 1-byte `char` C signature is gone entirely — every
+    // Char-typed runtime function parameter/return is now `int32_t`,
+    // matching `ty_to_c(Ty::Char)`'s own new mapping.
+    assert!(TEXT_C.contains("certo_text_t certo_char_to_text(int32_t c)"),
+        "certo_char_to_text must take int32_t, not char");
+    assert!(TEXT_C.contains("int64_t certo_char_to_int(int32_t c)"),
+        "certo_char_to_int must take int32_t, not char");
+    assert!(TEXT_C.contains("int32_t certo_char_from_int(int64_t n)"),
+        "certo_char_from_int must return int32_t, not char");
+    assert!(!TEXT_C.contains("char certo_char_to_upper_case"),
+        "no Char runtime function should still use the old 1-byte char type");
+}
+
+#[test]
+fn text_char_at_decodes_utf8_codepoints_not_raw_bytes() {
+    // Regression guard for the actual corruption bug: charAt must decode a
+    // real UTF-8 sequence (tracked via a decode-at-position helper), not
+    // index `s[i]` directly as a raw byte the way the old implementation did.
+    assert!(TEXT_C.contains("__certo_utf8_decode_at"),
+        "certo_text_char_at must decode real UTF-8 codepoints, not raw bytes");
+    assert!(!TEXT_C.contains("__certo_opt_box((int64_t)(unsigned char)s[i])"),
+        "the old byte-indexing implementation must be gone");
+}
+
+#[test]
+fn char_to_text_encodes_multi_byte_utf8_sequences() {
+    // certo_char_to_text must re-encode a codepoint > 0x7F as a real
+    // multi-byte UTF-8 sequence, not truncate it to a single raw byte.
+    assert!(TEXT_C.contains("0xC0") && TEXT_C.contains("0xE0") && TEXT_C.contains("0xF0"),
+        "certo_char_to_text must emit 2/3/4-byte UTF-8 encoding branches");
+}
+
+#[test]
+fn char_classification_functions_are_ascii_gated_against_undefined_behavior() {
+    // isdigit/isalpha/etc. (ctype.h) are undefined behavior for any value
+    // not representable as unsigned char or EOF — now that Char can hold an
+    // arbitrary Unicode codepoint, every classification/case-conversion
+    // function must gate to the ASCII range before calling into ctype.h.
+    for func in &["certo_char_is_digit", "certo_char_is_alpha", "certo_char_is_upper_case",
+                  "certo_char_is_lower_case", "certo_char_is_whitespace",
+                  "certo_char_to_upper_case", "certo_char_to_lower_case"] {
+        let idx = TEXT_C.find(func).unwrap_or_else(|| panic!("missing {func}"));
+        let window = &TEXT_C[idx..(idx + 200).min(TEXT_C.len())];
+        assert!(window.contains("c <= 127"),
+            "{func} must gate to the ASCII range before calling ctype.h, got: {window}");
+    }
+}
+
 #[test]
 fn core_c_contains_float32_symbols() {
     for sym in &["certo_float32_to_text", "certo_float32_to_int", "certo_int_to_float32",
