@@ -40,6 +40,13 @@ pub struct HirModule {
     /// `resolve_bare_generic_return`, BACKLOG item 135) actually needs
     /// unboxing from the raw `void*` the C function still returns.
     pub fn_ret_tys: std::collections::HashMap<String, Ty>,
+    /// Sum variant name → its own enclosing/parent type name (e.g.
+    /// `"Node" -> "Tree"`). Exposed so MIR's `lower_fn` can detect a
+    /// *direct* self-referential variant field (a field whose declared type
+    /// is the same as the variant's own parent type) and heap-box/unbox it
+    /// at construction/pattern-match time, since it's stored as a pointer
+    /// rather than inline-by-value in C — BACKLOG item 277.
+    pub variant_to_type: std::collections::HashMap<String, String>,
 }
 
 #[derive(Debug, Clone)]

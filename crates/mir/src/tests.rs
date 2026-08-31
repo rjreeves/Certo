@@ -6,7 +6,7 @@ fn mir_fn(src: &str) -> crate::MirFn {
     let module = parse(src).expect("parse error");
     let hir = lower_module(&module).expect("hir error");
     let HirItem::Fn(f) = &hir.items[0] else { panic!("expected fn"); };
-    lower_fn(f, &hir.record_field_types, &hir.variant_field_types, &hir.fn_param_tys, &hir.fn_ret_tys).0
+    lower_fn(f, &hir.record_field_types, &hir.variant_field_types, &hir.fn_param_tys, &hir.fn_ret_tys, &hir.variant_to_type).0
 }
 
 fn mir_fn_named(src: &str, name: &str) -> crate::MirFn {
@@ -16,7 +16,7 @@ fn mir_fn_named(src: &str, name: &str) -> crate::MirFn {
         HirItem::Fn(f) if f.name == name => Some(f),
         _ => None,
     }).unwrap_or_else(|| panic!("expected fn named {name}"));
-    lower_fn(f, &hir.record_field_types, &hir.variant_field_types, &hir.fn_param_tys, &hir.fn_ret_tys).0
+    lower_fn(f, &hir.record_field_types, &hir.variant_field_types, &hir.fn_param_tys, &hir.fn_ret_tys, &hir.variant_to_type).0
 }
 
 fn mir_fn_and_lifted_named(src: &str, name: &str) -> (crate::MirFn, Vec<crate::MirFn>) {
@@ -26,7 +26,7 @@ fn mir_fn_and_lifted_named(src: &str, name: &str) -> (crate::MirFn, Vec<crate::M
         HirItem::Fn(f) if f.name == name => Some(f),
         _ => None,
     }).unwrap_or_else(|| panic!("expected fn named {name}"));
-    lower_fn(f, &hir.record_field_types, &hir.variant_field_types, &hir.fn_param_tys, &hir.fn_ret_tys)
+    lower_fn(f, &hir.record_field_types, &hir.variant_field_types, &hir.fn_param_tys, &hir.fn_ret_tys, &hir.variant_to_type)
 }
 
 #[test]
@@ -135,6 +135,78 @@ fn positional_record_constructor_boxes_concrete_argument_into_bare_field() {
         crate::MirStmt::Assign { rvalue: Rvalue::BoxSome { .. }, .. }
     )));
     assert!(has_boxsome, "expected a BoxSome for the concrete argument passed into Box's bare-T field");
+}
+
+// ------------------------------------------------------------------ //
+// BACKLOG item 277 — recursive sum type construction/pattern-match boxing.
+// ------------------------------------------------------------------ //
+
+#[test]
+fn self_referential_constructor_call_boxes_the_recursive_field_argument() {
+    // `Node(1, Leaf, Leaf)` — `left`/`right`'s own declared type is `Tree`
+    // itself (Node's own enclosing type), a *direct* self-reference. Their
+    // C storage is a pointer (see the codegen test for the struct layout
+    // itself), so the constructor call must heap-box each argument via the
+    // plain `Rvalue::Box` (not the Option-specific `BoxSome`, which is only
+    // for the bare-type-param case).
+    let mf = mir_fn_named(
+        "module A\ntype Tree = | Leaf | Node(value: Int, left: Tree, right: Tree)\n\
+         fn f(): Tree = Node(1, Leaf, Leaf)",
+        "f");
+    let box_count = mf.blocks.iter().flat_map(|bb| bb.stmts.iter()).filter(|s| matches!(s,
+        crate::MirStmt::Assign { rvalue: Rvalue::Box { .. }, .. }
+    )).count();
+    assert_eq!(box_count, 2, "expected exactly 2 Rvalue::Box (one for `left`, one for `right`), got {box_count}");
+}
+
+#[test]
+fn self_referential_constructor_call_does_not_use_boxsome() {
+    // Regression guard: a direct self-referential field must use the plain
+    // `Rvalue::Box`, not `BoxSome` (that pairing is reserved for the bare
+    // type-param/Option-erasure case and would mismatch what the pattern-
+    // match side unboxes with — see the paired `Unbox` test below).
+    let mf = mir_fn_named(
+        "module A\ntype Tree = | Leaf | Node(value: Int, left: Tree, right: Tree)\n\
+         fn f(): Tree = Node(1, Leaf, Leaf)",
+        "f");
+    let has_boxsome = mf.blocks.iter().any(|bb| bb.stmts.iter().any(|s| matches!(s,
+        crate::MirStmt::Assign { rvalue: Rvalue::BoxSome { .. }, .. }
+    )));
+    assert!(!has_boxsome, "a direct self-referential field must not use BoxSome");
+}
+
+#[test]
+fn pattern_match_on_a_self_referential_field_unboxes_via_plain_unbox() {
+    // `match t { Node(v, l, r) => ... }` — `l`/`r` must be read as plain
+    // `Tree` values, dereferencing the pointer the constructor boxed,
+    // mirroring the plain `Rvalue::Unbox` pairing (not `UnboxSome`, which
+    // stays reserved for the bare-type-param case).
+    let mf = mir_fn_named(
+        "module A\ntype Tree = | Leaf | Node(value: Int, left: Tree, right: Tree)\n\
+         fn depth(t: Tree): Int = match t {\n Leaf => 0\n Node(v, l, r) => 1\n}",
+        "depth");
+    let has_unbox = mf.blocks.iter().any(|bb| bb.stmts.iter().any(|s| matches!(s,
+        crate::MirStmt::Assign { rvalue: Rvalue::Unbox { .. }, .. }
+    )));
+    assert!(has_unbox, "expected an Rvalue::Unbox reading the self-referential `left`/`right` fields");
+    let has_unboxsome = mf.blocks.iter().any(|bb| bb.stmts.iter().any(|s| matches!(s,
+        crate::MirStmt::Assign { rvalue: Rvalue::UnboxSome { .. }, .. }
+    )));
+    assert!(!has_unboxsome, "a direct self-referential field must not use UnboxSome");
+}
+
+#[test]
+fn non_recursive_field_construction_is_unaffected_by_the_self_ref_boxing_check() {
+    // Regression guard: an ordinary sum-type constructor call with no
+    // self-referential field must not spuriously box anything.
+    let mf = mir_fn_named(
+        "module A\ntype Shape = | Circle(radius: Float) | Square(side: Float)\n\
+         fn f(): Shape = Circle(1.0)",
+        "f");
+    let has_box = mf.blocks.iter().any(|bb| bb.stmts.iter().any(|s| matches!(s,
+        crate::MirStmt::Assign { rvalue: Rvalue::Box { .. }, .. }
+    )));
+    assert!(!has_box, "an ordinary, non-recursive constructor call must not box anything");
 }
 
 #[test]
