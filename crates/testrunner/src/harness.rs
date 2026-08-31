@@ -11,10 +11,12 @@
 //! isolated and the process-exit code is the definitive pass/fail signal.
 
 use certo_ast::{
-    decl::{Decl, FnDecl},
-    expr::Expr,
+    decl::{Decl, FnDecl, TestExpectation, ValidatorDecl},
+    expr::{Arg, Expr, ExpectMatcher, MatchArm, Stmt},
     module::Module,
+    pattern::Pattern,
     span::{Span, S},
+    types::ModulePath,
 };
 use certo_codegen::{emit_module, CodegenOptions, c_fn_name, c_ident};
 
@@ -97,6 +99,21 @@ pub fn sanitise_name(name: &str) -> String {
 /// run (unaffected, identical output to before this parameter existed).
 pub fn build_harness(module: &Module, coverage_source: Option<(String, String)>) -> Result<(String, Vec<TestEntry>), crate::error::TestRunnerError> {
     let mut augmented = module.clone();
+    // BACKLOG item 222 — `certo test` previously never expanded `validator`/
+    // `statemachine` declarations at all: a test file declaring a
+    // `validator` and calling `V.validate(...)` from an ordinary `test`
+    // block already failed to compile under `certo test`, independent of
+    // `ruleTest`/`validatorTest` support below, which fundamentally needs
+    // this too (a `ruleTest`/`validatorTest`'s own synthesized call target
+    // — `V.validate`/`V.someRule` — doesn't exist as a real function until
+    // this runs). Reuses the exact same expansion `certo build`/`check`/
+    // `run` already call (`crates/cli/src/main.rs`), now shared via
+    // `certo_codegen::expand` instead of being CLI-only.
+    let mut combined_src = String::new();
+    certo_codegen::expand_state_machines(&mut augmented, &mut combined_src)
+        .map_err(|(wrapped, _)| crate::error::TestRunnerError::ValidatorExpansionFailed(wrapped))?;
+    certo_codegen::expand_validators(&mut augmented, &mut combined_src)
+        .map_err(|(wrapped, _)| crate::error::TestRunnerError::ValidatorExpansionFailed(wrapped))?;
     let mut entries: Vec<TestEntry> = Vec::new();
     let zero_span = Span { start: 0, end: 0 };
     // Record/sum-type shapes for property parameter generation are read
@@ -149,6 +166,70 @@ pub fn build_harness(module: &Module, coverage_source: Option<(String, String)>)
             kind,
             c_fn_name: fn_id.clone(),
             params: gen_params,
+        });
+    }
+
+    // BACKLOG item 222 — `ruleTest`/`validatorTest`. Looked up against the
+    // *original* `module` (validators are never removed by expansion above,
+    // only supplemented with the real functions this synthesizes calls to —
+    // see `certo_codegen::expand::expand_validators`'s own doc comment).
+    for sdecl in &module.decls {
+        let (label, expect, call, span) = match &sdecl.node {
+            Decl::RuleTest(rt) => {
+                let (validator_name, rule_name) = match rt.validator.as_slice() {
+                    [v, r] => (v.node.as_str(), r.node.as_str()),
+                    _ => return Err(crate::error::TestRunnerError::UnknownValidatorRef {
+                        label: rt.label.clone(),
+                        path: rt.validator.iter().map(|i| i.node.as_str()).collect::<Vec<_>>().join("."),
+                    }),
+                };
+                let v = find_validator(module, validator_name).ok_or_else(|| crate::error::TestRunnerError::UnknownValidatorRef {
+                    label: rt.label.clone(),
+                    path: format!("{}.{}", validator_name, rule_name),
+                })?;
+                if !v.rules.iter().any(|r| r.name.node == rule_name) {
+                    return Err(crate::error::TestRunnerError::UnknownValidatorRef {
+                        label: rt.label.clone(),
+                        path: format!("{}.{}", validator_name, rule_name),
+                    });
+                }
+                let call = build_validator_call(validator_name, rule_name, &rt.entity, &rt.context, !v.context.is_empty(), rt.span);
+                (rt.label.clone(), &rt.expect, call, rt.span)
+            }
+            Decl::ValidatorTest(vt) => {
+                let v = find_validator(module, &vt.validator.node).ok_or_else(|| crate::error::TestRunnerError::UnknownValidatorRef {
+                    label: vt.label.clone(),
+                    path: vt.validator.node.clone(),
+                })?;
+                let call = build_validator_call(&vt.validator.node, "validate", &vt.entity, &vt.context, !v.context.is_empty(), vt.span);
+                (vt.label.clone(), &vt.expect, call, vt.span)
+            }
+            _ => continue,
+        };
+        let body = build_expectation_body(call, expect, span);
+
+        let safe  = sanitise_name(&label);
+        let idx   = entries.len();
+        let fn_id = format!("__test_{}_{}", idx, safe);
+        let fn_decl = FnDecl {
+            is_async:    false,
+            is_pub:      false,
+            name:        S::new(fn_id.clone(), zero_span),
+            type_params: vec![],
+            params:      vec![],
+            ret_ty:      None,
+            effects:     None,
+            body:        Some(body),
+            is_extern:   false,
+            export_name: None,
+            span:        zero_span,
+        };
+        augmented.decls.push(S::new(Decl::Fn(fn_decl), zero_span));
+        entries.push(TestEntry {
+            display_name: label,
+            kind: TestKind::Unit,
+            c_fn_name: fn_id,
+            params: vec![],
         });
     }
 
@@ -314,6 +395,115 @@ fn build_db_test_fn(fn_id: &str, body: &S<Expr>) -> Result<FnDecl, crate::error:
         .ok_or_else(|| crate::error::TestRunnerError::ParseError(
             format!("internal error: synthesized dbTest wrapper for \"{fn_id}\" produced no fn decl")
         ))
+}
+
+// ------------------------------------------------------------------ //
+// BACKLOG item 222 — `ruleTest`/`validatorTest` synthesis
+// ------------------------------------------------------------------ //
+
+fn find_validator<'a>(module: &'a Module, name: &str) -> Option<&'a ValidatorDecl> {
+    module.decls.iter().find_map(|d| match &d.node {
+        Decl::Validator(v) if v.name.node == name => Some(v),
+        _ => None,
+    })
+}
+
+fn path_expr(name: &str, span: Span) -> S<Expr> {
+    S::new(Expr::Path {
+        path: ModulePath { segments: vec![S::new(name.to_string(), span)], span },
+        span,
+    }, span)
+}
+
+/// Builds `{validator}.{method}(entity[, context])` — an ordinary dot-call,
+/// the same shape `OrderSubmit.customer_active(...)`/`OrderSubmit.validate(...)`
+/// already resolve through via `c_fn_name`'s existing dot/underscore
+/// normalization (no new call-resolution mechanism needed). `entity`/
+/// `context` are the test declaration's own already-parsed expressions,
+/// reused verbatim — not re-parsed or re-formatted.
+fn build_validator_call(validator: &str, method: &str, entity: &S<Expr>, context: &S<Expr>, has_context: bool, span: Span) -> S<Expr> {
+    let func = S::new(Expr::Field {
+        expr:  Box::new(path_expr(validator, span)),
+        field: S::new(method.to_string(), span),
+        span,
+    }, span);
+    let mut args = vec![Arg { label: None, value: entity.clone(), span }];
+    if has_context {
+        args.push(Arg { label: None, value: context.clone(), span });
+    }
+    S::new(Expr::App { func: Box::new(func), args, span }, span)
+}
+
+/// Builds the assertion body for one `ruleTest`/`validatorTest`, wrapping
+/// `call` (the validator/rule invocation built above) with the *already-
+/// existing* `expect(...)` matcher machinery (`ExpectMatcher`, used today by
+/// ordinary `test` blocks) — `expect(x).toBe(y)` and `x.toBe(y)` are
+/// equivalent (`expect` is a pure identity function, purely for
+/// readability), so `call` is used directly as `ExpectAssertion.actual`
+/// with no `expect(...)` wrapper needed.
+fn build_expectation_body(call: S<Expr>, expect: &TestExpectation, span: Span) -> S<Expr> {
+    match expect {
+        TestExpectation::Pass => S::new(Expr::ExpectAssertion {
+            actual: Box::new(call), matcher: ExpectMatcher::ToBeOk, span,
+        }, span),
+        TestExpectation::Fail { with: None } => S::new(Expr::ExpectAssertion {
+            actual: Box::new(call), matcher: ExpectMatcher::ToBeErr, span,
+        }, span),
+        TestExpectation::Fail { with: Some(expected) } => {
+            // val __result = <call>
+            // __result.toBeErr()
+            // match __result { Err(e) => e.toBe(expected), Ok(_) => () }
+            let result_name = "__validator_test_result";
+            let val_stmt = Stmt::Val {
+                pattern: S::new(Pattern::Ident { name: S::new(result_name.to_string(), span), span }, span),
+                ty: None,
+                value: call,
+                span,
+            };
+            let is_err_stmt = Stmt::Expr {
+                expr: S::new(Expr::ExpectAssertion {
+                    actual: Box::new(path_expr(result_name, span)),
+                    matcher: ExpectMatcher::ToBeErr,
+                    span,
+                }, span),
+                span,
+            };
+            let err_binding = "__validator_test_err";
+            let err_arm = MatchArm {
+                pattern: S::new(Pattern::Constructor {
+                    path: ModulePath { segments: vec![S::new("Err".into(), span)], span },
+                    fields: vec![S::new(Pattern::Ident { name: S::new(err_binding.to_string(), span), span }, span)],
+                    span,
+                }, span),
+                guard: None,
+                body: S::new(Expr::ExpectAssertion {
+                    actual: Box::new(path_expr(err_binding, span)),
+                    matcher: ExpectMatcher::ToBe(Box::new(expected.clone())),
+                    span,
+                }, span),
+                span,
+            };
+            let ok_arm = MatchArm {
+                pattern: S::new(Pattern::Constructor {
+                    path: ModulePath { segments: vec![S::new("Ok".into(), span)], span },
+                    fields: vec![S::new(Pattern::Wildcard { span }, span)],
+                    span,
+                }, span),
+                guard: None,
+                body: S::new(Expr::Lit { value: certo_ast::expr::Lit::Unit, span }, span),
+                span,
+            };
+            let match_stmt = Stmt::Expr {
+                expr: S::new(Expr::Match {
+                    scrutinee: Box::new(path_expr(result_name, span)),
+                    arms: vec![err_arm, ok_arm],
+                    span,
+                }, span),
+                span,
+            };
+            S::new(Expr::Block { stmts: vec![val_stmt, is_err_stmt, match_stmt], span }, span)
+        }
+    }
 }
 
 /// The C parameter type for a decoded value of `gt` — must match exactly
@@ -629,5 +819,107 @@ mod tests {
         ).unwrap();
         let err = build_harness(&m, None).unwrap_err();
         assert!(err.to_string().contains("t"));
+    }
+
+    // ------------------------------------------------------------------ //
+    // BACKLOG item 222 — `ruleTest`/`validatorTest` real support.
+    // ------------------------------------------------------------------ //
+
+    const VALIDATOR_SRC: &str = "\
+        type Customer = { status: Text }\n\
+        type Order = { total: Int }\n\
+        type OE = | NotActive | OverLimit\n\
+        validator V for Order errors OE {\n\
+            context { customer: Customer }\n\
+            rule active { require customer.status == \"active\" else OE.NotActive }\n\
+            rule creditLimit { require order.total <= 100 else OE.OverLimit }\n\
+        }\n";
+
+    #[test]
+    fn ordinary_test_calling_validator_validate_now_compiles() {
+        // BACKLOG item 222's own independent prerequisite-bug regression
+        // guard: `certo test` previously never expanded `validator`
+        // declarations at all, so `V.validate(...)` was an undefined name
+        // under `build_harness` — completely independent of ruleTest/
+        // validatorTest support.
+        let m = certo_parser::parse(&format!(
+            "module A\n{VALIDATOR_SRC}\
+             test \"calls validate directly\" {{\n    \
+                 val r = V.validate(Order {{ total: 1 }}, VContext {{ customer: Customer {{ status: \"active\" }} }})\n    \
+                 expect(r).toBeOk()\n\
+             }}"
+        )).unwrap();
+        let (src, entries) = build_harness(&m, None).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert!(src.contains("certo_v_validate"), "expected the real generated V_validate function\n{src}");
+    }
+
+    #[test]
+    fn rule_test_produces_a_real_entry_and_calls_the_named_rule() {
+        let m = certo_parser::parse(&format!(
+            "module A\n{VALIDATOR_SRC}\
+             ruleTest V.active \"passes\" {{\n    \
+                 entity: Order {{ total: 1 }}\n    \
+                 context: VContext {{ customer: Customer {{ status: \"active\" }} }}\n    \
+                 expect: pass\n\
+             }}"
+        )).unwrap();
+        let (src, entries) = build_harness(&m, None).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].display_name, "passes");
+        assert_eq!(entries[0].kind, TestKind::Unit);
+        assert!(src.contains("certo_v_active"), "expected a call to the real generated per-rule function\n{src}");
+    }
+
+    #[test]
+    fn validator_test_calls_validate_not_a_specific_rule() {
+        let m = certo_parser::parse(&format!(
+            "module A\n{VALIDATOR_SRC}\
+             validatorTest V \"passes\" {{\n    \
+                 entity: Order {{ total: 1 }}\n    \
+                 context: VContext {{ customer: Customer {{ status: \"active\" }} }}\n    \
+                 expect: pass\n\
+             }}"
+        )).unwrap();
+        let (src, entries) = build_harness(&m, None).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert!(src.contains("certo_v_validate"), "expected a call to V_validate, not a per-rule function\n{src}");
+    }
+
+    #[test]
+    fn expect_fail_with_synthesizes_a_payload_equality_check() {
+        let m = certo_parser::parse(&format!(
+            "module A\n{VALIDATOR_SRC}\
+             ruleTest V.active \"fails with NotActive\" {{\n    \
+                 entity: Order {{ total: 1 }}\n    \
+                 context: VContext {{ customer: Customer {{ status: \"inactive\" }} }}\n    \
+                 expect: fail with OE.NotActive\n\
+             }}"
+        )).unwrap();
+        let (src, entries) = build_harness(&m, None).unwrap();
+        assert_eq!(entries.len(), 1);
+        // The match-based payload check must appear (an Err(..) arm doing
+        // its own `.toBe(...)` against the expected error), not just a bare
+        // `.toBeErr()` with no value check.
+        assert!(src.contains("NotActive"), "expected the specific expected error value to appear\n{src}");
+    }
+
+    #[test]
+    fn rule_test_naming_an_unknown_validator_is_a_real_error() {
+        let m = certo_parser::parse(
+            "module A\nruleTest NoSuch.someRule \"bad\" {\n    entity: 1\n    context: 1\n    expect: pass\n}"
+        ).unwrap();
+        let err = build_harness(&m, None).unwrap_err();
+        assert!(matches!(err, crate::error::TestRunnerError::UnknownValidatorRef { .. }), "expected UnknownValidatorRef, got: {err}");
+    }
+
+    #[test]
+    fn rule_test_naming_an_unknown_rule_on_a_real_validator_is_a_real_error() {
+        let m = certo_parser::parse(&format!(
+            "module A\n{VALIDATOR_SRC}\
+             ruleTest V.noSuchRule \"bad\" {{\n    entity: 1\n    context: 1\n    expect: pass\n}}"
+        )).unwrap();
+        let err = build_harness(&m, None).unwrap_err();
+        assert!(matches!(err, crate::error::TestRunnerError::UnknownValidatorRef { .. }), "expected UnknownValidatorRef, got: {err}");
     }
 }

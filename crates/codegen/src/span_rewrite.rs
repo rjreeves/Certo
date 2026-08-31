@@ -1,11 +1,11 @@
 //! Rewrites every span in a freshly-parsed `Decl` subtree by adding a fixed
-//! byte offset — used by `expand_validators`/`expand_state_machines` in
-//! `main.rs` (BACKLOG item 223) so a declaration generated from Certo source
-//! text and re-parsed on its own (starting at byte 0) can be spliced into the
-//! real module and still carry spans that correctly index into a *combined*
-//! source string (the real file's own text, followed by each generated
-//! chunk in turn), rather than numerically colliding with the real file's
-//! own span range.
+//! byte offset — used by `expand_validators`/`expand_state_machines`
+//! (`crates/codegen/src/expand.rs`, BACKLOG item 223) so a declaration
+//! generated from Certo source text and re-parsed on its own (starting at
+//! byte 0) can be spliced into the real module and still carry spans that
+//! correctly index into a *combined* source string (the real file's own
+//! text, followed by each generated chunk in turn), rather than numerically
+//! colliding with the real file's own span range.
 //!
 //! Only `Decl::Fn` and `Decl::Type` are covered at the top level: those are
 //! the only two declaration kinds `emit_validator.rs`/`emit_statemachine.rs`
@@ -15,6 +15,11 @@
 //! catch-all arms), so the compiler forces this file to be updated if any of
 //! those enums ever grow a new variant, rather than silently leaving a new
 //! kind of node un-rewritten and reopening this exact bug.
+//!
+//! BACKLOG item 222 — moved here from `crates/cli/src/span_rewrite.rs` so
+//! `crates/testrunner` can reuse the same `expand_validators`/
+//! `expand_state_machines` `certo build`/`check`/`run` already use, instead
+//! of `certo test` never expanding either at all.
 
 use certo_ast::decl::*;
 use certo_ast::expr::*;

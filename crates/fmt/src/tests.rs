@@ -451,3 +451,56 @@ fn a_hand_written_lambda_still_prints_normally() {
     let out = fmt("module A\nfn f(items: List<Item>): Int = items.sumBy((item) => item.lineTotal)");
     assert_contains(&out, "item => item.lineTotal");
 }
+
+// ------------------------------------------------------------------ //
+// BACKLOG item 222 — `ruleTest`/`validatorTest` real round-tripping.
+// Previously formatted as a literal `{ ... }` placeholder, destroying the
+// real `entity`/`context`/`expect` body on every `certo fmt` run.
+// ------------------------------------------------------------------ //
+
+#[test]
+fn rule_test_round_trips_its_real_body_not_a_placeholder() {
+    let out = fmt(
+        "module A\nruleTest V.someRule \"passes\" {\n    entity: 1\n    context: 2\n    expect: pass\n}"
+    );
+    assert_not_contains(&out, "{ ... }");
+    assert_contains(&out, "entity: 1");
+    assert_contains(&out, "context: 2");
+    assert_contains(&out, "expect: pass");
+}
+
+#[test]
+fn validator_test_round_trips_its_real_body_not_a_placeholder() {
+    let out = fmt(
+        "module A\nvalidatorTest V \"passes\" {\n    entity: 1\n    context: 2\n    expect: pass\n}"
+    );
+    assert_not_contains(&out, "{ ... }");
+    assert_contains(&out, "entity: 1");
+    assert_contains(&out, "context: 2");
+    assert_contains(&out, "expect: pass");
+}
+
+#[test]
+fn rule_test_expect_fail_with_value_round_trips() {
+    let out = fmt(
+        "module A\nruleTest V.someRule \"fails\" {\n    entity: 1\n    context: 2\n    expect: fail with OE.Bad\n}"
+    );
+    assert_contains(&out, "expect: fail with OE.Bad");
+}
+
+#[test]
+fn rule_test_expect_fail_without_value_round_trips() {
+    let out = fmt(
+        "module A\nruleTest V.someRule \"fails\" {\n    entity: 1\n    context: 2\n    expect: fail\n}"
+    );
+    assert_contains(&out, "expect: fail\n");
+    assert_not_contains(&out, "expect: fail with");
+}
+
+#[test]
+fn rule_test_is_idempotent() {
+    let src  = "module A\nruleTest V.someRule \"passes\" {\n    entity: 1\n    context: 2\n    expect: pass\n}";
+    let out1 = fmt(src);
+    let out2 = fmt(&out1);
+    assert_eq!(out1, out2, "ruleTest formatting not idempotent");
+}

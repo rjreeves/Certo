@@ -14,6 +14,13 @@ pub struct ValidatorOutput {
     pub validate_fn: String,
     /// Certo source for `Validator.validateAll(entity, context): List<ErrorsType>`.
     pub validate_all_fn: String,
+    /// BACKLOG item 222 — one `Validator.ruleName(entity, context): Result<Unit,
+    /// ErrorsType>` function per named rule, testing *that rule alone* in
+    /// isolation (no `after`/`overrides`/topological-order awareness — that's
+    /// what `validate`/`validateAll` are for). Needed so `ruleTest` has a real
+    /// function to call; `validate`/`validateAll` above are unaffected and do
+    /// not call these — they keep their own existing inlined-expression form.
+    pub rule_fns: Vec<String>,
     /// Certo source for `Validator.validateWithDb(entity): Result<Unit, ErrorsType>`.
     /// Only present when every context field declares a `loaded by` expression.
     pub validate_with_db_fn: Option<String>,
@@ -41,6 +48,10 @@ impl ValidatorOutput {
         out.push_str(&self.validate_fn);
         out.push('\n');
         out.push_str(&self.validate_all_fn);
+        for rule_fn in &self.rule_fns {
+            out.push('\n');
+            out.push_str(rule_fn);
+        }
         if let Some(wdb) = &self.validate_with_db_fn {
             out.push('\n');
             out.push_str(wdb);
@@ -156,6 +167,25 @@ pub fn emit_validator(
             expr = format!("if {} then Err({}) else {}", cond, err, expr);
         }
         out.validate_fn = format!("{} =\n{}\n", sig, wrap_body(&expr, &v.context));
+    }
+
+    // ---------------------------------------------------------------- //
+    // Per-rule functions — BACKLOG item 222, for `ruleTest` (spec §16.12:
+    // "each rule can be tested in isolation"). Every named rule gets one,
+    // including a rule that also carries `overrides` — that relationship
+    // only affects how `validate`/`validateAll` *combine* rules, not what
+    // the rule itself means tested alone. Iterates `v.rules` directly, not
+    // `ordered`/`overridden_by` — isolation means no topological order and
+    // no override-guarding, unlike `validate`/`validateAll` above.
+    // ---------------------------------------------------------------- //
+    for rule in &v.rules {
+        let sig = build_fn_sig(vname, &rule.name.node, &entity_var, &entity_ty,
+            &ctx_type, !v.context.is_empty(),
+            &format!("Result<Unit, {}>", errors_ty));
+        let req = expand(fmt_expr(&rule.require.node, 0));
+        let err = expand(fmt_expr(&rule.else_.node, 0));
+        let expr = format!("if {} then Ok(unit) else Err({})", req, err);
+        out.rule_fns.push(format!("{} =\n{}\n", sig, wrap_body(&expr, &v.context)));
     }
 
     // ---------------------------------------------------------------- //

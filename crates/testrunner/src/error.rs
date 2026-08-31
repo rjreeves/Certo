@@ -16,6 +16,16 @@ pub enum TestRunnerError {
     Io(String),
     /// A `property` parameter's type has no value generator yet.
     UnsupportedPropertyParamType { property_name: String, param_name: String },
+    /// BACKLOG item 222 — `expand_validators`/`expand_state_machines`
+    /// (`certo_codegen::expand`) failed to parse their own generated source.
+    /// Always a compiler bug in the generator, never a user error — same
+    /// class as a `ParseError`, just with the generated text attached so a
+    /// caller can render it.
+    ValidatorExpansionFailed(String),
+    /// BACKLOG item 222 — a `ruleTest`/`validatorTest` names a validator, or
+    /// (for `ruleTest`) a rule on it, that isn't declared anywhere in the
+    /// module.
+    UnknownValidatorRef { label: String, path: String },
 }
 
 impl fmt::Display for TestRunnerError {
@@ -40,6 +50,10 @@ impl fmt::Display for TestRunnerError {
                      Option/Result, a List of a record/sum type, or a self-referential type)",
                     property_name, param_name
                 ),
+            TestRunnerError::ValidatorExpansionFailed(detail) =>
+                write!(f, "internal error: generated validator/state-machine source failed to parse\n{}", detail),
+            TestRunnerError::UnknownValidatorRef { label, path } =>
+                write!(f, "test \"{}\": `{}` doesn't name a declared validator/rule in this module", label, path),
         }
     }
 }
