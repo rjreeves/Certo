@@ -54,9 +54,23 @@ pub fn emit_server(module: &Module) -> Result<String, UiError> {
         return Err(UiError::NoDeclarations);
     }
 
+    // BACKLOG item 239 — every distinct `onSubmit` function name, so
+    // `emit_header` can import exactly those names from the original
+    // module. A *named* import (not a whole-module one), since a
+    // whole-module import would also drag in this same file's own
+    // `view`/`form` declarations — decl kinds the ordinary compile
+    // pipeline that consumes this generated file has no lowering for at
+    // all (that's `certo-ui`'s own job, one step earlier).
+    let mut on_submit_names: Vec<String> = Vec::new();
+    for f in &forms {
+        if let Some(fn_name) = extract_on_submit_fn_name(f)? {
+            if !on_submit_names.contains(&fn_name) { on_submit_names.push(fn_name); }
+        }
+    }
+
     let mut out = String::new();
 
-    emit_header(&mod_name, &mut out);
+    emit_header(&mod_name, &on_submit_names, &mut out);
     emit_shared_helpers(&mut out);
     emit_pk_col_index_helper(&mut out);
     emit_col_value_helper(&mut out);
@@ -74,7 +88,7 @@ pub fn emit_server(module: &Module) -> Result<String, UiError> {
     let has_live = views.iter().any(|v| !v.live.is_empty());
     for f in &forms {
         emit_form_get_handler(f, module, &mut out);
-        emit_form_post_handler(f, has_live, &mut out);
+        emit_form_post_handler(f, has_live, &views, &mut out)?;
     }
 
     emit_main(&mut out);
@@ -84,12 +98,17 @@ pub fn emit_server(module: &Module) -> Result<String, UiError> {
 
 // ── Module header ─────────────────────────────────────────────────────────────
 
-fn emit_header(mod_name: &str, out: &mut String) {
+fn emit_header(mod_name: &str, on_submit_names: &[String], out: &mut String) {
     writeln!(out, "module {}Server", mod_name).unwrap();
     writeln!(out).unwrap();
     writeln!(out, "import Stdlib.Core").unwrap();
     writeln!(out, "import Stdlib.Http").unwrap();
     writeln!(out, "import Stdlib.Db").unwrap();
+    if !on_submit_names.is_empty() {
+        // BACKLOG item 239 — see the doc comment at emit_server's own call
+        // site for why this is a named import, not `import {mod_name}`.
+        writeln!(out, "import {}.{{ {} }}", mod_name, on_submit_names.join(", ")).unwrap();
+    }
     writeln!(out).unwrap();
     writeln!(out, "fn dbUrl(): Text = getEnv(\"DATABASE_URL\") ?? \"host=localhost dbname=postgres user=postgres\"").unwrap();
     writeln!(out).unwrap();
@@ -530,7 +549,74 @@ fn emit_field_concat_tree(out: &mut String, n: usize, indent: &str) {
 
 // ── Form POST handler ─────────────────────────────────────────────────────────
 
-fn emit_form_post_handler(f: &FormDecl, has_live: bool, out: &mut String) {
+/// BACKLOG item 239 — `onSubmit: createProduct` must be a plain function
+/// name (`Expr::Path` with one segment); any other shape is a real,
+/// catchable authoring mistake rather than something to silently ignore.
+fn extract_on_submit_fn_name(f: &FormDecl) -> Result<Option<String>, UiError> {
+    match &f.on_submit {
+        None => Ok(None),
+        Some(e) => match &e.node {
+            Expr::Path { path, .. } if path.segments.len() == 1 =>
+                Ok(path.segments.last().map(|s| s.node.clone())),
+            _ => Err(UiError::ParseError(format!(
+                "form `{}`'s onSubmit must be a plain function name (e.g. `onSubmit: createProduct`)",
+                f.name.node))),
+        }
+    }
+}
+
+/// BACKLOG item 239 — `onSuccess: navigate(ViewName)` resolved to a real
+/// route slug, validating that `ViewName` actually names a declared `view`
+/// in this module. An undeclared navigate target is a real build error
+/// (`UiError::UnknownNavigateTarget`), not silently ignored.
+fn extract_on_success_redirect(f: &FormDecl, views: &[&ViewDecl]) -> Result<Option<String>, UiError> {
+    let Some(e) = &f.on_success else { return Ok(None); };
+    let is_navigate = matches!(&e.node, Expr::App { func, .. }
+        if matches!(&func.node, Expr::Path { path, .. }
+            if path.segments.last().map(|s| s.node.as_str()) == Some("navigate")));
+    if !is_navigate {
+        return Err(UiError::ParseError(format!(
+            "form `{}`'s onSuccess must be `navigate(ViewName)`", f.name.node)));
+    }
+    let Expr::App { args, .. } = &e.node else { unreachable!() };
+    let view_name = args.first().and_then(|a| match &a.value.node {
+        Expr::Path { path, .. } => path.segments.last().map(|s| s.node.clone()),
+        _ => None,
+    });
+    let Some(view_name) = view_name else {
+        return Err(UiError::ParseError(format!(
+            "form `{}`'s onSuccess navigate(...) must name a single view directly (e.g. `navigate(ProductList)`)",
+            f.name.node)));
+    };
+    if !views.iter().any(|v| v.name.node == view_name) {
+        return Err(UiError::UnknownNavigateTarget(view_name));
+    }
+    Ok(Some(format!("/{}", slugify(&view_name))))
+}
+
+/// Emits the tail response for the still-automatic SQL-write path (no
+/// `onSubmit` declared) — a plain "saved/updated" page, or, when `onSuccess`
+/// is declared, a real redirect to its resolved target on success.
+fn emit_auto_write_response(
+    out: &mut String, cond: &str, success_msg: &str, fail_msg: &str,
+    list_slug: &str, on_success_redirect: &Option<String>,
+) {
+    match on_success_redirect {
+        Some(url) => {
+            writeln!(out, "    if {cond} then Http.redirect(\"{url}\") else {{").unwrap();
+            writeln!(out, "        val pg = \"<h2>{fail_msg}</h2><p><a href=\\\"/{list_slug}\\\">← Back to list</a></p>\"").unwrap();
+            writeln!(out, "        Http.ok(htmlPage(\"Done\", pg), \"text/html\")").unwrap();
+            writeln!(out, "    }}").unwrap();
+        }
+        None => {
+            writeln!(out, "    val msg = if {cond} then \"{success_msg}\" else \"{fail_msg}\"").unwrap();
+            writeln!(out, "    val pg  = \"<h2>\" ++ msg ++ \"</h2><p><a href=\\\"/{list_slug}\\\">← Back to list</a></p>\"").unwrap();
+            writeln!(out, "    Http.ok(htmlPage(\"Done\", pg), \"text/html\")").unwrap();
+        }
+    }
+}
+
+fn emit_form_post_handler(f: &FormDecl, has_live: bool, views: &[&ViewDecl], out: &mut String) -> Result<(), UiError> {
     let name    = &f.name.node;
     let fn_name = format!("handle{}Post", name);
     let target  = f.target.segments.last()
@@ -544,15 +630,69 @@ fn emit_form_post_handler(f: &FormDecl, has_live: bool, out: &mut String) {
         .map(|field| camel_to_snake(&field.name.node))
         .collect();
 
+    // BACKLOG item 239 — `onSubmit`/`onSuccess` were parsed but silently
+    // discarded here; now resolved up front so both the onSubmit-replaces-
+    // the-write path and the still-automatic SQL-write path below can use
+    // them.
+    let on_submit_fn        = extract_on_submit_fn_name(f)?;
+    let on_success_redirect = extract_on_success_redirect(f, views)?;
+
     writeln!(out, "fn {fn_name}(req: HttpRequest): HttpResponse = {{").unwrap();
     writeln!(out, "    val body = HttpRequest.body(req)").unwrap();
-    writeln!(out, "    val conn = dbConnect(dbUrl())").unwrap();
 
     for field in &f.fields {
         let fname = &field.name.node;
         writeln!(out, "    val {fname} = formField(body, \"{fname}\")").unwrap();
     }
 
+    // The id (edit forms only) is needed by both the onSubmit path (as an
+    // extra trailing argument, mirroring the auto-UPDATE SQL's own
+    // convention of appending it last) and the auto-UPDATE path below.
+    let id_extracted = is_edit && f.pk.is_some();
+    if id_extracted {
+        writeln!(out, "    val _qry = HttpRequest.query(req)").unwrap();
+        writeln!(out, "    val _id  = formField(_qry, \"id\")").unwrap();
+    }
+
+    if let Some(fn_name_submit) = &on_submit_fn {
+        // `onSubmit` fully replaces the auto-generated INSERT/UPDATE — the
+        // named function now owns the entire write. Called positionally,
+        // one argument per declared form field in declaration order
+        // (BACKLOG item 239, confirmed with the user), plus `_id` last for
+        // an edit form. Must return `Result<T, E>`: `Ok` runs `onSuccess`
+        // (or the same generic saved/updated page as the auto-write path
+        // when no `onSuccess` is declared); `Err` shows the same generic
+        // failure page the auto-write path already shows on failure.
+        let mut call_args: Vec<&str> = f.fields.iter().map(|fld| fld.name.node.as_str()).collect();
+        if id_extracted { call_args.push("_id"); }
+        writeln!(out, "    match {}({}) {{", fn_name_submit, call_args.join(", ")).unwrap();
+        writeln!(out, "        Ok(_) => {{").unwrap();
+        if has_live {
+            writeln!(out, "            Http.liveNotify()").unwrap();
+        }
+        match &on_success_redirect {
+            Some(url) => { writeln!(out, "            Http.redirect(\"{url}\")").unwrap(); }
+            None => {
+                let msg = if is_edit { "Record updated." } else { "Record saved." };
+                writeln!(out, "            val pg = \"<h2>{msg}</h2><p><a href=\\\"/{list_slug}\\\">← Back to list</a></p>\"").unwrap();
+                writeln!(out, "            Http.ok(htmlPage(\"Done\", pg), \"text/html\")").unwrap();
+            }
+        }
+        writeln!(out, "        }}").unwrap();
+        writeln!(out, "        Err(_) => {{").unwrap();
+        let fail_msg = if is_edit { "Update failed." } else { "Save failed — check your input." };
+        writeln!(out, "            val pg = \"<h2>{fail_msg}</h2><p><a href=\\\"/{list_slug}\\\">← Back to list</a></p>\"").unwrap();
+        writeln!(out, "            Http.ok(htmlPage(\"Done\", pg), \"text/html\")").unwrap();
+        writeln!(out, "        }}").unwrap();
+        writeln!(out, "    }}").unwrap();
+        writeln!(out, "}}").unwrap();
+        writeln!(out).unwrap();
+        return Ok(());
+    }
+
+    // No `onSubmit` — the pre-existing auto-generated SQL write path,
+    // now also honoring `onSuccess`'s redirect when declared.
+    writeln!(out, "    val conn = dbConnect(dbUrl())").unwrap();
     writeln!(out, "    val _p0 = List.empty()").unwrap();
     for (i, field) in f.fields.iter().enumerate() {
         let fname = &field.name.node;
@@ -563,9 +703,6 @@ fn emit_form_post_handler(f: &FormDecl, has_live: bool, out: &mut String) {
         if let Some(ref pk_field) = f.pk {
             let pk_col = camel_to_snake(pk_field);
             let n      = f.fields.len();
-            // Extract id from query string
-            writeln!(out, "    val _qry = HttpRequest.query(req)").unwrap();
-            writeln!(out, "    val _id  = formField(_qry, \"id\")").unwrap();
             writeln!(out, "    val _p{} = List.push(_p{}, _id)", n + 1, n).unwrap();
             let last_p    = format!("_p{}", n + 1);
             let set_clause = cols.iter().enumerate()
@@ -578,12 +715,10 @@ fn emit_form_post_handler(f: &FormDecl, has_live: bool, out: &mut String) {
             if has_live {
                 writeln!(out, "    if _rows > 0 then Http.liveNotify() else ()").unwrap();
             }
-            writeln!(out, "    val msg = if _rows > 0 then \"Record updated.\" else \"Update failed — record not found.\"").unwrap();
-            writeln!(out, "    val pg  = \"<h2>\" ++ msg ++ \"</h2><p><a href=\\\"/{list_slug}\\\">← Back to list</a></p>\"").unwrap();
-            writeln!(out, "    Http.ok(htmlPage(\"Done\", pg), \"text/html\")").unwrap();
+            emit_auto_write_response(out, "_rows > 0", "Record updated.", "Update failed — record not found.", &list_slug, &on_success_redirect);
             writeln!(out, "}}").unwrap();
             writeln!(out).unwrap();
-            return;
+            return Ok(());
         }
     }
 
@@ -598,11 +733,10 @@ fn emit_form_post_handler(f: &FormDecl, has_live: bool, out: &mut String) {
     if has_live {
         writeln!(out, "    if _rows > 0 then Http.liveNotify() else ()").unwrap();
     }
-    writeln!(out, "    val msg = if _rows > 0 then \"Record saved.\" else \"Save failed — check your input.\"").unwrap();
-    writeln!(out, "    val pg  = \"<h2>\" ++ msg ++ \"</h2><p><a href=\\\"/{list_slug}\\\">← Back to list</a></p>\"").unwrap();
-    writeln!(out, "    Http.ok(htmlPage(\"Done\", pg), \"text/html\")").unwrap();
+    emit_auto_write_response(out, "_rows > 0", "Record saved.", "Save failed — check your input.", &list_slug, &on_success_redirect);
     writeln!(out, "}}").unwrap();
     writeln!(out).unwrap();
+    Ok(())
 }
 
 // ── Main ──────────────────────────────────────────────────────────────────────
@@ -998,6 +1132,131 @@ mod tests {
             "module M\ntype Product = { description: BoundedText(2000)? }\nform CreateProduct -> Product {\n field description {\n label: \"Description\"\n }\n}"
         );
         assert!(out.contains("maxlength=\\\"2000\\\""), "expected an optional BoundedText field to still carry maxlength\n{}", out);
+    }
+
+    // ------------------------------------------------------------------ //
+    // BACKLOG item 239 — `onSubmit`/`onSuccess` were parsed but silently
+    // discarded by the real (default, Htmx) form codegen path.
+    // ------------------------------------------------------------------ //
+
+    #[test]
+    fn on_submit_replaces_the_auto_insert_with_a_call_to_the_named_function() {
+        let out = server_source(
+            "module M\ntype Product = { name: Text, price: Text }\n\
+             fn createProduct(name: Text, price: Text): Result<Int, Text> = Ok(1)\n\
+             form ProductForm -> Product {\n field name {\n label: \"Name\"\n }\n field price {\n label: \"Price\"\n }\n \
+             onSubmit: createProduct\n}"
+        );
+        assert!(out.contains("match createProduct(name, price) {"),
+            "expected the handler to call createProduct positionally instead of the auto-INSERT, got:\n{out}");
+        assert!(!out.contains("INSERT INTO"),
+            "onSubmit must fully replace the auto-generated INSERT, got:\n{out}");
+        // BACKLOG item 239 — a named import (not a whole-module one) of the
+        // onSubmit function, so the generated server can actually resolve
+        // the call.
+        assert!(out.contains("import M.{ createProduct }"),
+            "expected a named import of the onSubmit function, got:\n{out}");
+    }
+
+    #[test]
+    fn on_success_navigate_becomes_a_real_redirect_after_a_successful_on_submit() {
+        let out = server_source(
+            "module M\ntype Product = { name: Text }\n\
+             fn createProduct(name: Text): Result<Int, Text> = Ok(1)\n\
+             view ProductList {\n layout = Text(\"list\")\n}\n\
+             form ProductForm -> Product {\n field name {\n label: \"Name\"\n }\n \
+             onSubmit:  createProduct\n onSuccess: navigate(ProductList)\n}"
+        );
+        assert!(out.contains("Http.redirect(\"/product-list\")"),
+            "expected a real redirect to the resolved view's slug, got:\n{out}");
+    }
+
+    #[test]
+    fn on_success_without_on_submit_redirects_after_the_still_automatic_insert() {
+        let out = server_source(
+            "module M\ntype Product = { name: Text }\n\
+             view ProductList {\n layout = Text(\"list\")\n}\n\
+             form ProductForm -> Product {\n field name {\n label: \"Name\"\n }\n \
+             onSuccess: navigate(ProductList)\n}"
+        );
+        assert!(out.contains("INSERT INTO"),
+            "the auto-INSERT must still run when onSubmit isn't declared, got:\n{out}");
+        assert!(out.contains("if _rows > 0 then Http.redirect(\"/product-list\")"),
+            "expected the auto-write's own success branch to redirect, got:\n{out}");
+    }
+
+    #[test]
+    fn on_submit_without_on_success_falls_back_to_the_generic_saved_page() {
+        let out = server_source(
+            "module M\ntype Product = { name: Text }\n\
+             fn createProduct(name: Text): Result<Int, Text> = Ok(1)\n\
+             form ProductForm -> Product {\n field name {\n label: \"Name\"\n }\n \
+             onSubmit: createProduct\n}"
+        );
+        assert!(out.contains("Record saved."),
+            "expected the generic saved page when no onSuccess is declared, got:\n{out}");
+        assert!(!out.contains("Http.redirect"), "must not redirect anywhere without onSuccess, got:\n{out}");
+    }
+
+    #[test]
+    fn form_without_on_submit_or_on_success_is_completely_unchanged() {
+        // Regression guard: the pre-existing, no-onSubmit/no-onSuccess
+        // output must be byte-for-byte identical to before this item.
+        let out = server_source(
+            "module M\ntype Product = { name: Text }\nform ProductForm -> Product {\n field name {\n label: \"Name\"\n }\n}"
+        );
+        assert!(out.contains("val _rows = dbExec(conn, \"INSERT INTO product (name) VALUES ($1)\", _p1)"));
+        assert!(out.contains("val msg = if _rows > 0 then \"Record saved.\" else \"Save failed — check your input.\""));
+        assert!(!out.contains("import M.{"), "no onSubmit anywhere in the module means no named import should be emitted\n{out}");
+    }
+
+    #[test]
+    fn on_submit_with_a_non_function_expression_is_a_real_error() {
+        let m = parse(
+            "module M\ntype Product = { name: Text }\n\
+             form ProductForm -> Product {\n field name {\n label: \"Name\"\n }\n \
+             onSubmit: 42\n}"
+        ).expect("parse");
+        let err = emit_server(&m).expect_err("expected a real error, not silent success");
+        assert!(matches!(err, UiError::ParseError(_)), "expected ParseError, got: {err:?}");
+    }
+
+    #[test]
+    fn on_success_navigate_to_an_undeclared_view_is_a_real_error() {
+        let m = parse(
+            "module M\ntype Product = { name: Text }\n\
+             fn createProduct(name: Text): Result<Int, Text> = Ok(1)\n\
+             form ProductForm -> Product {\n field name {\n label: \"Name\"\n }\n \
+             onSubmit:  createProduct\n onSuccess: navigate(NoSuchView)\n}"
+        ).expect("parse");
+        let err = emit_server(&m).expect_err("expected a real error, not silent success");
+        assert!(matches!(err, UiError::UnknownNavigateTarget(ref name) if name == "NoSuchView"),
+            "expected UnknownNavigateTarget(\"NoSuchView\"), got: {err:?}");
+    }
+
+    #[test]
+    fn edit_form_on_submit_receives_the_id_as_a_trailing_argument() {
+        let out = server_source(
+            "module M\ntype Product = { id: Int, name: Text }\n\
+             fn updateProduct(name: Text, id: Text): Result<Int, Text> = Ok(1)\n\
+             form EditProduct -> Product {\n pk: id\n field name {\n label: \"Name\"\n }\n \
+             onSubmit: updateProduct\n}"
+        );
+        assert!(out.contains("match updateProduct(name, _id) {"),
+            "expected the edit form's onSubmit call to receive _id as a trailing argument, got:\n{out}");
+    }
+
+    #[test]
+    fn multiple_forms_on_submit_functions_are_all_imported_once_each() {
+        let out = server_source(
+            "module M\ntype Product = { name: Text }\ntype Widget = { name: Text }\n\
+             fn createProduct(name: Text): Result<Int, Text> = Ok(1)\n\
+             fn createWidget(name: Text): Result<Int, Text> = Ok(1)\n\
+             form ProductForm -> Product {\n field name {\n label: \"Name\"\n }\n onSubmit: createProduct\n}\n\
+             form WidgetForm -> Widget {\n field name {\n label: \"Name\"\n }\n onSubmit: createWidget\n}"
+        );
+        assert!(out.contains("import M.{ createProduct, createWidget }"),
+            "expected both onSubmit functions in one named import, got:\n{out}");
     }
 
     #[test]
