@@ -700,7 +700,7 @@ Regex is a separate namespace, not a method on `Text` — pattern first, subject
 | Timestamp.parse(text) | Parse ISO 8601 — Result\<Timestamp, ParseError\> |
 | timestamp.inTimezone(tz) | Convert for display purposes |
 | timestamp.format(pattern, tz) | Format with explicit timezone |
-| Date.today(tz) | Current date in given timezone |
+| Date.todayIn(tz) | Current date in given timezone |
 | Date.of(year, month, day) | Construct from components |
 | date.addDuration(duration) | Produces Date |
 | timestamp.diff(timestamp) | Produces Duration |

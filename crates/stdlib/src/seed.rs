@@ -725,6 +725,14 @@ pub fn seed_stdlib(env: &mut TypeEnv, counter: &mut u32) {
 
     def!("Text.len",        fn1(Ty::Text, Ty::Int));
     def!("Text.byteLength", fn1(Ty::Text, Ty::Int));
+    // BACKLOG item 269 — spec §9.3's own `text.length()` example, and its
+    // explicit "(not byte count)" wording, distinguish a real *character*
+    // count from `Text.len`/`Text.byteLength`'s own byte count (`Text.len`
+    // returned the identical byte value as `Text.byteLength` for any
+    // multi-byte string, contradicting that wording). Counts real Unicode
+    // codepoints via the same UTF-8 decode loop item 258 built for
+    // `Text.charAt` — see `certo_text_length` in `crates/stdlib/src/text.rs`.
+    def!("Text.length",     fn1(Ty::Text, Ty::Int));
     def!("Text.concat",     fn2(Ty::Text, Ty::Text, Ty::Text));
     def!("Text.eq",         fn2(Ty::Text, Ty::Text, Ty::Bool));
     def!("Text.contains",   fn2(Ty::Text, Ty::Text, Ty::Bool));
@@ -732,6 +740,11 @@ pub fn seed_stdlib(env: &mut TypeEnv, counter: &mut u32) {
     def!("Text.endsWith",   fn2(Ty::Text, Ty::Text, Ty::Bool));
     def!("Text.toUpper",    fn1(Ty::Text, Ty::Text));
     def!("Text.toLower",    fn1(Ty::Text, Ty::Text));
+    // BACKLOG item 269 — spec §9.3's own `text.toUppercase()` example uses
+    // this name, not `Text.toUpper`. A plain alias for the identical
+    // runtime function (`certo_text_to_upper` — see `crates/stdlib/src/
+    // text.rs`), not a second implementation.
+    def!("Text.toUppercase", fn1(Ty::Text, Ty::Text));
     // Locale-aware case conversion — BACKLOG item 117. Real, ICU-backed
     // implementation on Windows; a clear runtime error on POSIX (no
     // OS-bundled Unicode library there, and a dlopen-based path couldn't
@@ -749,6 +762,15 @@ pub fn seed_stdlib(env: &mut TypeEnv, counter: &mut u32) {
     def!("Text.join",       fn2(Ty::List(Box::new(Ty::Text)), Ty::Text, Ty::Text));
     def!("Text.repeat",     fn2(Ty::Text, Ty::Int, Ty::Text));
     def!("Text.charAt",     fn2(Ty::Text, Ty::Int, Ty::Option(Box::new(Ty::Char))));
+    // BACKLOG item 269 — spec §9.4's own `text.toInt()` example documents a
+    // `Result<Int, ParseError>` return, but the real, already-working
+    // parsing function is the bare, un-namespaced `parseInt(s): Option<Int>`
+    // (no `ParseError` type exists anywhere in the compiler). User confirmed
+    // the smaller fix: a namespaced alias keeping `parseInt`'s own
+    // Option-shaped convention (matching `parseFloat`/`parseDecimal`/
+    // `parseBool`'s own established shape too), not inventing a new error
+    // type and Result-shaped API to match the spec literally.
+    def!("Text.toInt",      fn1(Ty::Text, Ty::Option(Box::new(Ty::Int))));
 
     // ---------------------------------------------------------------- //
     // Char
