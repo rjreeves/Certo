@@ -75,9 +75,44 @@ static const char *_re_match(const char *pat, const char *str, certo_re_cap *cap
         int consumed = 0;
         int plen = _re_patlen(pat);
         char quant = *(pat + plen);
+        int is_repeat = 0, min = 0, max = 0, qlen = 1;
         if (quant == '*' || quant == '+' || quant == '?') {
-            int min = (quant == '+') ? 1 : 0;
-            int max = (quant == '?') ? 1 : 256*256;
+            is_repeat = 1;
+            min = (quant == '+') ? 1 : 0;
+            max = (quant == '?') ? 1 : 256*256;
+        } else if (quant == '{') {
+            /* Bounded-repetition quantifier: {n}, {n,}, {n,m} (BACKLOG item
+               276) — mirrors the star/plus/question-mark case above, just
+               with an explicit min/max parsed from the braces instead of a
+               fixed one. Only
+               treated as a real quantifier when it parses as one of these
+               three shapes with at least one leading digit and a closing
+               `}` — anything else (a bare `{` with no digits, or a `{...`
+               that never closes) falls through to being matched as an
+               ordinary literal character instead, exactly like every other
+               character this engine doesn't recognize as special (the
+               previous behavior for `{`/`}`/digits/`,` entirely — this is a
+               strict superset, not a behavior change for anything that
+               wasn't already a real quantifier shape). */
+            const char *b = pat + plen + 1;
+            int n1 = 0, has_n1 = 0;
+            while (*b >= '0' && *b <= '9') { n1 = n1 * 10 + (*b - '0'); b++; has_n1 = 1; }
+            if (has_n1) {
+                int n2 = n1, has_n2 = 1;
+                if (*b == ',') {
+                    b++;
+                    n2 = 0; has_n2 = 0;
+                    while (*b >= '0' && *b <= '9') { n2 = n2 * 10 + (*b - '0'); b++; has_n2 = 1; }
+                }
+                if (*b == '}') {
+                    is_repeat = 1;
+                    min = n1;
+                    max = has_n2 ? n2 : 256*256;
+                    qlen = (int)(b - (pat + plen)) + 1;
+                }
+            }
+        }
+        if (is_repeat) {
             const char *s = str; int count = 0;
             while (count < max && *s) {
                 if (!_re_matchchar(pat, *s, &consumed)) break;
@@ -85,7 +120,7 @@ static const char *_re_match(const char *pat, const char *str, certo_re_cap *cap
             }
             /* greedy: try longest first */
             while (count >= min) {
-                const char *rest = _re_match(pat+plen+1, str+count, caps, ncaps);
+                const char *rest = _re_match(pat+plen+qlen, str+count, caps, ncaps);
                 if (rest) return rest;
                 count--;
             }

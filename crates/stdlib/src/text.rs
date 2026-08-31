@@ -14,9 +14,10 @@ int64_t certo_text_len(certo_text_t s) {
 }
 
 /* UTF-8 byte count. Certo Text values are UTF-8 encoded C strings, so this
-   is identical to certo_text_len — a distinct name exists because callers
-   who need character count (not yet implemented, see BACKLOG) must not
-   accidentally reach for `len` and get bytes instead. */
+   is identical to certo_text_len — a distinct name exists so a caller who
+   needs *character* count (certo_text_length, BACKLOG item 269, defined
+   below once __certo_utf8_decode_at exists) doesn't accidentally reach for
+   this or `len` and silently get bytes instead. */
 int64_t certo_text_byte_length(certo_text_t s) {
     return s ? (int64_t)strlen(s) : 0;
 }
@@ -196,6 +197,13 @@ certo_text_t certo_text_to_lower(certo_text_t s) {
 #endif
 }
 
+/* BACKLOG item 269 — spec §9.3's own `text.toUppercase()` example uses this
+   name; a plain alias for the identical real implementation above, not a
+   second one. */
+certo_text_t certo_text_to_uppercase(certo_text_t s) {
+    return certo_text_to_upper(s);
+}
+
 /* Locale-aware case conversion (BACKLOG item 117) — e.g. certo_text_to_upper_locale(s, "tr")
    correctly maps "i" to dotless "I" for Turkish, which the locale-independent
    certo_text_to_upper above does not (that's the whole point of a locale
@@ -276,6 +284,36 @@ void* certo_text_char_at(certo_text_t s, int64_t i) {
         idx++;
     }
     return NULL;
+}
+
+/* Real *character* count (BACKLOG item 269, spec §9.3's own `text.length()`
+   example, whose "(not byte count)" wording `Text.len`/`Text.byteLength`
+   both contradict for any multi-byte string) — counts real Unicode
+   codepoints via the same UTF-8 decode loop `certo_text_char_at` above
+   uses, rather than raw bytes. */
+int64_t certo_text_length(certo_text_t s) {
+    if (!s) return 0;
+    size_t len = strlen(s);
+    size_t pos = 0;
+    int64_t count = 0;
+    while (pos < len) {
+        /* An invalid byte (cp < 0) is skipped without counting, mirroring
+           certo_text_char_at's own indexing convention exactly — so a valid
+           index for charAt is always `0 <= i < length(s)`. */
+        int32_t cp = __certo_utf8_decode_at((const unsigned char*)s, len, &pos);
+        if (cp >= 0) count++;
+    }
+    return count;
+}
+
+/* BACKLOG item 269 — spec §9.4's own `text.toInt()` example; a namespaced
+   alias for the already-working `certo_parse_int` (crates/stdlib/src/
+   core.rs, defined earlier in the same generated translation unit),
+   keeping its Option<Int>-shaped convention rather than inventing a new
+   Result<Int, ParseError>-shaped API to match the spec's own text literally
+   (user confirmed this narrower scope). */
+int64_t* certo_text_to_int(certo_text_t s) {
+    return certo_parse_int(s);
 }
 
 /* Encodes a Unicode scalar value back to its UTF-8 byte sequence (1-4 bytes). */

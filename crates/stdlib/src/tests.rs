@@ -382,6 +382,67 @@ fn char_classification_functions_are_ascii_gated_against_undefined_behavior() {
     }
 }
 
+// ------------------------------------------------------------------ //
+// BACKLOG item 269 — several §9.3/§9.4 spec-documented function names
+// didn't exist under those names at all.
+// ------------------------------------------------------------------ //
+
+#[test]
+fn text_length_returns_character_count_not_byte_count() {
+    let env = seeded_env();
+    match env.lookup("Text.length").unwrap() {
+        Ty::Fn { params, ret } => {
+            assert_eq!(params, &[Ty::Text]);
+            assert_eq!(ret.as_ref(), &Ty::Int);
+        }
+        other => panic!("expected Fn, got {:?}", other),
+    }
+    assert!(TEXT_C.contains("int64_t certo_text_length(certo_text_t s)"),
+        "missing certo_text_length in TEXT_C");
+    // Regression guard: must count real codepoints via the UTF-8 decoder,
+    // not just re-return strlen (which is what certo_text_byte_length does).
+    let idx = TEXT_C.find("int64_t certo_text_length(").unwrap();
+    let window = &TEXT_C[idx..(idx + 600).min(TEXT_C.len())];
+    assert!(window.contains("__certo_utf8_decode_at"),
+        "certo_text_length must decode real UTF-8 codepoints, got: {window}");
+}
+
+#[test]
+fn text_uppercase_is_registered_as_an_alias_of_text_upper() {
+    let env = seeded_env();
+    match env.lookup("Text.toUppercase").unwrap() {
+        Ty::Fn { params, ret } => {
+            assert_eq!(params, &[Ty::Text]);
+            assert_eq!(ret.as_ref(), &Ty::Text);
+        }
+        other => panic!("expected Fn, got {:?}", other),
+    }
+    assert!(TEXT_C.contains("certo_text_t certo_text_to_uppercase(certo_text_t s)"),
+        "missing certo_text_to_uppercase in TEXT_C");
+    let idx = TEXT_C.find("certo_text_t certo_text_to_uppercase(").unwrap();
+    let window = &TEXT_C[idx..(idx + 150).min(TEXT_C.len())];
+    assert!(window.contains("certo_text_to_upper(s)"),
+        "certo_text_to_uppercase must delegate to the real implementation, not duplicate it, got: {window}");
+}
+
+#[test]
+fn text_to_int_is_registered_as_an_option_shaped_alias_of_parse_int() {
+    let env = seeded_env();
+    match env.lookup("Text.toInt").unwrap() {
+        Ty::Fn { params, ret } => {
+            assert_eq!(params, &[Ty::Text]);
+            assert_eq!(ret.as_ref(), &Ty::Option(Box::new(Ty::Int)));
+        }
+        other => panic!("expected Fn, got {:?}", other),
+    }
+    assert!(TEXT_C.contains("int64_t* certo_text_to_int(certo_text_t s)"),
+        "missing certo_text_to_int in TEXT_C");
+    let idx = TEXT_C.find("int64_t* certo_text_to_int(").unwrap();
+    let window = &TEXT_C[idx..(idx + 100).min(TEXT_C.len())];
+    assert!(window.contains("certo_parse_int(s)"),
+        "certo_text_to_int must delegate to the real parseInt implementation, not duplicate it, got: {window}");
+}
+
 #[test]
 fn core_c_contains_float32_symbols() {
     for sym in &["certo_float32_to_text", "certo_float32_to_int", "certo_int_to_float32",
@@ -809,6 +870,31 @@ fn regex_c_no_longer_discards_list_push_results() {
     let reassigned = REGEX_C.matches("list = certo_list_push(list,").count();
     assert_eq!(total, reassigned, "found a certo_list_push(list, ...) call whose result is discarded");
     assert_eq!(total, 5, "expected exactly 5 certo_list_push call sites (1 in captures, 4 in split)");
+}
+
+// ------------------------------------------------------------------ //
+// BACKLOG item 276 — the regex engine didn't support `{n,m}` bounded-
+// repetition quantifiers at all, silently mismatching instead of erroring.
+// Actual matching behavior (bounded/exact/open-ended forms, and that a
+// malformed `{` still falls back to a literal character) is verified live
+// via the real compiled `certo.exe`, not re-derivable from a Rust-level
+// string check on the embedded C source — these are regression guards on
+// the engine's own generated code shape.
+// ------------------------------------------------------------------ //
+
+#[test]
+fn regex_engine_now_recognizes_brace_quantifiers() {
+    assert!(REGEX_C.contains("quant == '{'"),
+        "the backtracker must now recognize '{{' as a real quantifier, not just a literal character");
+}
+
+#[test]
+fn regex_engine_parses_all_three_brace_quantifier_shapes() {
+    // {n}, {n,}, {n,m} — confirmed by the presence of the digit-parsing and
+    // comma-branch logic that distinguishes all three shapes.
+    assert!(REGEX_C.contains("has_n1"), "missing the leading-digit parse for {{n...}}");
+    assert!(REGEX_C.contains("*b == ','"), "missing the comma branch distinguishing {{n,}} / {{n,m}} from {{n}}");
+    assert!(REGEX_C.contains("*b == '}'"), "missing the closing-brace check that gates real-quantifier recognition");
 }
 
 #[test]

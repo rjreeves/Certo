@@ -451,8 +451,7 @@ correct default behaviour for unset timestamps.
 ### String Conditions
 
 ```certo
-require Regex.match("^[A-Z0-9-]+$", product.sku) and
-        Text.len(product.sku) >= 3 and Text.len(product.sku) <= 20
+require Regex.match("^[A-Z0-9-]{3,20}$", product.sku)
 require customer.email.contains("@")
 require order.reference.startsWith("ORD-")
 ```
