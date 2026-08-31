@@ -1348,6 +1348,10 @@ pub fn seed_stdlib(env: &mut TypeEnv, counter: &mut u32) {
         def!("Http.notFound",    fn1(Ty::Text, hr()));
         def!("Http.badRequest",  fn1(Ty::Text, hr()));
         def!("Http.serverError", fn1(Ty::Text, hr()));
+        // BACKLOG item 239 — a real server-side redirect (303 See Other),
+        // needed so a `form`'s `onSuccess: navigate(View)` can actually
+        // navigate the client somewhere.
+        def!("Http.redirect",    fn1(Ty::Text, hr()));
 
         // HttpRequest accessors
         def!("HttpRequest.method",  fn1(req(), Ty::Text));

@@ -15,6 +15,11 @@ typedef struct {
     certo_text_t body;
     int64_t      body_length;
     certo_text_t content_type;
+    /* BACKLOG item 239 — NULL for an ordinary response; set only by
+       certo_http_redirect below. A dedicated field rather than overloading
+       `body`'s meaning, so every existing constructor/accessor is
+       completely unaffected. */
+    certo_text_t location;
 } CertoHttpResponse;
 
 static CertoHttpResponse* http_response_new(int64_t status, char* body, int64_t body_length, char* ct) {
@@ -24,6 +29,7 @@ static CertoHttpResponse* http_response_new(int64_t status, char* body, int64_t 
     r->body         = body ? body : (char*)"";
     r->body_length  = body_length;
     r->content_type = ct   ? ct   : (char*)"";
+    r->location     = NULL;
     return r;
 }
 
@@ -320,6 +326,26 @@ CertoHttpResponse* certo_http_ok        (certo_text_t body, certo_text_t ct)  { 
 CertoHttpResponse* certo_http_not_found (certo_text_t body)                   { return certo_http_respond(404, body, "text/plain"); }
 CertoHttpResponse* certo_http_bad_req   (certo_text_t body)                   { return certo_http_respond(400, body, "text/plain"); }
 CertoHttpResponse* certo_http_srv_error (certo_text_t body)                   { return certo_http_respond(500, body, "text/plain"); }
+
+/* BACKLOG item 239 — a real server-side redirect (303 See Other, the
+   standard "redirect after a successful POST" status so the browser
+   re-fetches the target with GET rather than resubmitting the form),
+   needed for a `form`'s `onSuccess: navigate(View)` to actually navigate
+   the client anywhere — every generated `form` is a plain, non-htmx
+   `<form method="POST">`, so an ordinary HTTP redirect (not an
+   htmx-specific `HX-Redirect` header) is the correct mechanism a real
+   browser already understands. */
+CertoHttpResponse* certo_http_redirect(certo_text_t url) {
+    CertoHttpResponse* r = http_response_new(303, (char*)"", 0, (char*)"text/plain");
+    if (url) {
+        size_t n = strlen(url);
+        char* u = (char*)malloc(n + 1);
+        if (!u) certo_panic("out of memory");
+        memcpy(u, url, n + 1);
+        r->location = u;
+    }
+    return r;
+}
 /* Aliases matching camelCase Certo names → c_fn_name output */
 static inline CertoHttpResponse* certo_http_bad_request    (certo_text_t b) { return certo_http_bad_req(b); }
 static inline CertoHttpResponse* certo_http_server_error   (certo_text_t b) { return certo_http_srv_error(b); }
@@ -364,6 +390,7 @@ static const char* http_status_text(int64_t code) {
         case 204: return "No Content";
         case 301: return "Moved Permanently";
         case 302: return "Found";
+        case 303: return "See Other";
         case 304: return "Not Modified";
         case 400: return "Bad Request";
         case 401: return "Unauthorized";
@@ -530,15 +557,31 @@ static void http_srv_send(certo_socket_t sock, CertoHttpResponse* resp) {
     const char* ct   = resp && resp->content_type ? resp->content_type : "text/plain";
     int64_t     code = resp ? resp->status : 500;
     size_t      blen = strlen(body);
+    /* BACKLOG item 239 — a Location header, only ever set by
+       certo_http_redirect; every other response constructor leaves this
+       NULL, so this is a strict addition with no effect on any existing
+       response. */
+    const char* loc  = resp ? resp->location : NULL;
 
-    char header[512];
-    snprintf(header, sizeof(header),
-        "HTTP/1.1 %lld %s\r\n"
-        "Content-Type: %s\r\n"
-        "Content-Length: %zu\r\n"
-        "Connection: close\r\n"
-        "\r\n",
-        (long long)code, http_status_text(code), ct, blen);
+    char header[768];
+    if (loc) {
+        snprintf(header, sizeof(header),
+            "HTTP/1.1 %lld %s\r\n"
+            "Location: %s\r\n"
+            "Content-Type: %s\r\n"
+            "Content-Length: %zu\r\n"
+            "Connection: close\r\n"
+            "\r\n",
+            (long long)code, http_status_text(code), loc, ct, blen);
+    } else {
+        snprintf(header, sizeof(header),
+            "HTTP/1.1 %lld %s\r\n"
+            "Content-Type: %s\r\n"
+            "Content-Length: %zu\r\n"
+            "Connection: close\r\n"
+            "\r\n",
+            (long long)code, http_status_text(code), ct, blen);
+    }
 
     send(sock, header, (int)strlen(header), 0);
     if (blen > 0) send(sock, body, (int)blen, 0);
