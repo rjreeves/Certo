@@ -1734,6 +1734,19 @@ fn env_functions_registered() {
     assert!(env.lookup("getEnv").is_some(),   "missing getEnv");
     assert!(env.lookup("setEnv").is_some(),   "missing setEnv");
     assert!(env.lookup("unsetEnv").is_some(), "missing unsetEnv");
+    assert!(env.lookup("getCurrentDir").is_some(), "missing getCurrentDir");
+}
+
+#[test]
+fn get_current_dir_returns_text_with_no_params() {
+    let env = seeded_env();
+    match env.lookup("getCurrentDir").unwrap() {
+        Ty::Fn { params, ret } => {
+            assert!(params.is_empty());
+            assert_eq!(ret.as_ref(), &Ty::Text);
+        }
+        other => panic!("expected Fn, got {:?}", other),
+    }
 }
 
 #[test]
@@ -1753,6 +1766,7 @@ fn env_c_contains_key_functions() {
     assert!(ENV_C.contains("certo_get_env"),   "missing get_env");
     assert!(ENV_C.contains("certo_set_env"),   "missing set_env");
     assert!(ENV_C.contains("certo_unset_env"), "missing unset_env");
+    assert!(ENV_C.contains("certo_get_current_dir"), "missing get_current_dir");
 }
 
 // ------------------------------------------------------------------ //
@@ -2014,6 +2028,20 @@ fn process_c_contains_key_functions() {
     assert!(PROCESS_C.contains("certo_process_result_exit_code"),  "missing exit_code");
     assert!(PROCESS_C.contains("certo_process_result_stdout"),     "missing stdout");
     assert!(PROCESS_C.contains("certo_process_result_stderr"),     "missing stderr");
+}
+
+#[test]
+fn process_exec_inherit_registered_and_returns_int() {
+    let env = seeded_env();
+    match env.lookup("Process.execInherit").expect("missing Process.execInherit") {
+        Ty::Fn { ret, .. } => assert_eq!(ret.as_ref(), &Ty::Int),
+        other => panic!("expected Fn, got {:?}", other),
+    }
+}
+
+#[test]
+fn process_c_contains_exec_inherit() {
+    assert!(PROCESS_C.contains("certo_process_exec_inherit"), "missing exec_inherit");
 }
 
 // ------------------------------------------------------------------ //

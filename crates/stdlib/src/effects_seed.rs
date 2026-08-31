@@ -59,7 +59,7 @@ const IO_FUNCTIONS: &[&str] = &[
     // Credential
     "Credential.get", "Credential.getBytes", "Credential.set", "Credential.delete",
     // Process
-    "Process.exec", "Process.execWithInput", "Process.spawnDetached",
+    "Process.exec", "Process.execInherit", "Process.execWithInput", "Process.spawnDetached",
     "Process.spawnDetachedHidden", "Process.quit", "Process.lines",
     // DateTime
     "DateTime.now", "Date.today",
