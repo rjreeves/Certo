@@ -18,7 +18,11 @@ pub fn llvm_ty(ty: &Ty) -> String {
         Ty::Float      => "double".into(),
         Ty::Float32    => "float".into(),
         Ty::Bool       => "i1".into(),
-        Ty::Char       => "i8".into(),
+        // BACKLOG item 258 — must match the C backend's own `Ty::Char =>
+        // "int32_t"` (`crates/codegen/src/ty_to_c.rs`), since the LLVM
+        // backend calls into that same compiled C runtime — a mismatched
+        // width here would be a real ABI mismatch at every Char-typed call.
+        Ty::Char       => "i32".into(),
         Ty::Text       => "ptr".into(),    // const char*
         Ty::BoundedText(_) => "ptr".into(), // same runtime representation as Text
         Ty::Unit       => "i8".into(),     // placeholder; void used for return type
@@ -111,7 +115,7 @@ pub fn mangle(ty: &Ty) -> String {
         Ty::Float   => "f64".into(),
         Ty::Float32 => "f32".into(),
         Ty::Bool    => "i1".into(),
-        Ty::Char    => "i8".into(),
+        Ty::Char    => "i32".into(),
         Ty::Text    => "ptr".into(),
         Ty::Unit    => "void".into(),
         _           => "ptr".into(),

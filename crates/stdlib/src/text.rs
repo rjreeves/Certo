@@ -225,45 +225,115 @@ certo_text_t certo_text_to_lower_locale(certo_text_t s, certo_text_t locale) {
 #endif
 }
 
-/* ---- Char — a single ASCII byte, same byte-oriented convention as the rest
-   of Text (toUpper/toLower/len are all byte-based, not real Unicode). ---- */
+/* ---- Char — a real Unicode scalar value (spec §4.1: "4 bytes, a Unicode
+   scalar value, not a byte"), BACKLOG item 258. Certo Text is UTF-8, so
+   accessing "the i-th character" must decode UTF-8 to codepoints rather than
+   index raw bytes — the previous byte-indexed implementation corrupted any
+   multi-byte character it touched (`Text.charAt("héllo", 1)` returned a lone
+   continuation byte of 'é', not 'é' itself). `Char`'s own C representation
+   changed accordingly, from a 1-byte `char` to `int32_t` (`ty_to_c.rs`),
+   matching the spec's explicit size and holding any legal codepoint up to
+   0x10FFFF. */
 
-/* Bounds-checked single-character access — Text had no char-level access at
-   all before this. Returns Option<Char> (heap-boxed via __certo_opt_box,
-   same convention as every other Option-returning stdlib function). */
+/* Decode one UTF-8 codepoint starting at byte offset `*pos` (advanced past
+   the whole sequence, even on failure, so a caller's scanning loop always
+   makes progress). Returns -1 for invalid/truncated UTF-8 at this position —
+   `*pos` is still advanced by (at least) one byte so callers can skip over
+   it and keep counting real characters in the rest of the string. */
+static int32_t __certo_utf8_decode_at(const unsigned char* s, size_t len, size_t* pos) {
+    size_t i = *pos;
+    unsigned char b0 = s[i];
+    int32_t cp; size_t seq_len;
+    if ((b0 & 0x80) == 0x00)      { cp = b0;          seq_len = 1; }
+    else if ((b0 & 0xE0) == 0xC0) { cp = b0 & 0x1F;    seq_len = 2; }
+    else if ((b0 & 0xF0) == 0xE0) { cp = b0 & 0x0F;    seq_len = 3; }
+    else if ((b0 & 0xF8) == 0xF0) { cp = b0 & 0x07;    seq_len = 4; }
+    else { *pos = i + 1; return -1; } /* not a valid UTF-8 leading byte */
+    if (i + seq_len > len) { *pos = len; return -1; } /* truncated sequence */
+    for (size_t k = 1; k < seq_len; k++) {
+        unsigned char bk = s[i + k];
+        if ((bk & 0xC0) != 0x80) { *pos = i + 1; return -1; } /* bad continuation byte */
+        cp = (cp << 6) | (bk & 0x3F);
+    }
+    *pos = i + seq_len;
+    return cp;
+}
+
+/* Bounds-checked single-character access, counting real Unicode characters
+   (codepoints), not bytes — `i` is a character index. Returns Option<Char>
+   (heap-boxed via __certo_opt_box, same convention as every other
+   Option-returning stdlib function; `ty_to_c(Ty::Char)` is now `int32_t`, so
+   the generic Some/None unboxing machinery reads back the right width). */
 void* certo_text_char_at(certo_text_t s, int64_t i) {
     if (!s || i < 0) return NULL;
     size_t len = strlen(s);
-    if ((size_t)i >= len) return NULL;
-    return __certo_opt_box((int64_t)(unsigned char)s[i]);
+    size_t pos = 0;
+    int64_t idx = 0;
+    while (pos < len) {
+        int32_t cp = __certo_utf8_decode_at((const unsigned char*)s, len, &pos);
+        if (cp < 0) continue; /* invalid byte at this position — already skipped, keep scanning */
+        if (idx == i) return __certo_opt_box((int64_t)cp);
+        idx++;
+    }
+    return NULL;
 }
 
-certo_text_t certo_char_to_text(char c) {
-    char* out = (char*)malloc(2);
+/* Encodes a Unicode scalar value back to its UTF-8 byte sequence (1-4 bytes). */
+certo_text_t certo_char_to_text(int32_t c) {
+    char* out = (char*)malloc(5);
     if (!out) certo_panic("out of memory");
-    out[0] = c;
-    out[1] = '\0';
+    size_t n = 0;
+    if (c < 0) c = 0xFFFD; /* U+FFFD REPLACEMENT CHARACTER, for a bogus negative value */
+    if (c <= 0x7F) {
+        out[n++] = (char)c;
+    } else if (c <= 0x7FF) {
+        out[n++] = (char)(0xC0 | (c >> 6));
+        out[n++] = (char)(0x80 | (c & 0x3F));
+    } else if (c <= 0xFFFF) {
+        out[n++] = (char)(0xE0 | (c >> 12));
+        out[n++] = (char)(0x80 | ((c >> 6) & 0x3F));
+        out[n++] = (char)(0x80 | (c & 0x3F));
+    } else {
+        out[n++] = (char)(0xF0 | (c >> 18));
+        out[n++] = (char)(0x80 | ((c >> 12) & 0x3F));
+        out[n++] = (char)(0x80 | ((c >> 6) & 0x3F));
+        out[n++] = (char)(0x80 | (c & 0x3F));
+    }
+    out[n] = '\0';
     return out;
 }
 
-int64_t certo_char_to_int(char c) {
-    return (int64_t)(unsigned char)c;
+int64_t certo_char_to_int(int32_t c) {
+    return (int64_t)c;
 }
 
-/* Truncates to a byte, same convention as certo_float_to_int's silent
-   truncation rather than an Option — out-of-range input is a caller bug,
-   not a representable failure mode worth threading through every call site. */
-char certo_char_from_int(int64_t n) {
-    return (char)(n & 0xFF);
+/* Out-of-range input (outside a legal Unicode scalar value) is a caller bug,
+   not a representable failure mode worth threading through every call site —
+   same convention as certo_float_to_int's own silent truncation. Unlike the
+   previous byte-truncating `& 0xFF`, this no longer clips a real character
+   down to ASCII. */
+int32_t certo_char_from_int(int64_t n) {
+    return (int32_t)n;
 }
 
-bool certo_char_is_digit(char c)      { return isdigit((unsigned char)c) != 0; }
-bool certo_char_is_alpha(char c)      { return isalpha((unsigned char)c) != 0; }
-bool certo_char_is_upper_case(char c) { return isupper((unsigned char)c) != 0; }
-bool certo_char_is_lower_case(char c) { return islower((unsigned char)c) != 0; }
-bool certo_char_is_whitespace(char c) { return isspace((unsigned char)c) != 0; }
-char certo_char_to_upper_case(char c) { return (char)toupper((unsigned char)c); }
-char certo_char_to_lower_case(char c) { return (char)tolower((unsigned char)c); }
+/* isdigit/isalpha/etc. (ctype.h) are only well-defined for a value
+   representable as unsigned char or EOF — passing an arbitrary Unicode
+   codepoint (e.g. 0x65E5, a CJK character) is undefined behavior, not just
+   "wrong". Gated to the ASCII range: `isX` conservatively answers false for
+   anything non-ASCII (never *wrong*, since it's a genuine "not a plain ASCII
+   digit/letter", but not full Unicode general-category classification
+   either — that needs a real Unicode character database, out of scope
+   here), and the two case-conversion functions return the codepoint
+   unchanged rather than mis-converting it — matching this file's own
+   already-established ASCII-only-is-honest-not-wrong convention (see
+   certo_text_to_upper_ascii's own doc comment above). */
+bool certo_char_is_digit(int32_t c)      { return c >= 0 && c <= 127 && isdigit((unsigned char)c) != 0; }
+bool certo_char_is_alpha(int32_t c)      { return c >= 0 && c <= 127 && isalpha((unsigned char)c) != 0; }
+bool certo_char_is_upper_case(int32_t c) { return c >= 0 && c <= 127 && isupper((unsigned char)c) != 0; }
+bool certo_char_is_lower_case(int32_t c) { return c >= 0 && c <= 127 && islower((unsigned char)c) != 0; }
+bool certo_char_is_whitespace(int32_t c) { return c >= 0 && c <= 127 && isspace((unsigned char)c) != 0; }
+int32_t certo_char_to_upper_case(int32_t c) { return (c >= 0 && c <= 127) ? (int32_t)toupper((unsigned char)c) : c; }
+int32_t certo_char_to_lower_case(int32_t c) { return (c >= 0 && c <= 127) ? (int32_t)tolower((unsigned char)c) : c; }
 
 certo_text_t certo_text_trim(certo_text_t s) {
     if (!s) return "";
