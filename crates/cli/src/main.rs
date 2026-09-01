@@ -893,8 +893,46 @@ fn resolve_local_imports(module: &mut Module, input: &Path, colour: bool, verbos
                     module.decls.extend(imp_module.decls);
                 }
             }
+        } else {
+            // BACKLOG item 300 — an import path that doesn't resolve to any
+            // real file previously fell straight through this whole `if`
+            // silently: zero decls merged, zero error, no signal at all
+            // that the import itself was the problem. Confirmed live: a
+            // bogus import path and a real one both `check` clean, and only
+            // a later *use* of a name from it fails, with a generic,
+            // misleading "undefined name" that never points back to the
+            // import line. Deliberately not attempting real dotted-module-
+            // name resolution here (a separate, much larger feature —
+            // nothing in this codebase resolves an import by a candidate
+            // file's own declared `module X.Y.Z` name today, only by
+            // joining the import path directly into a directory path) —
+            // this is scoped to making the existing directory-path
+            // resolution's own failure loud and immediate instead of a
+            // silent no-op.
+            let diag = unresolved_local_import_diagnostic(imp, &candidate);
+            let src = std::fs::read_to_string(input).unwrap_or_default();
+            eprint!("{}", render_all(&[diag], &src, &input.display().to_string(), colour));
+            process::exit(1);
         }
     }
+}
+
+/// Builds the diagnostic for an import path with no matching local file —
+/// BACKLOG item 300. Split out from `resolve_local_imports` purely so a
+/// test can inspect the diagnostic's own code/message/span directly,
+/// without triggering that function's own `process::exit` on failure.
+fn unresolved_local_import_diagnostic(imp: &certo_ast::module::Import, candidate: &Path) -> Diagnostic {
+    let path_str = imp.path.segments.iter().map(|s| s.node.as_str()).collect::<Vec<_>>().join(".");
+    Diagnostic::error(
+        "E0103",
+        format!("cannot find a local module for `import {path_str}`"),
+    )
+    .with_span(imp.span)
+    .with_label(format!("no file found at {}", candidate.display()))
+    .with_note(format!(
+        "`{path_str}` doesn't match any stdlib module, and {} doesn't exist",
+        candidate.display()
+    ))
 }
 
 /// A rewrite target for a free reference to a renamed top-level name, used
@@ -5148,6 +5186,52 @@ mod resolve_local_imports_tests {
             Expr::Field { expr, field, .. } if field.node == "helper"
                 && matches!(&expr.node, Expr::Path { path, .. } if path.segments.last().map(|s| s.node.as_str()) == Some("M"))));
         assert!(calls_m_helper, "expected M.greet()'s body to call M.helper(), got {:#?}", body.node);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // ------------------------------------------------------------------ //
+    // BACKLOG item 300 — an import path with no matching local file must
+    // produce a real, clear diagnostic instead of silently no-op'ing (zero
+    // decls merged, zero error). `resolve_local_imports` itself calls
+    // `process::exit` on this path, so these tests exercise
+    // `unresolved_local_import_diagnostic` directly — the same
+    // bypass-the-exit-heavy-wrapper convention `span_rewrite_tests` above
+    // already established for `expand_validators`/`expand_state_machines`.
+    // ------------------------------------------------------------------ //
+
+    #[test]
+    fn unresolved_import_diagnostic_names_the_real_import_path_and_missing_file() {
+        let module = certo_parser::parse("module A\nimport Orders.Constraints.{ UserIsAdmin }").expect("parse error");
+        let imp = &module.imports[0];
+        let candidate = Path::new("Orders/Constraints.cto");
+        let diag = unresolved_local_import_diagnostic(imp, candidate);
+        assert_eq!(diag.code, "E0103");
+        assert!(diag.message.contains("Orders.Constraints"), "got: {}", diag.message);
+        assert!(diag.label.contains("Orders/Constraints.cto") || diag.label.contains("Orders\\Constraints.cto"),
+            "got: {}", diag.label);
+        assert_eq!(diag.span, Some(imp.span), "the diagnostic must point at the real import statement");
+    }
+
+    #[test]
+    fn a_bogus_import_path_now_actually_fails_instead_of_silently_succeeding() {
+        // Regression guard for the exact bug this item fixes: previously,
+        // `resolve_local_imports` on a bogus import path merged zero decls
+        // and reported nothing at all — confirmed here by checking that the
+        // failure is now detectable *before* `resolve_local_imports` would
+        // even be called for real (i.e. the candidate file genuinely
+        // doesn't exist), which is precisely the condition its own `else`
+        // branch (calling this function) is gated on.
+        let dir = temp_project("bogus_import");
+        let main_path = dir.join("main.cto");
+        std::fs::write(&main_path, "module Main\nimport Totally.Bogus.Path\nfn main(): Unit [io] = { println(\"hi\") }\n").unwrap();
+        let (module, _src) = parse_file_or_exit(&main_path, false);
+        let imp = &module.imports[0];
+        let rel: PathBuf = imp.path.segments.iter().map(|s| s.node.as_str()).collect::<Vec<_>>().join("/").into();
+        let candidate = dir.join(rel).with_extension("cto");
+        assert!(!candidate.exists(), "sanity check: the bogus import's candidate file must not exist");
+        let diag = unresolved_local_import_diagnostic(imp, &candidate);
+        assert_eq!(diag.code, "E0103");
 
         std::fs::remove_dir_all(&dir).ok();
     }
