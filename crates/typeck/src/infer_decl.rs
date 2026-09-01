@@ -1405,6 +1405,22 @@ fn hoist_decl(
             let ty = Ty::Named { name: t.name.node.clone(), args: vec![] };
             env.define(t.name.node.clone(), ty);
 
+            // BACKLOG item 281 — `type X = Y` (`TypeBody::Alias`) is a real
+            // alias, not an opaque nominal type: register its target
+            // `TypeExpr` (and its own declared type-param names, for a
+            // generic alias like `type Callback<T> = T => Unit`) so
+            // `type_expr_to_ty`'s `Named` catch-all can expand a reference
+            // to it into the real target type instead of the placeholder
+            // `Ty::Named` defined just above (which stays registered
+            // harmlessly for aliases too — nothing looks it up the way a
+            // record/sum type's own constructor binding does).
+            if let certo_ast::decl::TypeBody::Alias(target) = &t.body {
+                env.type_aliases.insert(
+                    t.name.node.clone(),
+                    (t.type_params.iter().map(|p| p.name.node.clone()).collect(), target.node.clone()),
+                );
+            }
+
             // Bring the type's own type params into scope (as fresh vars) so
             // record/variant field types that reference them (e.g.
             // `type Secret<T> = priv Secret(T)`) resolve correctly instead of

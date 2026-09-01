@@ -3093,3 +3093,75 @@ fn membership_right_side_must_be_a_list() {
     assert!(!errs.is_empty(), "the right side of `in` must be a list");
 }
 
+// ------------------------------------------------------------------ //
+// BACKLOG item 281 — `type X = Y` (spec §3.3) is a real alias, not an
+// opaque nominal type: it must be freely interchangeable with its target.
+// ------------------------------------------------------------------ //
+
+#[test]
+fn type_alias_value_can_be_used_as_its_underlying_type() {
+    // A `UserId`-typed value must be directly usable wherever a `Text` is
+    // expected (e.g. string concatenation) — an opaque nominal type would
+    // reject this.
+    check(
+        "module A
+type UserId = Text
+fn greet(id: UserId): Text = \"hi \" ++ id"
+    ).unwrap();
+}
+
+#[test]
+fn raw_underlying_value_can_be_passed_where_the_alias_is_expected() {
+    // The reverse direction: a plain `Text` literal passed where `UserId`
+    // is declared must typecheck — they're the same type.
+    check(
+        "module A
+type UserId = Text
+fn greet(id: UserId): Text = id
+fn main(): Unit = { val g = greet(\"abc\") }"
+    ).unwrap();
+}
+
+#[test]
+fn generic_type_alias_expands_its_target_with_substituted_args() {
+    // The spec's own `type Callback<T> = T => Unit` example: a param
+    // declared as `Callback<Int>` must accept a real `(Int) => Unit` lambda
+    // and be directly callable.
+    check(
+        "module A
+type Callback<T> = T => Unit
+fn runWith(cb: Callback<Int>): Unit = cb(42)
+fn main(): Unit = { runWith((n) => {}) }"
+    ).unwrap();
+}
+
+#[test]
+fn generic_type_alias_still_rejects_a_mismatched_instantiation() {
+    // `Callback<Int>` must NOT accept a `(Text) => Unit` lambda — the
+    // alias's own type param must still really participate in unification,
+    // not just silently accept anything.
+    let errs = check_err(
+        "module A
+type Callback<T> = T => Unit
+fn runWith(cb: Callback<Int>): Unit = cb(42)
+fn main(): Unit = { runWith((n: Text) => {}) }"
+    );
+    assert!(!errs.is_empty(), "a Callback<Int> should reject a (Text) => Unit lambda");
+}
+
+#[test]
+fn self_referential_type_alias_is_a_bounded_error_not_a_hang() {
+    // `type A = A` must not stack-overflow the compiler — it's nonsensical,
+    // and degrades to `Ty::Error` (which unifies silently, same as every
+    // other already-erroneous type in this module), so this just needs to
+    // complete at all in bounded time rather than hang/crash; not asserting
+    // a specific pass/fail outcome.
+    let module = parse(
+        "module A
+type A = A
+fn f(x: A): A = x"
+    ).expect("parse error");
+    let _ = resolve(&module);
+    let _ = check_module(&module);
+}
+
