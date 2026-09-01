@@ -106,6 +106,25 @@ pub fn snake_to_camel(s: &str) -> String {
     first + &rest
 }
 
+/// `customerId`/`ProductCategories` → `customer_id`/`product_categories` —
+/// the inverse of `snake_to_camel`/`snake_to_pascal` above, needed so real
+/// SQL DDL (`crates/migrate/src/sql_gen.rs`, BACKLOG item 285) round-trips
+/// with `certo db pull`'s own naming convention: Postgres silently
+/// lowercase-folds an unquoted camelCase identifier (`parentId` becomes the
+/// column `parentid`, not `parentId`), destroying the word boundary rather
+/// than just the casing — a migration writing camelCase table/column names
+/// (as the spec's own §6.5 example does) must snake_case them before they
+/// ever reach real SQL, or a follow-up `certo db pull` can never recover
+/// the original name.
+pub fn camel_to_snake(s: &str) -> String {
+    let mut out = String::new();
+    for (i, c) in s.chars().enumerate() {
+        if c.is_uppercase() && i > 0 { out.push('_'); }
+        out.extend(c.to_lowercase());
+    }
+    out
+}
+
 /// Is one of `a`/`b` a bare `"Decimal"` and the other a parameterized
 /// `"Decimal(p, s)"` (in either order, case-insensitively, ignoring a
 /// trailing `?`)? Every place that compares a declared type against another

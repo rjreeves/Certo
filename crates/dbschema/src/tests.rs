@@ -361,3 +361,30 @@ fn unrelated_types_not_compatible_bounded_text() {
 fn bounded_text_bare_vs_param_strips_nullable_suffix() {
     assert!(crate::schema::bounded_text_bare_vs_param("Text?", "BoundedText(255)?"));
 }
+
+// BACKLOG item 285 — `camel_to_snake` is the inverse of `snake_to_camel`/
+// `snake_to_pascal` above, needed so migration DDL can round-trip with
+// `certo db pull`'s own naming convention.
+#[test]
+fn camel_to_snake_converts_a_simple_field_name() {
+    assert_eq!(crate::schema::camel_to_snake("customerId"), "customer_id");
+}
+
+#[test]
+fn camel_to_snake_converts_a_pascal_case_table_name() {
+    assert_eq!(crate::schema::camel_to_snake("ProductCategories"), "product_categories");
+}
+
+#[test]
+fn camel_to_snake_is_a_no_op_on_an_already_lowercase_name() {
+    assert_eq!(crate::schema::camel_to_snake("orders"), "orders");
+}
+
+#[test]
+fn camel_to_snake_round_trips_with_snake_to_camel() {
+    for name in ["customerId", "parentId", "sortOrder", "id", "categoryId"] {
+        let snake = crate::schema::camel_to_snake(name);
+        assert_eq!(crate::schema::snake_to_camel(&snake), name,
+            "camel_to_snake({name:?}) = {snake:?} did not round-trip back via snake_to_camel");
+    }
+}

@@ -428,6 +428,99 @@ fn end_to_end_alter_and_index_emit_ddl() {
     assert!(alter.to_uppercase().contains("FOREIGN KEY"), "got: {alter}");
     assert!(alter.to_uppercase().contains("ON DELETE CASCADE"), "got: {alter}");
 
+    // BACKLOG item 285 — `authorId` must snake_case to `author_id` in real
+    // SQL (Postgres would otherwise silently lowercase-fold it to
+    // `authorid`, destroying the word boundary, not just the casing).
     let index = op_to_sql(&ops[1]);
-    assert_eq!(index, "CREATE INDEX posts_author_idx ON posts (authorId);");
+    assert_eq!(index, "CREATE INDEX posts_author_idx ON posts (author_id);");
+}
+
+// ------------------------------------------------------------------ //
+// BACKLOG item 285 — migration DDL must snake_case camelCase table/column
+// identifiers before they reach real SQL, matching `certo db pull`'s own
+// naming convention — Postgres silently lowercase-folds an unquoted
+// camelCase identifier (`parentId` → `parentid`), destroying the word
+// boundary, so a follow-up `certo db pull` can never recover the original
+// name unless migrations emit the real snake_case form up front. The
+// index's own name is deliberately left untouched — it's a plain
+// DBA-facing identifier, not part of that round-trip.
+// ------------------------------------------------------------------ //
+
+#[test]
+fn create_table_snake_cases_camel_case_table_and_column_names() {
+    let op = MigrationOp::CreateTable {
+        name: "productCategories".to_string(),
+        columns: vec![
+            make_col("id",       int_ty(),  true,  false),
+            make_col("parentId", int_ty(),  false, true),
+            make_col("sortOrder", int_ty(), false, false),
+        ],
+        span: dummy_span(),
+    };
+    let sql = op_to_sql(&op);
+    assert!(sql.contains("CREATE TABLE product_categories"), "got: {sql}");
+    assert!(sql.contains("parent_id"), "got: {sql}");
+    assert!(sql.contains("sort_order"), "got: {sql}");
+    assert!(!sql.contains("parentId") && !sql.contains("sortOrder") && !sql.contains("productCategories"),
+        "no raw camelCase identifier should survive into real SQL, got: {sql}");
+}
+
+#[test]
+fn create_table_snake_cases_a_composite_primary_key_list() {
+    let op = MigrationOp::CreateTable {
+        name: "orderItems".to_string(),
+        columns: vec![
+            make_col("orderId", int_ty(), true, false),
+            make_col("itemId",  int_ty(), true, false),
+        ],
+        span: dummy_span(),
+    };
+    let sql = op_to_sql(&op);
+    assert!(sql.contains("PRIMARY KEY (order_id, item_id)"), "got: {sql}");
+}
+
+#[test]
+fn drop_table_snake_cases_the_table_name() {
+    let op = MigrationOp::DropTable { name: "productCategories".to_string(), span: dummy_span() };
+    assert_eq!(op_to_sql(&op), "DROP TABLE product_categories;");
+}
+
+#[test]
+fn alter_table_drop_column_snake_cases_the_column_name() {
+    let op = MigrationOp::AlterTable {
+        name: "posts".to_string(),
+        ops:  vec![AlterOp::DropColumn { name: "categoryId".to_string(), span: dummy_span() }],
+        span: dummy_span(),
+    };
+    let sql = op_to_sql(&op);
+    assert!(sql.contains("DROP COLUMN category_id"), "got: {sql}");
+}
+
+#[test]
+fn alter_table_add_foreign_key_snake_cases_column_and_referenced_table() {
+    let op = MigrationOp::AlterTable {
+        name: "products".to_string(),
+        ops:  vec![AlterOp::AddForeignKey {
+            column:     "categoryId".to_string(),
+            references: "productCategories".to_string(),
+            on_delete:  FkAction::SetNull,
+            span:       dummy_span(),
+        }],
+        span: dummy_span(),
+    };
+    let sql = op_to_sql(&op);
+    assert!(sql.contains("ADD FOREIGN KEY (category_id) REFERENCES product_categories ON DELETE SET NULL"), "got: {sql}");
+}
+
+#[test]
+fn create_index_snake_cases_table_and_columns_but_not_the_index_name_itself() {
+    let op = MigrationOp::CreateIndex {
+        name:    "productsCategoryIdx".to_string(),
+        table:   "products".to_string(),
+        columns: vec!["categoryId".to_string()],
+        span:    dummy_span(),
+    };
+    let sql = op_to_sql(&op);
+    assert_eq!(sql, "CREATE INDEX productsCategoryIdx ON products (category_id);",
+        "the index name itself must stay as written; only the table/columns snake_case");
 }
