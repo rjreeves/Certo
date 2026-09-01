@@ -2150,9 +2150,23 @@ fn lower_expr(expr: &S<Expr>, cx: &mut Cx) -> HirExpr {
             let deadline_local = timeout.as_ref()
                 .map(|t| lower_deadline(t, "__parallel_deadline", &mut stmts, cx, span));
             let mut task_locals: Vec<LocalId> = Vec::new();
+            // BACKLOG item 287 — each task's own real type must be captured
+            // *before* `spawn_inner` moves into `Spawn`'s args below, mirroring
+            // `Expr::WithTimeout`'s own `body_ty` fix (item 122) just below —
+            // that fix's own doc comment explicitly flagged this exact same
+            // gap here as still open ("unlike `parallel`'s `Ty::Error`
+            // placeholder above"), never carried over until now. Without it,
+            // every awaited element stayed `Ty::Error`, so a destructuring
+            // `val (revenue, expenses, ...) = parallel { ... }` gave each
+            // bound name no real type — confirmed by direct testing: an
+            // f-string interpolating one of them read the boxed value as the
+            // wrong C type and segfaulted, the identical failure class
+            // `WithTimeout`'s own fix already documented for its own result.
+            let mut task_tys: Vec<Ty> = Vec::new();
             for (i, task) in tasks.iter().enumerate() {
                 let capture_threshold = cx.next_local;
                 let spawn_inner = lower_expr(task, cx);
+                let task_ty = spawn_inner.ty.clone();
                 let captures = collect_lambda_captures(&spawn_inner, capture_threshold);
                 let spawn_expr = HirExpr {
                     kind: HirExprKind::Spawn { fn_name: format!("__parallel_task_{i}"), args: vec![spawn_inner], captures },
@@ -2161,17 +2175,19 @@ fn lower_expr(expr: &S<Expr>, cx: &mut Cx) -> HirExpr {
                 let local = cx.fresh_local();
                 stmts.push(HirStmt::Let { local, name: format!("__task_{i}"), ty: Ty::Error, init: spawn_expr });
                 task_locals.push(local);
+                task_tys.push(task_ty);
             }
-            let awaited: Vec<HirExpr> = task_locals.iter().map(|&l| {
+            let awaited: Vec<HirExpr> = task_locals.iter().zip(task_tys.iter()).map(|(&l, ty)| {
                 let local_expr = HirExpr { kind: HirExprKind::Local(l), ty: Ty::Error, span };
                 let kind = match deadline_local {
                     Some(d) => HirExprKind::AwaitTimed { task: Box::new(local_expr), deadline: d },
                     None    => HirExprKind::Await(Box::new(local_expr)),
                 };
-                HirExpr { kind, ty: Ty::Error, span }
+                HirExpr { kind, ty: ty.clone(), span }
             }).collect();
-            let tail = HirExpr { kind: HirExprKind::Tuple(awaited), ty: Ty::Error, span };
-            HirExpr { kind: HirExprKind::Block { stmts, tail: Box::new(tail) }, ty: Ty::Error, span }
+            let tuple_ty = Ty::Tuple(task_tys);
+            let tail = HirExpr { kind: HirExprKind::Tuple(awaited), ty: tuple_ty.clone(), span };
+            HirExpr { kind: HirExprKind::Block { stmts, tail: Box::new(tail) }, ty: tuple_ty, span }
         }
 
         Expr::WithTimeout { duration, body, .. } => {
