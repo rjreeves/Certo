@@ -2272,3 +2272,63 @@ fn self_referential_type_alias_does_not_hang_hir_lowering() {
     // MAX_ALIAS_EXPANSION_DEPTH, degrading to a harmless opaque type.
     let _ = try_lower("module A\ntype A = A\nfn f(x: A): A = x");
 }
+
+// ------------------------------------------------------------------ //
+// BACKLOG item 284 — piping into a generic stdlib call that returns a
+// struct must recover the same real return type an equivalent non-piped
+// call already does, not `Ty::Error` (which miscompiled to invalid C:
+// `member reference base type 'int64_t' is not a structure or union`).
+// ------------------------------------------------------------------ //
+
+#[test]
+fn pipe_into_struct_returning_generic_call_resolves_the_real_element_type() {
+    let m = lower(
+        "module A\ntype Pt = { x: Int, y: Int }\n\
+         fn f(): List<Pt> = [1, 2, 3] |> List.map((n) => Pt { x: n, y: n * 2 })"
+    );
+    let f = m.items.iter().find_map(|it| match it {
+        HirItem::Fn(f) if f.name == "f" => Some(f),
+        _ => None,
+    }).expect("expected fn `f`");
+    let body = f.body.as_ref().unwrap();
+    assert_eq!(body.ty, Ty::List(Box::new(Ty::Named { name: "Pt".into(), args: vec![] })),
+        "piped List.map over a struct-returning lambda must resolve List<Pt>, not Ty::Error, got {:?}", body.ty);
+}
+
+#[test]
+fn pipe_into_struct_returning_call_matches_the_non_piped_equivalent() {
+    // The exact same call written with and without the pipe must resolve
+    // to the identical type — the pipe form must not lose any of the
+    // return-type recovery the ordinary `Expr::App` arm already does.
+    let piped = lower(
+        "module A\ntype Pt = { x: Int, y: Int }\n\
+         fn f(): List<Pt> = [1, 2, 3] |> List.map((n) => Pt { x: n, y: n * 2 })"
+    );
+    let plain = lower(
+        "module A\ntype Pt = { x: Int, y: Int }\n\
+         fn f(): List<Pt> = List.map([1, 2, 3], (n) => Pt { x: n, y: n * 2 })"
+    );
+    let ty_of = |m: &crate::HirModule| m.items.iter().find_map(|it| match it {
+        HirItem::Fn(f) if f.name == "f" => f.body.as_ref().map(|b| b.ty.clone()),
+        _ => None,
+    }).expect("expected fn `f`");
+    assert_eq!(ty_of(&piped), ty_of(&plain), "piped and non-piped forms of the same call must resolve identically");
+}
+
+#[test]
+fn pipe_with_no_call_args_into_struct_returning_fn_still_resolves() {
+    // `a |> f` (bare pipe, no explicit call args) must also recover the
+    // real return type, not just the `a |> f(...)` form.
+    let m = lower(
+        "module A\ntype Pt = { x: Int, y: Int }\n\
+         fn makePt(n: Int): Pt = Pt { x: n, y: n }\n\
+         fn f(): Pt = 5 |> makePt"
+    );
+    let f = m.items.iter().find_map(|it| match it {
+        HirItem::Fn(f) if f.name == "f" => Some(f),
+        _ => None,
+    }).expect("expected fn `f`");
+    let body = f.body.as_ref().unwrap();
+    assert_eq!(body.ty, Ty::Named { name: "Pt".into(), args: vec![] },
+        "bare `a |> f` must resolve f's real return type, not Ty::Error, got {:?}", body.ty);
+}

@@ -1186,22 +1186,35 @@ fn lower_expr(expr: &S<Expr>, cx: &mut Cx) -> HirExpr {
             }
         }
 
+        // `a |> f(b, c)` → `f(a, b, c)`; `a |> f` → `f(a)` — BACKLOG item
+        // 284: previously hand-rolled directly into a `Call` node with
+        // `ty: Ty::Error`, bypassing every one of the `Expr::App` arm's own
+        // return-type recovery paths below (stdlib/user return-type
+        // tables, `generic_container_ret`'s struct-shaped generic
+        // recovery, row-polymorphism, UFCS, labeled/default args, lambda
+        // hints) — a piped call into any generic stdlib function returning
+        // a struct (`Query.first`, `List.map` with a struct-returning
+        // lambda, ...) miscompiled to invalid C referencing a non-struct
+        // field on a raw `int64_t`. Fixed by desugaring to a real
+        // `Expr::App` over the original, un-lowered source AST and
+        // re-lowering that instead, so every one of the App arm's own
+        // recovery paths applies for free, with zero duplicated logic to
+        // keep in sync. `lower_expr` only builds a tree, never executes
+        // anything, so re-lowering `left`/`right` here can't
+        // double-evaluate a real side effect — the same accepted tradeoff
+        // the dot-call UFCS rewrite in the `Expr::App` arm below already
+        // relies on.
         Expr::Pipe { left, right, .. } => {
-            let lhs = lower_expr(left, cx);
-            match &right.node {
-                // `a |> f(b, c)` → `f(a, b, c)`
+            let left_arg = certo_ast::expr::Arg { label: None, value: (**left).clone(), span: left.span };
+            let synthetic: S<Expr> = match &right.node {
                 Expr::App { func, args, .. } => {
-                    let func = lower_expr(func, cx);
-                    let mut call_args = vec![lhs];
-                    call_args.extend(args.iter().map(|a| lower_expr(&a.value, cx)));
-                    HirExpr { kind: HirExprKind::Call { func: Box::new(func), args: call_args }, ty: Ty::Error, span }
+                    let mut new_args = vec![left_arg];
+                    new_args.extend(args.iter().cloned());
+                    S::new(Expr::App { func: func.clone(), args: new_args, span }, span)
                 }
-                // `a |> f` → `f(a)`
-                _ => {
-                    let func = lower_expr(right, cx);
-                    HirExpr { kind: HirExprKind::Call { func: Box::new(func), args: vec![lhs] }, ty: Ty::Error, span }
-                }
-            }
+                _ => S::new(Expr::App { func: right.clone(), args: vec![left_arg], span }, span),
+            };
+            lower_expr(&synthetic, cx)
         }
 
         Expr::App { func, args, .. } => {
