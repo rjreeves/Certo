@@ -2390,3 +2390,36 @@ fn parallel_with_timeout_still_resolves_real_element_types() {
     assert_eq!(body.ty, Ty::Tuple(vec![Ty::Int, Ty::Text]),
         "parallel(timeout: ...) {{ }}'s result must also resolve (Int, Text), not Ty::Error, got {:?}", body.ty);
 }
+
+// ------------------------------------------------------------------ //
+// BACKLOG item 282 — `List.sumBy`/`sortBy`/`minBy`/`maxBy`'s key/numeric
+// projection restriction previously excluded `Decimal`, breaking spec
+// §8.5's own flagship Aggregate Roots example (summing `Money`-typed
+// per-item fields, which wrap `Decimal`). `Decimal`'s `+`/`<`/`>` already
+// route through real runtime functions (item 249), so the "struct
+// operands don't compile with a bare C operator" reasoning this
+// restriction was built on no longer applies.
+// ------------------------------------------------------------------ //
+
+#[test]
+fn sumby_struct_decimal_field_key_lowers_ok_and_resolves_decimal() {
+    let m = lower(
+        "module A\nimport Stdlib.Collections.{ List }\ntype Item = { name: Text, price: Decimal }\n\
+         fn f(items: List<Item>): Decimal = List.sumBy(items, (i) => i.price)"
+    );
+    let f = m.items.iter().find_map(|it| match it {
+        HirItem::Fn(f) if f.name == "f" => Some(f),
+        _ => None,
+    }).expect("expected fn `f`");
+    assert_eq!(f.body.as_ref().unwrap().ty, Ty::Decimal(None),
+        "List.sumBy over a Decimal field must resolve Decimal, got {:?}", f.body.as_ref().unwrap().ty);
+}
+
+#[test]
+fn sortby_struct_decimal_field_key_lowers_ok() {
+    // Must not be rejected as E0601 — Decimal is now a supported key type.
+    lower(
+        "module A\nimport Stdlib.Collections.{ List }\ntype Item = { name: Text, price: Decimal }\n\
+         fn f(items: List<Item>): List<Item> = List.sortBy(items, (i) => i.price)"
+    );
+}

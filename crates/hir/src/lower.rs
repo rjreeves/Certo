@@ -639,7 +639,10 @@ fn lower_lambda_with_param_hints(params: &[certo_ast::expr::LambdaParam], body: 
 /// types (see the call site's own doc comment for why both exist).
 fn is_supported_key_ty(ty: &Ty) -> bool {
     matches!(ty,
-        Ty::Int | Ty::Int8 | Ty::Int16 | Ty::Int32 | Ty::UInt | Ty::Float | Ty::Float32)
+        Ty::Int | Ty::Int8 | Ty::Int16 | Ty::Int32 | Ty::UInt | Ty::Float | Ty::Float32
+        // BACKLOG item 282 — kept in sync with `crates/typeck/src/
+        // infer_expr.rs`'s own `is_supported_key_type`, see its doc comment.
+        | Ty::Decimal(_))
 }
 
 fn stdlib_param_names() -> HashMap<&'static str, &'static [&'static str]> {

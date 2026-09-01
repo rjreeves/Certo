@@ -893,6 +893,13 @@ fn lower_sum_by_call(list_expr: &HirExpr, key_expr: &HirExpr, b: &mut Builder) -
 
     let zero = match &n_ty {
         Ty::Float | Ty::Float32 => Operand::Const(MirConst::Float(0.0)),
+        // BACKLOG item 282 — a `Decimal` accumulator's zero must be a real
+        // `certo_decimal_t` value (via `certo_decimal_parse`, the same
+        // runtime path any other `Decimal` literal goes through), not a
+        // bit-pattern `MirConst::Int(0)` this struct-typed accumulator's
+        // own `Rvalue::BinOp{Add}` (routed to `certo_decimal_add` by
+        // `emit_binop`) would otherwise misread.
+        Ty::Decimal(_) => Operand::Const(MirConst::Decimal("0".to_string())),
         _ => Operand::Const(MirConst::Int(0)),
     };
     let acc_local = lb.declare_local("_acc", n_ty.clone());
