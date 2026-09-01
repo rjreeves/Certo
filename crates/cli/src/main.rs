@@ -584,7 +584,16 @@ fn cmd_build(args: &[String], quiet: bool) {
                     #include <stdint.h>\n#include <stdbool.h>\n#include <stddef.h>\n\
                     #include <inttypes.h>\n#include <stdarg.h>\n\
                     #define _CRT_SECURE_NO_WARNINGS\n\
-                    {}", if uses_db { "#define CERTO_DB_ENABLED 1\n" } else { "" });
+                    {}{}",
+                    if uses_db { "#define CERTO_DB_ENABLED 1\n" } else { "" },
+                    // [features] query-logging (spec §11.4, BACKLOG item
+                    // 301) — compile-time gated the same way CERTO_DB_ENABLED
+                    // just above already is; `certo_db_query`/`certo_db_exec`
+                    // (crates/stdlib/src/db.rs) are the two real sinks every
+                    // dbQuery/Query.*/Mutation.* call funnels through, so
+                    // gating logging there (not at every Certo-level call
+                    // site) covers all of them for free.
+                    if read_query_logging_flag(&project_root) { "#define CERTO_QUERY_LOGGING 1\n" } else { "" });
     let runtime_header = certo_codegen::RUNTIME_HEADER;
     let stdlib_c  = certo_stdlib::full_c_runtime_with_db(uses_db);
     let module_c  = certo_codegen::emit_module(
@@ -1445,6 +1454,17 @@ fn read_effect_checking_flag(project_root: &Path) -> bool {
         .and_then(|cfg| cfg.features)
         .and_then(|f| f.effect_checking)
         .unwrap_or(true)
+}
+
+/// `[features] query-logging` (BACKLOG item 301: spec §11.4 says "Log all
+/// DB queries in dev mode") — opt-in, defaults `false` like `schema-sync`
+/// above (a debug feature, not something a production build should get by
+/// silently omitting the flag).
+fn read_query_logging_flag(project_root: &Path) -> bool {
+    load_certo_toml_or_die(project_root)
+        .and_then(|cfg| cfg.features)
+        .and_then(|f| f.query_logging)
+        .unwrap_or(false)
 }
 
 /// Loads `certo.toml` from `project_root`, exiting with a clear parse error if
@@ -4819,6 +4839,49 @@ mod read_effect_checking_flag_tests {
         let dir = temp_project("explicit_true");
         std::fs::write(dir.join("certo.toml"), "[project]\nname = \"x\"\n[features]\neffect-checking = true\n").unwrap();
         assert!(read_effect_checking_flag(&dir));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+}
+
+// BACKLOG item 301 — `[features] query-logging` previously did nothing.
+#[cfg(test)]
+mod read_query_logging_flag_tests {
+    use super::*;
+
+    fn temp_project(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("certo_query_logging_flag_test_{}_{}_{}", name, std::process::id(), line!()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn defaults_to_false_with_no_certo_toml_at_all() {
+        let dir = temp_project("no_toml");
+        assert!(!read_query_logging_flag(&dir), "query logging must default off");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn defaults_to_false_with_no_features_section() {
+        let dir = temp_project("no_features");
+        std::fs::write(dir.join("certo.toml"), "[project]\nname = \"x\"\n").unwrap();
+        assert!(!read_query_logging_flag(&dir));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn explicit_true_enables_it() {
+        let dir = temp_project("explicit_true");
+        std::fs::write(dir.join("certo.toml"), "[project]\nname = \"x\"\n[features]\nquery-logging = true\n").unwrap();
+        assert!(read_query_logging_flag(&dir));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn explicit_false_keeps_it_off() {
+        let dir = temp_project("explicit_false");
+        std::fs::write(dir.join("certo.toml"), "[project]\nname = \"x\"\n[features]\nquery-logging = false\n").unwrap();
+        assert!(!read_query_logging_flag(&dir));
         std::fs::remove_dir_all(&dir).ok();
     }
 }

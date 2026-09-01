@@ -184,6 +184,15 @@ certo_text_t certo_db_version_string(int64_t handle) {
  * Returns the number of rows affected, or -1 on error. */
 int64_t certo_db_exec(int64_t handle, certo_text_t sql, CertoList* params) {
     if (handle == 0) return -1;
+#ifdef CERTO_QUERY_LOGGING
+    /* [features] query-logging (spec Sec 11.4, BACKLOG item 301) — SQL text
+       only, never bound parameter values (a real secrets/PII risk to log
+       by default). Compile-time gated (see CERTO_QUERY_LOGGING's own
+       `#define`, crates/cli/src/main.rs's build preamble), so there is
+       zero runtime cost when the feature is off, matching every other
+       compile-time-only feature flag already in this codebase. */
+    fprintf(stderr, "[certo] exec: %s\n", sql);
+#endif
     PGconn *conn = (PGconn *)(uintptr_t)handle;
     int nparams;
     const char **pv = certo_db_params(params, &nparams);
@@ -279,6 +288,14 @@ CertoList* certo_db_result_rows(CertoDbResult* r) {
 CertoList* certo_db_query(int64_t handle, certo_text_t sql, CertoList* params) {
     CertoList* result = certo_list_new_empty();
     if (handle == 0) return result;
+#ifdef CERTO_QUERY_LOGGING
+    /* [features] query-logging (BACKLOG item 301) — see certo_db_exec's own
+       identical comment just above; this is the other, read-side sink
+       every dbQuery/Query.list/.first/dbQueryTyped/dbQueryRow/dbQueryOne
+       call ultimately funnels through, so instrumenting these two
+       functions alone covers every real SQL-issuing call site. */
+    fprintf(stderr, "[certo] query: %s\n", sql);
+#endif
     PGconn *conn = (PGconn *)(uintptr_t)handle;
     int nparams;
     const char **pv = certo_db_params(params, &nparams);
