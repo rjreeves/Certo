@@ -119,7 +119,7 @@ fn check_impl(
                 // across traits and impls is the trait solver, deferred to
                 // the trait system extension in task #5b)
                 for (idx, (tpt, ipt)) in tsig.param_types.iter().zip(&isig.param_types).enumerate() {
-                    if !types_compatible(tpt, &expected_params, ipt, &found_params) {
+                    if !types_compatible(tpt, &expected_params, ipt, &found_params, &for_type) {
                         errors.push(TraitError {
                             kind: TraitErrorKind::ParamTypeMismatch {
                                 method:   name.clone(),
@@ -135,7 +135,7 @@ fn check_impl(
                 // Return type
                 if !tsig.ret_type.is_empty()
                     && !isig.ret_type.is_empty()
-                    && !types_compatible(&tsig.ret_type, &expected_params, &isig.ret_type, &found_params)
+                    && !types_compatible(&tsig.ret_type, &expected_params, &isig.ret_type, &found_params, &for_type)
                 {
                     errors.push(TraitError {
                         kind: TraitErrorKind::ReturnTypeMismatch {
@@ -158,7 +158,16 @@ fn check_impl(
 /// (e.g. `Order`) must match exactly, since every Certo type name is
 /// capitalized by convention and would otherwise be indistinguishable from a
 /// real type parameter.
-fn types_compatible(a: &str, a_params: &HashSet<&str>, b: &str, b_params: &HashSet<&str>) -> bool {
+///
+/// `self_ty` is the concrete type this impl is for. A trait method's bare
+/// `self`/`Self`-typed param or return type is left as the literal `Self`
+/// sentinel by the parser (`resolve_self_param` deliberately never resolves
+/// it on the trait side, since a trait has no single concrete type) —
+/// BACKLOG item 280: `Self` on the expected side matches only `self_ty`
+/// specifically, not any type, so an impl still can't claim conformance with
+/// an unrelated concrete param/return type.
+fn types_compatible(a: &str, a_params: &HashSet<&str>, b: &str, b_params: &HashSet<&str>, self_ty: &str) -> bool {
     if a == b { return true; }
+    if a == "Self" && b == self_ty { return true; }
     a_params.contains(a) || b_params.contains(b)
 }
