@@ -60,6 +60,19 @@ certo_decimal_t* certo_parse_decimal(certo_text_t s) {
     return box;
 }
 
+/* BACKLOG item 288 — spec §9.3's own `text.toDecimal()` example, the
+   direct sibling of `Text.toInt` (item 269); a namespaced alias for
+   `certo_parse_decimal` just above, keeping its Option<Decimal>-shaped
+   convention rather than inventing a new Result<Decimal, ParseError>-shaped
+   API to match the spec literally (same narrower scope item 269 already
+   established for Text.toInt). Defined here, not in text.rs alongside
+   certo_text_to_int, because MONEY_C is concatenated *after* TEXT_C in
+   `full_c_runtime` (crates/stdlib/src/lib.rs) — putting it in text.rs would
+   reference certo_parse_decimal before it's declared. */
+certo_decimal_t* certo_text_to_decimal(certo_text_t s) {
+    return certo_parse_decimal(s);
+}
+
 certo_text_t certo_decimal_to_text(certo_decimal_t d) {
     char* buf = (char*)malloc(64);
     if (!buf) certo_panic("out of memory");

@@ -443,6 +443,26 @@ fn text_to_int_is_registered_as_an_option_shaped_alias_of_parse_int() {
         "certo_text_to_int must delegate to the real parseInt implementation, not duplicate it, got: {window}");
 }
 
+// BACKLOG item 288 — spec §9.3's own `text.toDecimal()` example, the
+// direct sibling of `Text.toInt` just above.
+#[test]
+fn text_to_decimal_is_registered_as_an_option_shaped_alias_of_parse_decimal() {
+    let env = seeded_env();
+    match env.lookup("Text.toDecimal").unwrap() {
+        Ty::Fn { params, ret } => {
+            assert_eq!(params, &[Ty::Text]);
+            assert_eq!(ret.as_ref(), &Ty::Option(Box::new(Ty::Decimal(None))));
+        }
+        other => panic!("expected Fn, got {:?}", other),
+    }
+    assert!(MONEY_C.contains("certo_decimal_t* certo_text_to_decimal(certo_text_t s)"),
+        "missing certo_text_to_decimal in MONEY_C");
+    let idx = MONEY_C.find("certo_decimal_t* certo_text_to_decimal(").unwrap();
+    let window = &MONEY_C[idx..(idx + 100).min(MONEY_C.len())];
+    assert!(window.contains("certo_parse_decimal(s)"),
+        "certo_text_to_decimal must delegate to the real parseDecimal implementation, not duplicate it, got: {window}");
+}
+
 #[test]
 fn core_c_contains_float32_symbols() {
     for sym in &["certo_float32_to_text", "certo_float32_to_int", "certo_int_to_float32",
