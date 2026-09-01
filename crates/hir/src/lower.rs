@@ -1821,7 +1821,32 @@ fn lower_expr(expr: &S<Expr>, cx: &mut Cx) -> HirExpr {
                     _ => unreachable!(),
                 };
                 let global_name = format!("{}.{}", base_name, field.node);
-                HirExpr { kind: HirExprKind::Global(global_name), ty: Ty::Error, span }
+                // BACKLOG item 304 — a bare `Type.method` reference (not
+                // called — e.g. passed as a value to `.map(Secret.wrap)`)
+                // previously always got `Ty::Error` here regardless of
+                // whether it names a real, resolvable function, unlike
+                // `Expr::Path`'s own sibling fix (item 134) for a bare
+                // *unqualified* `fn` reference, which reconstructs a real
+                // `Ty::Fn` from the already-populated declared-type tables.
+                // Mirrors that fix for the qualified case: `fn_param_tys`/
+                // `fn_ret_types` are already populated for `Type.method`
+                // names too (`lower_module`'s own impl-method registration,
+                // keyed by the exact same dotted `qname`) — including a
+                // *generic* method's own erased `Ty::Var(0)` signature,
+                // which is exactly what `wrap_named_fn_as_closure`
+                // (`crates/mir/src/lower.rs`) needs to build a correct
+                // wrapper, the same way it already does for an ordinary
+                // generic top-level function passed by name. Falls back to
+                // the stdlib name tables for a qualified stdlib reference
+                // (e.g. `Text.trim` used bare as a value), which hits the
+                // identical gap for the identical reason.
+                let ty = cx.fn_param_tys.get(&global_name).cloned()
+                    .zip(cx.fn_ret_types.get(&global_name).cloned())
+                    .or_else(|| stdlib_param_types().get(global_name.as_str()).cloned()
+                        .zip(stdlib_ret_types().get(global_name.as_str()).cloned()))
+                    .map(|(params, ret)| Ty::Fn { params, ret: Box::new(ret) })
+                    .unwrap_or(Ty::Error);
+                HirExpr { kind: HirExprKind::Global(global_name), ty, span }
             } else {
                 let base = lower_expr(expr, cx);
                 // `computed` properties (BACKLOG item 143) desugar to a

@@ -2423,3 +2423,54 @@ fn sortby_struct_decimal_field_key_lowers_ok() {
          fn f(items: List<Item>): List<Item> = List.sortBy(items, (i) => i.price)"
     );
 }
+
+// ------------------------------------------------------------------ //
+// BACKLOG item 304 — a bare `Type.method` reference (not called) must
+// resolve a real `Ty::Fn`, not `Ty::Error` — the previous unconditional
+// `Ty::Error` here made `wrap_named_fn_as_closure` (crates/mir) build a
+// wrapper with the wrong C signature, miscompiling to invalid C.
+// ------------------------------------------------------------------ //
+
+fn find_call_arg<'a>(body: &'a crate::HirExpr, i: usize) -> &'a crate::HirExpr {
+    match &body.kind {
+        HirExprKind::Call { args, .. } => &args[i],
+        other => panic!("expected a Call, got {:?}", other),
+    }
+}
+
+#[test]
+fn bare_non_generic_impl_method_reference_resolves_a_real_fn_type() {
+    let m = lower(
+        "module A\ntype Box = { n: Int }\nimpl Box { fn double(x: Int): Int = x * 2 }\n\
+         fn apply(f: (Int) => Int, x: Int): Int = f(x)\n\
+         fn f(): Int = apply(Box.double, 5)"
+    );
+    let f = m.items.iter().find_map(|it| match it {
+        HirItem::Fn(f) if f.name == "f" => Some(f),
+        _ => None,
+    }).expect("expected fn `f`");
+    let arg = find_call_arg(f.body.as_ref().unwrap(), 0);
+    assert_eq!(arg.ty, Ty::Fn { params: vec![Ty::Int], ret: Box::new(Ty::Int) },
+        "bare Box.double reference must resolve its real (Int) => Int type, not Ty::Error, got {:?}", arg.ty);
+}
+
+#[test]
+fn bare_generic_impl_method_reference_resolves_an_erased_fn_type() {
+    // The item's own exact repro shape: a generic impl method (Secret.wrap)
+    // referenced bare, not called — must resolve to the same erased
+    // Ty::Var(0) signature an ordinary generic top-level function already
+    // gets when referenced bare, not Ty::Error.
+    let m = lower(
+        "module A\ntype Secret<T> = priv Secret(T)\n\
+         impl<T> Secret { fn wrap(v: T): Secret<T> = Secret(v) }\n\
+         fn apply(f: (Int) => Secret<Int>, x: Int): Secret<Int> = f(x)\n\
+         fn f(): Secret<Int> = apply(Secret.wrap, 5)"
+    );
+    let f = m.items.iter().find_map(|it| match it {
+        HirItem::Fn(f) if f.name == "f" => Some(f),
+        _ => None,
+    }).expect("expected fn `f`");
+    let arg = find_call_arg(f.body.as_ref().unwrap(), 0);
+    assert!(!matches!(arg.ty, Ty::Error), "bare Secret.wrap reference must not resolve to Ty::Error, got {:?}", arg.ty);
+    assert!(matches!(&arg.ty, Ty::Fn { .. }), "expected a Ty::Fn, got {:?}", arg.ty);
+}
