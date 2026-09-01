@@ -165,6 +165,32 @@ CertoDateTime certo_datetime_parse_iso(certo_text_t s) {
     return (CertoDateTime)timegm(&t);
 }
 
+/* `Timestamp.parse` (spec §9.4, BACKLOG item 289) — the spec documents this
+   as `Result<Timestamp, ParseError>`, but `Result`'s own error side needs a
+   real `ParseError` type this stdlib doesn't have; `Option<Timestamp>`
+   (None on any unparseable input) is the same "don't panic the whole
+   program on bad user input" contract `parseInt`/`parseDecimal`/`parseBool`
+   above already establish, just without a payload on the failure side.
+   Deliberately a *separate* function from `certo_datetime_parse_iso`
+   (`DateTime.parseIso`'s own real underlying implementation, which the
+   spec never documents as fallible) rather than changing that one to also
+   return an Option — this fix only touches `Timestamp.parse`'s own
+   declared behavior, not `DateTime.parseIso`'s. Reuses the identical parse
+   logic (same minimal `YYYY-MM-DDTHH:MM:SSZ` scanner) rather than calling
+   `certo_datetime_parse_iso` and catching its panic — there is no
+   catchable-panic mechanism in this C runtime to catch. */
+int64_t* certo_timestamp_parse_opt(certo_text_t s) {
+    if (!s) return NULL;
+    struct tm t = {0};
+    if (sscanf(s, "%d-%d-%dT%d:%d:%d",
+               &t.tm_year, &t.tm_mon, &t.tm_mday,
+               &t.tm_hour, &t.tm_min, &t.tm_sec) < 3)
+        return NULL;
+    t.tm_year -= 1900;
+    t.tm_mon  -= 1;
+    return __certo_opt_box((int64_t)(CertoDateTime)timegm(&t));
+}
+
 /* ================================================================
    Stdlib.Timezone — real IANA timezone support (BACKLOG item 118).
    `CertoTimezone` is just `certo_text_t` — the IANA zone name itself; no
@@ -458,7 +484,10 @@ CertoDate certo_date_today_in(CertoTimezone tz) {
    `certo_timestamp_of` is defined directly above (no DateTime equivalent
    to bridge to) and needs no macro here. */
 #define certo_timestamp_now         certo_datetime_now
-#define certo_timestamp_parse       certo_datetime_parse_iso
+/* BACKLOG item 289 — bridges to the real, Option-returning implementation
+   above, not `certo_datetime_parse_iso` (which panics on bad input and
+   backs the separate, never-documented-as-fallible `DateTime.parseIso`). */
+#define certo_timestamp_parse       certo_timestamp_parse_opt
 #define certo_timestamp_in_timezone certo_date_time_in_timezone
 #define certo_timestamp_format_tz   certo_date_time_format_tz
 /* BACKLOG item 214 — Timestamp.diff, same bridge pattern as the four above. */
