@@ -827,7 +827,10 @@ fn datetime_c_contains_timestamp_bridge_and_constructors() {
     assert!(DATETIME_C.contains("certo_date_of"),                "missing certo_date_of");
     assert!(DATETIME_C.contains("#define certo_timestamp_now         certo_datetime_now"),
         "missing Timestamp.now bridge");
-    assert!(DATETIME_C.contains("#define certo_timestamp_parse       certo_datetime_parse_iso"),
+    // BACKLOG item 289 — Timestamp.parse now bridges to its own
+    // Option-returning implementation, not DateTime.parseIso's
+    // panic-on-failure one; see the dedicated tests for this below.
+    assert!(DATETIME_C.contains("#define certo_timestamp_parse       certo_timestamp_parse_opt"),
         "missing Timestamp.parse bridge");
     assert!(DATETIME_C.contains("#define certo_timestamp_in_timezone certo_date_time_in_timezone"),
         "missing Timestamp.inTimezone bridge");
@@ -842,6 +845,59 @@ fn datetime_c_contains_timestamp_diff_bridge() {
     // the same bridge pattern as the other Timestamp.* functions above.
     assert!(DATETIME_C.contains("#define certo_timestamp_diff        certo_datetime_diff"),
         "missing Timestamp.diff bridge");
+}
+
+// ------------------------------------------------------------------ //
+// BACKLOG item 289 — `Timestamp.parse` (spec §9.4, documented as
+// `Result<Timestamp, ParseError>`) previously panicked the whole process
+// on any unparseable input via `certo_datetime_parse_iso`'s own
+// `certo_panic` call — worse than the bare, non-`Result` return item 164b
+// already disclosed, since that only ever checked the happy path. Now
+// returns `Option<Timestamp>` (`None` on bad input), the same "no value"
+// contract `parseInt`/`parseDecimal`/`parseBool` already use.
+// ------------------------------------------------------------------ //
+
+#[test]
+fn timestamp_parse_is_option_shaped() {
+    let env = seeded_env();
+    let ts = Ty::Named { name: "Timestamp".into(), args: vec![] };
+    match env.lookup("Timestamp.parse").unwrap() {
+        Ty::Fn { params, ret } => {
+            assert_eq!(params, &[Ty::Text]);
+            assert_eq!(ret.as_ref(), &Ty::Option(Box::new(ts)),
+                "Timestamp.parse must return Option<Timestamp>, got {:?}", ret);
+        }
+        other => panic!("expected Fn, got {:?}", other),
+    }
+}
+
+#[test]
+fn datetime_c_contains_real_option_returning_timestamp_parse_impl() {
+    // The real implementation must return a heap-boxed pointer (NULL on
+    // failure), not call certo_panic — confirmed directly on the generated
+    // C source, not just the stdlib registration's declared Ty.
+    assert!(DATETIME_C.contains("int64_t* certo_timestamp_parse_opt(certo_text_t s)"),
+        "missing the real Option-returning certo_timestamp_parse_opt implementation");
+    let idx = DATETIME_C.find("int64_t* certo_timestamp_parse_opt(").unwrap();
+    let window = &DATETIME_C[idx..(idx + 400).min(DATETIME_C.len())];
+    assert!(window.contains("return NULL"),
+        "certo_timestamp_parse_opt must return NULL on bad input, not panic, got: {window}");
+    assert!(!window.contains("certo_panic"),
+        "certo_timestamp_parse_opt must never call certo_panic, got: {window}");
+    assert!(window.contains("__certo_opt_box"),
+        "certo_timestamp_parse_opt must heap-box its success value like every other Option-returning stdlib function, got: {window}");
+}
+
+#[test]
+fn datetime_c_does_not_change_the_still_panicking_date_time_parse_iso() {
+    // BACKLOG item 289 deliberately does NOT change DateTime.parseIso's own
+    // behavior — the spec never documents that function as fallible, and
+    // it bridges to a genuinely separate C function from Timestamp.parse's
+    // new one.
+    assert!(DATETIME_C.contains("#define certo_date_time_parse_iso    certo_datetime_parse_iso"),
+        "DateTime.parseIso's own bridge must be unaffected by this item");
+    assert!(DATETIME_C.contains("certo_panic(\"datetime_parse_iso: invalid format\")"),
+        "certo_datetime_parse_iso (DateTime.parseIso's real implementation) must still panic, unchanged");
 }
 
 #[test]

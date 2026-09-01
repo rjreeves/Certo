@@ -881,7 +881,14 @@ pub fn seed_stdlib(env: &mut TypeEnv, counter: &mut u32) {
         params: vec![Ty::Int, Ty::Int, Ty::Int, Ty::Int, Ty::Int, Ty::Int, tz()],
         ret: Box::new(ts()),
     });
-    def!("Timestamp.parse",      fn1(Ty::Text, ts()));
+    // BACKLOG item 289 — spec §9.4 documents this as fallible
+    // (`Result<Timestamp, ParseError>`); previously a bare `ts()` return
+    // whose real underlying C implementation `certo_panic`'d on any
+    // unparseable input instead of producing any error value at all. No
+    // `ParseError` type exists in this stdlib, so `Option<Timestamp>` is
+    // used instead — the same "no value" contract every other `parse*`
+    // stdlib function (`parseInt`/`parseDecimal`/`parseBool`) already uses.
+    def!("Timestamp.parse",      fn1(Ty::Text, Ty::Option(Box::new(ts()))));
     def!("Timestamp.inTimezone", fn2(ts(), tz(), Ty::Text));
     def!("Timestamp.formatTz",   Ty::Fn { params: vec![ts(), Ty::Text, tz()], ret: Box::new(Ty::Text) });
     // BACKLOG item 214 — `Timestamp` had no path to a `Duration` at all
