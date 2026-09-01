@@ -1115,11 +1115,13 @@ fn is_displayable(ty: &Ty) -> bool {
 }
 
 /// Types `List.sortBy`/`minBy`/`maxBy`/`sumBy`'s key/numeric projection can
-/// resolve to (BACKLOG item 162b) — the real, closed set this codebase's
-/// `<`/`>`/`+` C operators are correct for (`emit_binop`,
-/// `crates/codegen/src/emit_mir.rs`). Must stay in sync with
-/// `crates/mir/src/lower.rs`'s per-call-site comparator/adder synthesis,
-/// which trusts this check has already ruled out everything else.
+/// resolve to (BACKLOG item 162b) — the real, closed set `emit_binop`
+/// (`crates/codegen/src/emit_mir.rs`) correctly compiles `<`/`>`/`+` for,
+/// whether via a bare C operator (the primitive scalars) or a routed
+/// runtime function (`Decimal`, item 249/282 — see `is_supported_key_type`
+/// below). Must stay in sync with `crates/mir/src/lower.rs`'s per-call-site
+/// comparator/adder synthesis, which trusts this check has already ruled
+/// out everything else.
 /// Every numeric type — used by `UnOp::Neg`'s inference (BACKLOG item 248)
 /// to accept negation of any of them, not just `Int`. `Decimal`'s C
 /// representation is a *struct* (`certo_decimal_t`), not a primitive
@@ -1136,7 +1138,14 @@ fn is_numeric_ty(ty: &Ty) -> bool {
 
 fn is_supported_key_type(ty: &Ty) -> bool {
     matches!(ty,
-        Ty::Int | Ty::Int8 | Ty::Int16 | Ty::Int32 | Ty::UInt | Ty::Float | Ty::Float32)
+        Ty::Int | Ty::Int8 | Ty::Int16 | Ty::Int32 | Ty::UInt | Ty::Float | Ty::Float32
+        // BACKLOG item 282 — `Decimal`'s `+`/`<`/`>` already route through
+        // real runtime functions (`certo_decimal_add`/`lt`/`gt`, item 249's
+        // own fix), not a bare C operator on a struct — the "Decimal's C
+        // representation is a struct, so `+`/`<` don't compile" reasoning
+        // this check was originally built on (see the doc comment above)
+        // no longer holds now that those ops are routed, not raw.
+        | Ty::Decimal(_))
 }
 
 // ------------------------------------------------------------------ //

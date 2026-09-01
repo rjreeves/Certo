@@ -597,3 +597,27 @@ fn computed_property_qualified_name_dot_is_sanitized_in_lifted_lambda_helper_nam
             "lifted helper name must not contain a raw '.', it becomes an illegal C identifier: {:?}", lf.name);
     }
 }
+
+// BACKLOG item 282 — `List.sumBy` over a `Decimal` key must initialize its
+// accumulator with a real `MirConst::Decimal` zero, not the bit-pattern
+// `MirConst::Int(0)` every other numeric key type uses — a `Decimal`'s C
+// representation is a struct, so codegen's own `Rvalue::BinOp{Add}` (routed
+// to `certo_decimal_add`) would misread a raw int64 bit-pattern as one.
+#[test]
+fn sum_by_decimal_key_accumulator_is_seeded_with_a_real_decimal_zero_not_int_zero() {
+    let (_mf, lifted) = mir_fn_and_lifted_named(
+        "module A\nimport Stdlib.Collections.{ List }\n\
+         type Item = { price: Decimal }\n\
+         fn f(items: List<Item>): Decimal = List.sumBy(items, (i) => i.price)",
+        "f");
+    let sum_helper = lifted.iter().find(|lf| lf.name.contains("__sum_by_"))
+        .expect("expected a lifted __sum_by_ helper");
+    let acc_local = sum_helper.locals.iter().find(|l| l.name == "_acc")
+        .unwrap_or_else(|| panic!("expected an _acc local, got locals: {:#?}", sum_helper.locals)).id;
+    let acc_seed = sum_helper.blocks.iter().flat_map(|bb| &bb.stmts).find_map(|s| match s {
+        MirStmt::Assign { dest, rvalue: Rvalue::Use(op), .. } if *dest == acc_local => Some(op.clone()),
+        _ => None,
+    }).unwrap_or_else(|| panic!("expected an initial assignment to _acc"));
+    assert!(matches!(&acc_seed, Operand::Const(MirConst::Decimal(v)) if v == "0"),
+        "expected the Decimal sumBy accumulator to be seeded with MirConst::Decimal(\"0\"), not a raw Int(0) bit-pattern, got {:?}", acc_seed);
+}
