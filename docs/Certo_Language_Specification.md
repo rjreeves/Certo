@@ -352,7 +352,7 @@ Query.from("Users") |> Query.filter("emal", "=", "alice@example.com") |> Query.c
 ```toml
 # certo.toml
 [database]
-url = "postgres://localhost/myapp_dev"
+schema = "${DATABASE_URL}"
 
 [features]
 schema-sync = true   # opt-in: cross-check every `impl DbRow` type against
@@ -612,13 +612,13 @@ certo db create add_users_table     # scaffold a new migration file
 
 ## **8.3 Smart Constructors**
 
-| // Prevent invalid values at the boundary type Email = priv Email(Text)    // Private constructor  // Only way to create an Email is through the validated constructor fn Email.new(raw: Text): Result\<Email, ValidationError\> =     if raw.contains("@") and raw.len() \> 3     then Ok(Email(raw))     else Err(ValidationError("email", f"Invalid email: \{raw\}"))  // Usage val email = Email.new("alice@example.com")?  // Validated // val bad = Email("bad")  // Compile error — constructor is private |
+| // Prevent invalid values at the boundary type Email = priv Email(Text)    // Private constructor  // Only way to create an Email is through the validated constructor, // declared inside an `impl` block — a bare top-level `fn Email.new(...)` // is not valid syntax impl Email {     fn new(raw: Text): Result\<Email, ValidationError\> =         if raw.contains("@") and raw.len() \> 3         then Ok(Email(raw))         else Err(ValidationError("email", f"Invalid email: \{raw\}")) }  // Usage val email = Email.new("alice@example.com")?  // Validated // val bad = Email("bad")  // Compile error — constructor is private |
 | - |
 
 
 ## **8.4 Value Objects**
 
-| // Value objects — equality by value, not by reference @valueObject type Money = \{     amount:   Decimal(19,4),     currency: Currency \}  // Equality is structural Money(d"10.00", USD) == Money(d"10.00", USD)  // true Money(d"10.00", USD) == Money(d"10.01", USD)  // false  // Arithmetic preserves currency fn Money.add(a: Money, b: Money): Result\<Money, CurrencyMismatch\> =     if a.currency == b.currency     then Ok(Money(a.amount + b.amount, a.currency))     else Err(CurrencyMismatch(a.currency, b.currency)) |
+| // Value objects — equality by value, not by reference @valueObject type Money = \{     amount:   Decimal(19,4),     currency: Currency \}  // Equality is structural Money(d"10.00", USD) == Money(d"10.00", USD)  // true Money(d"10.00", USD) == Money(d"10.01", USD)  // false  // Arithmetic preserves currency — declared inside an `impl` block, // not as a bare top-level `fn Money.add(...)` impl Money {     fn add(a: Money, b: Money): Result\<Money, CurrencyMismatch\> =         if a.currency == b.currency         then Ok(Money(a.amount + b.amount, a.currency))         else Err(CurrencyMismatch(a.currency, b.currency)) } |
 | - |
 
 
@@ -763,8 +763,7 @@ Regex is a separate namespace, not a method on `Text` — pattern first, subject
 | Schema Validation | Typed AST | Verified AST | Connect to DB, verify column types and names |
 | HIR Lowering | Verified AST | HIR | Desugar syntax, normalize patterns |
 | MIR Lowering | HIR | MIR (SSA) | Build CFG, SSA form, explicit drops |
-| Optimization | MIR | Optimized MIR | DCE, inlining, constant folding, query pushdown |
-| Codegen | Optimized MIR | LLVM IR / C / WASM | Target-specific emission |
+| Codegen | MIR | LLVM IR / C / WASM | Target-specific emission; `--release` passes `-O2` to the C compiler — there is no separate Certo-side optimizer (no DCE/inlining/constant-folding/query-pushdown pass exists) |
 | Linking | LLVM IR | Binary | Link stdlib, produce executable |
 
 
@@ -773,9 +772,9 @@ Regex is a separate namespace, not a method on `Text` — pattern first, subject
 | **Command** | **Options** | **Description** |
 | - | - | - |
 | certo new \<name\> | --template default|api|lib|cli|fullstack | Scaffold new project |
-| certo build | --release  --target native|wasm|jvm | Compile project |
+| certo build | --release | Compile project |
 | certo run | --watch  --port 8080 | Build and run, hot reload |
-| certo check | --strict  --explain E0412 | Type check only |
+| certo check | --strict  --explain | Type check only (`--explain` prints each reported diagnostic's full write-up) |
 | certo test | --filter \<pattern\>  --coverage  --watch | Run tests |
 | certo fmt | --check  --diff | Format source files |
 | certo db migrate | --dry-run  --step 1 | Apply migrations |
@@ -783,7 +782,7 @@ Regex is a separate namespace, not a method on `Text` — pattern first, subject
 | certo db status |  | Show migration state |
 | certo db pull | --url \<dsn\> | Import schema from DB |
 | certo add \<pkg\> | --version 1.2.0  --dev | Add dependency |
-| certo audit | --fix  --level high | Security audit |
+| certo audit | --strict | Check certo.toml dependencies against actual imports |
 | certo repl | --connect \<dsn\> | Interactive session |
 | certo doc | --serve  --port 4000 | Generate documentation |
 | certo generate | model|api|migration \<name\> | Code scaffolding |
@@ -791,13 +790,13 @@ Regex is a separate namespace, not a method on `Text` — pattern first, subject
 
 ## **11.3 Project Structure**
 
-| my-app/ ├── certo.toml              \# Project manifest and config ├── certo.lock              \# Dependency lock file — always commit ├── src/ │   ├── main.cto            \# Entry point │   ├── models/             \# Domain types │   │   ├── user.cto │   │   └── order.cto │   ├── services/           \# Business logic │   │   ├── billing.cto │   │   └── shipping.cto │   ├── api/                \# HTTP handlers │   │   └── routes.cto │   └── ui/                 \# UI views (optional) │       └── views/ ├── db/ │   ├── migrations/         \# Database migrations │   │   ├── 001\_create\_users.cto │   │   └── 002\_add\_orders.cto │   └── seeds/              \# Development seed data │       └── development.cto └── tests/     ├── unit/               \# Unit tests     └── integration/        \# Integration tests |
+| my-app/ ├── certo.toml              \# Project manifest and config ├── .env.example ├── .gitignore ├── README.md ├── src/ │   ├── main.cto            \# generated — don't hand-edit │   └── ui.cto              \# source of truth ├── db/ │   └── migrations/         \# Database migrations │       └── 001\_create\_task.cto └── tests/     ├── unit/               \# Unit tests     └── integration/        \# Integration tests (this is `certo new <name> --template fullstack`'s own real scaffold — other templates omit `ui.cto`/the seed migration, or lay out `src/` differently; there is no `certo.lock`, no `models/`/`services/`/`api/`/`ui/views/` subdirectories, and no `db/seeds/`) |
 | - |
 
 
 ## **11.4 certo.toml — Full Schema**
 
-| \[project\] name    = "billing-system" version = "1.2.0" edition = "2026" authors = \["Alice Smith \<alice@example.com\>"\] license = "MIT"  \[build\] target     = "native"      \# native | wasm | jvm output     = "dist/" entry      = "src/main.cto"  \[database\] schema     = "postgresql://localhost/billing\_dev" migrations = "db/migrations/" seeds      = "db/seeds/"  \[server\] port    = 8080 host    = "0.0.0.0"  \[dependencies\] stripe      = "4.2.0" sendgrid    = "2.1.0" pdf-render  = "1.0.3"  \[dev-dependencies\] test-fixtures = "1.0.0"  \[features\] strict-nulls     = true    \# Warn on any unsafe null operations query-logging    = true    \# Log all DB queries in dev mode schema-sync      = true    \# Fail compile on schema mismatch effect-checking  = true    \# Enforce effect type annotations  \[targets.production\] optimize    = true strip-debug = true schema      = "$\{DATABASE\_URL\}" |
+| \[project\] name    = "billing-system" version = "1.2.0" edition = "2026" authors = \["Alice Smith \<alice@example.com\>"\] license = "MIT"  \[build\] output     = "dist/" entry      = "src/main.cto"  \[database\] schema     = "postgresql://localhost/billing\_dev" migrations = "db/migrations/" seeds      = "db/seeds/"  \[server\] port    = 8080 host    = "0.0.0.0"  \[dependencies\] stripe      = "4.2.0" sendgrid    = "2.1.0" pdf-render  = "1.0.3"  \[dev-dependencies\] test-fixtures = "1.0.0"  \[features\] strict-nulls     = true    \# Warn on any unsafe null operations query-logging    = true    \# Log all DB queries in dev mode schema-sync      = true    \# Fail compile on schema mismatch effect-checking  = true    \# Enforce effect type annotations  \[targets.production\] optimize    = true strip-debug = true schema      = "$\{DATABASE\_URL\}" |
 | - |
 
 
@@ -819,7 +818,7 @@ Regex is a separate namespace, not a method on `Text` — pattern first, subject
 
 ## **12.3 Calling Certo from Other Languages**
 
-| // Export functions for use from Python, Node.js, etc. @export("certo\_process\_order") pub fn processOrder(orderJson: Text): Text =     orderJson     |\> Json.decode\<OrderRequest\>     |\> flatMap(processOrderInternal)     |\> map(Json.encode)     |\> getOrElse("""\{"error":"Processing failed"\}""")  // Called from Python: // import certo // result = certo.process\_order(order\_json)  // WASM target — runs in browser or inside PostgreSQL // certo build --target wasm // Creates: dist/my-app.wasm |
+| // Export functions for use from Python, Node.js, etc. // JSON is handled through the real `Json.parse`/`Json.stringify` + // `JsonValue` accessor API — there is no generic `Json.decode<T>`/ // `Json.encode` or `map` over a `Result`'s Ok side fn processOrderInternal(amount: Int): Result\<JsonValue, Text\> =     if amount \> 0 then Ok(Json.object()) else Err("invalid amount")  @export("certo\_process\_order") pub fn processOrder(orderJson: Text): Text = \{     val order  = Json.parse(orderJson)     val amount = order.get("amount").asInt()     match processOrderInternal(amount) \{         Ok(charge) =\> Json.stringify(charge)         Err(\_)     =\> """\{"error":"Processing failed"\}"""     \} \}  // Called from Python: // import certo // result = certo.process\_order(order\_json)  // WASM target — a separate compiler binary, not `certo build --target` // (which has no `--target` flag at all) — runs in browser or inside PostgreSQL // certo-wasm src/main.cto -o dist/my-app.wasm |
 | - |
 
 
@@ -842,7 +841,7 @@ Regex is a separate namespace, not a method on `Text` — pattern first, subject
 
 ***SQL injection is architecturally impossible in Certo. The query DSL never constructs SQL strings. All values are parameterized at the type level. Even the raw SQL escape hatch always uses parameterized queries.**
 
-| // This looks like string interpolation — it is NOT // The compiler generates parameterized queries always db.users.where(.email == userInput)    // Safe — parameterized  // Raw SQL also uses parameters — never string concat db.raw\<User\>(     sql: "SELECT \* FROM users WHERE email = $1",     params: \[userInput\]    // Always parameterized )  // This is a compile error — no string SQL allowed db.raw\<User\>(sql: f"SELECT \* WHERE email = '\{userInput\}'") // Error: string interpolation in SQL context is forbidden |
+| // The generated `db.<table>` accessors are always parameterized val user = db.users.find(userId)    // Safe — parameterized (requires `certo db pull` first)  // Raw SQL also uses parameters — never string concat val rows = dbQuery(conn, "SELECT \* FROM users WHERE email = $1", \[userInput\])    // Always parameterized  // This is a compile error — no string SQL allowed dbQuery(conn, f"SELECT \* WHERE email = '\{userInput\}'", \[\]) // Error\[E0216\]: an interpolated f-string was passed directly as the // `sql` argument to `dbQuery` — SQL injection risk |
 | - |
 
 
