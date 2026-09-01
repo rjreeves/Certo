@@ -1,15 +1,20 @@
 use certo_ast::decl::{MigrationOp, AlterOp, ColumnDef, FkAction};
 use certo_ast::types::TypeExpr;
+use certo_dbschema::camel_to_snake;
 
 /// Generate an SQL DDL string for a single `MigrationOp`.
 pub fn op_to_sql(op: &MigrationOp) -> String {
     match op {
         MigrationOp::CreateTable { name, columns, .. } => create_table(name, columns),
-        MigrationOp::DropTable   { name, .. }          => format!("DROP TABLE {};", name),
+        MigrationOp::DropTable   { name, .. }          => format!("DROP TABLE {};", camel_to_snake(name)),
         MigrationOp::AlterTable  { name, ops, .. }     => alter_table(name, ops),
         MigrationOp::CreateIndex { name, table, columns, .. } => {
-            let cols = columns.join(", ");
-            format!("CREATE INDEX {} ON {} ({});", name, table, cols)
+            // BACKLOG item 285 — the index's own name is left as written
+            // (it's a plain DBA-facing identifier, not part of `certo db
+            // pull`'s table/column round-trip), but the table and every
+            // column it indexes must be converted like everywhere else.
+            let cols = columns.iter().map(|c| camel_to_snake(c)).collect::<Vec<_>>().join(", ");
+            format!("CREATE INDEX {} ON {} ({});", name, camel_to_snake(table), cols)
         }
         MigrationOp::DropIndex   { name, .. }          => format!("DROP INDEX {};", name),
         MigrationOp::RawSql      { sql, .. }            => sql.clone(),
@@ -20,9 +25,9 @@ fn create_table(table: &str, columns: &[ColumnDef]) -> String {
     let mut defs: Vec<String> = columns.iter().map(col_def).collect();
 
     // Collect composite primary key if more than one PK column
-    let pk_cols: Vec<&str> = columns.iter()
+    let pk_cols: Vec<String> = columns.iter()
         .filter(|c| c.primary_key)
-        .map(|c| c.name.as_str())
+        .map(|c| camel_to_snake(&c.name))
         .collect();
     if pk_cols.len() > 1 {
         // Remove individual PK flags from column defs — recreate without PRIMARY KEY inline
@@ -30,12 +35,12 @@ fn create_table(table: &str, columns: &[ColumnDef]) -> String {
         defs.push(format!("    PRIMARY KEY ({})", pk_cols.join(", ")));
     }
 
-    format!("CREATE TABLE {} (\n{}\n);", table, defs.join(",\n"))
+    format!("CREATE TABLE {} (\n{}\n);", camel_to_snake(table), defs.join(",\n"))
 }
 
 fn col_def(col: &ColumnDef) -> String {
     let ty = te_to_sql(&col.ty.node);
-    let mut s = format!("    {} {}", col.name, ty);
+    let mut s = format!("    {} {}", camel_to_snake(&col.name), ty);
     if !col.nullable   { s.push_str(" NOT NULL"); }
     if col.unique      { s.push_str(" UNIQUE"); }
     if col.primary_key { s.push_str(" PRIMARY KEY"); }
@@ -47,7 +52,7 @@ fn col_def(col: &ColumnDef) -> String {
 
 fn col_def_no_pk(col: &ColumnDef) -> String {
     let ty = te_to_sql(&col.ty.node);
-    let mut s = format!("    {} {}", col.name, ty);
+    let mut s = format!("    {} {}", camel_to_snake(&col.name), ty);
     if !col.nullable { s.push_str(" NOT NULL"); }
     if col.unique    { s.push_str(" UNIQUE"); }
     if let Some(def) = &col.default {
@@ -58,7 +63,7 @@ fn col_def_no_pk(col: &ColumnDef) -> String {
 
 fn alter_table(table: &str, ops: &[AlterOp]) -> String {
     let clauses: Vec<String> = ops.iter().map(alter_op_clause).collect();
-    format!("ALTER TABLE {}\n    {};", table, clauses.join(",\n    "))
+    format!("ALTER TABLE {}\n    {};", camel_to_snake(table), clauses.join(",\n    "))
 }
 
 fn alter_op_clause(op: &AlterOp) -> String {
@@ -66,10 +71,10 @@ fn alter_op_clause(op: &AlterOp) -> String {
         AlterOp::AddColumn { def } =>
             format!("ADD COLUMN {}", col_def(def).trim_start()),
         AlterOp::DropColumn { name, .. } =>
-            format!("DROP COLUMN {}", name),
+            format!("DROP COLUMN {}", camel_to_snake(name)),
         AlterOp::AddForeignKey { column, references, on_delete, .. } => {
             let action = fk_action(on_delete);
-            format!("ADD FOREIGN KEY ({}) REFERENCES {} ON DELETE {}", column, references, action)
+            format!("ADD FOREIGN KEY ({}) REFERENCES {} ON DELETE {}", camel_to_snake(column), camel_to_snake(references), action)
         }
     }
 }
