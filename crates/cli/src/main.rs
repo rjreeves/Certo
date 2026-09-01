@@ -1346,16 +1346,27 @@ fn run_typeck_inner(
         process::exit(1);
     }
 
-    let mut effect_env = certo_effects::EffectEnv::new();
-    certo_stdlib::seed_stdlib_effects(&mut effect_env);
-    if let Err(errs) = certo_effects::check_module_seeded(module, effect_env) {
-        let diags: Vec<Diagnostic> = errs.iter()
-            .map(|e| effect_error_to_diagnostic(e))
-            .collect();
-        eprint!("{}", render_all(&diags, src, filename, colour));
-        eprintln!("aborting due to {} effect error(s)", diags.len());
-        if explain { print_explanations(&diags); }
-        process::exit(1);
+    // BACKLOG item 293 — `[features] effect-checking = false` (spec §11.4:
+    // "Enforce effect type annotations") previously did nothing at all:
+    // this pass ran unconditionally regardless of the flag's value,
+    // confirmed live (`effect-checking = false` still raised E0401 on a
+    // `[pure]` function calling `println`). Defaults to `true` (matching
+    // this pass's own always-on behavior before this flag existed) so an
+    // existing project with no `[features]` section, or the flag simply
+    // absent, sees no behavior change — only an explicit `false` now
+    // actually skips the pass.
+    if read_effect_checking_flag(project_root) {
+        let mut effect_env = certo_effects::EffectEnv::new();
+        certo_stdlib::seed_stdlib_effects(&mut effect_env);
+        if let Err(errs) = certo_effects::check_module_seeded(module, effect_env) {
+            let diags: Vec<Diagnostic> = errs.iter()
+                .map(|e| effect_error_to_diagnostic(e))
+                .collect();
+            eprint!("{}", render_all(&diags, src, filename, colour));
+            eprintln!("aborting due to {} effect error(s)", diags.len());
+            if explain { print_explanations(&diags); }
+            process::exit(1);
+        }
     }
 
     if let Err(errs) = certo_hir::lower_module(module) {
@@ -1423,6 +1434,17 @@ fn read_schema_sync_flag(project_root: &Path) -> bool {
         .and_then(|cfg| cfg.features)
         .and_then(|f| f.schema_sync)
         .unwrap_or(false)
+}
+
+/// `[features] effect-checking` (BACKLOG item 293) — unlike `schema-sync`
+/// above (opt-in, defaults `false`), effect checking is a core soundness
+/// pass that has always run unconditionally, so this defaults to `true`:
+/// only an explicit `effect-checking = false` opts a project *out* of it.
+fn read_effect_checking_flag(project_root: &Path) -> bool {
+    load_certo_toml_or_die(project_root)
+        .and_then(|cfg| cfg.features)
+        .and_then(|f| f.effect_checking)
+        .unwrap_or(true)
 }
 
 /// Loads `certo.toml` from `project_root`, exiting with a clear parse error if
@@ -4171,6 +4193,50 @@ fn cmd_db(args: &[String]) {
 // migrate
 // ------------------------------------------------------------------ //
 
+/// `certo db rollback [N]` / `certo db rollback --step N` (BACKLOG item
+/// 296) — the step count for `cmd_migrate`'s "down" arm. Previously
+/// `args.iter().find(|a| a.parse::<usize>().is_ok())` picked up *any* bare
+/// parseable integer anywhere in the argument list regardless of what (if
+/// anything) preceded it, so `certo db rollback --bogus-flag 1` silently
+/// "worked" identically to a real `--step 1` — the flag name itself was
+/// never actually checked. This command has two real, independently
+/// documented calling conventions that both need to keep working: the main
+/// spec doc's own `certo db rollback --step 1` (§11.2), and this CLI's own
+/// long-standing `rollback [N]` bare-positional usage (its own `--help`
+/// text, unchanged) — so the fix isn't simply "require `--step`" (item
+/// 265's own fix for "up", which has no competing bare-positional
+/// convention to preserve). `--step <n>` is recognized explicitly; a bare
+/// non-flag token is still accepted as the positional `[N]` form; but any
+/// other `--`-prefixed token is now a real, rejected unknown option instead
+/// of being silently ignored while its own trailing number gets misread as
+/// the step count. Returns a `Result` rather than calling `process::exit`
+/// directly so a test can check both the success and error cases without
+/// killing the test process.
+fn parse_rollback_step(args: &[String]) -> Result<usize, String> {
+    let mut count: Option<usize> = None;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--dry-run" => {}
+            "--step" => {
+                let v = args.get(i + 1).ok_or_else(|| "--step requires a number".to_string())?;
+                count = Some(v.parse().map_err(|_| "--step requires a number".to_string())?);
+                i += 1; // consume the value too
+            }
+            other if other.starts_with("--") => {
+                return Err(format!("unknown option: {}", other));
+            }
+            other => {
+                if let Ok(n) = other.parse::<usize>() {
+                    count = Some(n);
+                }
+            }
+        }
+        i += 1;
+    }
+    Ok(count.unwrap_or(1))
+}
+
 fn cmd_migrate(args: &[String]) {
     let sub = args.first().map(String::as_str).unwrap_or("");
     let project_root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
@@ -4245,10 +4311,10 @@ fn cmd_migrate(args: &[String]) {
 
         "down" => {
             let dry_run = args.contains(&"--dry-run".to_string());
-            let count: usize = args.iter()
-                .find(|a| a.parse::<usize>().is_ok())
-                .and_then(|a| a.parse().ok())
-                .unwrap_or(1);
+            let count = parse_rollback_step(args).unwrap_or_else(|msg| {
+                eprintln!("error: {}", msg);
+                process::exit(2);
+            });
             let migrations = load_migrations(&project_root);
             if !check_migrations_against_app_schema(&project_root, &migrations) {
                 process::exit(1);
@@ -4711,6 +4777,101 @@ mod fullstack_template_tests {
         );
         let module = certo_parser::parse(&template).unwrap_or_else(|e| panic!("must parse: {:?}", e));
         assert!(module.decls.iter().any(|d| matches!(&d.node, certo_ast::decl::Decl::Migration(m) if m.name == "add_widgets")));
+    }
+}
+
+// BACKLOG item 293 — `[features] effect-checking` previously did nothing.
+#[cfg(test)]
+mod read_effect_checking_flag_tests {
+    use super::*;
+
+    fn temp_project(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("certo_effect_checking_flag_test_{}_{}_{}", name, std::process::id(), line!()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn defaults_to_true_with_no_certo_toml_at_all() {
+        let dir = temp_project("no_toml");
+        assert!(read_effect_checking_flag(&dir), "effect checking must stay on by default");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn defaults_to_true_with_no_features_section() {
+        let dir = temp_project("no_features");
+        std::fs::write(dir.join("certo.toml"), "[project]\nname = \"x\"\n").unwrap();
+        assert!(read_effect_checking_flag(&dir));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn explicit_false_disables_it() {
+        let dir = temp_project("explicit_false");
+        std::fs::write(dir.join("certo.toml"), "[project]\nname = \"x\"\n[features]\neffect-checking = false\n").unwrap();
+        assert!(!read_effect_checking_flag(&dir));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn explicit_true_keeps_it_on() {
+        let dir = temp_project("explicit_true");
+        std::fs::write(dir.join("certo.toml"), "[project]\nname = \"x\"\n[features]\neffect-checking = true\n").unwrap();
+        assert!(read_effect_checking_flag(&dir));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+}
+
+// BACKLOG item 296 — `certo db rollback`'s step-count flag was decorative.
+#[cfg(test)]
+mod parse_rollback_step_tests {
+    use super::*;
+
+    #[test]
+    fn defaults_to_one_with_no_arguments() {
+        assert_eq!(parse_rollback_step(&["down".to_string()]), Ok(1));
+    }
+
+    #[test]
+    fn explicit_step_flag_is_honored() {
+        let args = vec!["down".to_string(), "--step".to_string(), "3".to_string()];
+        assert_eq!(parse_rollback_step(&args), Ok(3));
+    }
+
+    #[test]
+    fn bare_positional_count_is_still_honored() {
+        // This CLI's own long-documented `rollback [N]` usage must keep working.
+        let args = vec!["down".to_string(), "2".to_string()];
+        assert_eq!(parse_rollback_step(&args), Ok(2));
+    }
+
+    #[test]
+    fn dry_run_flag_does_not_interfere_with_the_count() {
+        let args = vec!["down".to_string(), "--step".to_string(), "5".to_string(), "--dry-run".to_string()];
+        assert_eq!(parse_rollback_step(&args), Ok(5));
+    }
+
+    #[test]
+    fn an_unknown_flag_is_a_real_error_not_silently_accepted() {
+        // Regression guard for the exact bug this item fixes: previously
+        // `--bogus-flag 1` silently "succeeded", using `1` as the count
+        // even though `--bogus-flag` isn't a real option at all.
+        let args = vec!["down".to_string(), "--bogus-flag".to_string(), "1".to_string()];
+        let err = parse_rollback_step(&args).unwrap_err();
+        assert!(err.contains("--bogus-flag"), "expected the error to name the unknown flag, got: {err}");
+    }
+
+    #[test]
+    fn step_flag_with_a_non_numeric_value_is_an_error() {
+        let args = vec!["down".to_string(), "--step".to_string(), "notanumber".to_string()];
+        assert!(parse_rollback_step(&args).is_err());
+    }
+
+    #[test]
+    fn step_flag_with_no_value_at_all_is_an_error() {
+        let args = vec!["down".to_string(), "--step".to_string()];
+        assert!(parse_rollback_step(&args).is_err());
     }
 }
 
