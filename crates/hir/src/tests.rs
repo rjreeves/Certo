@@ -2332,3 +2332,61 @@ fn pipe_with_no_call_args_into_struct_returning_fn_still_resolves() {
     assert_eq!(body.ty, Ty::Named { name: "Pt".into(), args: vec![] },
         "bare `a |> f` must resolve f's real return type, not Ty::Error, got {:?}", body.ty);
 }
+
+// ------------------------------------------------------------------ //
+// BACKLOG item 287 — `parallel { ... }`'s destructured tuple result must
+// carry each task's real type, not `Ty::Error` — a real runtime segfault
+// (an f-string interpolating a destructured element read the boxed value
+// as the wrong C type), not just a type-checking gap. Mirrors the exact
+// fix `Expr::WithTimeout` (item 122) already got for its own result, never
+// carried over to `parallel` until now.
+// ------------------------------------------------------------------ //
+
+#[test]
+fn parallel_tuple_result_resolves_real_element_types_not_ty_error() {
+    let m = lower(
+        "module A\n\
+         fn getCount(): Int = 42\n\
+         fn getLabel(): Text = \"hi\"\n\
+         fn f(): (Int, Text) = parallel { getCount(), getLabel() }"
+    );
+    let f = m.items.iter().find_map(|it| match it {
+        HirItem::Fn(f) if f.name == "f" => Some(f),
+        _ => None,
+    }).expect("expected fn `f`");
+    let body = f.body.as_ref().unwrap();
+    assert_eq!(body.ty, Ty::Tuple(vec![Ty::Int, Ty::Text]),
+        "parallel {{ }}'s result must resolve (Int, Text), not Ty::Error, got {:?}", body.ty);
+    // The block's own tail (the Tuple node itself, and each awaited
+    // element inside it) must carry the same real types, not just the
+    // outer wrapper — that's what a `val (a, b) = ...` destructure and an
+    // f-string interpolating one of the bound names actually consult.
+    if let HirExprKind::Block { tail, .. } = &body.kind {
+        assert_eq!(tail.ty, Ty::Tuple(vec![Ty::Int, Ty::Text]));
+        if let HirExprKind::Tuple(elems) = &tail.kind {
+            assert_eq!(elems[0].ty, Ty::Int, "first awaited element must be Int, got {:?}", elems[0].ty);
+            assert_eq!(elems[1].ty, Ty::Text, "second awaited element must be Text, got {:?}", elems[1].ty);
+        } else {
+            panic!("expected a Tuple tail, got {:?}", tail.kind);
+        }
+    } else {
+        panic!("expected parallel to lower to a Block, got {:?}", body.kind);
+    }
+}
+
+#[test]
+fn parallel_with_timeout_still_resolves_real_element_types() {
+    let m = lower(
+        "module A\n\
+         fn getCount(): Int = 42\n\
+         fn getLabel(): Text = \"hi\"\n\
+         fn f(): (Int, Text) = parallel(timeout: Duration.seconds(1)) { getCount(), getLabel() }"
+    );
+    let f = m.items.iter().find_map(|it| match it {
+        HirItem::Fn(f) if f.name == "f" => Some(f),
+        _ => None,
+    }).expect("expected fn `f`");
+    let body = f.body.as_ref().unwrap();
+    assert_eq!(body.ty, Ty::Tuple(vec![Ty::Int, Ty::Text]),
+        "parallel(timeout: ...) {{ }}'s result must also resolve (Int, Text), not Ty::Error, got {:?}", body.ty);
+}
