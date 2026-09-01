@@ -771,6 +771,11 @@ pub fn seed_stdlib(env: &mut TypeEnv, counter: &mut u32) {
     // `parseBool`'s own established shape too), not inventing a new error
     // type and Result-shaped API to match the spec literally.
     def!("Text.toInt",      fn1(Ty::Text, Ty::Option(Box::new(Ty::Int))));
+    // BACKLOG item 288 — spec §9.3's own `text.toDecimal()` example, the
+    // direct sibling of `Text.toInt` just above; same narrower scope (an
+    // Option-shaped alias over the already-working `parseDecimal`, not a
+    // new Result<Decimal, ParseError> API).
+    def!("Text.toDecimal",  fn1(Ty::Text, Ty::Option(Box::new(Ty::Decimal(None)))));
 
     // ---------------------------------------------------------------- //
     // Char
