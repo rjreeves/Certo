@@ -475,3 +475,73 @@ fn main(): Unit = {
     callGreet(r)
 }");
 }
+
+// ------------------------------------------------------------------ //
+// BACKLOG item 280 — a trait method taking bare `self` (the `Self`
+// sentinel, item 202) must be implementable for a concrete type; the
+// trait side's literal "Self" string was never treated as a wildcard.
+// ------------------------------------------------------------------ //
+
+#[test]
+fn bare_self_param_impl_conforms() {
+    ok("module A
+trait Serializable {
+    fn toJson(self): Text
+}
+
+type Widget = { id: Int }
+
+impl Serializable for Widget {
+    fn toJson(self): Text = f\"{self.id}\"
+}");
+}
+
+#[test]
+fn explicit_self_colon_self_param_impl_conforms() {
+    // `self: Self` (explicit annotation) must behave identically to bare `self`.
+    ok("module A
+trait Serializable {
+    fn toJson(self: Self): Text
+}
+
+type Widget = { id: Int }
+
+impl Serializable for Widget {
+    fn toJson(self): Text = f\"{self.id}\"
+}");
+}
+
+#[test]
+fn self_typed_return_value_impl_conforms() {
+    // A trait method returning `Self` (e.g. a builder-style `with`) must
+    // match an impl whose return type is the concrete implementing type.
+    ok("module A
+trait Cloneable {
+    fn duplicate(self): Self
+}
+
+type Counter = { n: Int }
+
+impl Cloneable for Counter {
+    fn duplicate(self): Counter = self
+}");
+}
+
+#[test]
+fn concrete_type_still_must_match_exactly_even_with_self_wildcard() {
+    // Regression guard: adding `Self` as an always-wildcard must not make
+    // an ordinary, unrelated concrete type name match by accident.
+    let errs = err("module A
+trait Greet {
+    fn greet(other: Self): Text
+}
+
+type Robot = { id: Int }
+
+impl Greet for Robot {
+    fn greet(other: Text): Text = other
+}");
+    assert!(has_kind(&errs, |k| matches!(k, TraitErrorKind::ParamTypeMismatch { method, .. } if method == "greet")),
+        "expected a real ParamTypeMismatch when the impl's param isn't the concrete Self type, got: {:?}",
+        errs.iter().map(|e| e.message()).collect::<Vec<_>>());
+}
