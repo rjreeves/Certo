@@ -88,6 +88,19 @@ struct Cx {
     /// module-wide counter (see `fresh_local` below), so an old entry's
     /// `LocalId` can never recur for a different function's own param.
     row_field_accessors: HashMap<LocalId, Vec<(String, LocalId, Ty)>>,
+    /// Real `type X = Y` type aliases (spec §3.3, BACKLOG item 281):
+    /// alias_name → (its own declared type-param names, in order; the raw
+    /// target `TypeExpr` it stands for). Populated up front in
+    /// `lower_module`'s first pass, mirroring `crates/typeck/src/env.rs`'s
+    /// own `TypeEnv.type_aliases` — HIR has its own, entirely separate
+    /// AST→`Ty` conversion (`ast_ty_to_ty_with_params`, since it does no
+    /// real unification and instead just erases every type param to
+    /// `Ty::Var(0)`), so the same alias-expansion had to be duplicated here:
+    /// fixing only `crates/typeck` left `certo check` accepting an alias
+    /// correctly while `certo build`/`run` still emitted invalid C
+    /// referencing an undefined type name for it (confirmed via a real
+    /// compile before this field was added).
+    type_aliases: HashMap<String, (Vec<String>, certo_ast::types::TypeExpr)>,
     errors:        Vec<LowerError>,
 }
 
@@ -113,6 +126,7 @@ impl Cx {
             local_types:         HashMap::new(),
             fn_row_bounds:       HashMap::new(),
             row_field_accessors: HashMap::new(),
+            type_aliases:        HashMap::new(),
             errors:              Vec::new(),
         }
     }
@@ -607,7 +621,7 @@ fn lower_lambda_with_param_hints(params: &[certo_ast::expr::LambdaParam], body: 
     cx.push_scope();
     let hir_params: Vec<HirParam> = params.iter().enumerate().map(|(i, p)| {
         let local = cx.define_local(&p.name.node);
-        let ty = p.ty.as_ref().map(|t| ast_ty_to_ty_with_params(&t.node, &[]))
+        let ty = p.ty.as_ref().map(|t| ast_ty_to_ty_with_params(&t.node, &[], &cx.type_aliases))
             .unwrap_or_else(|| hints.get(i).cloned().unwrap_or(Ty::Error));
         if !matches!(ty, Ty::Error) { cx.local_types.insert(local, ty.clone()); }
         HirParam { local, name: p.name.node.clone(), ty, span: p.span }
@@ -783,6 +797,22 @@ fn stdlib_param_names() -> HashMap<&'static str, &'static [&'static str]> {
 pub fn lower_module(module: &Module) -> Result<HirModule, Vec<LowerError>> {
     let mut cx = Cx::new();
 
+    // Register every `type X = Y` alias (BACKLOG item 281) before anything
+    // else runs `ast_ty_to_ty_with_params` — a separate, earlier pre-pass
+    // (not folded into the loop below) so an alias is known regardless of
+    // whether it's declared before or after the code that references it,
+    // same as every other top-level name in this module.
+    for sdecl in &module.decls {
+        if let Decl::Type(t) = &sdecl.node {
+            if let certo_ast::decl::TypeBody::Alias(target) = &t.body {
+                cx.type_aliases.insert(
+                    t.name.node.clone(),
+                    (t.type_params.iter().map(|p| p.name.node.clone()).collect(), target.node.clone()),
+                );
+            }
+        }
+    }
+
     // Register all top-level fn names first (for mutual recursion).
     for sdecl in &module.decls {
         if let Decl::Fn(f) = &sdecl.node {
@@ -794,12 +824,12 @@ pub fn lower_module(module: &Module) -> Result<HirModule, Vec<LowerError>> {
             // whether a return-type annotation is present, unlike
             // `fn_ret_types` below, so this isn't nested inside `if let Some(ret)`.
             cx.fn_param_tys.insert(f.name.node.clone(),
-                f.params.iter().map(|p| ast_ty_to_ty_with_params(&p.ty.node, &tp_names)).collect());
+                f.params.iter().map(|p| ast_ty_to_ty_with_params(&p.ty.node, &tp_names, &cx.type_aliases)).collect());
             if let Some(ret) = &f.ret_ty {
-                cx.fn_ret_types.insert(f.name.node.clone(), ast_ty_to_ty_with_params(&ret.node, &tp_names));
+                cx.fn_ret_types.insert(f.name.node.clone(), ast_ty_to_ty_with_params(&ret.node, &tp_names, &cx.type_aliases));
             }
             // BACKLOG item 200 — row-polymorphism codegen.
-            let row_fields = collect_row_bound_fields(&f.params, f.type_params.iter(), &tp_names);
+            let row_fields = collect_row_bound_fields(&f.params, f.type_params.iter(), &tp_names, &cx.type_aliases);
             if !row_fields.is_empty() {
                 cx.fn_row_bounds.insert(f.name.node.clone(), row_fields);
             }
@@ -823,12 +853,12 @@ pub fn lower_module(module: &Module) -> Result<HirModule, Vec<LowerError>> {
                 let tp_names: Vec<&str> = i.type_params.iter().chain(m.type_params.iter())
                     .map(|tp| tp.name.node.as_str()).collect();
                 cx.fn_param_tys.insert(qname.clone(),
-                    m.params.iter().map(|p| ast_ty_to_ty_with_params(&p.ty.node, &tp_names)).collect());
+                    m.params.iter().map(|p| ast_ty_to_ty_with_params(&p.ty.node, &tp_names, &cx.type_aliases)).collect());
                 if let Some(ret) = &m.ret_ty {
-                    cx.fn_ret_types.insert(qname.clone(), ast_ty_to_ty_with_params(&ret.node, &tp_names));
+                    cx.fn_ret_types.insert(qname.clone(), ast_ty_to_ty_with_params(&ret.node, &tp_names, &cx.type_aliases));
                 }
                 // BACKLOG item 200 — row-polymorphism codegen.
-                let row_fields = collect_row_bound_fields(&m.params, i.type_params.iter().chain(m.type_params.iter()), &tp_names);
+                let row_fields = collect_row_bound_fields(&m.params, i.type_params.iter().chain(m.type_params.iter()), &tp_names, &cx.type_aliases);
                 if !row_fields.is_empty() {
                     cx.fn_row_bounds.insert(qname, row_fields);
                 }
@@ -842,7 +872,7 @@ pub fn lower_module(module: &Module) -> Result<HirModule, Vec<LowerError>> {
                 cx.record_field_names.insert(t.name.node.clone(), names);
                 let tp_names: Vec<&str> = t.type_params.iter().map(|tp| tp.name.node.as_str()).collect();
                 let field_types: Vec<Ty> = rec.fields.iter()
-                    .map(|f| ast_ty_to_ty_with_params(&f.ty.node, &tp_names))
+                    .map(|f| ast_ty_to_ty_with_params(&f.ty.node, &tp_names, &cx.type_aliases))
                     .collect();
                 cx.record_field_types.insert(t.name.node.clone(), field_types);
                 // BACKLOG item 262 — positional record construction
@@ -879,7 +909,7 @@ pub fn lower_module(module: &Module) -> Result<HirModule, Vec<LowerError>> {
                         cx.variant_field_names.insert(v.name.node.clone(), field_names);
                         let tp_names: Vec<&str> = t.type_params.iter().map(|tp| tp.name.node.as_str()).collect();
                         let field_types: Vec<Ty> = v.fields.iter()
-                            .map(|f| ast_ty_to_ty_with_params(&f.ty.node, &tp_names))
+                            .map(|f| ast_ty_to_ty_with_params(&f.ty.node, &tp_names, &cx.type_aliases))
                             .collect();
                         cx.variant_field_types.insert(v.name.node.clone(), field_types);
                     }
@@ -921,14 +951,14 @@ pub fn lower_module(module: &Module) -> Result<HirModule, Vec<LowerError>> {
 
                 let mut params: Vec<HirParam> = f.params.iter().map(|p| {
                     let local = cx.define_local(&p.name.node);
-                    let ty = ast_ty_to_ty_with_params(&p.ty.node, &tp_names);
+                    let ty = ast_ty_to_ty_with_params(&p.ty.node, &tp_names, &cx.type_aliases);
                     if !matches!(ty, Ty::Error) { cx.local_types.insert(local, ty.clone()); }
                     HirParam { local, name: p.name.node.clone(), ty, span: p.span }
                 }).collect();
                 add_row_bound_accessor_params(&f.name.node, &mut params, f.span, &mut cx);
 
                 let mut body = f.body.as_ref().map(|b| lower_expr(b, &mut cx));
-                let ret_ty = f.ret_ty.as_ref().map(|t| ast_ty_to_ty_with_params(&t.node, &tp_names)).unwrap_or(Ty::Error);
+                let ret_ty = f.ret_ty.as_ref().map(|t| ast_ty_to_ty_with_params(&t.node, &tp_names, &cx.type_aliases)).unwrap_or(Ty::Error);
                 // BACKLOG item 235 — `fn f(): Int8 = 100`'s bare-literal
                 // body: MIR derives a function's *real* C return type from
                 // the body's own computed operand type (`infer_operand_ty`,
@@ -995,13 +1025,13 @@ pub fn lower_module(module: &Module) -> Result<HirModule, Vec<LowerError>> {
                     // it", which requires this type to be right).
                     let mut params: Vec<HirParam> = m.params.iter().map(|p| {
                         let local = cx.define_local(&p.name.node);
-                        let ty = ast_ty_to_ty_with_params(&p.ty.node, &tp_names);
+                        let ty = ast_ty_to_ty_with_params(&p.ty.node, &tp_names, &cx.type_aliases);
                         if !matches!(ty, Ty::Error) { cx.local_types.insert(local, ty.clone()); }
                         HirParam { local, name: p.name.node.clone(), ty, span: p.span }
                     }).collect();
                     add_row_bound_accessor_params(&qname, &mut params, m.span, &mut cx);
                     let mut body = Some(lower_expr(body_ast, &mut cx));
-                    let ret_ty = m.ret_ty.as_ref().map(|t| ast_ty_to_ty_with_params(&t.node, &tp_names)).unwrap_or(Ty::Error);
+                    let ret_ty = m.ret_ty.as_ref().map(|t| ast_ty_to_ty_with_params(&t.node, &tp_names, &cx.type_aliases)).unwrap_or(Ty::Error);
                     // BACKLOG item 235 — same fixed-width literal-body
                     // correction as the top-level `Decl::Fn` case above.
                     if let Some(b) = &mut body {
@@ -1146,7 +1176,7 @@ fn lower_expr(expr: &S<Expr>, cx: &mut Cx) -> HirExpr {
                 let ty = cx.global_types.get(name).cloned().unwrap_or_else(|| {
                     match (cx.fn_params.get(name), cx.fn_ret_types.get(name)) {
                         (Some(params), Some(ret)) => Ty::Fn {
-                            params: params.iter().map(|p| ast_ty_to_ty_with_params(&p.ty.node, &[])).collect(),
+                            params: params.iter().map(|p| ast_ty_to_ty_with_params(&p.ty.node, &[], &cx.type_aliases)).collect(),
                             ret: Box::new(ret.clone()),
                         },
                         _ => Ty::Error,
@@ -2441,7 +2471,7 @@ fn lower_block(stmts: &[Stmt], span: Span, cx: &mut Cx) -> HirExpr {
                 // otherwise this is exactly the case codegen would silently
                 // mis-cast a raw `void*` as a concrete C type, so it's a
                 // hard error instead — BACKLOG item 135.
-                let declared = val_ty_ann.as_ref().map(|t| ast_ty_to_ty_with_params(&t.node, &[]));
+                let declared = val_ty_ann.as_ref().map(|t| ast_ty_to_ty_with_params(&t.node, &[], &cx.type_aliases));
                 resolve_bare_generic_return(&mut init, declared.as_ref(), true, cx);
                 if let Some(d) = &declared {
                     if literal_matches_fixed_width(&value.node, d) { init.ty = d.clone(); }
@@ -2592,7 +2622,7 @@ fn lower_block(stmts: &[Stmt], span: Span, cx: &mut Cx) -> HirExpr {
                 // literal override just above (`var`'s declared annotation
                 // was previously discarded entirely here, unlike `Stmt::Val`).
                 if let Some(t) = var_ty_ann {
-                    let declared = ast_ty_to_ty_with_params(&t.node, &[]);
+                    let declared = ast_ty_to_ty_with_params(&t.node, &[], &cx.type_aliases);
                     if literal_matches_fixed_width(&value.node, &declared) { init.ty = declared; }
                 }
                 let ty = init.ty.clone();
@@ -3012,7 +3042,26 @@ fn literal_matches_fixed_width(expr: &Expr, declared: &Ty) -> bool {
     }
 }
 
-fn ast_ty_to_ty_with_params(te: &certo_ast::types::TypeExpr, type_params: &[&str]) -> Ty {
+fn ast_ty_to_ty_with_params(
+    te:          &certo_ast::types::TypeExpr,
+    type_params: &[&str],
+    aliases:     &HashMap<String, (Vec<String>, certo_ast::types::TypeExpr)>,
+) -> Ty {
+    ast_ty_to_ty_with_params_depth(te, type_params, aliases, 0)
+}
+
+/// BACKLOG item 281 — `depth` guards a self-referential alias (`type A = A`,
+/// or a longer cycle) against recursing forever: only incremented when an
+/// alias is actually expanded below, never for ordinary structural
+/// recursion, so it only counts real alias hops, not overall tree depth.
+const MAX_ALIAS_EXPANSION_DEPTH: u32 = 32;
+
+fn ast_ty_to_ty_with_params_depth(
+    te:          &certo_ast::types::TypeExpr,
+    type_params: &[&str],
+    aliases:     &HashMap<String, (Vec<String>, certo_ast::types::TypeExpr)>,
+    depth:       u32,
+) -> Ty {
     use certo_ast::types::TypeExpr;
     match te {
         TypeExpr::Named { path, args, .. } => {
@@ -3032,7 +3081,7 @@ fn ast_ty_to_ty_with_params(te: &certo_ast::types::TypeExpr, type_params: &[&str
             if args.len() == 1 && path.segments.len() == 1 && type_params.contains(&name) {
                 return Ty::Var(0);
             }
-            let targs: Vec<Ty> = args.iter().map(|a| ast_ty_to_ty_with_params(&a.node, type_params)).collect();
+            let targs: Vec<Ty> = args.iter().map(|a| ast_ty_to_ty_with_params_depth(&a.node, type_params, aliases, depth)).collect();
             match name {
                 "Int"     => Ty::Int,
                 "Int8"    => Ty::Int8,
@@ -3058,14 +3107,29 @@ fn ast_ty_to_ty_with_params(te: &certo_ast::types::TypeExpr, type_params: &[&str
                     let mut it = targs.into_iter();
                     Ty::Map(Box::new(it.next().unwrap_or(Ty::Error)), Box::new(it.next().unwrap_or(Ty::Error)))
                 }
-                other     => Ty::Named { name: other.to_string(), args: targs },
+                other => {
+                    // BACKLOG item 281 — a real `type X = Y` alias expands to
+                    // its target type here, instead of becoming a bogus
+                    // `Ty::Named` naming a C type nothing ever generates a
+                    // definition for (`TypeBody::Alias` emits no struct).
+                    if depth < MAX_ALIAS_EXPANSION_DEPTH {
+                        if let Some((param_names, target)) = aliases.get(other) {
+                            let subst: HashMap<String, certo_ast::types::TypeExpr> = param_names.iter().cloned()
+                                .zip(args.iter().map(|a| a.node.clone()))
+                                .collect();
+                            let substituted = substitute_type_expr_params(target, &subst);
+                            return ast_ty_to_ty_with_params_depth(&substituted, type_params, aliases, depth + 1);
+                        }
+                    }
+                    Ty::Named { name: other.to_string(), args: targs }
+                }
             }
         }
-        TypeExpr::Option { inner, .. } => Ty::Option(Box::new(ast_ty_to_ty_with_params(&inner.node, type_params))),
-        TypeExpr::Tuple { elements, .. } => Ty::Tuple(elements.iter().map(|e| ast_ty_to_ty_with_params(&e.node, type_params)).collect()),
+        TypeExpr::Option { inner, .. } => Ty::Option(Box::new(ast_ty_to_ty_with_params_depth(&inner.node, type_params, aliases, depth))),
+        TypeExpr::Tuple { elements, .. } => Ty::Tuple(elements.iter().map(|e| ast_ty_to_ty_with_params_depth(&e.node, type_params, aliases, depth)).collect()),
         TypeExpr::Fn { params, ret, .. } => Ty::Fn {
-            params: params.iter().map(|p| ast_ty_to_ty_with_params(&p.node, type_params)).collect(),
-            ret:    Box::new(ast_ty_to_ty_with_params(&ret.node, type_params)),
+            params: params.iter().map(|p| ast_ty_to_ty_with_params_depth(&p.node, type_params, aliases, depth)).collect(),
+            ret:    Box::new(ast_ty_to_ty_with_params_depth(&ret.node, type_params, aliases, depth)),
         },
         // Type parameters (e.g. T in fn foo<T>) are opaque at the HIR level.
         // Ty::Var(0) round-trips to void* in the C backend.
@@ -3073,6 +3137,63 @@ fn ast_ty_to_ty_with_params(te: &certo_ast::types::TypeExpr, type_params: &[&str
         TypeExpr::DecimalParam { precision, scale, .. } => Ty::Decimal(Some((*precision, *scale))),
         TypeExpr::BoundedTextParam { max_len, .. } => Ty::BoundedText(Some(*max_len)),
         _ => Ty::Error,
+    }
+}
+
+/// Structurally substitute a `type X<T, ...> = target`'s own declared
+/// type-param names inside `target` with the concrete `TypeExpr` arguments
+/// supplied at a use site (e.g. `T -> Int` for `Callback<Int>`) — BACKLOG
+/// item 281. Pure AST-to-AST substitution; does not itself expand nested
+/// aliases (the caller, `ast_ty_to_ty_with_params_depth`, re-enters its own
+/// alias-expansion branch on the result, so a substituted alias-of-alias
+/// still expands correctly).
+fn substitute_type_expr_params(
+    te:    &certo_ast::types::TypeExpr,
+    subst: &HashMap<String, certo_ast::types::TypeExpr>,
+) -> certo_ast::types::TypeExpr {
+    use certo_ast::types::TypeExpr;
+    match te {
+        TypeExpr::Named { path, args, span } => {
+            if args.is_empty() && path.segments.len() == 1 {
+                if let Some(replacement) = subst.get(path.segments[0].node.as_str()) {
+                    return replacement.clone();
+                }
+            }
+            TypeExpr::Named {
+                path: path.clone(),
+                args: args.iter().map(|a| S::new(substitute_type_expr_params(&a.node, subst), a.span)).collect(),
+                span: *span,
+            }
+        }
+        TypeExpr::Option { inner, span } =>
+            TypeExpr::Option { inner: Box::new(S::new(substitute_type_expr_params(&inner.node, subst), inner.span)), span: *span },
+        TypeExpr::Tuple { elements, span } =>
+            TypeExpr::Tuple {
+                elements: elements.iter().map(|e| S::new(substitute_type_expr_params(&e.node, subst), e.span)).collect(),
+                span: *span,
+            },
+        TypeExpr::Fn { params, ret, span } =>
+            TypeExpr::Fn {
+                params: params.iter().map(|p| S::new(substitute_type_expr_params(&p.node, subst), p.span)).collect(),
+                ret:    Box::new(S::new(substitute_type_expr_params(&ret.node, subst), ret.span)),
+                span:   *span,
+            },
+        TypeExpr::Record { fields, span } =>
+            TypeExpr::Record {
+                fields: fields.iter().map(|f| certo_ast::types::RecordTypeField {
+                    name:     f.name.clone(),
+                    ty:       S::new(substitute_type_expr_params(&f.ty.node, subst), f.ty.span),
+                    optional: f.optional,
+                    span:     f.span,
+                }).collect(),
+                span: *span,
+            },
+        TypeExpr::Ptr { inner, span } =>
+            TypeExpr::Ptr { inner: Box::new(S::new(substitute_type_expr_params(&inner.node, subst), inner.span)), span: *span },
+        TypeExpr::Param { name, .. } => {
+            subst.get(name.node.as_str()).cloned().unwrap_or_else(|| te.clone())
+        }
+        TypeExpr::DecimalParam { .. } | TypeExpr::BoundedTextParam { .. } => te.clone(),
     }
 }
 
@@ -3093,6 +3214,7 @@ fn collect_row_bound_fields<'a>(
     params: &[FnParam],
     type_params: impl Iterator<Item = &'a certo_ast::types::TypeParam>,
     tp_names: &[&str],
+    aliases: &HashMap<String, (Vec<String>, certo_ast::types::TypeExpr)>,
 ) -> Vec<(usize, String, Ty)> {
     use certo_ast::types::{Bound, TypeExpr};
     let mut out = Vec::new();
@@ -3111,7 +3233,7 @@ fn collect_row_bound_fields<'a>(
                 && path.segments[0].node == tp.name.node);
             if !is_this_param { continue; }
             for f in &row_fields {
-                out.push((i, f.name.node.clone(), ast_ty_to_ty_with_params(&f.ty.node, tp_names)));
+                out.push((i, f.name.node.clone(), ast_ty_to_ty_with_params(&f.ty.node, tp_names, aliases)));
             }
         }
     }

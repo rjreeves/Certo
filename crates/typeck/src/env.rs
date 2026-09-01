@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use certo_ast::types::TypeExpr;
 use crate::ty::{Ty, TyVar};
 use crate::unify::UnionFind;
 
@@ -67,6 +68,21 @@ pub struct TypeEnv {
     /// Sum type variant names: type_name → [variant_name, ...], in declaration
     /// order. Used for match exhaustiveness checking.
     pub sum_variants: HashMap<String, Vec<String>>,
+    /// Real `type X = Y` type aliases (spec §3.3, BACKLOG item 281):
+    /// alias_name → (its own declared type-param names, in order; the raw
+    /// target `TypeExpr` it stands for). Populated during hoisting
+    /// (`hoist_decl`'s `Decl::Type` arm, `TypeBody::Alias` case) — flat, not
+    /// scope-stacked like `frames`, since a type alias is always module-level,
+    /// same as `record_fields`/`sum_variants`. Consulted by
+    /// `type_expr_to_ty`'s `Named` catch-all so a reference to the alias
+    /// expands to its real target type instead of becoming an opaque,
+    /// unrelated nominal `Ty::Named` (the bug this item fixes).
+    pub type_aliases: HashMap<String, (Vec<String>, TypeExpr)>,
+    /// Alias names currently being expanded, used only as a cycle guard by
+    /// `type_expr_to_ty`'s alias-expansion path — a self-referential alias
+    /// (`type A = A`, or `type A = B; type B = A`) must be a bounded error,
+    /// not an infinite recursion / stack overflow.
+    pub(crate) alias_expand_stack: Vec<String>,
 }
 
 impl TypeEnv {
@@ -81,6 +97,8 @@ impl TypeEnv {
             row_bounds: HashMap::new(),
             current_body_row_bounds: HashMap::new(),
             sum_variants: HashMap::new(),
+            type_aliases: HashMap::new(),
+            alias_expand_stack: Vec::new(),
         }
     }
 

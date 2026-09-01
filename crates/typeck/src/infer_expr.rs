@@ -44,7 +44,7 @@ impl<'e> Ctx<'e> {
 pub fn type_expr_to_ty(te: &TypeExpr, ctx: &mut Ctx<'_>) -> Ty {
     use certo_ast::types::TypeExpr as TE;
     match te {
-        TE::Named { path, args, .. } => {
+        TE::Named { path, args, span } => {
             let name = path.segments.last().map(|s| s.node.clone()).unwrap_or_default();
             let targs: Vec<Ty> = args.iter().map(|a| type_expr_to_ty(&a.node, ctx)).collect();
             match name.as_str() {
@@ -104,7 +104,13 @@ pub fn type_expr_to_ty(te: &TypeExpr, ctx: &mut Ctx<'_>) -> Ty {
                             }
                         }
                     }
-                    Ty::Named { name, args: targs }
+                    // BACKLOG item 281 — a real `type X = Y` alias expands to
+                    // its target type here instead of becoming an opaque,
+                    // unrelated `Ty::Named`.
+                    match ctx.env.type_aliases.get(&name).cloned() {
+                        Some((param_names, target)) => expand_type_alias(&name, &param_names, &target, targs, *span, ctx),
+                        None => Ty::Named { name, args: targs },
+                    }
                 }
             }
         }
@@ -132,6 +138,48 @@ pub fn type_expr_to_ty(te: &TypeExpr, ctx: &mut Ctx<'_>) -> Ty {
         TE::DecimalParam { precision, scale, .. } => Ty::Decimal(Some((*precision, *scale))),
         TE::BoundedTextParam { max_len, .. } => Ty::BoundedText(Some(*max_len)),
     }
+}
+
+/// Expand a `type X = Y` alias reference (BACKLOG item 281) into its real
+/// target type. `targs` are the concrete arguments supplied at the use site
+/// (e.g. the `Int` in `Callback<Int>`, empty for a non-generic alias like
+/// `type UserId = UUID`): the alias's own declared type params are bound to
+/// fresh vars while converting its target (so a bare reference to one of
+/// them inside the target resolves via the ordinary `Ty::Var` lookup path
+/// `type_expr_to_ty`'s `Named` arm already has), then each fresh var is
+/// unified against the corresponding actual argument — the same
+/// fresh-var-then-unify idiom this module already uses for every other
+/// generic construct (record/sum type params, function type params), so the
+/// expanded type still participates correctly in later unification.
+fn expand_type_alias(
+    name:        &str,
+    param_names: &[String],
+    target:      &TypeExpr,
+    targs:       Vec<Ty>,
+    span:        Span,
+    ctx:         &mut Ctx<'_>,
+) -> Ty {
+    // A self-referential alias (`type A = A`, or a longer cycle like
+    // `type A = B; type B = A`) would otherwise recurse forever — a real,
+    // bounded `Ty::Error` instead of a stack overflow.
+    if ctx.env.alias_expand_stack.iter().any(|n| n == name) {
+        return Ty::Error;
+    }
+    ctx.env.alias_expand_stack.push(name.to_string());
+    ctx.env.push();
+    let fresh_vars: Vec<Ty> = param_names.iter().map(|pname| {
+        let v = ctx.fresh();
+        ctx.env.define(pname.clone(), v.clone());
+        v
+    }).collect();
+    let expanded = type_expr_to_ty(target, ctx);
+    ctx.env.pop();
+    ctx.env.alias_expand_stack.pop();
+
+    for (fresh, actual) in fresh_vars.into_iter().zip(targs.into_iter()) {
+        ctx.unify(actual, fresh, span);
+    }
+    expanded
 }
 
 /// Resolve a field access against an already-inferred object type. Shared by

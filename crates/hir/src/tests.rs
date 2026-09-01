@@ -2205,3 +2205,70 @@ fn positional_record_call_resolves_its_real_return_type_not_ty_error() {
     assert!(matches!(&body.kind, HirExprKind::Call { .. }),
         "positional record construction lowers as an ordinary Call, got {:?}", body.kind);
 }
+
+// ------------------------------------------------------------------ //
+// BACKLOG item 281 — `type X = Y` (spec §3.3) must expand to its real
+// target type at the HIR level too, not just in `crates/typeck` — HIR has
+// its own, entirely separate AST→Ty conversion (`ast_ty_to_ty_with_params`)
+// that previously kept an alias as an opaque `Ty::Named` naming a C type
+// codegen never generates a definition for.
+// ------------------------------------------------------------------ //
+
+#[test]
+fn fn_param_declared_as_an_alias_gets_the_real_underlying_ty() {
+    let m = lower(
+        "module A\ntype UserId = Text\nfn greet(id: UserId): Text = id"
+    );
+    let f = m.items.iter().find_map(|it| match it {
+        HirItem::Fn(f) if f.name == "greet" => Some(f),
+        _ => None,
+    }).expect("expected fn `greet`");
+    assert_eq!(f.params[0].ty, Ty::Text,
+        "an alias-typed param must resolve to its real target Ty, not an opaque Named, got {:?}", f.params[0].ty);
+}
+
+#[test]
+fn fn_return_declared_as_an_alias_gets_the_real_underlying_ty() {
+    let m = lower(
+        "module A\ntype UserId = Text\nfn newId(): UserId = \"abc\""
+    );
+    let f = m.items.iter().find_map(|it| match it {
+        HirItem::Fn(f) if f.name == "newId" => Some(f),
+        _ => None,
+    }).expect("expected fn `newId`");
+    assert_eq!(f.ret_ty, Ty::Text,
+        "an alias-typed return must resolve to its real target Ty, not an opaque Named, got {:?}", f.ret_ty);
+}
+
+#[test]
+fn generic_alias_param_expands_with_substituted_type_args() {
+    // The spec's own `type Callback<T> = T => Unit` example, instantiated
+    // as `Callback<Int>` — must resolve to a real `Ty::Fn` over `Ty::Int`,
+    // not an opaque `Ty::Named { name: "Callback", .. }`.
+    let m = lower(
+        "module A\ntype Callback<T> = T => Unit\nfn runWith(cb: Callback<Int>): Unit = cb(42)"
+    );
+    let f = m.items.iter().find_map(|it| match it {
+        HirItem::Fn(f) if f.name == "runWith" => Some(f),
+        _ => None,
+    }).expect("expected fn `runWith`");
+    assert_eq!(f.params[0].ty, Ty::Fn { params: vec![Ty::Int], ret: Box::new(Ty::Unit) },
+        "Callback<Int> must expand to (Int) => Unit, got {:?}", f.params[0].ty);
+}
+
+#[test]
+fn record_field_declared_as_an_alias_gets_the_real_underlying_ty() {
+    let m = lower(
+        "module A\ntype UserId = Text\ntype User = { id: UserId, name: Text }"
+    );
+    let field_types = m.record_field_types.get("User").expect("expected User's field types registered");
+    assert_eq!(field_types[0], Ty::Text,
+        "an alias-typed record field must resolve to its real target Ty, got {:?}", field_types[0]);
+}
+
+#[test]
+fn self_referential_type_alias_does_not_hang_hir_lowering() {
+    // `type A = A` must not stack-overflow HIR lowering — bounded by
+    // MAX_ALIAS_EXPANSION_DEPTH, degrading to a harmless opaque type.
+    let _ = try_lower("module A\ntype A = A\nfn f(x: A): A = x");
+}
