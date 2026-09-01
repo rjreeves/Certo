@@ -847,7 +847,7 @@ Regex is a separate namespace, not a method on `Text` — pattern first, subject
 
 ## **13.2 Secrets Management**
 
-| // Secrets are a first-class type — never logged, never serialized type Secret\<T\> = priv Secret(T)  // Load from environment — not from code val dbPassword = Env.require("DB\_PASSWORD") |\> map(Secret.wrap)  // Secret values cannot be logged Log.info("Connecting", \{ password: dbPassword \})  // Compile error // Error: Secret\<Text\> is not Loggable  // Secret values cannot be serialized to JSON Json.encode(dbPassword)  // Compile error // Error: Secret\<Text\> is not Serializable  // Must explicitly unwrap to use the value connect(host: dbHost, password: dbPassword.expose()) |
+| // `Secret<T>` is a pattern you declare, not a stdlib built-in — the // compiler specially recognizes any type structurally containing it // (however deeply wrapped) and rejects it at the sinks below type Secret\<T\> = priv Secret(T) impl\<T\> Secret \{     fn wrap(v: T): Secret\<T\> = Secret(v)     fn expose(s: Secret\<T\>): T = match s \{ Secret(v) =\> v \} \}  // Load from environment — not from code val dbPassword: Secret\<Text\>? = getEnv("DB\_PASSWORD").map((v) =\> Secret.wrap(v))  // Secret values cannot be logged println(dbPassword)  // Compile error // Error\[E0215\]: Secret\<Text\> is not Loggable/Serializable  // Secret values cannot be serialized to JSON Json.stringify(dbPassword)  // Compile error — Secret\<Text\> is not a JsonValue  // Must explicitly unwrap to use the value match dbPassword \{     Some(p) =\> connect(host: dbHost, password: p.expose())     None    =\> panic("DB\_PASSWORD not set") \} |
 | - |
 
 
