@@ -1317,6 +1317,255 @@ fn unwrap_result_payload(b: &mut Builder, scrut: &Operand, hir_local: LocalId, n
     unwrap_result_into(b, scrut, payload_ty, ml);
 }
 
+/// Check that the value in `op` (of type `ty`) matches `pat`, branching to
+/// `next_arm_bb` if it doesn't, and binding any names `pat` introduces on
+/// success. Used to check a field/element sub-pattern nested inside a
+/// `Record`/`Constructor`/`Tuple`/`List` pattern — BACKLOG item 305: those
+/// field/element loops previously only recognized a plain `HirPat::Bind`
+/// sub-pattern and silently emitted no check at all for anything else (a
+/// nested constructor like `Active`, a literal like `30`), so an arm like
+/// `{ status: Banned } => ...` matched regardless of the field's actual
+/// value. Recurses for a sub-pattern nested more than one level deep
+/// (`Wrap(Some(x))`, `(Some(x), y)`, etc.), reusing the exact same
+/// discriminant-check/unboxing rules the top-level arm dispatch above uses
+/// for the analogous top-level pattern kind.
+///
+/// Leaves the builder positioned at the block where matching should
+/// continue: the current block, unchanged, for a pattern that always
+/// matches (`Bind`/`Wildcard`), or a fresh block reached only once the
+/// check (and any further-nested checks) succeeded otherwise. Callers that
+/// need control to reach a specific downstream block regardless of how
+/// many intermediate blocks this introduces (the built-in `Some` case,
+/// which must branch to `next_arm_bb` on a null scrutinee *before*
+/// attempting to unbox its payload) must issue that final `Goto`
+/// themselves — see the built-in `Constructor("Some", ...)` arm above.
+fn check_nested_pattern(b: &mut Builder, pat: &HirPat, op: &Operand, ty: &Ty, next_arm_bb: BlockId) {
+    match pat {
+        HirPat::Wildcard => {}
+        HirPat::Bind { local, name } => {
+            let ml = b.map_hir_local(*local, name, ty.clone());
+            b.assign(ml, Rvalue::Use(op.clone()));
+        }
+        HirPat::Lit(lit) => {
+            let expected = match lit {
+                HirLitPat::Int(n)  => Operand::Const(MirConst::Int(*n)),
+                HirLitPat::Bool(v) => Operand::Const(MirConst::Bool(*v)),
+                HirLitPat::Str(s)  => Operand::Const(MirConst::Str(s.clone())),
+            };
+            let cmp = b.declare_local("_cmp", Ty::Bool);
+            b.assign(cmp, Rvalue::BinOp { op: certo_hir::BinOp::Eq, lhs: op.clone(), rhs: expected });
+            let cont_bb = b.new_block();
+            b.terminate(Terminator::If { cond: Operand::Local(cmp), true_bb: cont_bb, false_bb: next_arm_bb });
+            b.switch_to(cont_bb);
+        }
+        HirPat::Constructor { name, fields, field_names, field_types } => {
+            match name.as_str() {
+                "None" => {
+                    let cmp = b.declare_local("_cmp", Ty::Bool);
+                    b.assign(cmp, Rvalue::BinOp { op: certo_hir::BinOp::Eq, lhs: op.clone(), rhs: Operand::Global("__NULL".into()) });
+                    let cont_bb = b.new_block();
+                    b.terminate(Terminator::If { cond: Operand::Local(cmp), true_bb: cont_bb, false_bb: next_arm_bb });
+                    b.switch_to(cont_bb);
+                }
+                "Some" => {
+                    let cmp = b.declare_local("_cmp", Ty::Bool);
+                    b.assign(cmp, Rvalue::BinOp { op: certo_hir::BinOp::NotEq, lhs: op.clone(), rhs: Operand::Global("__NULL".into()) });
+                    let cont_bb = b.new_block();
+                    b.terminate(Terminator::If { cond: Operand::Local(cmp), true_bb: cont_bb, false_bb: next_arm_bb });
+                    b.switch_to(cont_bb);
+                    if let Some(inner_pat) = fields.first() {
+                        let payload_ty = match ty { Ty::Option(inner) => (**inner).clone(), _ => Ty::Error };
+                        let payload = b.declare_local("_payload", payload_ty.clone());
+                        b.assign(payload, Rvalue::UnboxSome { opt: op.clone(), ty: payload_ty.clone() });
+                        check_nested_pattern(b, inner_pat, &Operand::Local(payload), &payload_ty, next_arm_bb);
+                    }
+                }
+                "Ok" | "Err" => {
+                    let is_ok = b.declare_local("_is_ok", Ty::Bool);
+                    let next_bb = b.new_block();
+                    b.terminate(Terminator::Call { func: Operand::Global("__result_is_ok".into()), args: vec![op.clone()], dest: is_ok, next: next_bb });
+                    b.switch_to(next_bb);
+                    let (ok_ty, err_ty) = match ty { Ty::Result(t, e) => ((**t).clone(), (**e).clone()), _ => (Ty::Error, Ty::Error) };
+                    let want_ok = name == "Ok";
+                    let payload_ty = if want_ok { ok_ty } else { err_ty };
+                    let payload = fields.first().map(|inner_pat| {
+                        let dest = b.declare_local("_payload", payload_ty.clone());
+                        unwrap_result_into(b, op, &payload_ty, dest);
+                        (inner_pat, dest)
+                    });
+                    let cond_local = if want_ok {
+                        is_ok
+                    } else {
+                        let not_ok = b.declare_local("_not_ok", Ty::Bool);
+                        b.assign(not_ok, Rvalue::UnOp { op: certo_hir::UnOp::Not, arg: Operand::Local(is_ok) });
+                        not_ok
+                    };
+                    let cont_bb = b.new_block();
+                    b.terminate(Terminator::If { cond: Operand::Local(cond_local), true_bb: cont_bb, false_bb: next_arm_bb });
+                    b.switch_to(cont_bb);
+                    if let Some((inner_pat, dest)) = payload {
+                        check_nested_pattern(b, inner_pat, &Operand::Local(dest), &payload_ty, next_arm_bb);
+                    }
+                }
+                _ => {
+                    // User-defined sum type: compare .tag, then recurse into fields —
+                    // mirrors the top-level arm dispatch's own identical-shape handling.
+                    let tag_local = b.declare_local("_tag", Ty::Int);
+                    b.assign(tag_local, Rvalue::Field { base: op.clone(), field: "tag".into() });
+                    let variant = name.rsplit("__").next().unwrap_or(name).to_lowercase();
+                    let enclosing_type_name = name.split("__").next().unwrap_or(name);
+                    let ty_args: &[Ty] = match ty { Ty::Named { args, .. } => args, _ => &[] };
+                    let cmp = b.declare_local("_cmp", Ty::Bool);
+                    let variant_tag = Operand::Global(format!("__tag__{}", name));
+                    b.assign(cmp, Rvalue::BinOp { op: certo_hir::BinOp::Eq, lhs: Operand::Local(tag_local), rhs: variant_tag });
+                    let cont_bb = b.new_block();
+                    b.terminate(Terminator::If { cond: Operand::Local(cmp), true_bb: cont_bb, false_bb: next_arm_bb });
+                    b.switch_to(cont_bb);
+
+                    enum FieldUnbox { None, OptionBoxed, SelfRefBoxed }
+                    for (i, field_pat) in fields.iter().enumerate() {
+                        let declared = field_types.get(i).cloned().unwrap_or(Ty::Error);
+                        let (real_ty, unbox) = match &declared {
+                            Ty::Var(_) => {
+                                let concrete = ty_args.first().cloned().unwrap_or(Ty::Error);
+                                let unbox = if !matches!(concrete, Ty::Var(_)) { FieldUnbox::OptionBoxed } else { FieldUnbox::None };
+                                (concrete, unbox)
+                            }
+                            Ty::Named { name: field_ty_name, args } if args.is_empty() && field_ty_name == enclosing_type_name => {
+                                (declared.clone(), FieldUnbox::SelfRefBoxed)
+                            }
+                            other => (other.clone(), FieldUnbox::None),
+                        };
+                        let field_name = field_names.get(i).cloned().unwrap_or_else(|| format!("f{i}"));
+                        let field_op = match unbox {
+                            FieldUnbox::OptionBoxed => {
+                                let raw = b.declare_local("_field_raw", Ty::Var(0));
+                                b.assign(raw, Rvalue::Field { base: op.clone(), field: format!("{}.{}", variant, field_name) });
+                                let unboxed = b.declare_local("_field_val", real_ty.clone());
+                                b.assign(unboxed, Rvalue::UnboxSome { opt: Operand::Local(raw), ty: real_ty.clone() });
+                                Operand::Local(unboxed)
+                            }
+                            FieldUnbox::SelfRefBoxed => {
+                                let raw = b.declare_local("_field_raw", Ty::Var(0));
+                                b.assign(raw, Rvalue::Field { base: op.clone(), field: format!("{}.{}", variant, field_name) });
+                                let unboxed = b.declare_local("_field_val", real_ty.clone());
+                                b.assign(unboxed, Rvalue::Unbox { value: Operand::Local(raw), ty: real_ty.clone() });
+                                Operand::Local(unboxed)
+                            }
+                            FieldUnbox::None => {
+                                let val = b.declare_local("_field_val", real_ty.clone());
+                                b.assign(val, Rvalue::Field { base: op.clone(), field: format!("{}.{}", variant, field_name) });
+                                Operand::Local(val)
+                            }
+                        };
+                        check_nested_pattern(b, field_pat, &field_op, &real_ty, next_arm_bb);
+                    }
+                }
+            }
+        }
+        HirPat::Record { fields, field_names, field_types } => {
+            let ty_args: &[Ty] = match ty { Ty::Named { args, .. } => args, _ => &[] };
+            for (i, field_pat) in fields.iter().enumerate() {
+                let declared = field_types.get(i).cloned().unwrap_or(Ty::Error);
+                let (real_ty, needs_unbox) = match &declared {
+                    Ty::Var(_) => {
+                        let concrete = ty_args.first().cloned().unwrap_or(Ty::Error);
+                        let needs_unbox = !matches!(concrete, Ty::Var(_));
+                        (concrete, needs_unbox)
+                    }
+                    other => (other.clone(), false),
+                };
+                let field_name = field_names.get(i).cloned().unwrap_or_default();
+                let field_op = if needs_unbox {
+                    let raw = b.declare_local(&format!("_field_{}", field_name), Ty::Var(0));
+                    b.assign(raw, Rvalue::Field { base: op.clone(), field: field_name.clone() });
+                    let unboxed = b.declare_local("_field_val", real_ty.clone());
+                    b.assign(unboxed, Rvalue::UnboxSome { opt: Operand::Local(raw), ty: real_ty.clone() });
+                    Operand::Local(unboxed)
+                } else {
+                    let val = b.declare_local("_field_val", real_ty.clone());
+                    b.assign(val, Rvalue::Field { base: op.clone(), field: field_name.clone() });
+                    Operand::Local(val)
+                };
+                check_nested_pattern(b, field_pat, &field_op, &real_ty, next_arm_bb);
+            }
+        }
+        HirPat::Tuple(fields) => {
+            for (i, field_pat) in fields.iter().enumerate() {
+                let elem_local = b.declare_local("_tuple_elem", Ty::Error);
+                let next_bb = b.new_block();
+                b.terminate(Terminator::Call {
+                    func: Operand::Global("__tuple_get".into()),
+                    args: vec![op.clone(), Operand::Const(MirConst::Int(i as i64))],
+                    dest: elem_local,
+                    next: next_bb,
+                });
+                b.switch_to(next_bb);
+                check_nested_pattern(b, field_pat, &Operand::Local(elem_local), &Ty::Error, next_arm_bb);
+            }
+        }
+        HirPat::List { head, tail, elem_ty } => {
+            let len_local = b.declare_local("_len", Ty::Int);
+            let after_len_bb = b.new_block();
+            b.terminate(Terminator::Call { func: Operand::Global("List.len".into()), args: vec![op.clone()], dest: len_local, next: after_len_bb });
+            b.switch_to(after_len_bb);
+            let cmp = b.declare_local("_cmp", Ty::Bool);
+            b.assign(cmp, Rvalue::BinOp {
+                op: if tail.is_some() { certo_hir::BinOp::GtEq } else { certo_hir::BinOp::Eq },
+                lhs: Operand::Local(len_local),
+                rhs: Operand::Const(MirConst::Int(head.len() as i64)),
+            });
+            let bind_bb = b.new_block();
+            b.terminate(Terminator::If { cond: Operand::Local(cmp), true_bb: bind_bb, false_bb: next_arm_bb });
+            b.switch_to(bind_bb);
+            for (i, field_pat) in head.iter().enumerate() {
+                let elem_needs_unbox = matches!(elem_ty, Ty::Float) || elem_ty.needs_heap_box();
+                let raw_ty = if elem_needs_unbox { Ty::Var(0) } else { elem_ty.clone() };
+                let elem_raw = b.declare_local("_elem_raw", raw_ty);
+                let next_bb = b.new_block();
+                b.terminate(Terminator::Call {
+                    func: Operand::Global("List.getOrPanic".into()),
+                    args: vec![op.clone(), Operand::Const(MirConst::Int(i as i64))],
+                    dest: elem_raw,
+                    next: next_bb,
+                });
+                b.switch_to(next_bb);
+                let elem_op = if elem_needs_unbox {
+                    let unboxed = b.declare_local("_elem_val", elem_ty.clone());
+                    b.assign(unboxed, Rvalue::Unbox { value: Operand::Local(elem_raw), ty: elem_ty.clone() });
+                    Operand::Local(unboxed)
+                } else {
+                    Operand::Local(elem_raw)
+                };
+                check_nested_pattern(b, field_pat, &elem_op, elem_ty, next_arm_bb);
+            }
+            if let Some(tail_pat) = tail {
+                let list_ty = Ty::List(Box::new(elem_ty.clone()));
+                let tail_local = b.declare_local("_tail", list_ty.clone());
+                let next_bb = b.new_block();
+                b.terminate(Terminator::Call {
+                    func: Operand::Global("List.slice".into()),
+                    args: vec![op.clone(), Operand::Const(MirConst::Int(head.len() as i64)), Operand::Local(len_local)],
+                    dest: tail_local,
+                    next: next_bb,
+                });
+                b.switch_to(next_bb);
+                check_nested_pattern(b, tail_pat, &Operand::Local(tail_local), &list_ty, next_arm_bb);
+            }
+        }
+        HirPat::Or(l, r) => {
+            let after_or = b.new_block();
+            let try_right_bb = b.new_block();
+            check_nested_pattern(b, l, op, ty, try_right_bb);
+            b.terminate(Terminator::Goto(after_or));
+            b.switch_to(try_right_bb);
+            check_nested_pattern(b, r, op, ty, next_arm_bb);
+            b.terminate(Terminator::Goto(after_or));
+            b.switch_to(after_or);
+        }
+    }
+}
+
 /// Best-effort result type for a binary operation, used when HIR lowering left
 /// the node's type as `Ty::Error` (e.g. expressions synthesized by the f-string
 /// desugar). Comparisons/logicals yield `Bool`, concat yields `Text`, and
@@ -1906,19 +2155,36 @@ fn lower_expr(expr: &HirExpr, b: &mut Builder) -> Operand {
                                     rhs: Operand::Global("__NULL".into()),
                                 });
                                 let after_pat = if arm.guard.is_some() { b.new_block() } else { arm_bb };
-                                b.terminate(Terminator::If { cond: Operand::Local(cmp), true_bb: after_pat, false_bb: next_arm_bb });
                                 // Dereference the payload only in the matched (non-null)
-                                // block — never on the `None`/NULL path.
-                                b.switch_to(after_pat);
-                                for field_pat in fields.iter() {
-                                    if let HirPat::Bind { local, name: fname } = field_pat {
+                                // block — never on the `None`/NULL path. A non-`Bind`
+                                // payload sub-pattern (BACKLOG item 305 — e.g.
+                                // `Some(0)`/`Some(Some(x))`) may itself branch further,
+                                // so extract into its own block and explicitly
+                                // `Goto(after_pat)` once done, rather than assuming
+                                // `after_pat` is still `current` when extraction finishes.
+                                let fields_bb = b.new_block();
+                                b.terminate(Terminator::If { cond: Operand::Local(cmp), true_bb: fields_bb, false_bb: next_arm_bb });
+                                b.switch_to(fields_bb);
+                                match fields.first() {
+                                    Some(HirPat::Bind { local, name: fname }) => {
                                         let ml = b.map_hir_local(*local, fname, opt_payload.clone());
                                         b.assign(ml, Rvalue::UnboxSome {
                                             opt: scrut_op.clone(),
                                             ty:  opt_payload.clone(),
                                         });
                                     }
+                                    Some(HirPat::Wildcard) | None => {}
+                                    Some(field_pat) => {
+                                        let payload = b.declare_local("_payload", opt_payload.clone());
+                                        b.assign(payload, Rvalue::UnboxSome {
+                                            opt: scrut_op.clone(),
+                                            ty:  opt_payload.clone(),
+                                        });
+                                        check_nested_pattern(b, field_pat, &Operand::Local(payload), &opt_payload, next_arm_bb);
+                                    }
                                 }
+                                b.terminate(Terminator::Goto(after_pat));
+                                if arm.guard.is_some() { b.switch_to(after_pat); }
                             }
                             "Ok" => {
                                 // Ok(v): __result_is_ok(scrutinee); bind v = __result_unwrap(scrutinee)
@@ -1931,13 +2197,39 @@ fn lower_expr(expr: &HirExpr, b: &mut Builder) -> Operand {
                                     next: next_bb,
                                 });
                                 b.switch_to(next_bb);
+                                let mut pending_check = None;
                                 for field_pat in fields.iter() {
-                                    if let HirPat::Bind { local, name: fname } = field_pat {
-                                        unwrap_result_payload(b, &scrut_op, *local, fname, &ok_ty);
+                                    match field_pat {
+                                        HirPat::Bind { local, name: fname } => {
+                                            unwrap_result_payload(b, &scrut_op, *local, fname, &ok_ty);
+                                        }
+                                        HirPat::Wildcard => {}
+                                        other => {
+                                            let payload = b.declare_local("_payload", ok_ty.clone());
+                                            unwrap_result_into(b, &scrut_op, &ok_ty, payload);
+                                            pending_check = Some((other, payload));
+                                        }
                                     }
                                 }
                                 let after_pat = if arm.guard.is_some() { b.new_block() } else { arm_bb };
-                                b.terminate(Terminator::If { cond: Operand::Local(is_ok), true_bb: after_pat, false_bb: next_arm_bb });
+                                // BACKLOG item 305 — a non-`Bind` payload sub-pattern
+                                // (`Ok(0)`, say) needs its own check *after* confirming
+                                // this is really the `Ok` arm, so it can't share
+                                // `after_pat` as `is_ok`'s own `true_bb` directly (that
+                                // would run it, if guard-less, in the very block that
+                                // decides `is_ok`, which already has its terminator set).
+                                match pending_check {
+                                    None => {
+                                        b.terminate(Terminator::If { cond: Operand::Local(is_ok), true_bb: after_pat, false_bb: next_arm_bb });
+                                    }
+                                    Some((pat, payload)) => {
+                                        let check_bb = b.new_block();
+                                        b.terminate(Terminator::If { cond: Operand::Local(is_ok), true_bb: check_bb, false_bb: next_arm_bb });
+                                        b.switch_to(check_bb);
+                                        check_nested_pattern(b, pat, &Operand::Local(payload), &ok_ty, next_arm_bb);
+                                        b.terminate(Terminator::Goto(after_pat));
+                                    }
+                                }
                                 if arm.guard.is_some() { b.switch_to(after_pat); }
                             }
                             "Err" => {
@@ -1951,15 +2243,39 @@ fn lower_expr(expr: &HirExpr, b: &mut Builder) -> Operand {
                                     next: next_bb,
                                 });
                                 b.switch_to(next_bb);
+                                let mut pending_check = None;
                                 for field_pat in fields.iter() {
-                                    if let HirPat::Bind { local, name: fname } = field_pat {
-                                        unwrap_result_payload(b, &scrut_op, *local, fname, &err_ty);
+                                    match field_pat {
+                                        HirPat::Bind { local, name: fname } => {
+                                            unwrap_result_payload(b, &scrut_op, *local, fname, &err_ty);
+                                        }
+                                        HirPat::Wildcard => {}
+                                        other => {
+                                            let payload = b.declare_local("_payload", err_ty.clone());
+                                            unwrap_result_into(b, &scrut_op, &err_ty, payload);
+                                            pending_check = Some((other, payload));
+                                        }
                                     }
                                 }
                                 let not_ok = b.declare_local("_not_ok", Ty::Bool);
                                 b.assign(not_ok, Rvalue::UnOp { op: certo_hir::UnOp::Not, arg: Operand::Local(is_ok) });
                                 let after_pat = if arm.guard.is_some() { b.new_block() } else { arm_bb };
-                                b.terminate(Terminator::If { cond: Operand::Local(not_ok), true_bb: after_pat, false_bb: next_arm_bb });
+                                // BACKLOG item 305 — see the identical "Ok" case above
+                                // for why a non-`Bind` payload sub-pattern needs its own
+                                // intermediate block rather than sharing `after_pat` as
+                                // `not_ok`'s own `true_bb` directly.
+                                match pending_check {
+                                    None => {
+                                        b.terminate(Terminator::If { cond: Operand::Local(not_ok), true_bb: after_pat, false_bb: next_arm_bb });
+                                    }
+                                    Some((pat, payload)) => {
+                                        let check_bb = b.new_block();
+                                        b.terminate(Terminator::If { cond: Operand::Local(not_ok), true_bb: check_bb, false_bb: next_arm_bb });
+                                        b.switch_to(check_bb);
+                                        check_nested_pattern(b, pat, &Operand::Local(payload), &err_ty, next_arm_bb);
+                                        b.terminate(Terminator::Goto(after_pat));
+                                    }
+                                }
                                 if arm.guard.is_some() { b.switch_to(after_pat); }
                             }
                             _ => {
@@ -2010,47 +2326,60 @@ fn lower_expr(expr: &HirExpr, b: &mut Builder) -> Operand {
                                 // constructor call site boxed it).
                                 enum FieldUnbox { None, OptionBoxed, SelfRefBoxed }
                                 for (i, field_pat) in fields.iter().enumerate() {
-                                    if let HirPat::Bind { local, name: fname } = field_pat {
-                                        let declared = &field_types[i];
-                                        let (real_ty, unbox) = match declared {
-                                            Ty::Var(_) => {
-                                                let concrete = scrut_args.first().cloned().unwrap_or(Ty::Error);
-                                                let unbox = if !matches!(concrete, Ty::Var(_)) { FieldUnbox::OptionBoxed } else { FieldUnbox::None };
-                                                (concrete, unbox)
-                                            }
-                                            Ty::Named { name: field_ty_name, args } if args.is_empty() && field_ty_name == enclosing_type_name => {
-                                                (declared.clone(), FieldUnbox::SelfRefBoxed)
-                                            }
-                                            other => (other.clone(), FieldUnbox::None),
-                                        };
-                                        let ml = b.map_hir_local(*local, fname, real_ty.clone());
-                                        // Read the payload directly via a nested path
-                                        // `scrut.<variant>.<field>` — avoids an intermediate
-                                        // local whose (anonymous struct) type we can't name.
-                                        match unbox {
-                                            FieldUnbox::OptionBoxed => {
-                                                let raw = b.declare_local("_variant_field_raw", Ty::Var(0));
-                                                b.assign(raw, Rvalue::Field {
-                                                    base: scrut_op.clone(),
-                                                    field: format!("{}.{}", variant, field_names[i]),
-                                                });
-                                                b.assign(ml, Rvalue::UnboxSome { opt: Operand::Local(raw), ty: real_ty });
-                                            }
-                                            FieldUnbox::SelfRefBoxed => {
-                                                let raw = b.declare_local("_variant_field_raw", Ty::Var(0));
-                                                b.assign(raw, Rvalue::Field {
-                                                    base: scrut_op.clone(),
-                                                    field: format!("{}.{}", variant, field_names[i]),
-                                                });
-                                                b.assign(ml, Rvalue::Unbox { value: Operand::Local(raw), ty: real_ty });
-                                            }
-                                            FieldUnbox::None => {
-                                                b.assign(ml, Rvalue::Field {
-                                                    base: scrut_op.clone(),
-                                                    field: format!("{}.{}", variant, field_names[i]),
-                                                });
-                                            }
+                                    // BACKLOG item 305 — a non-`Bind` field sub-pattern
+                                    // (a nested constructor like `Active`, a literal like
+                                    // `30`) previously fell through this `if let Bind`
+                                    // guard entirely: no read, no check, so the arm
+                                    // matched unconditionally regardless of the field's
+                                    // real value. `Wildcard` still needs nothing (matches
+                                    // anything); anything else is checked recursively via
+                                    // `check_nested_pattern`, same as `Bind`'s read below.
+                                    if matches!(field_pat, HirPat::Wildcard) { continue; }
+                                    let declared = &field_types[i];
+                                    let (real_ty, unbox) = match declared {
+                                        Ty::Var(_) => {
+                                            let concrete = scrut_args.first().cloned().unwrap_or(Ty::Error);
+                                            let unbox = if !matches!(concrete, Ty::Var(_)) { FieldUnbox::OptionBoxed } else { FieldUnbox::None };
+                                            (concrete, unbox)
                                         }
+                                        Ty::Named { name: field_ty_name, args } if args.is_empty() && field_ty_name == enclosing_type_name => {
+                                            (declared.clone(), FieldUnbox::SelfRefBoxed)
+                                        }
+                                        other => (other.clone(), FieldUnbox::None),
+                                    };
+                                    let dest = match field_pat {
+                                        HirPat::Bind { local, name: fname } => b.map_hir_local(*local, fname, real_ty.clone()),
+                                        _ => b.declare_local("_field_val", real_ty.clone()),
+                                    };
+                                    // Read the payload directly via a nested path
+                                    // `scrut.<variant>.<field>` — avoids an intermediate
+                                    // local whose (anonymous struct) type we can't name.
+                                    match unbox {
+                                        FieldUnbox::OptionBoxed => {
+                                            let raw = b.declare_local("_variant_field_raw", Ty::Var(0));
+                                            b.assign(raw, Rvalue::Field {
+                                                base: scrut_op.clone(),
+                                                field: format!("{}.{}", variant, field_names[i]),
+                                            });
+                                            b.assign(dest, Rvalue::UnboxSome { opt: Operand::Local(raw), ty: real_ty.clone() });
+                                        }
+                                        FieldUnbox::SelfRefBoxed => {
+                                            let raw = b.declare_local("_variant_field_raw", Ty::Var(0));
+                                            b.assign(raw, Rvalue::Field {
+                                                base: scrut_op.clone(),
+                                                field: format!("{}.{}", variant, field_names[i]),
+                                            });
+                                            b.assign(dest, Rvalue::Unbox { value: Operand::Local(raw), ty: real_ty.clone() });
+                                        }
+                                        FieldUnbox::None => {
+                                            b.assign(dest, Rvalue::Field {
+                                                base: scrut_op.clone(),
+                                                field: format!("{}.{}", variant, field_names[i]),
+                                            });
+                                        }
+                                    }
+                                    if !matches!(field_pat, HirPat::Bind { .. }) {
+                                        check_nested_pattern(b, field_pat, &Operand::Local(dest), &real_ty, next_arm_bb);
                                     }
                                 }
                                 let cmp = b.declare_local("_cmp", Ty::Bool);
@@ -2075,24 +2404,34 @@ fn lower_expr(expr: &HirExpr, b: &mut Builder) -> Operand {
                         // instantiation argument is itself concrete.
                         let scrut_args: &[Ty] = match &scrutinee.ty { Ty::Named { args, .. } => args, _ => &[] };
                         for (i, field_pat) in fields.iter().enumerate() {
-                            if let HirPat::Bind { local, name: fname } = field_pat {
-                                let declared = &field_types[i];
-                                let (real_ty, needs_unbox) = match declared {
-                                    Ty::Var(_) => {
-                                        let concrete = scrut_args.first().cloned().unwrap_or(Ty::Error);
-                                        let needs_unbox = !matches!(concrete, Ty::Var(_));
-                                        (concrete, needs_unbox)
-                                    }
-                                    other => (other.clone(), false),
-                                };
-                                let ml = b.map_hir_local(*local, fname, real_ty.clone());
-                                if needs_unbox {
-                                    let raw = b.declare_local(&format!("_field_{}", field_names[i]), Ty::Var(0));
-                                    b.assign(raw, Rvalue::Field { base: scrut_op.clone(), field: field_names[i].clone() });
-                                    b.assign(ml, Rvalue::UnboxSome { opt: Operand::Local(raw), ty: real_ty });
-                                } else {
-                                    b.assign(ml, Rvalue::Field { base: scrut_op.clone(), field: field_names[i].clone() });
+                            // BACKLOG item 305 — see the identical comment on the
+                            // `Constructor` field loop above: a non-`Bind` sub-pattern
+                            // used to be silently skipped (no read, no check), so e.g.
+                            // `{ status: Banned }` matched regardless of `status`'s
+                            // real value.
+                            if matches!(field_pat, HirPat::Wildcard) { continue; }
+                            let declared = &field_types[i];
+                            let (real_ty, needs_unbox) = match declared {
+                                Ty::Var(_) => {
+                                    let concrete = scrut_args.first().cloned().unwrap_or(Ty::Error);
+                                    let needs_unbox = !matches!(concrete, Ty::Var(_));
+                                    (concrete, needs_unbox)
                                 }
+                                other => (other.clone(), false),
+                            };
+                            let dest = match field_pat {
+                                HirPat::Bind { local, name: fname } => b.map_hir_local(*local, fname, real_ty.clone()),
+                                _ => b.declare_local("_field_val", real_ty.clone()),
+                            };
+                            if needs_unbox {
+                                let raw = b.declare_local(&format!("_field_{}", field_names[i]), Ty::Var(0));
+                                b.assign(raw, Rvalue::Field { base: scrut_op.clone(), field: field_names[i].clone() });
+                                b.assign(dest, Rvalue::UnboxSome { opt: Operand::Local(raw), ty: real_ty.clone() });
+                            } else {
+                                b.assign(dest, Rvalue::Field { base: scrut_op.clone(), field: field_names[i].clone() });
+                            }
+                            if !matches!(field_pat, HirPat::Bind { .. }) {
+                                check_nested_pattern(b, field_pat, &Operand::Local(dest), &real_ty, next_arm_bb);
                             }
                         }
                         let after_pat = if arm.guard.is_some() { b.new_block() } else { arm_bb };
@@ -2102,19 +2441,27 @@ fn lower_expr(expr: &HirExpr, b: &mut Builder) -> Operand {
                     HirPat::Tuple(fields) => {
                         // Tuple is stored as a CertoList*. Extract each field by index.
                         for (i, field_pat) in fields.iter().enumerate() {
-                            if let HirPat::Bind { local, name: fname } = field_pat {
-                                let elem_local = b.map_hir_local(*local, fname, Ty::Error);
-                                let next_bb = b.new_block();
-                                b.terminate(Terminator::Call {
-                                    func: Operand::Global("__tuple_get".into()),
-                                    args: vec![
-                                        scrut_op.clone(),
-                                        Operand::Const(MirConst::Int(i as i64)),
-                                    ],
-                                    dest: elem_local,
-                                    next: next_bb,
-                                });
-                                b.switch_to(next_bb);
+                            // BACKLOG item 305 — same fix as `Record`/`Constructor`
+                            // above: a non-`Bind` element sub-pattern (`(Some(x), y)`
+                            // vs `(None, y)`) used to be silently skipped.
+                            if matches!(field_pat, HirPat::Wildcard) { continue; }
+                            let elem_local = match field_pat {
+                                HirPat::Bind { local, name: fname } => b.map_hir_local(*local, fname, Ty::Error),
+                                _ => b.declare_local("_tuple_elem", Ty::Error),
+                            };
+                            let next_bb = b.new_block();
+                            b.terminate(Terminator::Call {
+                                func: Operand::Global("__tuple_get".into()),
+                                args: vec![
+                                    scrut_op.clone(),
+                                    Operand::Const(MirConst::Int(i as i64)),
+                                ],
+                                dest: elem_local,
+                                next: next_bb,
+                            });
+                            b.switch_to(next_bb);
+                            if !matches!(field_pat, HirPat::Bind { .. }) {
+                                check_nested_pattern(b, field_pat, &Operand::Local(elem_local), &Ty::Error, next_arm_bb);
                             }
                         }
                         let after_pat = if arm.guard.is_some() { b.new_block() } else { arm_bb };
