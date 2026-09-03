@@ -621,3 +621,121 @@ fn sum_by_decimal_key_accumulator_is_seeded_with_a_real_decimal_zero_not_int_zer
     assert!(matches!(&acc_seed, Operand::Const(MirConst::Decimal(v)) if v == "0"),
         "expected the Decimal sumBy accumulator to be seeded with MirConst::Decimal(\"0\"), not a raw Int(0) bit-pattern, got {:?}", acc_seed);
 }
+
+// ------------------------------------------------------------------ //
+// BACKLOG item 305 — a non-`Bind` field/element sub-pattern nested inside
+// a `Record`/`Constructor`/`Tuple` pattern used to be silently skipped: no
+// read, no check, so the arm matched unconditionally regardless of the
+// field's real value. Confirmed live before this fix: `User { status:
+// Banned }` and `User { status: Inactive }` both printed the *first*
+// arm's output; `Wrap(Some(x))`/`Wrap(None)` and `(Some(x), y)`/`(None, y)`
+// showed the identical symptom. The fix (`check_nested_pattern`) makes
+// each of these emit a real conditional check for the nested sub-pattern.
+// ------------------------------------------------------------------ //
+
+#[test]
+fn record_pattern_with_nested_constructor_field_emits_a_real_check() {
+    // Before this fix, `Record`'s own field loop never produced a single
+    // `Terminator::If` at all (a record "always matches" — no discriminant
+    // of its own — and a non-`Bind` field sub-pattern like `Active`/
+    // `Banned` was simply skipped). Two arms, each checking a *different*
+    // nested nullary constructor on the same field, must now each emit
+    // their own real check.
+    let mf = mir_fn_named(
+        "module A\ntype Status = | Active | Inactive\ntype U = { name: Text, status: Status }\n\
+         fn describe(u: U): Text = match u {\n { name, status: Active } => \"a\"\n { name, status: Inactive } => \"b\"\n}",
+        "describe");
+    let if_count = mf.blocks.iter().filter(|bb| matches!(bb.terminator, Some(Terminator::If { .. }))).count();
+    assert!(if_count >= 2,
+        "expected a real conditional check per arm's nested field sub-pattern, got {if_count} If terminator(s)");
+}
+
+#[test]
+fn record_pattern_with_only_bind_fields_emits_no_spurious_check() {
+    // Regression guard: a record pattern whose fields are all plain binds
+    // (the common, already-working case) must not gain any new checks.
+    let mf = mir_fn_named(
+        "module A\ntype U = { name: Text, age: Int }\n\
+         fn describe(u: U): Text = match u {\n { name, age } => name\n}",
+        "describe");
+    let if_count = mf.blocks.iter().filter(|bb| matches!(bb.terminator, Some(Terminator::If { .. }))).count();
+    assert_eq!(if_count, 0, "an all-Bind record pattern must not emit any conditional check, got {if_count}");
+}
+
+fn count_null_comparisons(mf: &crate::MirFn) -> usize {
+    mf.blocks.iter().flat_map(|bb| bb.stmts.iter()).filter(|s| matches!(s,
+        MirStmt::Assign { rvalue: Rvalue::BinOp { lhs: Operand::Global(g), .. }, .. } if g == "__NULL"
+    ) || matches!(s,
+        MirStmt::Assign { rvalue: Rvalue::BinOp { rhs: Operand::Global(g), .. }, .. } if g == "__NULL"
+    )).count()
+}
+
+#[test]
+fn constructor_field_with_nested_option_subpattern_checks_the_payload() {
+    // `Wrap` is a user-defined (non-builtin) single-variant sum type, so
+    // `Wrap(Some(x))`/`Wrap(None)` exercises the "user-defined sum type"
+    // field loop's own fallback, not the built-in `Some`/`None` arm — each
+    // arm's nested `Some`/`None` sub-pattern must emit its own `__NULL`
+    // comparison for the *inner* field, on top of `Wrap`'s own tag check.
+    let mf = mir_fn_named(
+        "module A\ntype Wrap = | Wrap(inner: Int?)\n\
+         fn describe(w: Wrap): Text = match w {\n Wrap(Some(x)) => \"s\"\n Wrap(None) => \"n\"\n}",
+        "describe");
+    assert!(count_null_comparisons(&mf) >= 2,
+        "expected a nested Some/None check against __NULL for each arm's own `inner` field, got {}", count_null_comparisons(&mf));
+}
+
+#[test]
+fn builtin_some_pattern_with_nested_literal_payload_checks_the_literal() {
+    // The built-in `Some`/`None` `Constructor` arm has its own special-cased
+    // null-check-before-unbox order (unlike the user-defined sum-type case,
+    // unboxing a `None` would be a real null-pointer dereference) — a
+    // literal payload sub-pattern (`Some(0)`) must still be checked, not
+    // just unboxed and bound.
+    let mf = mir_fn_named(
+        "module A\nfn describe(x: Int?): Text = match x {\n Some(0) => \"zero\"\n Some(n) => \"other\"\n None => \"none\"\n}",
+        "describe");
+    let lit_cmp_count = mf.blocks.iter().flat_map(|bb| bb.stmts.iter()).filter(|s| matches!(s,
+        MirStmt::Assign { rvalue: Rvalue::BinOp { rhs: Operand::Const(MirConst::Int(0)), .. }, .. }
+    )).count();
+    assert!(lit_cmp_count >= 1, "expected a literal-0 comparison for `Some(0)`'s own nested check, got {lit_cmp_count}");
+}
+
+#[test]
+fn tuple_pattern_with_nested_option_subpattern_checks_each_element() {
+    // Before this fix, `Tuple`'s own field loop only ever called
+    // `__tuple_get` and, for a `Bind` sub-pattern, bound the result — a
+    // non-`Bind` element sub-pattern like `Some(x)`/`None` was silently
+    // skipped with no check at all.
+    let mf = mir_fn_named(
+        "module A\nfn describe(t: (Int?, Int)): Text = match t {\n (Some(x), y) => \"s\"\n (None, y) => \"n\"\n}",
+        "describe");
+    assert!(count_null_comparisons(&mf) >= 2,
+        "expected a nested Some/None check for each arm's own tuple element, got {}", count_null_comparisons(&mf));
+}
+
+#[test]
+fn self_referential_field_with_nested_constructor_subpattern_still_unboxes_correctly() {
+    // Combines item 277's self-referential boxing with item 305's nested
+    // check: `Node(_, Leaf, _)` needs its own recursive check on `left`
+    // *after* correctly unboxing it via the same plain `Rvalue::Unbox`
+    // pairing `pattern_match_on_a_self_referential_field_unboxes_via_plain_unbox`
+    // already covers — verified live (`Node(1, Leaf, Leaf)` vs
+    // `Node(1, Node(2, Leaf, Leaf), Leaf)`) to correctly distinguish the
+    // two cases before this test was written.
+    let mf = mir_fn_named(
+        "module A\ntype Tree = | Leaf | Node(value: Int, left: Tree, right: Tree)\n\
+         fn describe(t: Tree): Text = match t {\n Node(_, Leaf, _) => \"leftleaf\"\n Node(_, _, _) => \"other\"\n Leaf => \"leaf\"\n}",
+        "describe");
+    let has_unbox = mf.blocks.iter().any(|bb| bb.stmts.iter().any(|s| matches!(s,
+        MirStmt::Assign { rvalue: Rvalue::Unbox { .. }, .. }
+    )));
+    assert!(has_unbox, "expected the self-referential `left` field to still be read via plain Unbox");
+    // The nested `Leaf` check on `left` compares its own `.tag` field —
+    // confirm at least one *additional* tag comparison beyond the two
+    // top-level arms' own `Node` tag checks (2 arms + >=1 nested check).
+    let tag_field_reads = mf.blocks.iter().flat_map(|bb| bb.stmts.iter()).filter(|s| matches!(s,
+        MirStmt::Assign { rvalue: Rvalue::Field { field, .. }, .. } if field == "tag"
+    )).count();
+    assert!(tag_field_reads >= 3, "expected the nested `Leaf` sub-pattern check to read `.tag` independently, got {tag_field_reads} reads");
+}
