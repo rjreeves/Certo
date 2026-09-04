@@ -162,6 +162,98 @@ fn foreign_key_to_existing_table_ok() {
     check_module(&m).unwrap();
 }
 
+// BACKLOG item 313 — a migration written in the spec's own documented
+// lowercase/snake_case table-name convention must still resolve against a
+// `type` declared PascalCase (as `certo db pull` generates it).
+#[test]
+fn create_table_accepts_snake_case_name_for_pascal_case_type() {
+    let m = module(vec![
+        record_type("Categories", &[("id", "UUID"), ("name", "Text")]),
+        migration("001_snake",
+            vec![MigrationOp::CreateTable {
+                name:    "categories".into(),
+                columns: vec![col("id", "UUID"), col("name", "Text")],
+                span:    DUMMY,
+            }],
+            vec![MigrationOp::DropTable { name: "categories".into(), span: DUMMY }],
+        ),
+    ]);
+    check_module(&m).unwrap();
+}
+
+// The same case-folding must apply to the column-type lookup, not just
+// table existence — a wrong column type against a snake_case-named table
+// must still be caught.
+#[test]
+fn column_type_mismatch_still_caught_through_snake_case_table_name() {
+    let m = module(vec![
+        record_type("Categories", &[("id", "UUID"), ("sortOrder", "Int")]),
+        migration("001_snake",
+            vec![MigrationOp::CreateTable {
+                name:    "categories".into(),
+                columns: vec![col("id", "UUID"), col("sortOrder", "Text")], // wrong type
+                span:    DUMMY,
+            }],
+            vec![MigrationOp::DropTable { name: "categories".into(), span: DUMMY }],
+        ),
+    ]);
+    let errs = check_module(&m).unwrap_err();
+    assert!(has(&errs, |k| matches!(k, DbErrorKind::ColumnTypeMismatch { column, .. } if column == "sortOrder")),
+        "expected E0501: {:?}", errs.iter().map(|e| e.message()).collect::<Vec<_>>());
+}
+
+// A foreign-key target named in the migration's own snake_case convention
+// must resolve against the PascalCase type it really refers to.
+#[test]
+fn foreign_key_target_accepts_snake_case_reference() {
+    let m = module(vec![
+        record_type("Categories", &[("id", "UUID")]),
+        record_type("Products",   &[("id", "UUID"), ("categoryId", "UUID")]),
+        migration("001_snake",
+            vec![
+                MigrationOp::CreateTable {
+                    name: "categories".into(), columns: vec![col("id", "UUID")], span: DUMMY,
+                },
+                MigrationOp::CreateTable {
+                    name: "products".into(),
+                    columns: vec![col("id", "UUID"), col("categoryId", "UUID")],
+                    span: DUMMY,
+                },
+                MigrationOp::AlterTable {
+                    name: "products".into(),
+                    ops:  vec![AlterOp::AddForeignKey {
+                        column:     "categoryId".into(),
+                        references: "categories".into(),
+                        on_delete:  FkAction::SetNull,
+                        span:       DUMMY,
+                    }],
+                    span: DUMMY,
+                },
+            ],
+            vec![MigrationOp::DropTable { name: "products".into(), span: DUMMY },
+                 MigrationOp::DropTable { name: "categories".into(), span: DUMMY }],
+        ),
+    ]);
+    check_module(&m).unwrap();
+}
+
+// A table genuinely absent stays absent regardless of casing — the fold
+// must not make every lookup vacuously succeed.
+#[test]
+fn snake_case_lookup_still_rejects_a_genuinely_unknown_table() {
+    let m = module(vec![
+        migration("001",
+            vec![MigrationOp::CreateTable {
+                name: "ghost_table".into(), columns: vec![], span: DUMMY,
+            }],
+            vec![MigrationOp::DropTable { name: "ghost_table".into(), span: DUMMY }],
+        ),
+    ]);
+    let errs = check_module(&m).unwrap_err();
+    assert!(has(&errs, |k| matches!(k, DbErrorKind::TableNotDeclaredAsType { table, .. } if table == "ghost_table")),
+        "expected E0505: {:?}", errs.iter().map(|e| e.message()).collect::<Vec<_>>());
+}
+
 // ------------------------------------------------------------------ //
 // Error cases
 // ------------------------------------------------------------------ //
