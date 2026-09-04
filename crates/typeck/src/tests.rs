@@ -366,6 +366,14 @@ fn seeded_check(src: &str) -> Result<(), Vec<crate::error::TypeError>> {
         env.define_param_meta("Option.isSome", vec![("opt".into(), false)]);
     }
 
+    // `Int.toFloat`/`Int.toDecimal`/`Char.toText`/`Char.isDigit` (BACKLOG
+    // item 307's own dot-call-on-a-primitive-scalar coverage) — real
+    // signatures per `crates/stdlib/src/seed.rs`.
+    env.define("Int.toFloat", Ty::Fn { params: vec![Ty::Int], ret: Box::new(Ty::Float) });
+    env.define("Int.toDecimal", Ty::Fn { params: vec![Ty::Int], ret: Box::new(Ty::Decimal(None)) });
+    env.define("Char.toText", Ty::Fn { params: vec![Ty::Char], ret: Box::new(Ty::Text) });
+    env.define("Char.isDigit", Ty::Fn { params: vec![Ty::Char], ret: Box::new(Ty::Bool) });
+
     crate::infer_decl::check_module_seeded(&module, env, counter)
 }
 
@@ -412,6 +420,28 @@ fn dot_call_on_unknown_method_is_still_e0205() {
          fn f(o: Order): Int = o.frobnicate()"
     );
     assert!(matches!(kind, TypeErrorKind::UnknownField { .. }), "expected E0205, got {kind:?}");
+}
+
+// BACKLOG item 307 — spec §4.5's own literal "correct usage" example
+// (`n.toFloat()`/`n.toDecimal()`) failed even after registering
+// `Int.toFloat`/`Int.toDecimal` in `seed.rs`, because `Ty::qualifying_name`
+// (the UFCS dot-call's own type→namespace lookup, `crates/typeck/src/ty.rs`)
+// never handled any primitive scalar type — silently making dot-call syntax
+// unreachable for *any* qualified scalar function, not just these two.
+#[test]
+fn dot_call_works_on_int_receiver_for_qualified_scalar_functions() {
+    seeded_check("module A\nfn f(n: Int): Float = n.toFloat()").unwrap();
+    seeded_check("module A\nfn f(n: Int): Decimal = n.toDecimal()").unwrap();
+}
+
+#[test]
+fn dot_call_works_on_char_receiver_too() {
+    // `Char` already had 10 registered qualified functions before this fix
+    // (`Char.toText`/`Char.toInt`/`Char.isDigit`/etc.) — all unreachable via
+    // dot-call for the identical reason as `Int` above, confirmed live
+    // before this fix (`c.toText()` failed `E0205` exactly like `n.toFloat()`).
+    seeded_check("module A\nfn f(c: Char): Text = c.toText()").unwrap();
+    seeded_check("module A\nfn f(c: Char): Bool = c.isDigit()").unwrap();
 }
 
 #[test]

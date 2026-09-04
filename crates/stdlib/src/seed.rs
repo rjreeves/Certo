@@ -27,6 +27,13 @@ pub fn seed_stdlib(env: &mut TypeEnv, counter: &mut u32) {
     def!("floatToInt",  fn1(Ty::Float, Ty::Int));
     def!("intToFloat",  fn1(Ty::Int,   Ty::Float));
     def!("textToIntUnsafe", fn1(Ty::Text, Ty::Int));
+    // BACKLOG item 307 — spec §4.5's own literal "correct usage" example,
+    // `n.toFloat()`, is a dot-call (item 162's UFCS rewrite), which looks
+    // up the qualified name `"Int.toFloat"` — a plain namespaced alias for
+    // `intToFloat` just above, not a second implementation: both names
+    // mangle (`crates/codegen/src/emit_mir.rs`'s `c_fn_name`) to the
+    // identical C symbol `certo_int_to_float`, so no new C code is needed.
+    def!("Int.toFloat", fn1(Ty::Int, Ty::Float));
 
     // Float32 — a distinct type from Float (does not unify), so it needs its
     // own full conversion set rather than reusing Float's.
@@ -923,6 +930,15 @@ pub fn seed_stdlib(env: &mut TypeEnv, counter: &mut u32) {
     def!("Decimal.round",      fn2(Ty::Decimal(None), Ty::Int, Ty::Decimal(None)));
     def!("Decimal.toInt",      fn1(Ty::Decimal(None), Ty::Int));
     def!("Decimal.fromInt",    fn1(Ty::Int, Ty::Decimal(None)));
+    // BACKLOG item 307 — spec §4.5's own literal "correct usage" example,
+    // `n.toDecimal()`, is a dot-call (item 162's UFCS rewrite) on `Int`,
+    // which looks up the qualified name `"Int.toDecimal"` — unlike
+    // `Int.toFloat` just above, this one *does* need its own C wrapper
+    // (`certo_int_to_decimal`, crates/stdlib/src/money.rs): `"Int.toDecimal"`
+    // and `"Decimal.fromInt"` mangle to two different C symbols
+    // (`certo_int_to_decimal` vs `certo_decimal_from_int`), unlike
+    // `Int.toFloat`/`intToFloat`, which happen to collide.
+    def!("Int.toDecimal",      fn1(Ty::Int, Ty::Decimal(None)));
     def!("Decimal.toText",     fn1(Ty::Decimal(None), Ty::Text));
     // BACKLOG item 228 — the inverse of `parseUuid` above: no function
     // serialized a UUID back to Text either, needed e.g. to pass a

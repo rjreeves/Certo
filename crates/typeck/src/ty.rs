@@ -198,6 +198,28 @@ impl Ty {
             Ty::Decimal(_) => Some("Decimal".to_string()),
             Ty::Uuid => Some("UUID".to_string()),
             Ty::Named { name, .. } => Some(name.clone()),
+            // BACKLOG item 307 — no primitive scalar type was ever handled
+            // here, silently making dot-call syntax (item 162's UFCS
+            // rewrite) unreachable for *any* qualified scalar function,
+            // however many were registered in `crates/stdlib/src/seed.rs`.
+            // Confirmed live before this fix: not just the item's own
+            // `n.toFloat()`/`n.toDecimal()` (spec §4.5), but `c.toText()`
+            // on a `Char` too — 10 already-registered `Char.*` functions
+            // (`toText`/`toInt`/`isDigit`/etc.) were *all* unreachable via
+            // dot-call for the identical reason. Each arm below only
+            // activates for a name that's actually registered (the lookup
+            // right after this call still gates on `ctx.env.lookup(...)`
+            // returning `Some`), so this can't spuriously accept anything
+            // that wasn't already a real, working qualified call.
+            Ty::Int => Some("Int".to_string()),
+            Ty::Int8 => Some("Int8".to_string()),
+            Ty::Int16 => Some("Int16".to_string()),
+            Ty::Int32 => Some("Int32".to_string()),
+            Ty::UInt => Some("UInt".to_string()),
+            Ty::Float => Some("Float".to_string()),
+            Ty::Float32 => Some("Float32".to_string()),
+            Ty::Bool => Some("Bool".to_string()),
+            Ty::Char => Some("Char".to_string()),
             _ => None,
         }
     }

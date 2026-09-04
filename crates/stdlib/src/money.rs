@@ -180,6 +180,13 @@ certo_decimal_t certo_decimal_from_int(int64_t n) {
     return d;
 }
 
+/* BACKLOG item 307 — spec §4.5's own `n.toDecimal()` dot-call example;
+   a namespaced alias for the identical real implementation above, not a
+   second one (mirrors item 269's own `certo_text_to_uppercase` precedent). */
+certo_decimal_t certo_int_to_decimal(int64_t n) {
+    return certo_decimal_from_int(n);
+}
+
 /* ---- Money (alias for Decimal with scale=2) ---- */
 
 certo_decimal_t certo_money_from_cents(int64_t cents) {

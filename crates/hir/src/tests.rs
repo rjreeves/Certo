@@ -541,6 +541,38 @@ fn dot_call_on_option_lowers_to_qualified_global() {
     }
 }
 
+// BACKLOG item 307 — `Ty::qualifying_name` (shared by this file's own UFCS
+// rewrite and typeck's identical one) never handled any primitive scalar
+// type, so a dot-call on an `Int`/`Char`/etc. receiver could never even
+// reach this rewrite — confirmed live before this fix (`n.toFloat()` and
+// `c.toText()` both failed `E0205`, the latter despite 10 already-
+// registered `Char.*` stdlib functions).
+#[test]
+fn dot_call_on_int_lowers_to_qualified_global() {
+    let m = lower("module A\nfn f(n: Int): Float = n.toFloat()");
+    if let HirItem::Fn(f) = &m.items[0] {
+        if let HirExprKind::Call { func, args } = &f.body.as_ref().unwrap().kind {
+            assert!(matches!(&func.kind, HirExprKind::Global(name) if name == "Int.toFloat"));
+            assert_eq!(args.len(), 1);
+        } else {
+            panic!("expected Call, got {:?}", f.body.as_ref().unwrap().kind);
+        }
+    }
+}
+
+#[test]
+fn dot_call_on_char_lowers_to_qualified_global() {
+    let m = lower("module A\nfn f(c: Char): Text = c.toText()");
+    if let HirItem::Fn(f) = &m.items[0] {
+        if let HirExprKind::Call { func, args } = &f.body.as_ref().unwrap().kind {
+            assert!(matches!(&func.kind, HirExprKind::Global(name) if name == "Char.toText"));
+            assert_eq!(args.len(), 1);
+        } else {
+            panic!("expected Call, got {:?}", f.body.as_ref().unwrap().kind);
+        }
+    }
+}
+
 #[test]
 fn dot_call_field_access_typo_is_unaffected() {
     // A genuine field-access typo (no matching `"Order.frobnicate"` global
