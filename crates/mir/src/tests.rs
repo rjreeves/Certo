@@ -694,6 +694,56 @@ fn sum_by_decimal_key_accumulator_is_seeded_with_a_real_decimal_zero_not_int_zer
         "expected the Decimal sumBy accumulator to be seeded with MirConst::Decimal(\"0\"), not a raw Int(0) bit-pattern, got {:?}", acc_seed);
 }
 
+// BACKLOG item 311 — `List.sumBy` over a user struct type (e.g. `Money`)
+// has no bit-pattern/literal "zero" and no bare `+` at all (Certo has no
+// operator overloading) — the accumulator must instead be seeded and
+// accumulated via real calls to that type's own `{Type}.zero()`/
+// `{Type}.add(a, b)`, which `crates/hir`'s `is_supported_sum_ty` already
+// validated exist before MIR ever sees this call.
+#[test]
+fn sum_by_struct_key_accumulator_is_seeded_via_a_real_zero_call() {
+    let (_mf, lifted) = mir_fn_and_lifted_named(
+        "module A\nimport Stdlib.Collections.{ List }\n\
+         type Money = { amount: Int }\n\
+         impl Money {\n  fn add(a: Money, b: Money): Money = Money { amount: a.amount + b.amount }\n  fn zero(): Money = Money { amount: 0 }\n}\n\
+         type Item = { lineTotal: Money }\n\
+         fn f(items: List<Item>): Money = List.sumBy(items, (i) => i.lineTotal)",
+        "f");
+    let sum_helper = lifted.iter().find(|lf| lf.name.contains("__sum_by_"))
+        .expect("expected a lifted __sum_by_ helper");
+    let acc_local = sum_helper.locals.iter().find(|l| l.name == "_acc")
+        .unwrap_or_else(|| panic!("expected an _acc local, got locals: {:#?}", sum_helper.locals)).id;
+    let seeds_via_zero_call = sum_helper.blocks.iter().any(|bb| matches!(&bb.terminator,
+        Some(Terminator::Call { func: Operand::Global(name), args, dest, .. })
+            if name == "Money.zero" && args.is_empty() && *dest == acc_local));
+    assert!(seeds_via_zero_call, "expected _acc to be seeded via a Call to Money.zero(), got blocks: {:#?}", sum_helper.blocks);
+}
+
+#[test]
+fn sum_by_struct_key_accumulates_via_a_real_add_call_not_binop() {
+    let (_mf, lifted) = mir_fn_and_lifted_named(
+        "module A\nimport Stdlib.Collections.{ List }\n\
+         type Money = { amount: Int }\n\
+         impl Money {\n  fn add(a: Money, b: Money): Money = Money { amount: a.amount + b.amount }\n  fn zero(): Money = Money { amount: 0 }\n}\n\
+         type Item = { lineTotal: Money }\n\
+         fn f(items: List<Item>): Money = List.sumBy(items, (i) => i.lineTotal)",
+        "f");
+    let sum_helper = lifted.iter().find(|lf| lf.name.contains("__sum_by_"))
+        .expect("expected a lifted __sum_by_ helper");
+    let accumulates_via_add_call = sum_helper.blocks.iter().any(|bb| matches!(&bb.terminator,
+        Some(Terminator::Call { func: Operand::Global(name), args, .. }) if name == "Money.add" && args.len() == 2));
+    assert!(accumulates_via_add_call, "expected the accumulator update to be a Call to Money.add(acc, key), got blocks: {:#?}", sum_helper.blocks);
+    // The loop's own index increment (`_i_new = _i + 1`) legitimately uses
+    // `Rvalue::BinOp{Add}` on plain `Int`s — only the accumulator itself
+    // (`_acc`, declared `Money`) must never use it.
+    let acc_local = sum_helper.locals.iter().find(|l| l.name == "_acc").unwrap().id;
+    let acc_uses_binop_add = sum_helper.blocks.iter().any(|bb| bb.stmts.iter().any(|s| matches!(s,
+        MirStmt::Assign { rvalue: Rvalue::BinOp { op: certo_hir::BinOp::Add, lhs, rhs, .. }, .. }
+            if matches!(lhs, Operand::Local(id) if *id == acc_local) || matches!(rhs, Operand::Local(id) if *id == acc_local)
+    )));
+    assert!(!acc_uses_binop_add, "the Money accumulator must never use a raw Rvalue::BinOp{{Add}} — Money can't satisfy a bare + at the C level");
+}
+
 // ------------------------------------------------------------------ //
 // BACKLOG item 305 — a non-`Bind` field/element sub-pattern nested inside
 // a `Record`/`Constructor`/`Tuple` pattern used to be silently skipped: no

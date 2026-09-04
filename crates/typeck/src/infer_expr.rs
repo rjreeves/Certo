@@ -667,7 +667,17 @@ pub fn infer(expr: &S<Expr>, ctx: &mut Ctx<'_>) -> Ty {
                             // struct fields) are instead caught there, as
                             // E0601 — this check only covers what typeck
                             // can actually see (bare/identity projections).
-                            if !matches!(resolved_key, Ty::Var(_)) && !is_supported_key_type(&resolved_key) {
+                            // BACKLOG item 311 — `List.sumBy` alone also
+                            // accepts a struct declaring `{Type}.add`/
+                            // `{Type}.zero`; `sortBy`/`minBy`/`maxBy` stay
+                            // exactly as restrictive as before (ordering has
+                            // no equivalent named-method convention here).
+                            let supported = if name == "List.sumBy" {
+                                is_supported_sum_type(&resolved_key, ctx)
+                            } else {
+                                is_supported_key_type(&resolved_key)
+                            };
+                            if !matches!(resolved_key, Ty::Var(_)) && !supported {
                                 ctx.errors.push(TypeError {
                                     kind: TypeErrorKind::UnsupportedKeyType {
                                         fn_name: name.clone(),
@@ -1177,6 +1187,31 @@ fn is_supported_key_type(ty: &Ty) -> bool {
         // this check was originally built on (see the doc comment above)
         // no longer holds now that those ops are routed, not raw.
         | Ty::Decimal(_))
+}
+
+/// `List.sumBy`'s own additional acceptance (BACKLOG item 311) — unlike
+/// `sortBy`/`minBy`/`maxBy` (ordering only, still gated by
+/// `is_supported_key_type` above), summing also accepts a non-generic
+/// named struct type that declares both `{Type}.add(a: {Type}, b: {Type}):
+/// {Type}` and `{Type}.zero(): {Type}`, mirroring the `Decimal.add`/
+/// `Duration.add` naming convention this codebase already uses everywhere
+/// else for a "named type with arithmetic" shape. There is no operator
+/// overloading in Certo, so an arbitrary struct (e.g. a `@valueObject` like
+/// `Money`, spec §8.5's own flagship aggregate-root example) can never
+/// satisfy `sumBy`'s own accumulator via a bare `+` the way `Decimal`
+/// does (routed to a real runtime function, not a C operator, at the
+/// codegen level) — the named-method convention is the only generalizable
+/// way for a *user-defined* type to opt in.
+fn is_supported_sum_type(ty: &Ty, ctx: &Ctx<'_>) -> bool {
+    if is_supported_key_type(ty) { return true; }
+    let Ty::Named { name, args } = ty else { return false };
+    if !args.is_empty() { return false; }
+    let target = ty.clone();
+    let add_ok = matches!(ctx.env.lookup(&format!("{name}.add")),
+        Some(Ty::Fn { params, ret }) if params.len() == 2 && params[0] == target && params[1] == target && **ret == target);
+    let zero_ok = matches!(ctx.env.lookup(&format!("{name}.zero")),
+        Some(Ty::Fn { params, ret }) if params.is_empty() && **ret == target);
+    add_ok && zero_ok
 }
 
 // ------------------------------------------------------------------ //

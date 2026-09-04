@@ -471,6 +471,52 @@ fn minby_maxby_sumby_text_key_is_e0710() {
     }
 }
 
+// BACKLOG item 311 — `List.sumBy` alone also accepts a non-generic struct
+// type declaring both `{Type}.add(a, b): {Type}` and `{Type}.zero(): {Type}`
+// (spec §8.5's own flagship aggregate-root example, `items.sumBy(.lineTotal)`
+// summing a `Money`-typed field — Certo has no operator overloading, so a
+// struct can never satisfy a bare `+` the way `Decimal` does at the codegen
+// level). These use the *bare identity* projection (`(m) => m`), the shape
+// typeck's own check can actually resolve — see
+// `sortby_struct_float_field_key_does_not_false_positive` below for why a
+// field-access projection is instead validated in `crates/hir`.
+#[test]
+fn sumby_struct_identity_key_with_add_and_zero_ok() {
+    seeded_check(
+        "module A
+type Money = { amount: Int }
+impl Money {
+    fn add(a: Money, b: Money): Money = Money { amount: a.amount + b.amount }
+    fn zero(): Money = Money { amount: 0 }
+}
+fn f(xs: List<Money>): Money = List.sumBy(xs, (m) => m)"
+    ).unwrap();
+}
+
+#[test]
+fn sumby_struct_identity_key_without_add_zero_is_e0710() {
+    let kind = seeded_first_error_kind(
+        "module A\ntype Box = { value: Int }\nfn f(xs: List<Box>): Box = List.sumBy(xs, (b) => b)");
+    assert!(matches!(kind, TypeErrorKind::UnsupportedKeyType { .. }), "expected E0710, got {kind:?}");
+}
+
+#[test]
+fn sortby_struct_identity_key_with_add_zero_is_still_e0710() {
+    // Regression guard: `sortBy`/`minBy`/`maxBy` stay exactly as restrictive
+    // as before — declaring `add`/`zero` doesn't grant a struct type
+    // ordering, only summation.
+    let kind = seeded_first_error_kind(
+        "module A
+type Money = { amount: Int }
+impl Money {
+    fn add(a: Money, b: Money): Money = Money { amount: a.amount + b.amount }
+    fn zero(): Money = Money { amount: 0 }
+}
+fn f(xs: List<Money>): List<Money> = List.sortBy(xs, (m) => m)"
+    );
+    assert!(matches!(kind, TypeErrorKind::UnsupportedKeyType { .. }), "expected E0710, got {kind:?}");
+}
+
 #[test]
 fn sortby_struct_float_field_key_does_not_false_positive() {
     // Regression test: a key projection that does field access on a struct
