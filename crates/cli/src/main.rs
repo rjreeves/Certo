@@ -2168,6 +2168,14 @@ pub(crate) fn type_error_to_diagnostic(e: &TypeError) -> Diagnostic {
                 .with_note(format!("add `{field}` to `{type_param}`'s own bound (`{type_param}: {{ {field}: ... }}`) if every caller must provide it"))
         }
 
+        TypeErrorKind::MethodNotInTraitBound { type_param, method, bound_methods } => {
+            Diagnostic::error("E0221",
+                format!("`{method}` is not declared by `{type_param}`'s own trait bound"))
+                .with_span(e.span)
+                .with_label(format!("`{type_param}` only guarantees {}", bound_methods.iter().map(|m| format!("`{m}`")).collect::<Vec<_>>().join(", ")))
+                .with_note(format!("add a trait that declares `{method}` to `{type_param}`'s own bound if every caller must provide it"))
+        }
+
         TypeErrorKind::RuleCycle { validator, cycle } => {
             Diagnostic::error("E0700",
                 format!("cycle in rule dependency graph in validator `{validator}`"))
@@ -4668,6 +4676,14 @@ mod flag_tests {
         let text = explain_code("E0220").expect("E0220 should be in the error reference");
         assert!(text.starts_with("### E0220"));
         assert!(text.contains("row bound"));
+    }
+
+    #[test]
+    fn explain_code_finds_e0221() {
+        // BACKLOG item 309 — the trait-bound sibling of E0220 above.
+        let text = explain_code("E0221").expect("E0221 should be in the error reference");
+        assert!(text.starts_with("### E0221"));
+        assert!(text.contains("trait bound"));
     }
 
     #[test]
