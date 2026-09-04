@@ -2771,6 +2771,7 @@ fn lower_block(stmts: &[Stmt], span: Span, cx: &mut Cx) -> HirExpr {
                 if let Some(d) = &declared {
                     if literal_matches_fixed_width(&value.node, d) { init.ty = d.clone(); }
                 }
+                resolve_empty_list_ty(&mut init, declared.as_ref());
                 match &pattern.node {
                     Pattern::Ident { name, .. } => {
                         let local = cx.define_local(&name.node);
@@ -2918,7 +2919,8 @@ fn lower_block(stmts: &[Stmt], span: Span, cx: &mut Cx) -> HirExpr {
                 // was previously discarded entirely here, unlike `Stmt::Val`).
                 if let Some(t) = var_ty_ann {
                     let declared = ast_ty_to_ty_with_params(&t.node, &[], &cx.type_aliases);
-                    if literal_matches_fixed_width(&value.node, &declared) { init.ty = declared; }
+                    if literal_matches_fixed_width(&value.node, &declared) { init.ty = declared.clone(); }
+                    resolve_empty_list_ty(&mut init, Some(&declared));
                 }
                 let ty = init.ty.clone();
                 let local = cx.define_local(&name.node);
@@ -3334,6 +3336,28 @@ fn literal_matches_fixed_width(expr: &Expr, declared: &Ty) -> bool {
         (Expr::Lit { value: Lit::Int(_), .. }, Ty::UInt) => !is_negated,
         (Expr::Lit { value: Lit::Float(_), .. }, Ty::Float32) => true,
         _ => false,
+    }
+}
+
+/// An empty list literal (`[]`) has no elements of its own to infer an
+/// element type from — `Expr::List`'s own lowering leaves it permanently
+/// `Ty::List(Ty::Error)` regardless of context (BACKLOG item 322). If a
+/// `val`/`var`'s own declared annotation gives a concrete element type,
+/// patch the initializer's type to match, mirroring
+/// `literal_matches_fixed_width`'s identical role for an under-determined
+/// numeric literal just above. Confirmed live before this fix: `val empty:
+/// List<Item> = []` left `empty`'s own registered HIR type as
+/// `List<Ty::Error>`/`int64_t`, so a later `List.sumBy(empty, (i) =>
+/// i.price)` inferred its lambda parameter's type as `Ty::Error` too,
+/// miscompiling to invalid C — even though passing the *same* `[]`
+/// literal directly as an ordinary function argument (governed by that
+/// function's own declared param type, not this `val`-annotation path at
+/// all) already worked correctly.
+fn resolve_empty_list_ty(init: &mut HirExpr, declared: Option<&Ty>) {
+    if let (Ty::List(inner), Some(d @ Ty::List(_))) = (&init.ty, declared) {
+        if matches!(inner.as_ref(), Ty::Error) {
+            init.ty = d.clone();
+        }
     }
 }
 
