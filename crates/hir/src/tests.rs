@@ -1801,6 +1801,64 @@ fn fn_return_position_literal_resolves_to_the_declared_fixed_width_type() {
          MIR derives the C return type from this, not from HirFn.ret_ty");
 }
 
+// ------------------------------------------------------------------ //
+// BACKLOG item 322 — an empty list literal (`[]`) has no elements of its
+// own to infer an element type from (`Expr::List`'s own lowering always
+// leaves it `Ty::List(Ty::Error)`); a `val`/`var`'s own declared
+// annotation must patch that in, the same role `literal_matches_fixed_
+// width` already plays for an under-determined numeric literal just
+// above. Confirmed live before this fix: `val empty: List<Item> = []`
+// followed by `List.sumBy(empty, (i) => i.price)` miscompiled to invalid
+// C (the lambda parameter's own type stayed `Ty::Error`/`int64_t`), even
+// though passing the *same* `[]` literal directly as an ordinary function
+// argument (governed by that function's own declared param type, a
+// wholly different code path) already worked correctly.
+// ------------------------------------------------------------------ //
+
+#[test]
+fn val_empty_list_literal_resolves_element_type_from_its_own_annotation() {
+    let m = lower("module A\ntype Item = { price: Decimal }\nfn f(): Unit = { val empty: List<Item> = [] }");
+    assert_eq!(let_ty_of(&m, "f"), Ty::List(Box::new(Ty::Named { name: "Item".into(), args: vec![] })),
+        "an empty list literal's own type must come from its val's declared annotation, not stay List<Ty::Error>");
+}
+
+#[test]
+fn var_empty_list_literal_resolves_element_type_from_its_own_annotation() {
+    let m = lower("module A\ntype Item = { price: Decimal }\nfn f(): Unit = { var empty: List<Item> = [] }");
+    assert_eq!(let_ty_of(&m, "f"), Ty::List(Box::new(Ty::Named { name: "Item".into(), args: vec![] })),
+        "an empty list literal's own type must come from its var's declared annotation, not stay List<Ty::Error>");
+}
+
+#[test]
+fn nonempty_list_literal_element_type_is_unaffected_by_the_annotation_patch() {
+    // Regression guard: a *non*-empty list literal already correctly infers
+    // its own element type from its real elements — the annotation-based
+    // patch above must only ever fire for the genuinely under-determined
+    // (empty) case, never override an already-correct inferred type.
+    let m = lower("module A\nfn f(): Unit = { val xs: List<Int> = [1, 2, 3] }");
+    assert_eq!(let_ty_of(&m, "f"), Ty::List(Box::new(Ty::Int)));
+}
+
+#[test]
+fn sumby_over_a_val_annotated_empty_list_resolves_correctly() {
+    // The item's own original repro, checked at the actual call site (not
+    // just the `val`'s own type) — the lambda parameter and the whole
+    // `List.sumBy` call must resolve to `Item`/`Decimal`, not `Ty::Error`.
+    let m = lower(
+        "module A\nimport Stdlib.Collections.{ List }\n\
+         type Item = { price: Decimal }\n\
+         fn f(): Decimal = {\n    val empty: List<Item> = []\n    List.sumBy(empty, (i) => i.price)\n}"
+    );
+    let f = m.items.iter().find_map(|it| match it {
+        HirItem::Fn(f) if f.name == "f" => Some(f),
+        _ => None,
+    }).expect("expected fn `f`");
+    let HirExprKind::Block { tail, .. } = &f.body.as_ref().unwrap().kind else {
+        panic!("expected a Block body");
+    };
+    assert_eq!(tail.ty, Ty::Decimal(None), "List.sumBy over a val-annotated empty list must still resolve Decimal, got {:?}", tail.ty);
+}
+
 // BACKLOG item 248 — `Expr::UnOp` unconditionally hardcoded `ty: Ty::Error`
 // regardless of the operand's own type, masked for `-Int` only because
 // Ty::Error's own C fallback (int64_t) happens to coincide with Int's;
