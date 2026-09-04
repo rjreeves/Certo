@@ -2229,6 +2229,184 @@ fn row_bound_on_an_impl_method_also_gains_an_accessor_param() {
 }
 
 // ------------------------------------------------------------------ //
+// Trait-bound method dispatch via call-site accessor closures — BACKLOG
+// item 309 (the trait-bound sibling of item 200's own row-bound mechanism
+// just above — same architecture, keyed by trait method instead of row
+// field). Confirmed live before this fix: `value.toJson()` inside
+// `fn serialize<T: Serializable>(value: T): Text = value.toJson()` compiled
+// and typechecked (item 309's own typeck-side fix, a separate soundness
+// gap) but failed at the C stage — `member reference base type 'void *' is
+// not a structure or union`.
+// ------------------------------------------------------------------ //
+
+#[test]
+fn trait_bound_fn_gains_an_extra_accessor_param() {
+    let m = lower(
+        "module A\ntrait Serializable { fn toJson(self): Text }\n\
+         fn serialize<T: Serializable>(value: T): Text = value.toJson()");
+    let f = m.items.iter().find_map(|it| match it {
+        HirItem::Fn(f) if f.name == "serialize" => Some(f),
+        _ => None,
+    }).expect("expected fn `serialize`");
+    assert_eq!(f.params.len(), 2, "expected the ordinary `value` param plus one synthesized accessor param, got {:?}", f.params);
+    assert!(matches!(&f.params[1].ty, Ty::Fn { params, ret } if params.is_empty() && matches!(ret.as_ref(), Ty::Var(_))),
+        "expected the accessor param's type to be an erased zero-arg closure (toJson takes no extra params beyond self), got {:?}", f.params[1].ty);
+}
+
+#[test]
+fn trait_bound_method_call_lowers_to_a_call_on_the_accessor() {
+    let m = lower(
+        "module A\ntrait Serializable { fn toJson(self): Text }\n\
+         fn serialize<T: Serializable>(value: T): Text = value.toJson()");
+    let f = m.items.iter().find_map(|it| match it {
+        HirItem::Fn(f) if f.name == "serialize" => Some(f),
+        _ => None,
+    }).expect("expected fn `serialize`");
+    let body = f.body.as_ref().expect("expected a body");
+    assert_eq!(body.ty, Ty::Text, "value.toJson()'s own type must resolve to Text (the trait's declared return type), not stay erased, got {:?}", body.ty);
+    let HirExprKind::Call { func, args } = &body.kind else {
+        panic!("expected value.toJson() to lower to a Call on the accessor, got {:?}", body.kind);
+    };
+    assert!(args.is_empty(), "toJson takes no extra args beyond the receiver, already consumed by the accessor closure itself");
+    let accessor_local = f.params[1].local;
+    assert!(matches!(&func.kind, HirExprKind::Local(id) if *id == accessor_local),
+        "expected the call's own callee to be the synthesized accessor param, got {:?}", func.kind);
+}
+
+#[test]
+fn trait_bound_call_site_synthesizes_one_accessor_arg_per_bound_method() {
+    let m = lower(
+        "module A\ntrait Serializable { fn toJson(self): Text }\n\
+         trait Loggable { fn describe(self): Text }\n\
+         type Widget = { id: Int }\n\
+         fn report<T: Serializable + Loggable>(value: T): Text = value.toJson()\n\
+         fn f(w: Widget): Text = report(w)");
+    let f = m.items.iter().find_map(|it| match it {
+        HirItem::Fn(f) if f.name == "f" => Some(f),
+        _ => None,
+    }).expect("expected fn `f`");
+    let HirExprKind::Call { args, .. } = &f.body.as_ref().unwrap().kind else {
+        panic!("expected f's body to be a Call");
+    };
+    // The ordinary `w` argument, plus one synthesized accessor per bound
+    // method (`toJson`, `describe` — 2 methods across the 2 combined bounds).
+    assert_eq!(args.len(), 3, "expected 1 ordinary arg + 2 accessor args, got {:?}", args);
+    for a in &args[1..] {
+        assert!(matches!(&a.kind, HirExprKind::Lambda { params, ret_hint, .. } if params.is_empty() && matches!(ret_hint, Ty::Var(_))),
+            "expected a zero-arg, erased-return accessor lambda, got {:?}", a.kind);
+    }
+}
+
+#[test]
+fn trait_bound_call_site_accessor_dispatches_through_the_concrete_impl() {
+    // The accessor's own body must resolve to the *concrete* receiver's own
+    // real qualified call (`Widget.toJson`) at this call site, not stay
+    // erased the way the generic function's own body sees it — confirming
+    // the whole point of this item: the accessor closure carries the
+    // concrete-dispatch knowledge the generic function body itself can
+    // never have (true type erasure — one compiled C body per function,
+    // never monomorphized per call site).
+    let m = lower(
+        "module A\ntrait Serializable { fn toJson(self): Text }\n\
+         type Widget = { id: Int }\n\
+         impl Serializable for Widget { fn toJson(self): Text = \"widget\" }\n\
+         fn serialize<T: Serializable>(value: T): Text = value.toJson()\n\
+         fn f(w: Widget): Text = serialize(w)");
+    let f = m.items.iter().find_map(|it| match it {
+        HirItem::Fn(f) if f.name == "f" => Some(f),
+        _ => None,
+    }).expect("expected fn `f`");
+    let HirExprKind::Call { args, .. } = &f.body.as_ref().unwrap().kind else {
+        panic!("expected f's body to be a Call");
+    };
+    let HirExprKind::Lambda { body, .. } = &args[1].kind else {
+        panic!("expected the 2nd arg to be the synthesized accessor lambda, got {:?}", args[1].kind);
+    };
+    assert_eq!(body.ty, Ty::Text, "the accessor's own body must resolve toJson's real return type (Text), got {:?}", body.ty);
+    let HirExprKind::Call { func, .. } = &body.kind else {
+        panic!("expected the accessor body to be an ordinary Call on the concrete impl method, got {:?}", body.kind);
+    };
+    assert!(matches!(&func.kind, HirExprKind::Global(name) if name == "Widget.toJson"),
+        "expected the accessor body to call the concrete `Widget.toJson`, got {:?}", func.kind);
+}
+
+#[test]
+fn trait_bound_method_with_extra_args_forwards_them_through_the_accessor() {
+    // `compareTo` takes an extra `other: Self` param beyond the receiver —
+    // the accessor closure must take one real (synthetic) param per extra
+    // arg, not stay zero-arg the way a row-bound field read always is.
+    // Both `a` and `b` are bound by `T`, so — mirroring
+    // `collect_row_bound_fields`'s identical per-*parameter-position*
+    // behavior (not per-type-param) — each gets its *own* independent
+    // accessor (2 total), even though this particular body only calls
+    // through the one keyed to `a`, the actual receiver; the `b`-keyed one
+    // sits unused, exactly as harmless as an unused row-bound accessor
+    // would be in the same shape.
+    let m = lower(
+        "module A\ntrait Comparable { fn compareTo(self, other: Self): Int }\n\
+         fn maxOf<T: Comparable>(a: T, b: T): Int = a.compareTo(b)");
+    let f = m.items.iter().find_map(|it| match it {
+        HirItem::Fn(f) if f.name == "maxOf" => Some(f),
+        _ => None,
+    }).expect("expected fn `maxOf`");
+    // `a`, `b`, plus one accessor param each for `a.compareTo`/`b.compareTo`.
+    assert_eq!(f.params.len(), 4, "expected a + b + one accessor param per bound parameter position, got {:?}", f.params);
+    for accessor in &f.params[2..] {
+        assert!(matches!(&accessor.ty, Ty::Fn { params, ret } if params.len() == 1 && matches!(params[0], Ty::Var(_)) && matches!(ret.as_ref(), Ty::Var(_))),
+            "expected each accessor's own declared shape to take exactly 1 erased extra param (for `other`), got {:?}", accessor.ty);
+    }
+    let body = f.body.as_ref().unwrap();
+    let HirExprKind::Call { func, args } = &body.kind else {
+        panic!("expected a.compareTo(b) to lower to a Call on an accessor, got {:?}", body.kind);
+    };
+    assert_eq!(args.len(), 1, "expected exactly 1 forwarded arg (b) to the accessor, got {:?}", args);
+    // The receiver is `a` (param index 0), so the accessor actually called
+    // must be the *first* one registered (`f.params[2]`), not `b`'s.
+    assert!(matches!(&func.kind, HirExprKind::Local(id) if *id == f.params[2].local),
+        "expected the call to go through `a`'s own accessor (params[2]), got {:?}", func.kind);
+}
+
+#[test]
+fn non_bound_method_call_on_a_trait_bound_param_is_unaffected() {
+    // A method name the bound trait never declares falls through to the
+    // ordinary (pre-existing, separately-tracked) UFCS/field-access path
+    // unchanged — confirms the accessor rewrite only fires for genuinely
+    // bound methods, matching item 200's own `non_bound_field_access...`
+    // regression guard. `typo` isn't declared anywhere, so this must not
+    // panic or silently produce a bogus accessor Call.
+    let m = lower(
+        "module A\ntrait Serializable { fn toJson(self): Text }\n\
+         fn serialize<T: Serializable>(value: T): Text = value.toJson()\n\
+         fn other<T: Serializable>(value: T): Text = value.toJson()");
+    // Both functions still lower successfully and each keeps exactly its
+    // own single accessor param (for `toJson`) — no cross-contamination
+    // between two different trait-bounded functions' own accessor tables.
+    for name in ["serialize", "other"] {
+        let f = m.items.iter().find_map(|it| match it {
+            HirItem::Fn(f) if f.name == name => Some(f),
+            _ => None,
+        }).unwrap_or_else(|| panic!("expected fn `{name}`"));
+        assert_eq!(f.params.len(), 2, "expected `value` + one accessor param for fn `{name}`, got {:?}", f.params);
+    }
+}
+
+#[test]
+fn trait_bound_on_an_impl_method_also_gains_an_accessor_param() {
+    let m = lower(
+        "module A\ntrait Serializable { fn toJson(self): Text }\n\
+         type Logger = { tag: Text }\n\
+         impl Logger {\n  fn log<T: Serializable>(self, value: T): Text = value.toJson()\n}\n\
+         fn f(): Unit = {}");
+    let log = m.items.iter().find_map(|it| match it {
+        HirItem::Fn(f) if f.name == "Logger.log" => Some(f),
+        _ => None,
+    }).expect("expected fn `Logger.log`");
+    // `self` (index 0), `value` (index 1), plus the synthesized accessor.
+    assert_eq!(log.params.len(), 3, "expected self + value + one accessor param, got {:?}", log.params);
+    assert!(matches!(&log.params[2].ty, Ty::Fn { params, ret } if params.is_empty() && matches!(ret.as_ref(), Ty::Var(_))));
+}
+
+// ------------------------------------------------------------------ //
 // BACKLOG item 262 — positional record construction (spec §8.4). Mirrors
 // a sum-type variant constructor's own HIR-level return-type resolution.
 // ------------------------------------------------------------------ //

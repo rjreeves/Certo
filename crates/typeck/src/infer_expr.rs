@@ -293,25 +293,49 @@ fn resolve_field_ty(obj_ty: Ty, field: &S<String>, span: Span, ctx: &mut Ctx<'_>
             // is an ordinary not-yet-resolved inference var unrelated to row
             // polymorphism (may still be resolved later via unification, so
             // stays exactly as permissive as before).
-            match ctx.env.lookup_current_body_row_bound(*v) {
-                Some((type_param, bound_fields)) => {
-                    match bound_fields.iter().find(|(n, _)| n == &field.node) {
-                        Some((_, ty)) => ty.clone(),
-                        None => {
-                            ctx.errors.push(TypeError {
-                                kind: TypeErrorKind::FieldNotInRowBound {
-                                    type_param: type_param.clone(),
-                                    field: field.node.clone(),
-                                    bound_fields: bound_fields.iter().map(|(n, _)| n.clone()).collect(),
-                                },
-                                span,
-                            });
-                            Ty::Error
-                        }
+            if let Some((type_param, bound_fields)) = ctx.env.lookup_current_body_row_bound(*v) {
+                return match bound_fields.iter().find(|(n, _)| n == &field.node) {
+                    Some((_, ty)) => ty.clone(),
+                    None => {
+                        ctx.errors.push(TypeError {
+                            kind: TypeErrorKind::FieldNotInRowBound {
+                                type_param: type_param.clone(),
+                                field: field.node.clone(),
+                                bound_fields: bound_fields.iter().map(|(n, _)| n.clone()).collect(),
+                            },
+                            span,
+                        });
+                        Ty::Error
                     }
-                }
-                None => ctx.fresh(),
+                };
             }
+            // BACKLOG item 309 — same idea, for a trait-bounded type param's
+            // own method calls: `.field` here is really `.method(...)`'s own
+            // callee half (a bare field read is a legitimate but degenerate
+            // case of the same lookup — a zero-arg, no-return trait method
+            // would resolve the same way). A hit resolves to the bound
+            // method's own concrete `Ty::Fn` (with `Self` already
+            // substituted for `v` by `collect_trait_bounds`), so the
+            // enclosing call's own argument/arity checking — unmodified,
+            // the exact same mechanism any ordinary function-typed value
+            // already goes through — validates the rest.
+            if let Some((type_param, bound_methods)) = ctx.env.lookup_current_body_trait_bound(*v) {
+                return match bound_methods.get(&field.node) {
+                    Some((params, ret)) => Ty::Fn { params: params.clone(), ret: Box::new(ret.clone()) },
+                    None => {
+                        ctx.errors.push(TypeError {
+                            kind: TypeErrorKind::MethodNotInTraitBound {
+                                type_param: type_param.clone(),
+                                method: field.node.clone(),
+                                bound_methods: bound_methods.keys().cloned().collect(),
+                            },
+                            span,
+                        });
+                        Ty::Error
+                    }
+                };
+            }
+            ctx.fresh()
         }
         other => {
             ctx.errors.push(TypeError {

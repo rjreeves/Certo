@@ -37,6 +37,67 @@ fn collect_row_bounds(
     }).collect()
 }
 
+/// Replace every occurrence of the `Self` sentinel (`Ty::Named{"Self", []}`
+/// — how `type_expr_to_ty` converts a trait method's own bare `Self`
+/// reference, confirmed via its `Named` catch-all: no type param binds the
+/// name, no alias registers it, so it falls through to an ordinary,
+/// otherwise-opaque nominal `Ty::Named`) with `replacement` (the specific
+/// `TyVar` a generic function's own trait bound instantiates `Self` to),
+/// recursing into every compound `Ty` shape it could plausibly appear
+/// inside (BACKLOG item 309).
+fn subst_self(ty: &Ty, replacement: &Ty) -> Ty {
+    match ty {
+        Ty::Named { name, args } if name == "Self" && args.is_empty() => replacement.clone(),
+        Ty::Named { name, args } => Ty::Named {
+            name: name.clone(),
+            args: args.iter().map(|a| subst_self(a, replacement)).collect(),
+        },
+        Ty::Option(inner) => Ty::Option(Box::new(subst_self(inner, replacement))),
+        Ty::Result(ok, err) => Ty::Result(Box::new(subst_self(ok, replacement)), Box::new(subst_self(err, replacement))),
+        Ty::List(inner) => Ty::List(Box::new(subst_self(inner, replacement))),
+        Ty::Map(k, v) => Ty::Map(Box::new(subst_self(k, replacement)), Box::new(subst_self(v, replacement))),
+        Ty::Tuple(elems) => Ty::Tuple(elems.iter().map(|e| subst_self(e, replacement)).collect()),
+        Ty::Fn { params, ret } => Ty::Fn {
+            params: params.iter().map(|p| subst_self(p, replacement)).collect(),
+            ret: Box::new(subst_self(ret, replacement)),
+        },
+        other => other.clone(),
+    }
+}
+
+/// Extract trait-bound method tables (`T: Serializable`, BACKLOG item 309)
+/// from a function/method's type parameters, merging every bound trait's
+/// own methods (`T: A + B` exposes both) with `Self` substituted for each
+/// bound param's own fresh `TyVar` — mirrors `collect_row_bounds` exactly
+/// (same signature shape, called from the same sites), just for
+/// `Bound::Trait` instead of `Bound::Row`.
+fn collect_trait_bounds(
+    type_params:     &[certo_ast::types::TypeParam],
+    type_param_vars: &[u32],
+    ctx:             &mut Ctx<'_>,
+) -> Vec<(u32, HashMap<String, (Vec<Ty>, Ty)>)> {
+    use certo_ast::types::Bound;
+    type_params.iter().zip(type_param_vars.iter()).filter_map(|(tp, &var)| {
+        let self_ty = Ty::Var(var);
+        let mut methods: HashMap<String, (Vec<Ty>, Ty)> = HashMap::new();
+        for b in &tp.bounds {
+            let Bound::Trait(tb) = b else { continue };
+            let trait_name = tb.name.segments.last().map(|s| s.node.clone()).unwrap_or_default();
+            let Some(trait_methods) = ctx.env.trait_defs.get(&trait_name).cloned() else { continue };
+            for (method_name, (param_tes, ret_te)) in trait_methods {
+                let params: Vec<Ty> = param_tes.iter()
+                    .map(|te| subst_self(&type_expr_to_ty(te, ctx), &self_ty))
+                    .collect();
+                let ret = ret_te.as_ref()
+                    .map(|te| subst_self(&type_expr_to_ty(te, ctx), &self_ty))
+                    .unwrap_or(Ty::Unit);
+                methods.insert(method_name, (params, ret));
+            }
+        }
+        if methods.is_empty() { None } else { Some((var, methods)) }
+    }).collect()
+}
+
 /// Entry point: check all declarations in a module.
 pub fn check_module(module: &Module) -> Result<(), Vec<TypeError>> {
     let mut env     = TypeEnv::new();
@@ -1679,6 +1740,27 @@ fn hoist_decl(
                 ctx.env.define_row_bounds(qname, row_bounds);
             }
         }
+        // BACKLOG item 309 — traits themselves were never hoisted at all
+        // (only concrete `impl` blocks were, confirmed via grep before this
+        // item — `resolve_field_ty`'s `Ty::Var` arm had no table to consult
+        // for a trait-bounded generic's own method calls, so it silently
+        // fell through to its permissive `ctx.fresh()` fallback). Stores
+        // *raw* param/return type exprs, excluding the receiver (`self`)
+        // param — `Self` substitution needs the specific bound `TyVar` a
+        // given generic function instantiates it to, which doesn't exist
+        // yet at this module-wide, trait-defined-once registration point;
+        // see `collect_trait_bounds` for where that substitution happens.
+        Decl::Trait(t) => {
+            let methods: HashMap<String, (Vec<TypeExpr>, Option<TypeExpr>)> = t.methods.iter()
+                .map(|m| {
+                    let params: Vec<TypeExpr> = m.params.iter().skip(1)
+                        .map(|p| p.ty.node.clone()).collect();
+                    let ret = m.ret_ty.as_ref().map(|r| r.node.clone());
+                    (m.name.node.clone(), (params, ret))
+                })
+                .collect();
+            env.trait_defs.insert(t.name.node.clone(), methods);
+        }
         _ => {} // Other decls handled later or not yet
     }
 }
@@ -1710,6 +1792,14 @@ fn check_decl(decl: &Decl, ctx: &mut Ctx<'_>) {
                     .map(|(var, fields)| (var, (var_names.get(&var).cloned().unwrap_or_default(), fields)))
                     .collect();
                 ctx.env.set_current_body_row_bounds(named_bounds);
+                // BACKLOG item 309 — validate trait-bound method calls
+                // against *these* fresh vars too, same rationale as the
+                // row-bound case just above.
+                let trait_bounds = collect_trait_bounds(&f.type_params, &type_param_vars, ctx);
+                let named_trait_bounds: HashMap<TyVar, (String, HashMap<String, (Vec<Ty>, Ty)>)> = trait_bounds.into_iter()
+                    .map(|(var, methods)| (var, (var_names.get(&var).cloned().unwrap_or_default(), methods)))
+                    .collect();
+                ctx.env.set_current_body_trait_bounds(named_trait_bounds);
                 // Bind parameters
                 for p in &f.params {
                     let ty = type_expr_to_ty(&p.ty.node, ctx);
@@ -1733,6 +1823,7 @@ fn check_decl(decl: &Decl, ctx: &mut Ctx<'_>) {
                 }
 
                 ctx.env.clear_current_body_row_bounds();
+                ctx.env.clear_current_body_trait_bounds();
                 ctx.env.pop();
             }
         }
@@ -1953,6 +2044,12 @@ fn check_decl(decl: &Decl, ctx: &mut Ctx<'_>) {
                         .map(|(var, fields)| (var, (var_names.get(&var).cloned().unwrap_or_default(), fields)))
                         .collect();
                     ctx.env.set_current_body_row_bounds(named_bounds);
+                    // BACKLOG item 309 — same validation as Decl::Fn above.
+                    let trait_bounds = collect_trait_bounds(&all_type_params, &type_param_vars, ctx);
+                    let named_trait_bounds: HashMap<TyVar, (String, HashMap<String, (Vec<Ty>, Ty)>)> = trait_bounds.into_iter()
+                        .map(|(var, methods)| (var, (var_names.get(&var).cloned().unwrap_or_default(), methods)))
+                        .collect();
+                    ctx.env.set_current_body_trait_bounds(named_trait_bounds);
                     for p in &m.params {
                         let ty = type_expr_to_ty(&p.ty.node, ctx);
                         ctx.env.define(p.name.node.clone(), ty);
@@ -1965,6 +2062,7 @@ fn check_decl(decl: &Decl, ctx: &mut Ctx<'_>) {
                         }
                     }
                     ctx.env.clear_current_body_row_bounds();
+                    ctx.env.clear_current_body_trait_bounds();
                     ctx.env.pop();
                 }
             }

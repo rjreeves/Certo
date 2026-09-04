@@ -502,6 +502,34 @@ fn f<R: { name: Text }>(r: R): Int = r.age
 fn f<R: { name: Text, age: Int }>(r: R): Int = r.age
 ```
 
+### E0221  Method not declared in trait bound
+
+```
+error[E0221]: `toJsonx` is not declared by `T`'s own trait bound
+  --> src/main.cto:5:49
+    = `T` only guarantees `toJson`
+```
+
+**Cause:** Inside a trait-bounded generic function's own body, a method
+call on the bound parameter names a method none of its bound traits
+declare (`fn serialize<T: Serializable>(v: T): Text = v.toJsonx()` —
+`Serializable` only declares `toJson`). No concrete type satisfying only
+that bound is guaranteed to have a `toJsonx` method at all, so this is
+rejected the same way as any other unknown-method access — the trait-bound
+sibling of E0220 above.
+
+**Fix:** Only call methods the type parameter's own bound traits actually
+declare, or add a trait that declares the method to the bound:
+
+```certo
+// Before (rejected):
+trait Serializable { fn toJson(self): Text }
+fn serialize<T: Serializable>(v: T): Text = v.toJsonx()
+
+// After:
+fn serialize<T: Serializable>(v: T): Text = v.toJson()
+```
+
 ---
 
 ## E0300–E0306  Trait errors

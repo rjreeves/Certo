@@ -1779,6 +1779,104 @@ fn field_access_on_a_completely_unbound_type_param_is_unaffected() {
 }
 
 // ------------------------------------------------------------------ //
+// Trait-bound method call validated *inside* the generic body — BACKLOG
+// item 309 (the trait-bound sibling of item 257's own row-bound fix above)
+// ------------------------------------------------------------------ //
+
+#[test]
+fn trait_bound_method_call_on_a_method_not_in_the_bound_e0221() {
+    // `Serializable` only declares `toJson` — no concrete type satisfying
+    // only that bound is guaranteed to have a `toJsonx` method, so this
+    // must be rejected, not silently typecheck via an unconstrained fresh
+    // var (confirmed live before this fix: it did, only failing two build
+    // stages later with a raw C compile error).
+    let kind = first_error_kind(
+        "module A
+trait Serializable { fn toJson(self): Text }
+fn serialize<T: Serializable>(value: T): Text = value.toJsonx()
+fn f(): Int = 0"
+    );
+    assert!(matches!(kind, TypeErrorKind::MethodNotInTraitBound { .. }), "expected E0221, got {kind:?}");
+}
+
+#[test]
+fn trait_bound_method_call_names_the_type_param_and_bound_methods() {
+    let kind = first_error_kind(
+        "module A
+trait Serializable { fn toJson(self): Text }
+fn serialize<T: Serializable>(value: T): Text = value.toJsonx()
+fn f(): Int = 0"
+    );
+    let TypeErrorKind::MethodNotInTraitBound { type_param, method, bound_methods } = kind else {
+        panic!("expected MethodNotInTraitBound, got {kind:?}");
+    };
+    assert_eq!(type_param, "T");
+    assert_eq!(method, "toJsonx");
+    assert_eq!(bound_methods, vec!["toJson".to_string()]);
+}
+
+#[test]
+fn trait_bound_method_call_on_the_real_bound_method_is_still_ok() {
+    // Regression guard: the legitimate case (spec §4.3's own motivating
+    // example) must keep typechecking cleanly.
+    check("module A\ntrait Serializable { fn toJson(self): Text }\nfn serialize<T: Serializable>(value: T): Text = value.toJson()").unwrap();
+}
+
+#[test]
+fn trait_bound_method_call_on_either_of_two_combined_bounds_is_ok() {
+    // `T: A + B` merges both traits' own methods — a call to either must
+    // typecheck, not just the first bound listed.
+    check(
+        "module A
+trait Serializable { fn toJson(self): Text }
+trait Loggable { fn describe(self): Text }
+fn report<T: Serializable + Loggable>(value: T): Text = value.toJson()
+fn report2<T: Serializable + Loggable>(value: T): Text = value.describe()"
+    ).unwrap();
+}
+
+#[test]
+fn trait_bound_method_call_with_extra_args_is_checked_like_any_other_call() {
+    // `compareTo` takes an extra `other: Self` param beyond the receiver —
+    // resolving `.compareTo` to a real `Ty::Fn` (not just validating the
+    // *name*) lets the ordinary call machinery, already unmodified, catch
+    // the missing argument here too (as an ordinary `Ty::Fn` unification
+    // `Mismatch` — this call resolves through the general callee-unification
+    // path, not the arg-count-vs-`param_meta` check `ArityMismatch` guards).
+    let kind = first_error_kind(
+        "module A
+trait Comparable { fn compareTo(self, other: Self): Int }
+fn maxOf<T: Comparable>(a: T, b: T): Bool = a.compareTo()
+fn f(): Int = 0"
+    );
+    assert!(matches!(kind, TypeErrorKind::Mismatch { .. }), "expected a Fn-shape mismatch for the missing `other` argument, got {kind:?}");
+}
+
+#[test]
+fn trait_bound_method_call_inside_an_impl_method_is_also_validated() {
+    let kind = first_error_kind(
+        "module A
+trait Serializable { fn toJson(self): Text }
+type Logger = { tag: Text }
+impl Logger {
+  fn log<T: Serializable>(self, value: T): Text = value.toJsonx()
+}
+fn f(): Int = 0"
+    );
+    assert!(matches!(kind, TypeErrorKind::MethodNotInTraitBound { .. }),
+        "expected E0221 inside an impl method body too, got {kind:?}");
+}
+
+#[test]
+fn method_call_on_a_completely_unbound_type_param_is_unaffected() {
+    // Same deliberate scope boundary as item 257's own row-bound sibling
+    // test above: a completely unbound generic's method call stays exactly
+    // as permissive as before — this item only validates against an
+    // *actual* trait bound.
+    check("module A\nfn f<T>(value: T): Text = value.toJson()").unwrap();
+}
+
+// ------------------------------------------------------------------ //
 // `??` chaining with an optional fallback (right-associative parse)
 // ------------------------------------------------------------------ //
 

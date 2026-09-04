@@ -88,6 +88,38 @@ struct Cx {
     /// module-wide counter (see `fresh_local` below), so an old entry's
     /// `LocalId` can never recur for a different function's own param.
     row_field_accessors: HashMap<LocalId, Vec<(String, LocalId, Ty)>>,
+    /// Trait name → [(method name, arity excluding the receiver/`self`
+    /// param)] — BACKLOG item 309. Traits themselves are never otherwise
+    /// consulted by HIR at all (only concrete `impl` blocks are); populated
+    /// once, up front, from every `Decl::Trait` in the module, mirroring
+    /// `crates/typeck/src/infer_decl.rs`'s own independent registration
+    /// (HIR never shares typeck's tables — see `type_aliases`'s own doc
+    /// comment for why). Only the method's own *arity* is needed here, not
+    /// its full parameter/return types: every accessor param this item adds
+    /// is uniformly erased to `Ty::Var(0)` (mirroring item 76's HKT-closure
+    /// convention), so no `Self`-substitution or real-type bookkeeping is
+    /// needed the way typeck's own `trait_defs` requires.
+    trait_defs: HashMap<String, Vec<(String, usize, Ty)>>,
+    /// Trait-bounded function name → (declared-param index, method name,
+    /// arity excluding self) for every method declared by any trait bound
+    /// on that param (`fn f<T: A + B>(value: T): ...` merges both `A`'s and
+    /// `B`'s methods) — BACKLOG item 309, the trait-bound sibling of
+    /// `fn_row_bounds` just above. Consulted at each call site to
+    /// synthesize the method-accessor closures a trait-bounded generic
+    /// function's own body needs (see `trait_method_accessors` below), for
+    /// the identical true-type-erasure reason `fn_row_bounds` already
+    /// documents.
+    fn_trait_bounds: HashMap<String, Vec<(usize, String, usize, Ty)>>,
+    /// Trait-bounded param's own LocalId → its accessors: (method name,
+    /// accessor's own LocalId, arity excluding self) — BACKLOG item 309.
+    /// Populated once per trait-bounded function, right after its own
+    /// params are defined; consulted by `Expr::App`'s own call-lowering so
+    /// `value.toJson(...)` calls through the accessor closure instead of
+    /// the ordinary UFCS/field-access path, which can never resolve a
+    /// concrete `"TypeName.method"` name against an erased `Ty::Var`
+    /// receiver. Never needs clearing, for the same reason
+    /// `row_field_accessors` never does.
+    trait_method_accessors: HashMap<LocalId, Vec<(String, LocalId, usize, Ty)>>,
     /// Real `type X = Y` type aliases (spec §3.3, BACKLOG item 281):
     /// alias_name → (its own declared type-param names, in order; the raw
     /// target `TypeExpr` it stands for). Populated up front in
@@ -126,6 +158,9 @@ impl Cx {
             local_types:         HashMap::new(),
             fn_row_bounds:       HashMap::new(),
             row_field_accessors: HashMap::new(),
+            trait_defs:          HashMap::new(),
+            fn_trait_bounds:     HashMap::new(),
+            trait_method_accessors: HashMap::new(),
             type_aliases:        HashMap::new(),
             errors:              Vec::new(),
         }
@@ -816,6 +851,45 @@ pub fn lower_module(module: &Module) -> Result<HirModule, Vec<LowerError>> {
         }
     }
 
+    // Register every `trait`'s own method names/arities (BACKLOG item 309)
+    // before the loop below computes `fn_trait_bounds` for any trait-bounded
+    // function — same "separate, earlier pre-pass" rationale as the alias
+    // pass just above: a trait declared *after* the function that bounds a
+    // type param by it must still be found. The receiver (`self`, always
+    // params[0] in this codebase's explicit-self convention — confirmed via
+    // `crates/traits/src/trait_db.rs`'s own identical `sig_of`) is excluded
+    // from the stored arity, matching how a call site never re-supplies it.
+    // Also resolves the method's own declared return type — unlike its
+    // params (uniformly erased to `Ty::Var(0)` on the accessor closure's own
+    // signature, since real types are never known at the bounded function's
+    // definition site), the *return* type is threaded onto the outer call
+    // expression itself when it's concrete (e.g. `Text`), so the bounded
+    // body's own C return type isn't erased to `void*` for no reason (MIR
+    // derives a function's real C return type from its body's own computed
+    // operand type, not its declared annotation — item 235's convention) —
+    // only truly `Self`-dependent returns (`fn clone(self): Self`) stay
+    // erased. `ast_ty_to_ty_with_params` already treats any single-segment
+    // name matching a *known type param* as `Ty::Var(0)` — passing `"Self"`
+    // as if it were one more type param reuses that erasure for free, no
+    // separate substitution logic needed (unlike typeck's own `subst_self`,
+    // which must substitute a *specific* bound `TyVar` per body — HIR erases
+    // every type param to the identical `Ty::Var(0)` sentinel regardless of
+    // which one, so there's only ever one possible erasure value here).
+    for sdecl in &module.decls {
+        if let Decl::Trait(t) = &sdecl.node {
+            let methods: Vec<(String, usize, Ty)> = t.methods.iter()
+                .map(|m| {
+                    let arity = m.params.len().saturating_sub(1);
+                    let ret_ty = m.ret_ty.as_ref()
+                        .map(|r| ast_ty_to_ty_with_params(&r.node, &["Self"], &cx.type_aliases))
+                        .unwrap_or(Ty::Unit);
+                    (m.name.node.clone(), arity, ret_ty)
+                })
+                .collect();
+            cx.trait_defs.insert(t.name.node.clone(), methods);
+        }
+    }
+
     // Register all top-level fn names first (for mutual recursion).
     for sdecl in &module.decls {
         if let Decl::Fn(f) = &sdecl.node {
@@ -835,6 +909,11 @@ pub fn lower_module(module: &Module) -> Result<HirModule, Vec<LowerError>> {
             let row_fields = collect_row_bound_fields(&f.params, f.type_params.iter(), &tp_names, &cx.type_aliases);
             if !row_fields.is_empty() {
                 cx.fn_row_bounds.insert(f.name.node.clone(), row_fields);
+            }
+            // BACKLOG item 309 — trait-bound method-call codegen.
+            let trait_methods = collect_trait_bound_methods(&f.params, f.type_params.iter(), &cx.trait_defs);
+            if !trait_methods.is_empty() {
+                cx.fn_trait_bounds.insert(f.name.node.clone(), trait_methods);
             }
         }
         // Impl methods register as qualified globals `Type.method`.
@@ -863,7 +942,12 @@ pub fn lower_module(module: &Module) -> Result<HirModule, Vec<LowerError>> {
                 // BACKLOG item 200 — row-polymorphism codegen.
                 let row_fields = collect_row_bound_fields(&m.params, i.type_params.iter().chain(m.type_params.iter()), &tp_names, &cx.type_aliases);
                 if !row_fields.is_empty() {
-                    cx.fn_row_bounds.insert(qname, row_fields);
+                    cx.fn_row_bounds.insert(qname.clone(), row_fields);
+                }
+                // BACKLOG item 309 — trait-bound method-call codegen.
+                let trait_methods = collect_trait_bound_methods(&m.params, i.type_params.iter().chain(m.type_params.iter()), &cx.trait_defs);
+                if !trait_methods.is_empty() {
+                    cx.fn_trait_bounds.insert(qname, trait_methods);
                 }
             }
         }
@@ -959,6 +1043,7 @@ pub fn lower_module(module: &Module) -> Result<HirModule, Vec<LowerError>> {
                     HirParam { local, name: p.name.node.clone(), ty, span: p.span }
                 }).collect();
                 add_row_bound_accessor_params(&f.name.node, &mut params, f.span, &mut cx);
+                add_trait_bound_accessor_params(&f.name.node, &mut params, f.span, &mut cx);
 
                 let mut body = f.body.as_ref().map(|b| lower_expr(b, &mut cx));
                 let ret_ty = f.ret_ty.as_ref().map(|t| ast_ty_to_ty_with_params(&t.node, &tp_names, &cx.type_aliases)).unwrap_or(Ty::Error);
@@ -1033,6 +1118,7 @@ pub fn lower_module(module: &Module) -> Result<HirModule, Vec<LowerError>> {
                         HirParam { local, name: p.name.node.clone(), ty, span: p.span }
                     }).collect();
                     add_row_bound_accessor_params(&qname, &mut params, m.span, &mut cx);
+                    add_trait_bound_accessor_params(&qname, &mut params, m.span, &mut cx);
                     let mut body = Some(lower_expr(body_ast, &mut cx));
                     let ret_ty = m.ret_ty.as_ref().map(|t| ast_ty_to_ty_with_params(&t.node, &tp_names, &cx.type_aliases)).unwrap_or(Ty::Error);
                     // BACKLOG item 235 — same fixed-width literal-body
@@ -1234,6 +1320,51 @@ fn lower_expr(expr: &S<Expr>, cx: &mut Cx) -> HirExpr {
             // its own — only the same table/method → function-name mapping.
             if let Some(rewritten) = try_db_accessor_rewrite(func, args, cx) {
                 return lower_expr(&rewritten, cx);
+            }
+
+            // Trait-bounded method call (BACKLOG item 309) — `value.toJson()`
+            // where `value: T`, `T: Serializable`, inside `Serializable`'s
+            // own bounded generic function body. Checked before the
+            // ordinary UFCS rewrite for the identical reason the db-accessor
+            // check just above runs first: `value`'s own HIR type here is
+            // the erased `Ty::Var(0)` sentinel every type param uses, which
+            // never carries a real concrete type name for UFCS to look
+            // `"<TypeName>.toJson"` up with — that rewrite could never fire
+            // for this receiver anyway, so this is checked first purely to
+            // avoid a needless (harmless) re-probe of `value`'s own type.
+            // `expr` is lowered once to identify the accessor; if this
+            // doesn't match, the ordinary paths below lower `func`/`args`
+            // fresh from the untouched AST — the same accepted "wasted
+            // lowering pass" tradeoff the UFCS rewrite already documents,
+            // since `lower_expr` only builds a tree, never executes anything.
+            if let Expr::Field { expr, field, .. } = &func.node {
+                let base = lower_expr(expr, cx);
+                let accessor = match &base.kind {
+                    HirExprKind::Local(id) => cx.trait_method_accessors.get(id)
+                        .and_then(|accessors| accessors.iter().find(|(name, _, _, _)| name == &field.node))
+                        .map(|(_, accessor_local, arity, ret_ty)| (*accessor_local, *arity, ret_ty.clone())),
+                    _ => None,
+                };
+                if let Some((accessor_local, arity, ret_ty)) = accessor {
+                    let arg_ops: Vec<HirExpr> = args.iter().map(|a| lower_expr(&a.value, cx)).collect();
+                    let accessor_fn = HirExpr {
+                        kind: HirExprKind::Local(accessor_local),
+                        ty: Ty::Fn { params: vec![Ty::Var(0); arity], ret: Box::new(Ty::Var(0)) },
+                        span,
+                    };
+                    // `ret_ty` (not `Ty::Var(0)`) — same reason the row-bound
+                    // accessor call above sets its own outer `ty` to
+                    // `field_ty`: MIR derives this function's real C return
+                    // type from the body's own computed operand type (item
+                    // 235's convention), so leaving this erased would make
+                    // the *whole enclosing function* return `void*` even
+                    // when its own declared return type is concrete (e.g.
+                    // `Text`) — confirmed live before this fix: `certo_
+                    // serialize` compiled and ran, but printed garbage,
+                    // since its C return type was wrongly `void*` with no
+                    // unboxing ever applied at its own call site.
+                    return HirExpr { kind: HirExprKind::Call { func: Box::new(accessor_fn), args: arg_ops }, ty: ret_ty, span };
+                }
             }
 
             // Dot-call UFCS (BACKLOG item 162) — HIR does its own, entirely
@@ -1719,6 +1850,78 @@ fn lower_expr(expr: &S<Expr>, cx: &mut Cx) -> HirExpr {
                     let captures = collect_lambda_captures(&body, capture_threshold);
                     lowered_args.push(HirExpr {
                         kind: HirExprKind::Lambda { params: vec![], body: Box::new(body), captures, ret_hint: Ty::Var(0) },
+                        ty: Ty::Error,
+                        span,
+                    });
+                }
+            }
+
+            // Trait-bound method dispatch (BACKLOG item 309) — a call to a
+            // trait-bounded function needs one extra method-accessor
+            // argument per bound method, appended after any row-bound
+            // accessors just above, in the exact same order
+            // `add_trait_bound_accessor_params` appended the matching hidden
+            // params to the callee's own definition. Unlike a row-bound
+            // field's own always-zero-arg accessor, a trait method can take
+            // its own extra parameters beyond the receiver, so the
+            // synthesized closure needs real (synthetic) params of its own
+            // for the method call's own extra args to reference — built the
+            // same way an ordinary user-written `Expr::Lambda` binds its
+            // params (`cx.define_local` before lowering the body, so a
+            // `Expr::Path` reference to the same synthetic name resolves to
+            // it), just with compiler-chosen `__trait_arg_N` names instead
+            // of user-written ones. The receiver's own AST is re-lowered a
+            // second time here (once for its own ordinary positional arg,
+            // once inside this accessor body) — the same accepted tradeoff
+            // `row_fields` just above and the UFCS rewrite both already rely
+            // on.
+            if let Some(trait_methods) = fn_full_path.as_deref().and_then(|fp| cx.fn_trait_bounds.get(fp)).cloned() {
+                for (param_index, method_name, arity, _ret_ty) in &trait_methods {
+                    let Some(orig_arg_ast) = args.get(*param_index).map(|a| a.value.clone()) else { continue };
+                    let capture_threshold = cx.next_local;
+                    cx.push_scope();
+                    let param_names: Vec<String> = (0..*arity).map(|i| format!("__trait_arg_{i}")).collect();
+                    let hir_params: Vec<HirParam> = param_names.iter().map(|name| {
+                        let local = cx.define_local(name);
+                        // Without this, a later `Expr::Path` reference to
+                        // this same local (inside the synthesized method-call
+                        // AST below) would default to `Ty::Error`, not
+                        // `Ty::Var(0)` (`Expr::Path`'s own lowering only ever
+                        // consults `cx.local_types`, defaulting to `Ty::Error`
+                        // on a miss) — which silently defeats item 76's own
+                        // "inverse direction" unboxing check just above in
+                        // this same match (`matches!(a.ty, Ty::Var(_))`),
+                        // since `Ty::Error` doesn't match it. Confirmed live
+                        // before this fix: a trait method taking an extra
+                        // `Self`-typed param (`fn compareTo(self, other:
+                        // Self): Int`) passed the still-erased `void*` value
+                        // straight through as a real C `Order` argument with
+                        // no unbox at all — `passing 'void *' to parameter of
+                        // incompatible type 'Order'`.
+                        cx.local_types.insert(local, Ty::Var(0));
+                        HirParam { local, name: name.clone(), ty: Ty::Var(0), span }
+                    }).collect();
+                    let call_args: Vec<certo_ast::expr::Arg> = param_names.iter().map(|name| {
+                        let path = certo_ast::types::ModulePath { segments: vec![S::new(name.clone(), span)], span };
+                        let value = S::new(Expr::Path { path, span }, span);
+                        certo_ast::expr::Arg { label: None, value, span }
+                    }).collect();
+                    let method_call_ast = S::new(
+                        Expr::App {
+                            func: Box::new(S::new(
+                                Expr::Field { expr: Box::new(orig_arg_ast), field: S::new(method_name.clone(), span), span },
+                                span,
+                            )),
+                            args: call_args,
+                            span,
+                        },
+                        span,
+                    );
+                    let body = lower_expr(&method_call_ast, cx);
+                    cx.pop_scope();
+                    let captures = collect_lambda_captures(&body, capture_threshold);
+                    lowered_args.push(HirExpr {
+                        kind: HirExprKind::Lambda { params: hir_params, body: Box::new(body), captures, ret_hint: Ty::Var(0) },
                         ty: Ty::Error,
                         span,
                     });
@@ -3300,6 +3503,44 @@ fn collect_row_bound_fields<'a>(
     out
 }
 
+/// Trait-bound sibling of `collect_row_bound_fields` just above (BACKLOG
+/// item 309) — identical shape and matching rule (a param whose own
+/// declared type is a *bare* reference to the bound type param name), just
+/// collecting `(method_name, arity)` pairs from `trait_defs` for a
+/// `Bound::Trait` instead of `(field_name, field_ty)` pairs from a
+/// `Bound::Row`'s own inline field list.
+fn collect_trait_bound_methods<'a>(
+    params: &[FnParam],
+    type_params: impl Iterator<Item = &'a certo_ast::types::TypeParam>,
+    trait_defs: &HashMap<String, Vec<(String, usize, Ty)>>,
+) -> Vec<(usize, String, usize, Ty)> {
+    use certo_ast::types::{Bound, TypeExpr};
+    let mut out = Vec::new();
+    for tp in type_params {
+        let methods: Vec<(String, usize, Ty)> = tp.bounds.iter()
+            .filter_map(|b| match b {
+                Bound::Trait(tb) => {
+                    let trait_name = tb.name.segments.last().map(|s| s.node.as_str()).unwrap_or_default();
+                    trait_defs.get(trait_name).cloned()
+                }
+                Bound::Row(_) => None,
+            })
+            .flatten()
+            .collect();
+        if methods.is_empty() { continue; }
+        for (i, p) in params.iter().enumerate() {
+            let is_this_param = matches!(&p.ty.node, TypeExpr::Named { path, args, .. }
+                if args.is_empty() && path.segments.len() == 1
+                && path.segments[0].node == tp.name.node);
+            if !is_this_param { continue; }
+            for (method_name, arity, ret_ty) in &methods {
+                out.push((i, method_name.clone(), *arity, ret_ty.clone()));
+            }
+        }
+    }
+    out
+}
+
 /// Append a row-bound function's own field-accessor params to `params` and
 /// register `cx.row_field_accessors` for them — BACKLOG item 200. Shared by
 /// the top-level `Decl::Fn` and `Decl::Impl` method lowering (both build
@@ -3319,6 +3560,31 @@ fn add_row_bound_accessor_params(fn_name: &str, params: &mut Vec<HirParam>, span
         cx.local_types.insert(accessor_local, accessor_ty.clone());
         params.push(HirParam { local: accessor_local, name: format!("__row_{field_name}"), ty: accessor_ty, span });
         cx.row_field_accessors.entry(record_local).or_default().push((field_name, accessor_local, field_ty));
+    }
+}
+
+/// Trait-bound sibling of `add_row_bound_accessor_params` just above
+/// (BACKLOG item 309) — one extra accessor param per method declared by a
+/// bound trait, instead of one per row-bound field. Unlike a row-bound
+/// field read (always a zero-arg access), a trait method can take its own
+/// extra parameters beyond the receiver, so each accessor's own erased
+/// `Ty::Fn` shape has `arity` `Ty::Var(0)` params, not zero.
+fn add_trait_bound_accessor_params(fn_name: &str, params: &mut Vec<HirParam>, span: Span, cx: &mut Cx) {
+    let Some(trait_methods) = cx.fn_trait_bounds.get(fn_name).cloned() else { return };
+    for (param_index, method_name, arity, ret_ty) in trait_methods {
+        let Some(receiver_local) = params.get(param_index).map(|p| p.local) else { continue };
+        let accessor_name = format!("__trait_{method_name}");
+        let accessor_local = cx.define_local(&accessor_name);
+        // The accessor's own *declared* signature stays uniformly erased
+        // (`Ty::Var(0)` params and return — item 76's HKT-closure
+        // convention), regardless of `ret_ty`: `ret_ty` is threaded through
+        // only so the *outer call expression* at each use site inside this
+        // function's own body can carry the real, non-erased return type
+        // when it's concrete — see the `Expr::App` interception below.
+        let accessor_ty = Ty::Fn { params: vec![Ty::Var(0); arity], ret: Box::new(Ty::Var(0)) };
+        cx.local_types.insert(accessor_local, accessor_ty.clone());
+        params.push(HirParam { local: accessor_local, name: accessor_name, ty: accessor_ty, span });
+        cx.trait_method_accessors.entry(receiver_local).or_default().push((method_name, accessor_local, arity, ret_ty));
     }
 }
 

@@ -65,6 +65,31 @@ pub struct TypeEnv {
     /// bound instead of always returning an unconstrained fresh var,
     /// regardless of whether the field was ever declared in it.
     current_body_row_bounds: HashMap<TyVar, (String, Vec<(String, Ty)>)>,
+    /// Trait method signatures (BACKLOG item 309): trait_name → method_name
+    /// → (declared param type exprs *excluding* the receiver/`self` param,
+    /// declared return type expr, or `None` for an inferred/`Unit` return).
+    /// Kept as raw, unconverted `TypeExpr`s (not `Ty`) rather than eagerly
+    /// resolved — a trait method's own signature can reference `Self`
+    /// (`fn toJson(self): Self`, say), which only has a *concrete* meaning
+    /// once substituted with whichever specific type param a given generic
+    /// function's own bound instantiates it to; converting eagerly at
+    /// registration time (before any such bound exists) would have nothing
+    /// correct to substitute `Self` with. Populated once, during hoisting,
+    /// from every `Decl::Trait` in the module (traits themselves are never
+    /// otherwise hoisted by typeck at all — only concrete `impl` blocks
+    /// are — confirmed by grep before this item).
+    pub trait_defs: HashMap<String, HashMap<String, (Vec<TypeExpr>, Option<TypeExpr>)>>,
+    /// Trait bounds for the function/method body *currently being checked*
+    /// (BACKLOG item 309), keyed by the same *fresh* body-check `TyVar`
+    /// `current_body_row_bounds` is keyed by — see that field's own doc
+    /// comment for why body-checking's fresh vars, not hoisting's. Each
+    /// entry: the type param's own source name (for diagnostics) plus the
+    /// *merged* method table across every trait bound on it (`T: A + B`
+    /// exposes both `A`'s and `B`'s methods), with any `Self` in a method's
+    /// own signature already substituted for this specific `TyVar` — so a
+    /// hit here resolves directly to a concrete, callable `Ty::Fn`, no
+    /// further substitution needed at the call site.
+    current_body_trait_bounds: HashMap<TyVar, (String, HashMap<String, (Vec<Ty>, Ty)>)>,
     /// Sum type variant names: type_name → [variant_name, ...], in declaration
     /// order. Used for match exhaustiveness checking.
     pub sum_variants: HashMap<String, Vec<String>>,
@@ -96,6 +121,8 @@ impl TypeEnv {
             type_param_vars: HashMap::new(),
             row_bounds: HashMap::new(),
             current_body_row_bounds: HashMap::new(),
+            trait_defs: HashMap::new(),
+            current_body_trait_bounds: HashMap::new(),
             sum_variants: HashMap::new(),
             type_aliases: HashMap::new(),
             alias_expand_stack: Vec::new(),
@@ -208,6 +235,25 @@ impl TypeEnv {
     /// being checked.
     pub fn lookup_current_body_row_bound(&self, var: TyVar) -> Option<&(String, Vec<(String, Ty)>)> {
         self.current_body_row_bounds.get(&var)
+    }
+
+    /// Set the trait bounds in scope for the body currently being checked
+    /// (BACKLOG item 309) — see `current_body_trait_bounds`'s own doc
+    /// comment. Same replace-outright convention as its row-bound sibling.
+    pub fn set_current_body_trait_bounds(&mut self, bounds: HashMap<TyVar, (String, HashMap<String, (Vec<Ty>, Ty)>)>) {
+        self.current_body_trait_bounds = bounds;
+    }
+
+    /// Clear the current body's trait bounds once it's done being checked.
+    pub fn clear_current_body_trait_bounds(&mut self) {
+        self.current_body_trait_bounds.clear();
+    }
+
+    /// Look up the type param's own name and merged method table for `var`,
+    /// if it's a trait-bound type param of the function/method body
+    /// currently being checked.
+    pub fn lookup_current_body_trait_bound(&self, var: TyVar) -> Option<&(String, HashMap<String, (Vec<Ty>, Ty)>)> {
+        self.current_body_trait_bounds.get(&var)
     }
 
     /// Seed the environment with built-in types/values.

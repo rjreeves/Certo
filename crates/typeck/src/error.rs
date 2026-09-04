@@ -112,6 +112,18 @@ pub enum TypeErrorKind {
     /// was a real, silent soundness gap, not just a missing convenience check.
     FieldNotInRowBound { type_param: String, field: String, bound_fields: Vec<String> },
 
+    /// E0221 — inside a trait-bounded generic function's own body, a
+    /// method call on the bound param names a method none of its bound
+    /// traits declare (BACKLOG item 309). Same soundness gap as
+    /// `FieldNotInRowBound` just above, for trait bounds instead of row
+    /// bounds: `resolve_field_ty`'s `Ty::Var(_)` arm had no table to
+    /// consult for a trait-bounded param's own method calls at all before
+    /// this item, so `fn f<T: Serializable>(v: T): Text = v.toJsonx()` (a
+    /// typo — `Serializable` only declares `toJson`) typechecked exactly as
+    /// cleanly as the real `v.toJson()`, only failing two build stages
+    /// later at the C-compiler stage.
+    MethodNotInTraitBound { type_param: String, method: String, bound_methods: Vec<String> },
+
     /// E0703 — a validator rule's `else` clause produces a type other than
     /// the validator's own declared `errors` type (BACKLOG item 219).
     /// Deliberately its own variant, not a reuse of `Mismatch`/E0200 —
@@ -239,6 +251,10 @@ impl TypeError {
                 format!("E0220: `{}` is not declared in `{}`'s own row bound (only {} may be accessed)",
                     field, type_param,
                     bound_fields.iter().map(|f| format!("`{f}`")).collect::<Vec<_>>().join(", ")),
+            TypeErrorKind::MethodNotInTraitBound { type_param, method, bound_methods } =>
+                format!("E0221: `{}` is not declared by `{}`'s own trait bound (only {} may be called)",
+                    method, type_param,
+                    bound_methods.iter().map(|m| format!("`{m}`")).collect::<Vec<_>>().join(", ")),
             TypeErrorKind::ElseTypeMismatch { rule_name, expected, found } =>
                 format!("E0703: rule `{}`'s `else` branch produces `{}`, but this validator declares `errors {}`",
                     rule_name, found.display(), expected.display()),
