@@ -90,6 +90,22 @@ pub struct TypeEnv {
     /// hit here resolves directly to a concrete, callable `Ty::Fn`, no
     /// further substitution needed at the call site.
     current_body_trait_bounds: HashMap<TyVar, (String, HashMap<String, (Vec<Ty>, Ty)>)>,
+    /// The declared return type of the function/method body *currently being
+    /// checked* (BACKLOG item 321), if it has one — `None` for an
+    /// unannotated body or while checking outside any function (e.g. a
+    /// top-level `val`). Set right before `infer_fn_body` runs, cleared once
+    /// the body is fully checked, same replace-outright convention as its
+    /// row/trait-bound siblings above. Consulted by `Expr::Try`'s own
+    /// inference arm (`e?`) to decide whether an `Option`-shaped operand is
+    /// allowed: `Result<T,E>`'s own runtime shape (a boxed
+    /// `certo_result_t{is_ok,payload}`) has room to propagate *any* Err
+    /// payload regardless of the enclosing function's own declared `E`
+    /// (confirmed live — item 321's own investigation), but `Option<T>` is a
+    /// raw `void*` (`None` = NULL) with no payload at all, so propagating a
+    /// `None` out of a function that doesn't *also* return `Option<U>` would
+    /// have no real value to construct — there is no such thing as a "safe
+    /// default" `Result`/other value to manufacture from a bare `None`.
+    current_body_return_ty: Option<Ty>,
     /// Sum type variant names: type_name → [variant_name, ...], in declaration
     /// order. Used for match exhaustiveness checking.
     pub sum_variants: HashMap<String, Vec<String>>,
@@ -123,6 +139,7 @@ impl TypeEnv {
             current_body_row_bounds: HashMap::new(),
             trait_defs: HashMap::new(),
             current_body_trait_bounds: HashMap::new(),
+            current_body_return_ty: None,
             sum_variants: HashMap::new(),
             type_aliases: HashMap::new(),
             alias_expand_stack: Vec::new(),
@@ -254,6 +271,24 @@ impl TypeEnv {
     /// currently being checked.
     pub fn lookup_current_body_trait_bound(&self, var: TyVar) -> Option<&(String, HashMap<String, (Vec<Ty>, Ty)>)> {
         self.current_body_trait_bounds.get(&var)
+    }
+
+    /// Set the declared return type in scope for the body currently being
+    /// checked (BACKLOG item 321) — see `current_body_return_ty`'s own doc
+    /// comment.
+    pub fn set_current_body_return_ty(&mut self, ty: Option<Ty>) {
+        self.current_body_return_ty = ty;
+    }
+
+    /// Clear the current body's return type once it's done being checked.
+    pub fn clear_current_body_return_ty(&mut self) {
+        self.current_body_return_ty = None;
+    }
+
+    /// Look up the declared return type of the function/method body
+    /// currently being checked, if any.
+    pub fn lookup_current_body_return_ty(&self) -> Option<&Ty> {
+        self.current_body_return_ty.as_ref()
     }
 
     /// Seed the environment with built-in types/values.

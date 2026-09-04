@@ -1,7 +1,7 @@
 use certo_parser::parse;
 use certo_typeck::Ty;
 use crate::lower_module;
-use crate::hir::{HirItem, HirExprKind, HirStmt, BinOp, HirPat};
+use crate::hir::{HirItem, HirExpr, HirExprKind, HirFn, HirStmt, BinOp, HirPat};
 
 fn lower(src: &str) -> crate::HirModule {
     let module = parse(src).expect("parse error");
@@ -55,6 +55,38 @@ fn lower_simple_fn() {
     } else {
         panic!("expected Fn");
     }
+}
+
+// ------------------------------------------------------------------ //
+// `e?` on Result/Option — BACKLOG item 321 (Option-`?`)
+// ------------------------------------------------------------------ //
+
+fn first_let_init(f: &HirFn) -> &HirExpr {
+    let HirExprKind::Block { stmts, .. } = &f.body.as_ref().unwrap().kind else { panic!("expected a Block body") };
+    let HirStmt::Let { init, .. } = &stmts[0] else { panic!("expected first stmt to be a Let") };
+    init
+}
+
+#[test]
+fn try_on_result_still_resolves_to_the_ok_payload_type() {
+    // Regression guard: the pre-existing Result-`?` path is unaffected by
+    // the new Option-`?` arm.
+    let m = lower("module A\nfn g(): Result<Int, Text> = Ok(1)\n\
+        fn f(): Result<Int, Text> = { val x = g()?\n Ok(x) }");
+    let f = m.items.iter().find_map(|it| if let HirItem::Fn(f) = it { if f.name == "f" { Some(f) } else { None } } else { None }).unwrap();
+    let init = first_let_init(f);
+    assert!(matches!(&init.kind, HirExprKind::Try(_)), "expected HirExprKind::Try, got {:?}", init.kind);
+    assert_eq!(init.ty, Ty::Int, "e?'s type should be Result's Ok payload (Int), got {:?}", init.ty);
+}
+
+#[test]
+fn try_on_option_resolves_to_the_some_payload_type() {
+    let m = lower("module A\nfn g(): Int? = Some(1)\n\
+        fn f(): Int? = { val x = g()?\n Some(x) }");
+    let f = m.items.iter().find_map(|it| if let HirItem::Fn(f) = it { if f.name == "f" { Some(f) } else { None } } else { None }).unwrap();
+    let init = first_let_init(f);
+    assert!(matches!(&init.kind, HirExprKind::Try(_)), "expected HirExprKind::Try, got {:?}", init.kind);
+    assert_eq!(init.ty, Ty::Int, "e?'s type should be Option's Some payload (Int), got {:?}", init.ty);
 }
 
 // ------------------------------------------------------------------ //

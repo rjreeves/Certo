@@ -49,6 +49,48 @@ fn binop_produces_assign() {
     assert!(has_binop, "expected BinOp assign");
 }
 
+// `e?` on Result/Option — BACKLOG item 321 (Option-`?`)
+
+#[test]
+fn try_on_result_still_calls_result_is_ok() {
+    // Regression guard: the pre-existing Result-`?` desugaring (a real call
+    // to `__result_is_ok`) is unaffected by the new Option-`?` branch.
+    let mf = mir_fn_named(
+        "module A\nfn g(): Result<Int, Text> = Ok(1)\n\
+         fn f(): Result<Int, Text> = { val x = g()?\n Ok(x) }",
+        "f");
+    let calls_result_is_ok = mf.blocks.iter().any(|bb| matches!(&bb.terminator,
+        Some(Terminator::Call { func: Operand::Global(name), .. }) if name == "__result_is_ok"));
+    assert!(calls_result_is_ok, "expected a real call to __result_is_ok");
+}
+
+#[test]
+fn try_on_option_uses_a_null_check_not_result_is_ok() {
+    // BACKLOG item 321 — Option<T> is a raw void* (None = NULL), so `e?` on
+    // an Option operand must never call the Result-shaped `__result_is_ok`
+    // (that would dereference a NULL/non-`certo_result_t` pointer); it
+    // branches on a direct null comparison instead, mirroring
+    // `check_nested_pattern`'s own `Constructor("None", ...)` arm.
+    let mf = mir_fn_named(
+        "module A\nfn g(): Int? = Some(1)\n\
+         fn f(): Int? = { val x = g()?\n Some(x) }",
+        "f");
+    let calls_result_is_ok = mf.blocks.iter().any(|bb| matches!(&bb.terminator,
+        Some(Terminator::Call { func: Operand::Global(name), .. }) if name == "__result_is_ok"));
+    assert!(!calls_result_is_ok, "Option-? must not call __result_is_ok");
+
+    let has_null_check = mf.blocks.iter().any(|bb| bb.stmts.iter().any(|s| matches!(s,
+        MirStmt::Assign { rvalue: Rvalue::BinOp { op: certo_hir::BinOp::Eq, rhs: Operand::Global(name), .. }, .. }
+        if name == "__NULL"
+    )));
+    assert!(has_null_check, "expected a direct null check against __NULL");
+
+    let has_unbox_some = mf.blocks.iter().any(|bb| bb.stmts.iter().any(|s| matches!(s,
+        MirStmt::Assign { rvalue: Rvalue::UnboxSome { .. }, .. }
+    )));
+    assert!(has_unbox_some, "expected the Some payload to be extracted via UnboxSome");
+}
+
 #[test]
 fn row_bound_field_accessor_call_gets_unbox_some_not_unbox() {
     // BACKLOG item 200 — the accessor's own return is boxed via `Rvalue::

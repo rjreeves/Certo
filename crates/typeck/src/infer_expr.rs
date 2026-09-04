@@ -980,12 +980,36 @@ pub fn infer(expr: &S<Expr>, ctx: &mut Ctx<'_>) -> Ty {
         }
 
         Expr::Try { expr, span } => {
-            // `e?` — e must be Result<T, E>; the expression has type T
+            // `e?` — e must be Result<T, E> (propagates `Err`) or, when the
+            // *enclosing function itself* also declares an `Option<U>`
+            // return type, Option<T> (propagates `None`) — BACKLOG item 321.
+            // Only Option-in-Option-fn is supported: `Result<T,E>`'s own
+            // runtime shape (a boxed `certo_result_t{is_ok,payload}`) has
+            // room to carry any Err payload regardless of the enclosing
+            // function's own declared `E` (confirmed live — the existing
+            // Result arm below has never actually checked `err_ty` against
+            // it), but `Option<T>` is a raw `void*` (`None` = NULL) with no
+            // payload at all, so propagating a `None` out of a
+            // `Result`-returning function would have no real error value to
+            // construct. Checking the *enclosing function's* declared return
+            // type (rather than the operand's own, which may still be an
+            // unresolved fresh var at this point) is what lets this dispatch
+            // correctly even for a still-generic callee.
             let inner_ty = infer(expr, ctx);
-            let ok_ty = ctx.fresh();
-            let err_ty = ctx.fresh();
-            ctx.unify(inner_ty, Ty::Result(Box::new(ok_ty.clone()), Box::new(err_ty)), *span);
-            ok_ty
+            let enclosing_is_option = matches!(
+                ctx.env.lookup_current_body_return_ty().map(|t| ctx.uf.apply(t)),
+                Some(Ty::Option(_))
+            );
+            if enclosing_is_option {
+                let ok_ty = ctx.fresh();
+                ctx.unify(inner_ty, Ty::Option(Box::new(ok_ty.clone())), *span);
+                ok_ty
+            } else {
+                let ok_ty = ctx.fresh();
+                let err_ty = ctx.fresh();
+                ctx.unify(inner_ty, Ty::Result(Box::new(ok_ty.clone()), Box::new(err_ty)), *span);
+                ok_ty
+            }
         }
 
         Expr::Await { expr, .. } => infer(expr, ctx),

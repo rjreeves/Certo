@@ -2328,12 +2328,17 @@ fn lower_expr(expr: &S<Expr>, cx: &mut Cx) -> HirExpr {
 
         Expr::Try { expr, .. } => {
             let inner = lower_expr(expr, cx);
-            // `e?`'s type is `e`'s Result Ok-payload type — needed so MIR's
-            // unwrap knows whether to bit-restore a Float or dereference a
-            // heap-boxed struct payload (see BACKLOG item 114); previously
-            // always Ty::Error, silently truncating a Float here too.
+            // `e?`'s type is `e`'s Result Ok-payload/Option Some-payload type
+            // — needed so MIR's unwrap knows whether to bit-restore a Float
+            // or dereference a heap-boxed struct payload (see BACKLOG item
+            // 114); previously always Ty::Error, silently truncating a Float
+            // here too. The `Ty::Option` arm is BACKLOG item 321 — `e?` on
+            // an Option-shaped operand, only ever typechecked when the
+            // enclosing function itself also returns `Option<_>` (see
+            // `crates/typeck/src/infer_expr.rs`'s own `Expr::Try` arm).
             let ty = match &inner.ty {
                 Ty::Result(t, _) => (**t).clone(),
+                Ty::Option(t) => (**t).clone(),
                 _ => Ty::Error,
             };
             HirExpr { kind: HirExprKind::Try(Box::new(inner)), ty, span }
