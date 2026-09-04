@@ -608,6 +608,18 @@ fn timestamp_functions_registered() {
 }
 
 #[test]
+fn timestamp_format_is_registered_as_a_real_alias_for_format_tz() {
+    // BACKLOG item 315 — spec §9.4's own literal table row documents this
+    // as `Timestamp.format(pattern, tz)`; only `formatTz` ever existed.
+    let env = seeded_env();
+    assert!(env.lookup("Timestamp.format").is_some(), "missing: Timestamp.format");
+    // Same 3-arg (self, pattern, tz) shape as the already-working formatTz.
+    let format_ty     = env.lookup("Timestamp.format").unwrap();
+    let format_tz_ty  = env.lookup("Timestamp.formatTz").unwrap();
+    assert_eq!(format_ty, format_tz_ty, "Timestamp.format must have the exact same signature as Timestamp.formatTz");
+}
+
+#[test]
 fn expect_and_tag_predicates_registered() {
     // BACKLOG item 165: expect(x).toBe(y) and friends.
     let env = seeded_env();
@@ -856,6 +868,9 @@ fn datetime_c_contains_timestamp_bridge_and_constructors() {
         "missing Timestamp.inTimezone bridge");
     assert!(DATETIME_C.contains("#define certo_timestamp_format_tz   certo_date_time_format_tz"),
         "missing Timestamp.formatTz bridge");
+    // BACKLOG item 315 — Timestamp.format, a genuine alias for formatTz.
+    assert!(DATETIME_C.contains("#define certo_timestamp_format      certo_date_time_format_tz"),
+        "missing Timestamp.format bridge");
 }
 
 #[test]

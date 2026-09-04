@@ -903,6 +903,15 @@ pub fn seed_stdlib(env: &mut TypeEnv, counter: &mut u32) {
     def!("Timestamp.parse",      fn1(Ty::Text, Ty::Option(Box::new(ts()))));
     def!("Timestamp.inTimezone", fn2(ts(), tz(), Ty::Text));
     def!("Timestamp.formatTz",   Ty::Fn { params: vec![ts(), Ty::Text, tz()], ret: Box::new(Ty::Text) });
+    // BACKLOG item 315 — spec §9.4's own literal table row calls this
+    // `Timestamp.format(pattern, tz)`; the real, only-ever-implemented name
+    // was `formatTz`, which `certo check` never caught (`Timestamp` is a
+    // built-in opaque `Ty::Named`, so a nonexistent method silently falls
+    // through `resolve_field_ty`'s permissive fallback, the same residual
+    // gap item 260 scoped out) — it failed only at the C-compile stage.
+    // Registered as a genuine alias, same signature as `formatTz`, bridged
+    // to the identical C implementation below.
+    def!("Timestamp.format",     Ty::Fn { params: vec![ts(), Ty::Text, tz()], ret: Box::new(Ty::Text) });
     // BACKLOG item 214 — `Timestamp` had no path to a `Duration` at all
     // (bare `timestamp - timestamp` is now rejected, see
     // `OpaqueTemporalArithmetic`/E0218); mirrors `DateTime.diff` exactly,
