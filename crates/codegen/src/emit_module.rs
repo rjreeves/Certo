@@ -846,7 +846,18 @@ fn ast_ty_to_c_str(te: &certo_ast::types::TypeExpr) -> String {
                 // struct with a `createdAt: DateTime` field failing to
                 // compile (BACKLOG item 134, found while verifying the
                 // struct-boxing fix end-to-end, not caused by it).
+                // BACKLOG item 317 — `Timestamp` was missing from this list
+                // (present in `ty_to_c.rs`'s own identical match, item 164,
+                // ever since), so a record *field* typed `Timestamp`
+                // (unlike a function param/return, which already went
+                // through `ty_to_c.rs`) emitted the bare, undeclared C
+                // identifier `Timestamp` — confirmed via a real struct
+                // definition with a `dueAt: Timestamp` field failing to
+                // compile. `Timestamp` has no separate runtime type of its
+                // own (see `ty_to_c.rs`'s own doc comment) — reuses
+                // `CertoDateTime` exactly, same as there.
                 "DateTime" | "Date" | "Duration" | "Timezone" => format!("Certo{}", name),
+                "Timestamp" => "CertoDateTime".to_string(),
                 "JsonValue" | "ProcessResult" => format!("Certo{}*", name),
                 other     => c_ident(other),
             }

@@ -201,7 +201,7 @@ certo-lang.org  |  github.com/certo-lang
 
 ### **Product Types**
 
-| // All fields required unless marked optional with ? type Invoice = \{     id:         UUID,     customerId: CustomerId,     amount:     Money,     issuedAt:   Timestamp,     dueAt:      Timestamp,     paidAt:     Timestamp?,      // Optional     notes:      Text?,           // Optional      // Computed properties — never stored in DB     computed isPaid:     Bool      = paidAt.isSome()     computed isOverdue:  Bool      = Timestamp.now() \> dueAt and not isPaid     computed daysUntilDue: Int     = (dueAt - Timestamp.now()).days \} |
+| // All fields required unless marked optional with ? type Invoice = \{     id:         UUID,     customerId: CustomerId,     amount:     Money,     issuedAt:   Timestamp,     dueAt:      Timestamp,     paidAt:     Timestamp?,      // Optional     notes:      Text?,           // Optional      // Computed properties — never stored in DB     computed isPaid:     Bool      = paidAt.isSome()     computed isOverdue:  Bool      = Timestamp.now() \> dueAt and not isPaid     computed daysUntilDue: Int     = dueAt.diff(Timestamp.now()).toDays() \} |
 | - |
 
 
@@ -264,7 +264,7 @@ certo-lang.org  |  github.com/certo-lang
 
 ## **5.1 The Result Type**
 
-| // Built into the language — not a library type Result\<T, E\> =     | Ok(T)    // Success carrying value T     | Err(E)   // Failure carrying error E  // Pattern match to handle both cases match db.users.find(id) \{     Ok(user) =\> render(user)     Err(e)   =\> handleError(e) \}  // Propagate errors up the call stack with ? fn processUser(id: UUID): Result\<Report, AppError\> = \{     val user   = db.users.find(id)?          // Returns Err early if not found     val orders = db.orders.forUser(id)?       // Same     Ok(buildReport(user, orders)) \} |
+| // Built into the language — not a library type Result\<T, E\> =     | Ok(T)    // Success carrying value T     | Err(E)   // Failure carrying error E  // Pattern match to handle both cases — db.\<table\>.find returns // Option, not Result, so it's Some/None here, not Ok/Err match db.users.find(id) \{     Some(user) =\> render(user)     None       =\> handleError() \}  // Propagate errors up the call stack with ? — for a Result-returning // call; an Option-returning call (like db.\<table\>.find) is unwrapped // explicitly instead, since ? only works on Result fn processUser(id: UUID): Result\<Report, AppError\> =     match db.users.find(id) \{         Some(user) =\> Ok(buildReport(user, db.orders.all()))         None       =\> Err(AppError.UserNotFound)     \} |
 | - |
 
 

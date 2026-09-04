@@ -273,6 +273,20 @@ fn timestamp_typed_param_and_return_use_certo_datetime_c_type() {
 }
 
 #[test]
+fn timestamp_typed_record_field_uses_certo_datetime_c_type() {
+    // BACKLOG item 317(a) — item 164 (just above) fixed `Timestamp` as a
+    // function param/return type (`ty_to_c.rs`), but `emit_module.rs`'s own
+    // separate AST-level copy used for record *field* declarations
+    // (`field_c_ty`) never got the matching fix — a `dueAt: Timestamp`
+    // record field emitted the bare, undeclared C identifier `Timestamp`
+    // instead of `CertoDateTime`, confirmed via a real struct definition
+    // failing to compile before this fix.
+    let c = codegen("module A\ntype Invoice = { dueAt: Timestamp }");
+    assert_contains(&c, "CertoDateTime dueAt;");
+    assert_not_contains(&c, "Timestamp dueAt;");
+}
+
+#[test]
 fn age_lowers_to_a_real_datetime_diff_call_not_identity() {
     // BACKLOG item 164: `.age` was previously a HIR-level no-op stub
     // ("lower the inner expression") — `t.age` compiled to literally `t`,
