@@ -48,12 +48,29 @@ impl Schema {
         schema
     }
 
+    /// Look up a table by name, tolerating either casing convention a
+    /// migration might spell it with (BACKLOG item 313): `self.tables` is
+    /// keyed by the `type` declaration's own PascalCase name (e.g.
+    /// `"Categories"`), but the spec's own migration examples — and any
+    /// project following that convention — write lowercase/snake_case table
+    /// names (`"categories"`) instead. Falls back to comparing
+    /// `camel_to_snake` of both sides (the same normalization
+    /// `crates/migrate/src/sql_gen.rs` already applies when emitting real
+    /// SQL) only when the exact-string fast path misses, so an
+    /// already-matching-convention project pays no extra cost.
+    fn find_table(&self, name: &str) -> Option<&SchemaTable> {
+        self.tables.get(name).or_else(|| {
+            let folded = camel_to_snake(name);
+            self.tables.values().find(|t| camel_to_snake(&t.name) == folded)
+        })
+    }
+
     pub fn has_table(&self, name: &str) -> bool {
-        self.tables.contains_key(name)
+        self.find_table(name).is_some()
     }
 
     pub fn column_type(&self, table: &str, column: &str) -> Option<&str> {
-        self.tables.get(table)
+        self.find_table(table)
             .and_then(|t| t.columns.iter().find(|c| c.name == column))
             .map(|c| c.ty.as_str())
     }
