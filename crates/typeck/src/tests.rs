@@ -1415,6 +1415,54 @@ fn result_err_constructor_ok() {
     check("module A\nfn f(): Result<Int, Text> = Err(\"boom\")").unwrap();
 }
 
+// `?` error propagation — BACKLOG item 321. Result-`?` was already
+// supported; Option-`?` is new, and only ever allowed when the *enclosing*
+// function itself also declares an `Option<_>` return type (see
+// `Expr::Try`'s own doc comment for why the other direction can't work).
+
+#[test]
+fn try_on_result_still_works_in_a_result_returning_fn() {
+    check(
+        "module A\n\
+         fn g(): Result<Int, Text> = Ok(1)\n\
+         fn f(): Result<Int, Text> = { val x = g()?\n Ok(x + 1) }"
+    ).unwrap();
+}
+
+#[test]
+fn try_on_option_works_in_an_option_returning_fn() {
+    check(
+        "module A\n\
+         fn g(): Int? = Some(1)\n\
+         fn f(): Int? = { val x = g()?\n Some(x + 1) }"
+    ).unwrap();
+}
+
+#[test]
+fn try_on_option_still_rejected_in_a_result_returning_fn() {
+    // The item's own original repro: an Option-returning callee, `?`'d
+    // inside a function that returns Result — the direction this item
+    // deliberately did not build (no error payload to construct from a
+    // bare `None`). Must still fail, not silently start "working" by
+    // accident.
+    let kind = first_error_kind(
+        "module A\n\
+         fn g(): Int? = Some(1)\n\
+         fn f(): Result<Int, Text> = { val x = g()?\n Ok(x + 1) }"
+    );
+    assert!(matches!(kind, TypeErrorKind::Mismatch { .. }), "expected E0200: {:?}", kind);
+}
+
+#[test]
+fn try_on_option_works_in_an_impl_method_returning_option() {
+    check(
+        "module A\n\
+         fn g(): Int? = Some(1)\n\
+         type Box = { n: Int }\n\
+         impl Box { fn get(self): Int? = { val x = g()?\n Some(x + self.n) } }"
+    ).unwrap();
+}
+
 #[test]
 fn list_literal_homogeneous_ok() {
     check("module A\nfn f(): List<Int> = [1, 2, 3]").unwrap();

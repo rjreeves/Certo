@@ -1805,12 +1805,19 @@ fn check_decl(decl: &Decl, ctx: &mut Ctx<'_>) {
                     let ty = type_expr_to_ty(&p.ty.node, ctx);
                     ctx.env.define(p.name.node.clone(), ty);
                 }
+                // BACKLOG item 321 — make this function's own declared
+                // return type available to `Expr::Try`'s inference arm
+                // *before* the body is checked, so `e?` on an Option-shaped
+                // operand can be allowed exactly when this function also
+                // returns `Option<_>`. Computed once here and reused below
+                // for the existing body/declared-return unification.
+                let declared_ret = f.ret_ty.as_ref().map(|ann| type_expr_to_ty(&ann.node, ctx));
+                ctx.env.set_current_body_return_ty(declared_ret.clone());
                 // Infer body
                 let body_ty = infer_fn_body(body, ctx);
 
                 // Unify body type with declared return type (if present)
-                if let Some(ann) = &f.ret_ty {
-                    let declared = type_expr_to_ty(&ann.node, ctx);
+                if let Some(declared) = declared_ret {
                     if !literal_matches_fixed_width(&body.node, &declared) {
                         ctx.unify(body_ty, declared, f.span);
                     }
@@ -1824,6 +1831,7 @@ fn check_decl(decl: &Decl, ctx: &mut Ctx<'_>) {
 
                 ctx.env.clear_current_body_row_bounds();
                 ctx.env.clear_current_body_trait_bounds();
+                ctx.env.clear_current_body_return_ty();
                 ctx.env.pop();
             }
         }
@@ -2054,15 +2062,18 @@ fn check_decl(decl: &Decl, ctx: &mut Ctx<'_>) {
                         let ty = type_expr_to_ty(&p.ty.node, ctx);
                         ctx.env.define(p.name.node.clone(), ty);
                     }
+                    // BACKLOG item 321 — same as Decl::Fn above.
+                    let declared_ret = m.ret_ty.as_ref().map(|ann| type_expr_to_ty(&ann.node, ctx));
+                    ctx.env.set_current_body_return_ty(declared_ret.clone());
                     let body_ty = infer_fn_body(body, ctx);
-                    if let Some(ann) = &m.ret_ty {
-                        let declared = type_expr_to_ty(&ann.node, ctx);
+                    if let Some(declared) = declared_ret {
                         if !literal_matches_fixed_width(&body.node, &declared) {
                             ctx.unify(body_ty, declared, m.span);
                         }
                     }
                     ctx.env.clear_current_body_row_bounds();
                     ctx.env.clear_current_body_trait_bounds();
+                    ctx.env.clear_current_body_return_ty();
                     ctx.env.pop();
                 }
             }

@@ -2803,6 +2803,19 @@ fn lower_expr(expr: &HirExpr, b: &mut Builder) -> Operand {
             // bb_ok:
             //   _val = __result_unwrap(_result)        // extract Ok value
             //   ... (continue)
+            //
+            // BACKLOG item 321 — `e?` on an `Option<T>` operand takes a
+            // different branch entirely: only reachable when typeck
+            // confirmed the enclosing function itself also returns
+            // `Option<_>` (`crates/typeck/src/infer_expr.rs`'s own
+            // `Expr::Try` arm). `Option<T>`'s runtime shape is a raw `void*`
+            // (`None` = NULL, `Some(v)` a boxed pointer, per
+            // `Rvalue::BoxSome`/`UnboxSome`) — there is no `__result_is_ok`-
+            // style tag call to make here; branch directly on a null check,
+            // mirroring `check_nested_pattern`'s own `Constructor("None",
+            // ...)` arm exactly. Propagating `_result` itself on the `None`
+            // path is correct regardless of this function's own payload
+            // type, since NULL already *is* a valid `Option<_>` for any `_`.
 
             let inner_op = lower_expr(inner, b);
 
@@ -2810,7 +2823,33 @@ fn lower_expr(expr: &HirExpr, b: &mut Builder) -> Operand {
             let result_local = b.declare_local("_result", Ty::Error); // void*
             b.assign(result_local, Rvalue::Use(inner_op));
 
-            // Call __result_is_ok → bool
+            if matches!(inner.ty, Ty::Option(_)) {
+                let is_none_local = b.declare_local("_is_none", Ty::Bool);
+                b.assign(is_none_local, Rvalue::BinOp {
+                    op:  certo_hir::BinOp::Eq,
+                    lhs: Operand::Local(result_local),
+                    rhs: Operand::Global("__NULL".into()),
+                });
+                let ok_block  = b.new_block();
+                let err_block = b.new_block();
+                b.terminate(Terminator::If {
+                    cond:     Operand::Local(is_none_local),
+                    true_bb:  err_block,
+                    false_bb: ok_block,
+                });
+
+                // err_block: run defers then propagate the None.
+                b.switch_to(err_block);
+                emit_defers_then_return(Operand::Local(result_local), b);
+
+                // ok_block: unbox the Some payload.
+                b.switch_to(ok_block);
+                let val_local = b.declare_local("_try_val", expr.ty.clone());
+                b.assign(val_local, Rvalue::UnboxSome { opt: Operand::Local(result_local), ty: expr.ty.clone() });
+                return Operand::Local(val_local);
+            }
+
+            // Result<T, E> — call __result_is_ok → bool
             let is_ok_local  = b.declare_local("_is_ok", Ty::Bool);
             let after_is_ok  = b.new_block();
             b.terminate(Terminator::Call {
