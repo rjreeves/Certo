@@ -2992,6 +2992,22 @@ fn float_literal_types_as_float32_annotation() {
     check("module A\nfn f(): Unit = { val a: Float32 = 3.5 }").unwrap();
 }
 
+// BACKLOG item 306 — `Int64` (spec §4.1: "Same as Int") was a dead,
+// unconstructable type name: `Int8`/`Int16`/`Int32`/`UInt` were all mapped
+// to their own `Ty` variant here, but `Int64` was never mapped to
+// anything, even though `crates/resolve/src/scope.rs` already reserves it
+// as a builtin name — so it resolved to an opaque, incompatible nominal
+// type with no literal syntax. Confirmed live before this fix: `val x:
+// Int64 = 5` failed `E0200: expected Int64, found Int`.
+#[test]
+fn int64_is_a_real_alias_for_int_not_a_dead_type_name() {
+    check("module A\nfn f(): Unit = { val a: Int64 = 100 }").unwrap();
+    // Interchangeable with plain `Int` in both directions, since `Int64`
+    // maps to the exact same `Ty::Int`, not a distinct fixed-width type.
+    check("module A\nfn f(n: Int64): Int = n").unwrap();
+    check("module A\nfn f(n: Int): Int64 = n").unwrap();
+}
+
 #[test]
 fn negative_int_literal_types_as_signed_fixed_width_annotation() {
     check("module A\nfn f(): Unit = { val a: Int32 = -5000 }").unwrap();

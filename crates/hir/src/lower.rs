@@ -3141,6 +3141,9 @@ fn ast_ty_to_ty_with_params_depth(
             let targs: Vec<Ty> = args.iter().map(|a| ast_ty_to_ty_with_params_depth(&a.node, type_params, aliases, depth)).collect();
             match name {
                 "Int"     => Ty::Int,
+                // BACKLOG item 306 — see the identical fix/comment in
+                // `crates/typeck/src/infer_expr.rs`'s own duplicate table.
+                "Int64"   => Ty::Int,
                 "Int8"    => Ty::Int8,
                 "Int16"   => Ty::Int16,
                 "Int32"   => Ty::Int32,

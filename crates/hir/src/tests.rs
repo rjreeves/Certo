@@ -1728,6 +1728,18 @@ fn val_literal_resolves_to_each_declared_fixed_width_type() {
     assert_eq!(let_ty_of(&m, "f"), Ty::Float32);
 }
 
+// BACKLOG item 306 — `Int64` (spec §4.1: "Same as Int") was never mapped to
+// any `Ty` in `ast_ty_to_ty_with_params_depth` (this function's own
+// duplicate of typeck's identical conversion table), unlike its sibling
+// fixed-width names just above — checked directly on HIR's own lowered
+// type, same rationale as `let_ty_of`'s own doc comment: typeck accepting
+// an annotation doesn't guarantee HIR's independent conversion agrees.
+#[test]
+fn int64_resolves_to_plain_int_not_a_dead_type_name() {
+    let m = lower("module A\nfn f(): Unit = { val a: Int64 = 100 }");
+    assert_eq!(let_ty_of(&m, "f"), Ty::Int);
+}
+
 #[test]
 fn var_literal_also_resolves_to_the_declared_fixed_width_type() {
     // `Stmt::Var` previously discarded its own type annotation entirely in

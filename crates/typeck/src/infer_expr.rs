@@ -49,6 +49,13 @@ pub fn type_expr_to_ty(te: &TypeExpr, ctx: &mut Ctx<'_>) -> Ty {
             let targs: Vec<Ty> = args.iter().map(|a| type_expr_to_ty(&a.node, ctx)).collect();
             match name.as_str() {
                 "Int"     => Ty::Int,
+                // BACKLOG item 306 — `Int64` is spec §4.1's own documented
+                // alias for the default `Int` (see `Ty::Int`'s own doc
+                // comment in `crates/typeck/src/ty.rs`), not a distinct
+                // type; `crates/resolve/src/scope.rs` already reserves the
+                // name as a builtin, but neither conversion table actually
+                // mapped it, leaving it a dead, unconstructable name.
+                "Int64"   => Ty::Int,
                 "Int8"    => Ty::Int8,
                 "Int16"   => Ty::Int16,
                 "Int32"   => Ty::Int32,
