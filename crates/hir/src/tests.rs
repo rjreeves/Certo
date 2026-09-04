@@ -2647,6 +2647,62 @@ fn sortby_struct_decimal_field_key_lowers_ok() {
 }
 
 // ------------------------------------------------------------------ //
+// BACKLOG item 311 — `List.sumBy` alone also accepts a non-generic struct
+// type declaring both `{Type}.add(a, b): {Type}` and `{Type}.zero(): {Type}`
+// — the actual spec §8.5 shape (`items.sumBy(.lineTotal)`, `lineTotal:
+// Money`, a `@valueObject` wrapping `Decimal`), unlike item 282's own
+// `Decimal`-field verification just above, which sidesteps this case.
+// This is the field-access shape typeck's own check can't resolve (see
+// `sortby_struct_float_field_key_does_not_false_positive` in
+// `crates/typeck`), so it's validated here instead, after the per-call-site
+// lambda hint runs.
+// ------------------------------------------------------------------ //
+
+#[test]
+fn sumby_struct_field_key_with_add_and_zero_lowers_ok() {
+    let m = lower(
+        "module A\nimport Stdlib.Collections.{ List }\n\
+         type Money = { amount: Int }\n\
+         impl Money {\n  fn add(a: Money, b: Money): Money = Money { amount: a.amount + b.amount }\n  fn zero(): Money = Money { amount: 0 }\n}\n\
+         type Item = { lineTotal: Money }\n\
+         fn f(items: List<Item>): Money = List.sumBy(items, (i) => i.lineTotal)"
+    );
+    let f = m.items.iter().find_map(|it| match it {
+        HirItem::Fn(f) if f.name == "f" => Some(f),
+        _ => None,
+    }).expect("expected fn `f`");
+    assert_eq!(f.body.as_ref().unwrap().ty, Ty::Named { name: "Money".into(), args: vec![] },
+        "List.sumBy over a Money field must resolve Money, got {:?}", f.body.as_ref().unwrap().ty);
+}
+
+#[test]
+fn sumby_struct_field_key_without_add_zero_is_e0601() {
+    let err = try_lower(
+        "module A\nimport Stdlib.Collections.{ List }\n\
+         type Box = { value: Int }\n\
+         type Item = { b: Box }\n\
+         fn f(items: List<Item>): Box = List.sumBy(items, (i) => i.b)"
+    ).expect_err("a struct field key with no add/zero must be rejected");
+    assert!(err.iter().any(|e| matches!(&e.kind, crate::LowerErrorKind::Unsupported(msg) if msg.contains("Box"))),
+        "expected an Unsupported error naming Box, got {err:?}");
+}
+
+#[test]
+fn sortby_struct_field_key_with_add_zero_is_still_e0601() {
+    // Regression guard: `sortBy`/`minBy`/`maxBy` stay exactly as
+    // restrictive as before, mirroring the identical `crates/typeck` guard.
+    let err = try_lower(
+        "module A\nimport Stdlib.Collections.{ List }\n\
+         type Money = { amount: Int }\n\
+         impl Money {\n  fn add(a: Money, b: Money): Money = Money { amount: a.amount + b.amount }\n  fn zero(): Money = Money { amount: 0 }\n}\n\
+         type Item = { lineTotal: Money }\n\
+         fn f(items: List<Item>): List<Item> = List.sortBy(items, (i) => i.lineTotal)"
+    ).expect_err("sortBy must not accept a struct key even with add/zero declared");
+    assert!(err.iter().any(|e| matches!(&e.kind, crate::LowerErrorKind::Unsupported(msg) if msg.contains("Money"))),
+        "expected an Unsupported error naming Money, got {err:?}");
+}
+
+// ------------------------------------------------------------------ //
 // BACKLOG item 304 — a bare `Type.method` reference (not called) must
 // resolve a real `Ty::Fn`, not `Ty::Error` — the previous unconditional
 // `Ty::Error` here made `wrap_named_fn_as_closure` (crates/mir) build a

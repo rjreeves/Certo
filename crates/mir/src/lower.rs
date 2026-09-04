@@ -891,19 +891,29 @@ fn lower_sum_by_call(list_expr: &HirExpr, key_expr: &HirExpr, b: &mut Builder) -
     let list_param = lb.declare_local("_list", Ty::List(Box::new(t_ty.clone())));
     let key_param = lb.declare_local("_key", key_ty.clone());
 
-    let zero = match &n_ty {
-        Ty::Float | Ty::Float32 => Operand::Const(MirConst::Float(0.0)),
+    let acc_local = lb.declare_local("_acc", n_ty.clone());
+    match &n_ty {
+        Ty::Float | Ty::Float32 => lb.assign(acc_local, Rvalue::Use(Operand::Const(MirConst::Float(0.0)))),
         // BACKLOG item 282 — a `Decimal` accumulator's zero must be a real
         // `certo_decimal_t` value (via `certo_decimal_parse`, the same
         // runtime path any other `Decimal` literal goes through), not a
         // bit-pattern `MirConst::Int(0)` this struct-typed accumulator's
         // own `Rvalue::BinOp{Add}` (routed to `certo_decimal_add` by
         // `emit_binop`) would otherwise misread.
-        Ty::Decimal(_) => Operand::Const(MirConst::Decimal("0".to_string())),
-        _ => Operand::Const(MirConst::Int(0)),
-    };
-    let acc_local = lb.declare_local("_acc", n_ty.clone());
-    lb.assign(acc_local, Rvalue::Use(zero));
+        Ty::Decimal(_) => lb.assign(acc_local, Rvalue::Use(Operand::Const(MirConst::Decimal("0".to_string())))),
+        // BACKLOG item 311 — a user struct type (e.g. `Money`) has no
+        // literal/bit-pattern "zero" at all; typeck/HIR's own
+        // `is_supported_sum_type`/`is_supported_sum_ty` already validated
+        // this type declares a real `{Type}.zero(): {Type}` function
+        // (mirroring `Decimal.add`'s own naming convention), so call it
+        // directly to seed the accumulator instead.
+        Ty::Named { name, args } if args.is_empty() => {
+            let next = lb.new_block();
+            lb.terminate(Terminator::Call { func: Operand::Global(format!("{name}.zero")), args: vec![], dest: acc_local, next });
+            lb.switch_to(next);
+        }
+        _ => lb.assign(acc_local, Rvalue::Use(Operand::Const(MirConst::Int(0)))),
+    }
 
     let len_local = lb.declare_local("_len", Ty::Int);
     let len_done = lb.new_block();
@@ -946,7 +956,24 @@ fn lower_sum_by_call(list_expr: &HirExpr, key_expr: &HirExpr, b: &mut Builder) -
     lb.switch_to(key_done);
 
     let acc_new = lb.declare_local("_acc_new", n_ty.clone());
-    lb.assign(acc_new, Rvalue::BinOp { op: certo_hir::BinOp::Add, lhs: Operand::Local(acc_local), rhs: Operand::Local(key_val) });
+    // BACKLOG item 311 — same idea as the zero-seed above: a user struct
+    // type has no bare `+` (no operator overloading in Certo), so call its
+    // own already-validated `{Type}.add(a, b): {Type}` instead of emitting
+    // an `Rvalue::BinOp{Add}` a struct operand could never satisfy at the
+    // C level.
+    match &n_ty {
+        Ty::Named { name, args } if args.is_empty() => {
+            let next = lb.new_block();
+            lb.terminate(Terminator::Call {
+                func: Operand::Global(format!("{name}.add")),
+                args: vec![Operand::Local(acc_local), Operand::Local(key_val)],
+                dest: acc_new,
+                next,
+            });
+            lb.switch_to(next);
+        }
+        _ => lb.assign(acc_new, Rvalue::BinOp { op: certo_hir::BinOp::Add, lhs: Operand::Local(acc_local), rhs: Operand::Local(key_val) }),
+    }
     lb.assign(acc_local, Rvalue::Use(Operand::Local(acc_new)));
 
     let i_new = lb.declare_local("_i_new", Ty::Int);

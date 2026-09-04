@@ -680,6 +680,27 @@ fn is_supported_key_ty(ty: &Ty) -> bool {
         | Ty::Decimal(_))
 }
 
+/// `List.sumBy`'s own additional acceptance (BACKLOG item 311) — mirrors
+/// `crates/typeck/src/infer_expr.rs`'s own `is_supported_sum_type`, kept in
+/// sync by hand for the identical reason `is_supported_key_ty`/
+/// `is_supported_key_type` already are: a non-generic named struct type
+/// declaring both `{Type}.add(a: {Type}, b: {Type}): {Type}` and
+/// `{Type}.zero(): {Type}` — checked against `cx.fn_param_tys`/
+/// `cx.fn_ret_tys`, HIR's own qualified-function tables (populated for
+/// every top-level `fn`/`impl` method during hoisting), since HIR never
+/// shares typeck's `TypeEnv`.
+fn is_supported_sum_ty(ty: &Ty, cx: &Cx) -> bool {
+    if is_supported_key_ty(ty) { return true; }
+    let Ty::Named { name, args } = ty else { return false };
+    if !args.is_empty() { return false; }
+    let add_ok = cx.fn_param_tys.get(&format!("{name}.add"))
+        .is_some_and(|p| p.len() == 2 && &p[0] == ty && &p[1] == ty)
+        && cx.fn_ret_types.get(&format!("{name}.add")) == Some(ty);
+    let zero_ok = cx.fn_param_tys.get(&format!("{name}.zero")).is_some_and(|p| p.is_empty())
+        && cx.fn_ret_types.get(&format!("{name}.zero")) == Some(ty);
+    add_ok && zero_ok
+}
+
 fn stdlib_param_names() -> HashMap<&'static str, &'static [&'static str]> {
     let mut m: HashMap<&'static str, &'static [&'static str]> = HashMap::new();
 
@@ -1621,14 +1642,21 @@ fn lower_expr(expr: &S<Expr>, cx: &mut Cx) -> HirExpr {
                                 // miscompiled instead of erroring.
                                 let is_key_fn = matches!(fn_full_path.as_deref(),
                                     Some("List.sortBy") | Some("List.minBy") | Some("List.maxBy") | Some("List.sumBy"));
+                                // BACKLOG item 311 — `List.sumBy` alone also
+                                // accepts a struct declaring `{Type}.add`/
+                                // `{Type}.zero`; `sortBy`/`minBy`/`maxBy`
+                                // stay exactly as restrictive as before.
+                                let is_sum_fn = matches!(fn_full_path.as_deref(), Some("List.sumBy"));
                                 if is_key_fn {
                                     if let HirExprKind::Lambda { body, .. } = &lowered.kind {
-                                        if !matches!(body.ty, Ty::Error) && !is_supported_key_ty(&body.ty) {
+                                        let key_ok = if is_sum_fn { is_supported_sum_ty(&body.ty, cx) } else { is_supported_key_ty(&body.ty) };
+                                        if !matches!(body.ty, Ty::Error) && !key_ok {
                                             cx.err(LowerErrorKind::Unsupported(format!(
                                                 "`{}`'s key/numeric projection resolved to `{}`, which isn't \
-                                                 supported — only Int/Int8/Int16/Int32/UInt/Float/Float32 are \
-                                                 (Text's ordering isn't lexicographic here and Decimal has no \
-                                                 generic comparison/addition yet)",
+                                                 supported — only Int/Int8/Int16/Int32/UInt/Float/Float32/Decimal \
+                                                 are (Text's ordering isn't lexicographic here); `List.sumBy` also \
+                                                 accepts a struct type declaring both `{{Type}}.add(a, b): {{Type}}` \
+                                                 and `{{Type}}.zero(): {{Type}}`",
                                                 fn_full_path.as_deref().unwrap_or(""), body.ty.display(),
                                             )), arg.value.span);
                                         }
@@ -1663,14 +1691,21 @@ fn lower_expr(expr: &S<Expr>, cx: &mut Cx) -> HirExpr {
                                 let lowered = lower_lambda_with_param_hint(params, body, &hint, cx, arg.value.span);
                                 let is_key_fn = matches!(fn_full_path.as_deref(),
                                     Some("List.sortBy") | Some("List.minBy") | Some("List.maxBy") | Some("List.sumBy"));
+                                // BACKLOG item 311 — `List.sumBy` alone also
+                                // accepts a struct declaring `{Type}.add`/
+                                // `{Type}.zero`; `sortBy`/`minBy`/`maxBy`
+                                // stay exactly as restrictive as before.
+                                let is_sum_fn = matches!(fn_full_path.as_deref(), Some("List.sumBy"));
                                 if is_key_fn {
                                     if let HirExprKind::Lambda { body, .. } = &lowered.kind {
-                                        if !matches!(body.ty, Ty::Error) && !is_supported_key_ty(&body.ty) {
+                                        let key_ok = if is_sum_fn { is_supported_sum_ty(&body.ty, cx) } else { is_supported_key_ty(&body.ty) };
+                                        if !matches!(body.ty, Ty::Error) && !key_ok {
                                             cx.err(LowerErrorKind::Unsupported(format!(
                                                 "`{}`'s key/numeric projection resolved to `{}`, which isn't \
-                                                 supported — only Int/Int8/Int16/Int32/UInt/Float/Float32 are \
-                                                 (Text's ordering isn't lexicographic here and Decimal has no \
-                                                 generic comparison/addition yet)",
+                                                 supported — only Int/Int8/Int16/Int32/UInt/Float/Float32/Decimal \
+                                                 are (Text's ordering isn't lexicographic here); `List.sumBy` also \
+                                                 accepts a struct type declaring both `{{Type}}.add(a, b): {{Type}}` \
+                                                 and `{{Type}}.zero(): {{Type}}`",
                                                 fn_full_path.as_deref().unwrap_or(""), body.ty.display(),
                                             )), arg.value.span);
                                         }

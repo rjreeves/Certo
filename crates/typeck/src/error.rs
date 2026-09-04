@@ -273,7 +273,11 @@ impl TypeError {
             TypeErrorKind::AgeOnNonTimestamp { found } =>
                 format!("E0709: `.age` is only valid on Timestamp or Timestamp?, found `{}`", found.display()),
             TypeErrorKind::UnsupportedKeyType { fn_name, found } =>
-                format!("E0710: `{}`'s key/numeric projection resolved to `{}`, which isn't supported — only Int/Int8/Int16/Int32/UInt/Float/Float32 are", fn_name, found.display()),
+                if fn_name == "List.sumBy" {
+                    format!("E0710: `{}`'s key/numeric projection resolved to `{}`, which isn't supported — only Int/Int8/Int16/Int32/UInt/Float/Float32/Decimal are, or a struct type declaring both `{{Type}}.add(a, b): {{Type}}` and `{{Type}}.zero(): {{Type}}`", fn_name, found.display())
+                } else {
+                    format!("E0710: `{}`'s key/numeric projection resolved to `{}`, which isn't supported — only Int/Int8/Int16/Int32/UInt/Float/Float32/Decimal are", fn_name, found.display())
+                },
             TypeErrorKind::RuleCycle { validator, cycle } =>
                 format!("E0700: cycle in rule dependency graph in validator `{}`: {}", validator, cycle.join(" → ")),
             TypeErrorKind::AfterRuleNotFound { rule_name, after_name } =>
