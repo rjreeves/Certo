@@ -209,6 +209,78 @@ fn non_recursive_field_construction_is_unaffected_by_the_self_ref_boxing_check()
     assert!(!has_box, "an ordinary, non-recursive constructor call must not box anything");
 }
 
+// ------------------------------------------------------------------ //
+// BACKLOG item 308 — a *generic* self-referential sum type (`Tree<T>`'s own
+// `Node(value: T, left: Tree<T>, right: Tree<T>)`, spec §3.3's own literal
+// example) needs the identical box/unbox treatment item 277 built for the
+// non-generic case; the self-ref detection previously required the field's
+// own type args to be empty (`args.is_empty()`), which a generic self-
+// reference never satisfies (`left`'s declared type is `Tree<T>`, i.e.
+// `Ty::Named{"Tree", args: [Ty::Var(0)]}`, not `Ty::Named{"Tree", args: []}`).
+// Confirmed live before this fix: 5 real C compile errors (`assigning to
+// 'Tree' from incompatible type 'void *'`, etc.).
+// ------------------------------------------------------------------ //
+
+#[test]
+fn generic_self_referential_constructor_call_boxes_the_recursive_field_argument() {
+    let mf = mir_fn_named(
+        "module A\ntype Tree<T> = | Leaf | Node(value: T, left: Tree<T>, right: Tree<T>)\n\
+         fn f(): Tree<Int> = Node(1, Leaf, Leaf)",
+        "f");
+    let box_count = mf.blocks.iter().flat_map(|bb| bb.stmts.iter()).filter(|s| matches!(s,
+        crate::MirStmt::Assign { rvalue: Rvalue::Box { .. }, .. }
+    )).count();
+    assert_eq!(box_count, 2, "expected exactly 2 Rvalue::Box (one for `left`, one for `right`), got {box_count}");
+}
+
+#[test]
+fn generic_self_referential_constructor_call_does_not_use_boxsome() {
+    // Regression guard, mirroring the non-generic case's own identical test:
+    // a self-referential field must use plain `Rvalue::Box`, not `BoxSome` —
+    // that pairing is reserved for the bare type-param field (`value: T`
+    // itself), which this same constructor call also has one of.
+    let mf = mir_fn_named(
+        "module A\ntype Tree<T> = | Leaf | Node(value: T, left: Tree<T>, right: Tree<T>)\n\
+         fn f(): Tree<Int> = Node(1, Leaf, Leaf)",
+        "f");
+    let box_count = mf.blocks.iter().flat_map(|bb| bb.stmts.iter()).filter(|s| matches!(s,
+        crate::MirStmt::Assign { rvalue: Rvalue::Box { .. }, .. }
+    )).count();
+    let boxsome_count = mf.blocks.iter().flat_map(|bb| bb.stmts.iter()).filter(|s| matches!(s,
+        crate::MirStmt::Assign { rvalue: Rvalue::BoxSome { .. }, .. }
+    )).count();
+    assert_eq!(box_count, 2, "expected 2 Rvalue::Box for the two self-referential fields");
+    assert_eq!(boxsome_count, 1, "expected exactly 1 Rvalue::BoxSome for the bare-T `value` field");
+}
+
+#[test]
+fn pattern_match_on_a_generic_self_referential_field_unboxes_via_plain_unbox() {
+    let mf = mir_fn_named(
+        "module A\ntype Tree<T> = | Leaf | Node(value: T, left: Tree<T>, right: Tree<T>)\n\
+         fn depth(t: Tree<Int>): Int = match t {\n Leaf => 0\n Node(v, l, r) => 1\n}",
+        "depth");
+    let has_unbox = mf.blocks.iter().any(|bb| bb.stmts.iter().any(|s| matches!(s,
+        crate::MirStmt::Assign { rvalue: Rvalue::Unbox { .. }, .. }
+    )));
+    assert!(has_unbox, "expected an Rvalue::Unbox reading the generic self-referential `left`/`right` fields");
+}
+
+#[test]
+fn non_generic_self_referential_case_is_unaffected_by_the_generic_relaxation() {
+    // Regression guard: item 277's own non-generic self-referential tests
+    // (a bare `Tree` with no type params at all) must keep working exactly
+    // as before — the `args.is_empty()` gate this item dropped was a
+    // *subset* of the new, broader name-only check, not a separate path.
+    let mf = mir_fn_named(
+        "module A\ntype Tree = | Leaf | Node(value: Int, left: Tree, right: Tree)\n\
+         fn f(): Tree = Node(1, Leaf, Leaf)",
+        "f");
+    let box_count = mf.blocks.iter().flat_map(|bb| bb.stmts.iter()).filter(|s| matches!(s,
+        crate::MirStmt::Assign { rvalue: Rvalue::Box { .. }, .. }
+    )).count();
+    assert_eq!(box_count, 2, "non-generic self-referential boxing must be unaffected by item 308's relaxation");
+}
+
 #[test]
 fn generic_call_does_not_double_box_already_opaque_argument() {
     // `wrapTwice`'s own body calls `Box.wrap(v)` where `v` is `wrapTwice`'s

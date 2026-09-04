@@ -1431,7 +1431,17 @@ fn check_nested_pattern(b: &mut Builder, pat: &HirPat, op: &Operand, ty: &Ty, ne
                                 let unbox = if !matches!(concrete, Ty::Var(_)) { FieldUnbox::OptionBoxed } else { FieldUnbox::None };
                                 (concrete, unbox)
                             }
-                            Ty::Named { name: field_ty_name, args } if args.is_empty() && field_ty_name == enclosing_type_name => {
+                            // BACKLOG item 308 — a *generic* self-referential
+                            // field (`Tree<T>`'s own `left: Tree<T>`) needs the
+                            // identical box/unbox treatment as the non-generic
+                            // case item 277 built (dropped `args.is_empty()`,
+                            // previously the only gate): the recursive-storage
+                            // problem a self-referential field poses (an
+                            // inline-by-value field would be an infinite-size
+                            // struct) is about the field's own *name* matching
+                            // its enclosing type, independent of whatever type
+                            // arguments it (or its enclosing type) carries.
+                            Ty::Named { name: field_ty_name, .. } if field_ty_name == enclosing_type_name => {
                                 (declared.clone(), FieldUnbox::SelfRefBoxed)
                             }
                             other => (other.clone(), FieldUnbox::None),
@@ -1879,8 +1889,13 @@ fn lower_expr(expr: &HirExpr, b: &mut Builder) -> Operand {
                 // plain, already-generic `Rvalue::Box`/`box_value`, not the
                 // Option-specific `BoxSome`) so the constructor receives the
                 // pointer its own C signature now expects.
-                if let Some(Ty::Named { name: field_ty_name, args: field_ty_args }) = declared {
-                    if field_ty_args.is_empty() && Some(field_ty_name.as_str()) == enclosing_type.as_deref() {
+                // BACKLOG item 308 — a *generic* self-referential field
+                // (`Tree<T>`'s own `left: Tree<T>`) needs the same boxing as
+                // the non-generic case just above's own comment describes;
+                // dropped the `field_ty_args.is_empty()` gate that previously
+                // limited this to a non-generic self-reference only.
+                if let Some(Ty::Named { name: field_ty_name, .. }) = declared {
+                    if Some(field_ty_name.as_str()) == enclosing_type.as_deref() {
                         let boxed = b.declare_local("_boxed_self_field", Ty::Var(0));
                         b.assign(boxed, Rvalue::Box { value: value_op, ty: a.ty.clone() });
                         return Operand::Local(boxed);
@@ -2342,7 +2357,15 @@ fn lower_expr(expr: &HirExpr, b: &mut Builder) -> Operand {
                                             let unbox = if !matches!(concrete, Ty::Var(_)) { FieldUnbox::OptionBoxed } else { FieldUnbox::None };
                                             (concrete, unbox)
                                         }
-                                        Ty::Named { name: field_ty_name, args } if args.is_empty() && field_ty_name == enclosing_type_name => {
+                                        // BACKLOG item 308 — see the identical
+                                        // comment on the sibling check in
+                                        // `check_nested_pattern` above: dropped
+                                        // the `args.is_empty()` gate so a
+                                        // *generic* self-referential field
+                                        // (`Tree<T>`'s own `left: Tree<T>`) gets
+                                        // the same box/unbox treatment as the
+                                        // non-generic case.
+                                        Ty::Named { name: field_ty_name, .. } if field_ty_name == enclosing_type_name => {
                                             (declared.clone(), FieldUnbox::SelfRefBoxed)
                                         }
                                         other => (other.clone(), FieldUnbox::None),
