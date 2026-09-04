@@ -590,7 +590,7 @@ certo db create add_users_table     # scaffold a new migration file
 
 ## **7.4 Resource Management**
 
-| // use — automatically closes resources when scope exits async fn processFile(path: Path): Result\<Report, IOError\> =     use file = await File.open(path) \{         val content = await file.readAll()         Ok(parseReport(content))     \}  // file.close() called automatically here  // defer — run on scope exit regardless of success/failure async fn withAudit\<T, E\>(action: Text, f: () =\> Result\<T, E\>): Result\<T, E\> = \{     val start = Timestamp.now()     defer \{ db.auditLog.insert(AuditEntry(action, start, Timestamp.now())) \}     f() \} |
+| // use — automatically closes resources when scope exits fn processFile(path: Text): Result\<Text, Text\> =     match File.open(path) \{         None =\> Err("could not open file")         Some(f) =\> use file = f \{             match file.readAll() \{                 None =\> Err("could not read file")                 Some(content) =\> Ok(content)             \}         \}     \}  // file.close() called automatically here  // defer — run on scope exit regardless of success/failure async fn withAudit\<T, E\>(action: Text, f: () =\> Result\<T, E\>): Result\<T, E\> = \{     val start = Timestamp.now()     defer \{ db.auditLog.insert(AuditEntry(action, start, Timestamp.now())) \}     f() \} |
 | - |
 
 
