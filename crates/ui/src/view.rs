@@ -72,8 +72,8 @@ pub fn generate_view(v: &ViewDecl) -> String {
     writeln!(out, "  <title>{}</title>", html_esc(name)).unwrap();
     writeln!(out, "  <script src=\"https://unpkg.com/htmx.org@2\" defer></script>").unwrap();
     writeln!(out, "  <style>").unwrap();
-    writeln!(out, "    .vstack {{ display: flex; flex-direction: column; gap: 0.5rem; }}").unwrap();
-    writeln!(out, "    .hstack {{ display: flex; flex-direction: row;    gap: 0.5rem; }}").unwrap();
+    writeln!(out, "    .vstack, .column {{ display: flex; flex-direction: column; gap: 0.5rem; }}").unwrap();
+    writeln!(out, "    .hstack, .row    {{ display: flex; flex-direction: row;    gap: 0.5rem; }}").unwrap();
     writeln!(out, "    .cto-view {{ padding: 1rem; }}").unwrap();
     writeln!(out, "  </style>").unwrap();
     writeln!(out, "</head>").unwrap();
