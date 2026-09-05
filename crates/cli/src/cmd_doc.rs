@@ -126,6 +126,10 @@ pub enum ItemKind {
     Validator,
     Rule,
     Constraint,
+    // BACKLOG item 319 — §16.14's "New Top-Level Declarations" table lists
+    // four kinds (`constraint`, `temporal`, `validator`, `rule`); item 222
+    // only ever added the first, third, and fourth. Same crude recognition.
+    Temporal,
 }
 
 impl ItemKind {
@@ -138,6 +142,7 @@ impl ItemKind {
             ItemKind::Validator  => "validator",
             ItemKind::Rule       => "rule",
             ItemKind::Constraint => "constraint",
+            ItemKind::Temporal   => "temporal",
         }
     }
 }
@@ -188,7 +193,7 @@ pub fn extract_doc_items(src: &str) -> Vec<DocItem> {
 }
 
 fn should_always_include(kind: &ItemKind) -> bool {
-    matches!(kind, ItemKind::Function | ItemKind::Type | ItemKind::Validator | ItemKind::Rule | ItemKind::Constraint)
+    matches!(kind, ItemKind::Function | ItemKind::Type | ItemKind::Validator | ItemKind::Rule | ItemKind::Constraint | ItemKind::Temporal)
 }
 
 /// Try to parse a declaration line and return a partial DocItem (no doc/anchor yet).
@@ -242,6 +247,15 @@ fn try_parse_decl_line(trimmed: &str) -> Option<DocItem> {
         let name = extract_word_after(s, "constraint ")?;
         let name = name.split(['=']).next()?.trim().to_string();
         return Some(DocItem { kind: ItemKind::Constraint, name, signature: sig, doc: String::new(), anchor: String::new() });
+    }
+
+    // BACKLOG item 319 — `temporal Name = Duration...` has the identical
+    // shape to `constraint Name = expr`, same extraction.
+    if s.starts_with("temporal ") {
+        let sig = trimmed.to_string();
+        let name = extract_word_after(s, "temporal ")?;
+        let name = name.split(['=']).next()?.trim().to_string();
+        return Some(DocItem { kind: ItemKind::Temporal, name, signature: sig, doc: String::new(), anchor: String::new() });
     }
 
     // `rule name {` — nested inside a `validator { ... }` body; this
@@ -335,6 +349,7 @@ nav .badge-var  {{ background: #fce7f3; color: #9d174d; }}
 nav .badge-validator  {{ background: #dbeafe; color: #1d4ed8; }}
 nav .badge-rule       {{ background: #e0e7ff; color: #4338ca; }}
 nav .badge-constraint {{ background: #fee2e2; color: #b91c1c; }}
+nav .badge-temporal   {{ background: #d1fae5; color: #047857; }}
 main {{
   flex: 1;
   padding: 40px 60px;
@@ -429,6 +444,7 @@ fn render_sidebar(items: &[DocItem]) -> String {
             ItemKind::Validator  => "badge-validator",
             ItemKind::Rule       => "badge-rule",
             ItemKind::Constraint => "badge-constraint",
+            ItemKind::Temporal   => "badge-temporal",
         };
         format!(
             "    <li><a href=\"#{anchor}\"><span class=\"badge {badge_class}\">{kind}</span>{name}</a></li>",
@@ -450,6 +466,7 @@ fn render_content(items: &[DocItem]) -> String {
             ItemKind::Validator  => "badge-validator",
             ItemKind::Rule       => "badge-rule",
             ItemKind::Constraint => "badge-constraint",
+            ItemKind::Temporal   => "badge-temporal",
         };
         let doc_html = if item.doc.is_empty() {
             r#"<p class="no-doc">No documentation.</p>"#.to_string()
@@ -559,6 +576,24 @@ mod tests {
         let items = extract_doc_items(src);
         assert!(items.iter().any(|i| i.kind == ItemKind::Constraint && i.name == "UserIsAdmin"),
             "expected a UserIsAdmin constraint item, got: {:?}", items.iter().map(|i| (&i.kind, &i.name)).collect::<Vec<_>>());
+    }
+
+    // BACKLOG item 319 — §16.14's own "New Top-Level Declarations" table
+    // lists `temporal` alongside `constraint`/`validator`/`rule`; item 222
+    // never added a matching branch for it.
+    #[test]
+    fn temporal_declaration_is_recognized() {
+        let src = "temporal VoidWindow = Duration.days(30)\n";
+        let items = extract_doc_items(src);
+        assert!(items.iter().any(|i| i.kind == ItemKind::Temporal && i.name == "VoidWindow"),
+            "expected a VoidWindow temporal item, got: {:?}", items.iter().map(|i| (&i.kind, &i.name)).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn temporal_is_always_included_without_a_doc_comment() {
+        let src = "temporal VoidWindow = Duration.days(30)\n";
+        let items = extract_doc_items(src);
+        assert!(items.iter().any(|i| i.kind == ItemKind::Temporal), "expected a temporal item without any /// doc comment");
     }
 
     #[test]
