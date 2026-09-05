@@ -8,7 +8,7 @@
 
 param(
     [Parameter(Mandatory)]
-    [string]$version,
+    [string]$version = "1",
 
     [string]$out = "dist",
 
@@ -19,9 +19,9 @@ param(
 Set-Location "$PSScriptRoot\.."
 $ErrorActionPreference = "Stop"
 
-$isWindows = $IsWindows -or $env:OS -eq "Windows_NT"
-$ext       = if ($isWindows) { ".exe" } else { "" }
-$platform  = if ($isWindows) {
+$myWindows = $true #$IsWindows  -or $env:OS -eq "Windows_NT"
+$ext       = if ($myWindows) { ".exe" } else { "" }
+$platform  = if ($myWindows) {
     "windows-x64"
 } elseif ($IsMacOS) {
     "macos-arm64"
