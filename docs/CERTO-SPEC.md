@@ -666,7 +666,7 @@ Certo can call C libraries through its Foreign Function Interface. FFI calls are
 ## 12.3 Calling Certo from Other Languages
 
 ```
-// Export functions for use from Python, Node.js, etc. @export("certo_process_order") pub fn processOrder(orderJson: Text): Text =     orderJson     │> Json.decode<OrderRequest>     │> flatMap(processOrderInternal)     │> map(Json.encode)     │> getOrElse("""{"error":"Processing failed"}""") // Called from Python: // import certo // result = certo.process_order(order_json) // WASM target — runs in browser or inside PostgreSQL // certo build --target wasm // Creates: dist/my-app.wasm
+// Export functions for use from Python, Node.js, etc. @export("certo_process_order") pub fn processOrder(orderJson: Text): Text =     orderJson     │> Json.decode<OrderRequest>     │> flatMap(processOrderInternal)     │> map(Json.encode)     │> getOrElse("""{"error":"Processing failed"}""") // Called from Python: // import certo // result = certo.process_order(order_json) // WASM target — a separate compiler binary, not `certo build --target` // (which has no `--target` flag at all) — targets wasm32-wasi (default) or // wasm32-unknown-unknown (--target browser); no PostgreSQL WASM target exists // certo-wasm src/main.cto -o dist/my-app.wasm
 ```
 
 ## 12.4 Gradual Adoption
