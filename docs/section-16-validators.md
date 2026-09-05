@@ -605,19 +605,6 @@ The compiler generates the session setting reads inside the trigger
 function. The `currentUserId()` function in `loaded by` expressions
 reads from the session automatically.
 
-### WASM Triggers
-
-When building for the Postgres WASM extension target, trigger validators
-compile to WASM functions installed directly in the database:
-
-```
-certo build --target wasm
-certo db install-extension dist/validators.wasm
-```
-
-No PL/pgSQL is generated. The WASM validator runs natively inside
-Postgres with full type safety.
-
 ---
 
 ## 16.8 Named Constraints
