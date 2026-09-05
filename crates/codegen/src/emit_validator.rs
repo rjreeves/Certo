@@ -94,7 +94,19 @@ pub fn emit_validator(
 
     // Entity variable: lowercase first letter of entity type name.
     let entity_var  = lowercase_first(&entity_ty);
-    let expand = |raw: String| substitute_constraints(&raw, constraints);
+    // BACKLOG item 317(b) — a `temporal` name referenced in an ordinary
+    // (non-trigger) rule body (`require invoice.createdAt.age < VoidWindow`,
+    // spec §16.9/§16.10's own documented shape) needs the exact same
+    // text-substitution treatment already applied to `constraint`
+    // references just below: `temporal` has no runtime C symbol anywhere
+    // outside the SQL-trigger path (`temporal_asts`'s *other* consumer,
+    // `SqlCtx`/`expr_to_sql` above), so the bare name must be inlined here
+    // or it reaches generated C as an undeclared identifier.
+    let temporal_bodies = build_temporal_bodies(temporal_asts);
+    let expand = |raw: String| {
+        let with_constraints = substitute_constraints(&raw, constraints);
+        substitute_constraints(&with_constraints, &temporal_bodies)
+    };
 
     // ---------------------------------------------------------------- //
     // Context type
@@ -530,11 +542,22 @@ fn resolve_constraint(
     wrapped
 }
 
+/// Build a name → parenthesized Certo source map for every module-level
+/// `temporal` declaration (BACKLOG item 317(b)) — unlike `constraint`,
+/// temporals don't compose (spec §16.9: "temporals are fully resolved at
+/// declaration time"), so this is a direct render, no recursion or cycle
+/// guard needed like `build_constraint_bodies`'s own `resolve_constraint`.
+pub fn build_temporal_bodies(temporals: &HashMap<&str, &S<Expr>>) -> HashMap<String, String> {
+    temporals.iter()
+        .map(|(&name, body)| (name.to_string(), format!("({})", fmt_expr(&body.node, 0))))
+        .collect()
+}
+
 /// Replace every standalone identifier in `text` that names a known
-/// constraint with that constraint's own expanded, parenthesized body.
-/// Skips content inside string literals and identifiers immediately
-/// following `.` (a field/qualified-path segment, never a bare constraint
-/// reference).
+/// constraint (or, via the same generic substitution, a known `temporal`)
+/// with that declaration's own expanded, parenthesized body. Skips content
+/// inside string literals and identifiers immediately following `.` (a
+/// field/qualified-path segment, never a bare reference).
 fn substitute_constraints(text: &str, resolved: &HashMap<String, String>) -> String {
     if resolved.is_empty() { return text.to_string(); }
     expand_idents(text, |word| resolved.get(word).cloned())
