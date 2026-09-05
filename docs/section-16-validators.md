@@ -1266,7 +1266,7 @@ imperative ordering logic. The compiler verifies the dependency graph.
 **DB trigger installation** — add `trigger on Update when status == Submitted`
 to install the same rules at the database layer automatically.
 
-**Generated documentation** — `certo docs` produces a rule catalogue
+**Generated documentation** — `certo doc` produces a rule catalogue
 from your validator declarations.
 
 ---
