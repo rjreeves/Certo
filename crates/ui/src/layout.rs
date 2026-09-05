@@ -15,6 +15,21 @@
 //! | `For(items, body)`     | comment noting dynamic list            |
 //! | `If(cond, body)`       | comment noting conditional             |
 //!
+//! BACKLOG item 216 — a deliberately bounded, **static-only** dashboard
+//! vocabulary (spec §10.2's own dashboard primitives, minus the two pieces
+//! the item's own investigation found substantially bigger and explicitly
+//! declined for now: the `Foo(...) { block }` trailing-block call syntax,
+//! and any live-query/`live val` data binding — every value rendered here
+//! must be a compile-time literal, same restriction every existing
+//! primitive above already has):
+//!
+//! | Certo call                                          | HTML output |
+//! |------------------------------------------------------|-------------|
+//! | `Column(children: […])`                               | `<div class="column">…</div>` — `VStack`'s own alias |
+//! | `Row(children: […])`                                  | `<div class="row">…</div>` — `HStack`'s own alias |
+//! | `MetricCard(label, value, format?, alert?)`           | `<div class="metric-card">…</div>` |
+//! | `Table(columns: […], rows: […])`                      | a real `<table>` |
+//!
 //! Any unrecognised call emits an HTML comment so the file stays valid.
 
 use std::fmt::Write as _;
@@ -38,6 +53,11 @@ pub fn layout_to_html(expr: &Expr, indent: usize) -> String {
                 Some("Input")  => input_html(args, &pad),
                 Some("For")    => format!("{pad}<!-- For loop: render list here -->\n"),
                 Some("If")     => format!("{pad}<!-- If condition: render conditionally here -->\n"),
+                // BACKLOG item 216 — static-only dashboard vocabulary.
+                Some("Column")     => container_html("column", args, indent),
+                Some("Row")        => container_html("row", args, indent),
+                Some("MetricCard") => metric_card_html(args, &pad),
+                Some("Table")      => table_html(args, indent),
                 Some(other)    => format!("{pad}<!-- unknown UI primitive: {} -->\n", other),
                 None           => format!("{pad}<!-- complex expression: cannot render -->\n"),
             }
@@ -101,6 +121,64 @@ fn input_html(args: &[Arg], pad: &str) -> String {
     let label = nth_str_arg(args, 1).unwrap_or(name);
     format!("{pad}<label>{}<input name=\"{}\" type=\"text\"></label>\n",
         html_escape(label), html_escape(name))
+}
+
+// BACKLOG item 216 — static-only dashboard vocabulary.
+
+fn metric_card_html(args: &[Arg], pad: &str) -> String {
+    let label  = nth_str_arg(args, 0).unwrap_or("Metric");
+    let value  = nth_any_lit_arg(args, 1).unwrap_or_default();
+    let format = named_arg_as_name(args, "format");
+    let alert  = named_arg_as_bool(args, "alert");
+
+    let mut card_class = "metric-card".to_string();
+    if alert { card_class.push_str(" alert"); }
+    let value_class = match &format {
+        Some(f) => format!(" metric-value-{}", f.to_lowercase()),
+        None    => String::new(),
+    };
+    format!(
+        "{pad}<div class=\"{card_class}\">\n\
+         {pad}  <div class=\"metric-label\">{}</div>\n\
+         {pad}  <div class=\"metric-value{value_class}\">{}</div>\n\
+         {pad}</div>\n",
+        html_escape(label), html_escape(&value)
+    )
+}
+
+fn table_html(args: &[Arg], indent: usize) -> String {
+    let pad = "  ".repeat(indent);
+    let columns: Vec<String> = named_list_arg(args, "columns").iter()
+        .filter_map(|e| lit_expr_to_string(&e.node))
+        .collect();
+    let rows: Vec<Vec<String>> = named_list_arg(args, "rows").iter()
+        .map(|row| match &row.node {
+            Expr::List { elements, .. } => elements.iter()
+                .filter_map(|c| lit_expr_to_string(&c.node))
+                .collect(),
+            other => lit_expr_to_string(other).into_iter().collect(),
+        })
+        .collect();
+
+    let mut out = String::new();
+    writeln!(out, "{pad}<table>").unwrap();
+    if !columns.is_empty() {
+        writeln!(out, "{pad}  <thead>\n{pad}    <tr>").unwrap();
+        for col in &columns {
+            writeln!(out, "{pad}      <th>{}</th>", html_escape(col)).unwrap();
+        }
+        writeln!(out, "{pad}    </tr>\n{pad}  </thead>").unwrap();
+    }
+    writeln!(out, "{pad}  <tbody>").unwrap();
+    for row in &rows {
+        writeln!(out, "{pad}    <tr>").unwrap();
+        for cell in row {
+            writeln!(out, "{pad}      <td>{}</td>", html_escape(cell)).unwrap();
+        }
+        writeln!(out, "{pad}    </tr>").unwrap();
+    }
+    writeln!(out, "{pad}  </tbody>\n{pad}</table>").unwrap();
+    out
 }
 
 // ------------------------------------------------------------------ //
@@ -170,6 +248,95 @@ fn nth_str_arg(args: &[Arg], n: usize) -> Option<&str> {
         }
     }
     None
+}
+
+/// Render any literal this static-only slice can meaningfully display as
+/// plain text — `Text`/`Int`/`Float`/`Decimal`/`Bool` — or `None` for
+/// anything else (an f-string, a live `val` reference, a whole expression).
+/// BACKLOG item 216's own bounded scope: every value here must already be
+/// known at compile time, same restriction `nth_str_arg` already enforces
+/// for the primitives above, just generalized past bare strings so a
+/// `MetricCard`'s numeric value or a `Table` cell isn't forced through a
+/// string literal to render at all.
+fn lit_expr_to_string(expr: &Expr) -> Option<String> {
+    match expr {
+        Expr::Lit { value, .. } => match value {
+            Lit::String(s)  => Some(s.clone()),
+            Lit::Int(n)      => Some(n.to_string()),
+            Lit::Float(f)    => Some(f.to_string()),
+            Lit::Decimal(s)  => Some(s.clone()),
+            Lit::Bool(b)     => Some(b.to_string()),
+            Lit::FString(_) | Lit::Uuid(_) | Lit::Unit => None,
+        },
+        _ => None,
+    }
+}
+
+/// Same positional/named-fallback lookup as `nth_str_arg`, but accepting any
+/// literal `lit_expr_to_string` can render, not just `Lit::String`.
+fn nth_any_lit_arg(args: &[Arg], n: usize) -> Option<String> {
+    let positional: Vec<_> = args.iter().filter(|a| a.label.is_none()).collect();
+    if let Some(arg) = positional.get(n) {
+        if let Some(s) = lit_expr_to_string(&arg.value.node) {
+            return Some(s);
+        }
+    }
+    if n == 1 {
+        for key in &["value"] {
+            for arg in args {
+                if arg.label.as_ref().map(|l| l.node.as_str()) == Some(*key) {
+                    if let Some(s) = lit_expr_to_string(&arg.value.node) {
+                        return Some(s);
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+/// A named arg's own "name" — either a bare identifier (`format: Currency`)
+/// or a plain string (`format: "Currency"`); used for CSS-class-style
+/// annotations rather than displayed text, so no HTML-escaping concern.
+fn named_arg_as_name(args: &[Arg], key: &str) -> Option<String> {
+    for arg in args {
+        if arg.label.as_ref().map(|l| l.node.as_str()) == Some(key) {
+            return match &arg.value.node {
+                Expr::Path { path, .. } => path.segments.last().map(|s| s.node.clone()),
+                Expr::Lit { value: Lit::String(s), .. } => Some(s.clone()),
+                _ => None,
+            };
+        }
+    }
+    None
+}
+
+/// A named arg's literal `Bool` value (`alert: true`) — anything else
+/// (a real comparison expression, a live value) isn't a compile-time literal
+/// this static-only slice can evaluate, so it's treated as absent/`false`
+/// rather than guessed at.
+fn named_arg_as_bool(args: &[Arg], key: &str) -> bool {
+    for arg in args {
+        if arg.label.as_ref().map(|l| l.node.as_str()) == Some(key) {
+            if let Expr::Lit { value: Lit::Bool(b), .. } = &arg.value.node {
+                return *b;
+            }
+        }
+    }
+    false
+}
+
+/// The raw element expressions of a named list argument (`columns: [...]`),
+/// or an empty list when the arg is missing or isn't a list literal.
+fn named_list_arg(args: &[Arg], key: &str) -> Vec<S<Expr>> {
+    for arg in args {
+        if arg.label.as_ref().map(|l| l.node.as_str()) == Some(key) {
+            if let Expr::List { elements, .. } = &arg.value.node {
+                return elements.clone();
+            }
+        }
+    }
+    vec![]
 }
 
 // ------------------------------------------------------------------ //
@@ -259,5 +426,89 @@ mod tests {
         let src = "module M\nview Foo { layout = Mystery(\"x\") }\n";
         let html = layout_html(src);
         assert!(html.contains("<!-- unknown UI primitive: Mystery -->"), "got: {}", html);
+    }
+
+    // ------------------------------------------------------------------ //
+    // BACKLOG item 216 — static-only dashboard vocabulary
+    // ------------------------------------------------------------------ //
+
+    #[test]
+    fn column_and_row_are_real_containers() {
+        let src = "module M\nview Foo { layout = Column(children: [Row(children: [Text(\"a\")])]) }\n";
+        let html = layout_html(src);
+        assert!(html.contains("class=\"column\""), "got: {}", html);
+        assert!(html.contains("class=\"row\""), "got: {}", html);
+        assert!(html.contains("<p>a</p>"), "got: {}", html);
+    }
+
+    #[test]
+    fn metric_card_renders_label_and_literal_value() {
+        let src = "module M\nview Foo { layout = MetricCard(\"Pending\", 42) }\n";
+        let html = layout_html(src);
+        assert!(html.contains("class=\"metric-card\""), "got: {}", html);
+        assert!(html.contains("metric-label\">Pending<"), "got: {}", html);
+        assert!(html.contains("metric-value\">42<"), "got: {}", html);
+    }
+
+    #[test]
+    fn metric_card_format_becomes_a_value_css_class() {
+        let src = "module M\nview Foo { layout = MetricCard(\"Revenue\", 100, format: Currency) }\n";
+        let html = layout_html(src);
+        assert!(html.contains("metric-value-currency"), "got: {}", html);
+    }
+
+    #[test]
+    fn metric_card_alert_true_adds_an_alert_class() {
+        let src = "module M\nview Foo { layout = MetricCard(\"Low Stock\", 3, alert: true) }\n";
+        let html = layout_html(src);
+        assert!(html.contains("class=\"metric-card alert\""), "got: {}", html);
+    }
+
+    #[test]
+    fn metric_card_alert_non_literal_is_ignored_not_guessed() {
+        // A real comparison expression (not a compile-time literal) is
+        // outside this static-only slice's scope — must not panic, and
+        // must not silently guess `true`.
+        let src = "module M\nfn f(): Unit = {}\nview Foo { layout = MetricCard(\"Low Stock\", 3, alert: 3 > 0) }\n";
+        let html = layout_html(src);
+        assert!(html.contains("class=\"metric-card\""), "got: {}", html);
+        assert!(!html.contains("alert\""), "expected no alert class for a non-literal condition: {}", html);
+    }
+
+    #[test]
+    fn table_renders_real_columns_and_rows() {
+        let src = "module M\nview Foo { layout = Table(columns: [\"Name\", \"Amount\"], rows: [[\"Alice\", \"10.00\"], [\"Bob\", \"5.00\"]]) }\n";
+        let html = layout_html(src);
+        assert!(html.contains("<table>"), "got: {}", html);
+        assert!(html.contains("<th>Name</th>"), "got: {}", html);
+        assert!(html.contains("<th>Amount</th>"), "got: {}", html);
+        assert!(html.contains("<td>Alice</td>"), "got: {}", html);
+        assert!(html.contains("<td>10.00</td>"), "got: {}", html);
+        assert!(html.contains("<td>Bob</td>"), "got: {}", html);
+    }
+
+    #[test]
+    fn table_with_no_columns_still_renders_rows() {
+        let src = "module M\nview Foo { layout = Table(rows: [[\"x\"]]) }\n";
+        let html = layout_html(src);
+        assert!(!html.contains("<thead>"), "expected no <thead> with no columns: {}", html);
+        assert!(html.contains("<td>x</td>"), "got: {}", html);
+    }
+
+    #[test]
+    fn dashboard_example_composes_all_four_new_primitives() {
+        // The static, real-syntax slice of spec §10.2's own flagship
+        // dashboard — no live queries, no trailing-block Table syntax.
+        let src = "module M\nview Dashboard { layout = Column(children: [\n\
+            Row(children: [MetricCard(\"Pending\", 12), MetricCard(\"Revenue\", 500, format: Currency)]),\n\
+            Table(columns: [\"Order\", \"Status\"], rows: [[\"1001\", \"Shipped\"]])\n\
+        ]) }\n";
+        let html = layout_html(src);
+        assert!(html.contains("class=\"column\""), "got: {}", html);
+        assert!(html.contains("class=\"row\""), "got: {}", html);
+        assert!(html.contains("metric-label\">Pending<"), "got: {}", html);
+        assert!(html.contains("metric-value-currency"), "got: {}", html);
+        assert!(html.contains("<th>Order</th>"), "got: {}", html);
+        assert!(html.contains("<td>1001</td>"), "got: {}", html);
     }
 }
