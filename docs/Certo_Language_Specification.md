@@ -675,7 +675,8 @@ certo db create add_users_table     # scaffold a new migration file
 | text.split(sep) | Split into list on separator |
 | text.contains(sub) | Case-sensitive containment check |
 | text.startsWith(prefix) | Prefix check |
-| text.toUppercase(locale?) | Locale-aware uppercase conversion |
+| text.toUppercase() | Uppercase conversion |
+| Text.toUpperLocale(text, locale) | Locale-aware uppercase conversion (e.g. "i" → "İ" for "tr") |
 | text.toInt() | Parse as Int — returns Result\<Int, ParseError\> |
 | text.toDecimal() | Parse as Decimal — returns Result\<Decimal, ParseError\> |
 | Text.join(list, sep) | Join list of Text with separator |
