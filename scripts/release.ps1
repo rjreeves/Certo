@@ -1,11 +1,15 @@
 # scripts/release.ps1
-# Build all Certo binaries in release mode and stage them to dist/.
+# Build all Certo binaries and stage them to dist/.
 #
 # Usage (from repo root):
-#   .\scripts\release.ps1
+#   .\scripts\release.ps1                    # release build (default)
+#   .\scripts\release.ps1 -Profile debug     # fast debug build, for local iteration
 #   .\scripts\release.ps1 -verbose
 
 param(
+    [ValidateSet("debug", "release")]
+    [string]$Profile = "release",
+
     [switch]$verbose
 )
 
@@ -24,16 +28,17 @@ $bins = @(
 )
 
 $ext     = if ($IsWindows -or $env:OS -eq "Windows_NT") { ".exe" } else { "" }
-$srcDir  = "target\release"
+$srcDir  = "target\$Profile"
 $destDir = "dist"
 
 # ── Build ────────────────────────────────────────────────────────────────────
 Write-Host ""
 Write-Host ("=" * 60) -ForegroundColor Cyan
-Write-Host "  Building Certo (release)" -ForegroundColor Cyan
+Write-Host "  Building Certo ($Profile)" -ForegroundColor Cyan
 Write-Host ("=" * 60) -ForegroundColor Cyan
 
-$cargoArgs = @("build", "--release", "--bins")
+$cargoArgs = @("build", "--bins")
+if ($Profile -eq "release") { $cargoArgs += "--release" }
 if (-not $verbose) { $cargoArgs += "--quiet" }
 
 cargo @cargoArgs

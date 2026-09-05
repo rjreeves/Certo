@@ -33,9 +33,11 @@ $archiveName = "certo-$version-$platform"
 $stagingDir  = "$env:TEMP\$archiveName"
 
 # ── Optionally rebuild first ─────────────────────────────────────────────────
+# Always forces a release build — packaging debug binaries as a distributable
+# would ship unoptimized, un-stripped executables under a release archive name.
 if ($rebuild) {
-    Write-Host "Rebuilding binaries…" -ForegroundColor Cyan
-    & "$PSScriptRoot\release.ps1"
+    Write-Host "Rebuilding binaries (release)…" -ForegroundColor Cyan
+    & "$PSScriptRoot\release.ps1" -Profile release
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 }
 
