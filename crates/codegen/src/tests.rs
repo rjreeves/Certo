@@ -1545,6 +1545,100 @@ fn validator_after_gate_in_validate() {
     assert!(pos_exists < pos_valid, "prerequisite `exists` must be checked first:\n{}", out);
 }
 
+// ------------------------------------------------------------------ //
+// `priority` — BACKLOG item 316. A real tiebreaker for evaluation order
+// among rules `after` itself leaves unconstrained, matching the spec's
+// own literal §16.4 definition ("higher values are evaluated first").
+// Deliberately does *not* touch item 218's override-suspension design —
+// see `topo_sort_rules`'s own doc comment for why resolving conflicts
+// among multiple rules that `overrides` the same target is a separate,
+// bigger piece of design work, not built here.
+// ------------------------------------------------------------------ //
+
+#[test]
+fn higher_priority_rule_is_checked_first_among_independent_rules() {
+    let src = "module A\nvalidator V for Order errors OE {\n\
+        rule lowPriority { priority 0 require order.a > 0 else OE.A }\n\
+        rule highPriority { priority 100 require order.b > 0 else OE.B }\n\
+    }";
+    let out = gen_validator(src);
+    let pos_low  = out.find("order.a > 0").unwrap_or(usize::MAX);
+    let pos_high = out.find("order.b > 0").unwrap_or(usize::MAX);
+    assert!(pos_high < pos_low,
+        "higher-priority rule must be checked first (outermost in the fail-fast chain):\n{}", out);
+}
+
+#[test]
+fn priority_order_is_reflected_in_validate_all_too() {
+    let src = "module A\nvalidator V for Order errors OE {\n\
+        rule lowPriority { priority 0 require order.a > 0 else OE.A }\n\
+        rule highPriority { priority 100 require order.b > 0 else OE.B }\n\
+    }";
+    let out = gen_validator_output(src);
+    let pos_low  = out.validate_all_fn.find("OE.A").unwrap_or(usize::MAX);
+    let pos_high = out.validate_all_fn.find("OE.B").unwrap_or(usize::MAX);
+    assert!(pos_high < pos_low,
+        "higher-priority rule's error must be listed first in validateAll:\n{}", out.validate_all_fn);
+}
+
+#[test]
+fn after_dependency_still_outranks_priority() {
+    // `after` is a hard prerequisite constraint — a rule named as another's
+    // `after` must still be checked first, even with a *lower* priority
+    // than its dependent, since priority only breaks ties among rules
+    // `after` leaves otherwise unconstrained.
+    let src = "module A\nvalidator V for Order errors OE {\n\
+        rule exists { priority 0 require order.id > 0 else OE.Missing }\n\
+        rule valid { after exists priority 100 require order.total > 0 else OE.Invalid }\n\
+    }";
+    let out = gen_validator(src);
+    let pos_exists = out.find("order.id > 0").unwrap_or(usize::MAX);
+    let pos_valid  = out.find("order.total > 0").unwrap_or(0);
+    assert!(pos_exists < pos_valid,
+        "after-prerequisite must still be checked first regardless of priority:\n{}", out);
+}
+
+#[test]
+fn rule_with_no_declared_priority_defaults_to_zero() {
+    // A rule with no `priority` clause at all must be outranked by an
+    // explicit higher priority, same as an explicit `priority 0` would be —
+    // confirms the default (spec: "Default is 0") without crashing.
+    let src = "module A\nvalidator V for Order errors OE {\n\
+        rule noPriority   { require order.a > 0 else OE.A }\n\
+        rule highPriority { priority 100 require order.b > 0 else OE.B }\n\
+    }";
+    let out = gen_validator(src);
+    let pos_default = out.find("order.a > 0").unwrap_or(usize::MAX);
+    let pos_high     = out.find("order.b > 0").unwrap_or(usize::MAX);
+    assert!(pos_high < pos_default,
+        "an explicit higher priority must outrank a rule with no declared priority:\n{}", out);
+}
+
+#[test]
+fn priority_on_overriding_rules_is_a_documented_remaining_gap() {
+    // BACKLOG item 316's own scope boundary: resolving conflicts among
+    // *multiple rules overriding the same target* (this test's own shape)
+    // stays item 218/220's declined-for-now territory — an overriding
+    // rule never independently fails, so there's no "winner" for priority
+    // to pick between simultaneously-active overriders. Swapping their
+    // priorities must not silently change output while pretending this is
+    // now general conflict resolution.
+    let src_a = "module A\nvalidator V for Order errors OE {\n\
+        rule base { require order.total <= 100 else OE.OverLimit }\n\
+        rule overrideOne { overrides base priority 10 require condOne else OE.One }\n\
+        rule overrideTwo { overrides base priority 90 require condTwo else OE.Two }\n\
+    }";
+    let src_b = "module A\nvalidator V for Order errors OE {\n\
+        rule base { require order.total <= 100 else OE.OverLimit }\n\
+        rule overrideOne { overrides base priority 90 require condOne else OE.One }\n\
+        rule overrideTwo { overrides base priority 10 require condTwo else OE.Two }\n\
+    }";
+    let out_a = gen_validator(src_a);
+    let out_b = gen_validator(src_b);
+    assert_eq!(out_a, out_b,
+        "swapping priority between two overriders of the same rule is a documented remaining gap, not silently resolved");
+}
+
 #[test]
 fn validator_validate_all_collects_violations() {
     let src = "module A\nvalidator V for Order errors OE {\n    rule r { require true else OE.X }\n}";

@@ -592,31 +592,53 @@ fn expand_idents(text: &str, mut replace: impl FnMut(&str) -> Option<String>) ->
     out
 }
 
-/// Topological sort of rules respecting `after` dependencies.
-/// Rules with no dependencies come first; rules with dependencies follow.
+/// Topological sort of rules respecting `after` dependencies. Rules with no
+/// dependencies come first; rules with dependencies follow. BACKLOG item
+/// 316 — `after` is still a hard ordering constraint (a prerequisite is
+/// always visited, and thus ordered, before its dependent, regardless of
+/// priority), but wherever `after` itself leaves the relative order among
+/// several rules unconstrained, a higher `priority` (default 0, per the
+/// spec's own §16.4 definition — "higher values are evaluated first") now
+/// breaks the tie, rather than the previous accidental declaration order.
+/// This makes `priority` a real, observable evaluation-order signal for
+/// `validate`'s fail-fast chain (which of several otherwise-independent
+/// failing rules is the one actually returned) and `validateAll`'s
+/// error-list order — deliberately *not* a fix for resolving conflicts
+/// among multiple rules that `overrides` the very same target rule, which
+/// stays exactly as item 218 built it (an overriding rule never
+/// independently fails, so there is no "winner" for priority to pick
+/// between multiple simultaneously-active overriders — see that item's own
+/// note, and this item's BACKLOG writeup, for why that's a separate, bigger
+/// piece of design work, not bundled in here).
 fn topo_sort_rules<'a>(rules: &'a [RuleDecl]) -> Vec<&'a RuleDecl> {
     let idx: HashMap<&str, usize> = rules.iter()
         .enumerate()
         .map(|(i, r)| (r.name.node.as_str(), i))
         .collect();
+    let priority_of = |i: usize| rules[i].priority.unwrap_or(0);
 
     let mut visited = vec![false; rules.len()];
     let mut order: Vec<usize> = Vec::with_capacity(rules.len());
 
     fn visit(i: usize, rules: &[RuleDecl], idx: &HashMap<&str, usize>,
+             priority_of: &dyn Fn(usize) -> i64,
              visited: &mut Vec<bool>, order: &mut Vec<usize>) {
         if visited[i] { return; }
         visited[i] = true;
-        for after in &rules[i].after {
-            if let Some(&j) = idx.get(after.node.as_str()) {
-                visit(j, rules, idx, visited, order);
-            }
+        let mut deps: Vec<usize> = rules[i].after.iter()
+            .filter_map(|after| idx.get(after.node.as_str()).copied())
+            .collect();
+        deps.sort_by_key(|&j| (std::cmp::Reverse(priority_of(j)), j));
+        for j in deps {
+            visit(j, rules, idx, priority_of, visited, order);
         }
         order.push(i);
     }
 
-    for i in 0..rules.len() {
-        visit(i, rules, &idx, &mut visited, &mut order);
+    let mut roots: Vec<usize> = (0..rules.len()).collect();
+    roots.sort_by_key(|&i| (std::cmp::Reverse(priority_of(i)), i));
+    for i in roots {
+        visit(i, rules, &idx, &priority_of, &mut visited, &mut order);
     }
 
     order.iter().map(|&i| &rules[i]).collect()
