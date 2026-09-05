@@ -572,7 +572,7 @@ certo db create add_users_table     # scaffold a new migration file
 
 ## **7.1 Async Model**
 
-| // async functions return immediately with a future async fn fetchUserProfile(id: UUID): Result\<Profile, ApiError\>  // await suspends until the future resolves async fn buildDashboard(userId: UUID): Result\<Dashboard, AppError\> \[io\] = \{     val profile = await fetchUserProfile(userId)     val orders  = await db.orders.all()     val balance = await billingService.getBalance(userId)     Ok(Dashboard(profile, orders, balance)) \}  // await propagates errors with ? async fn buildDashboard(userId: UUID): Result\<Dashboard, AppError\> \[io\] = \{     val profile = await fetchUserProfile(userId)?     val orders  = await db.orders.all()     Ok(Dashboard(profile, orders)) \} |
+| // async functions return immediately with a future async fn fetchUserProfile(id: UUID): Result\<Profile, ApiError\>  // await suspends until the future resolves — no ? yet, so the Result // must be unwrapped explicitly before its payload can be used async fn buildDashboard(userId: UUID): Result\<Dashboard, AppError\> \[io\] = \{     match await fetchUserProfile(userId) \{         Ok(profile) =\> \{             val orders  = await db.orders.all()             val balance = await billingService.getBalance(userId)             Ok(Dashboard(profile, orders, balance))         \}         Err(\_) =\> Err(AppError.ProfileUnavailable)     \} \}  // await propagates errors with ? — much shorter than the explicit match above async fn buildDashboard(userId: UUID): Result\<Dashboard, AppError\> \[io\] = \{     val profile = await fetchUserProfile(userId)?     val orders  = await db.orders.all()     Ok(Dashboard(profile, orders)) \} |
 | - |
 
 
