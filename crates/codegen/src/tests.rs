@@ -1934,6 +1934,73 @@ fn validator_using_a_constraint_generates_parseable_source() {
 }
 
 // ------------------------------------------------------------------ //
+// Named temporal inlining — BACKLOG item 317(b)
+// ------------------------------------------------------------------ //
+
+#[test]
+fn temporal_reference_is_inlined_not_left_as_a_bare_name() {
+    // `temporal` has no runtime symbol of its own outside the SQL-trigger
+    // path (spec §16.9) — an ordinary rule body that names one must have
+    // its body inlined here, or the generated function references a
+    // nonexistent global (confirmed live: `certo_void_window`).
+    let src = "module A\ntemporal VoidWindow = Duration.days(30)\n\
+        validator V for Invoice errors IE {\n    rule r { require invoice.createdAt.age < VoidWindow else true }\n}";
+    let out = gen_validator(src);
+    assert_not_contains(&out, "VoidWindow");
+    assert_contains(&out, "Duration.days(30)");
+}
+
+#[test]
+fn temporal_reference_in_validate_all_is_also_inlined() {
+    let src = "module A\ntemporal VoidWindow = Duration.days(30)\n\
+        validator V for Invoice errors IE {\n    rule r { require invoice.createdAt.age < VoidWindow else true }\n}";
+    let out = gen_validator(src);
+    let (_, validate_all) = out.split_once("fn V_validateAll").expect("validateAll present");
+    assert_not_contains(validate_all, "VoidWindow");
+    assert_contains(validate_all, "Duration.days(30)");
+}
+
+#[test]
+fn temporal_reference_inside_a_string_literal_is_left_alone() {
+    let src = "module A\ntemporal VoidWindow = Duration.days(30)\ntype IE = | Bad(Text)\n\
+        validator V for Invoice errors IE {\n    rule r { require invoice.createdAt.age < VoidWindow else IE.Bad(\"VoidWindow exceeded\") }\n}";
+    let out = gen_validator(src);
+    assert_contains(&out, "\"VoidWindow exceeded\"");
+}
+
+#[test]
+fn inlined_temporal_is_parenthesized_so_composition_preserves_precedence() {
+    let src = "module A\ntemporal VoidWindow = Duration.days(30)\n\
+        validator V for Invoice errors IE {\n    rule r { require true and invoice.createdAt.age < VoidWindow else true }\n}";
+    let out = gen_validator(src);
+    assert_contains(&out, "(Duration.days(30))");
+}
+
+#[test]
+fn multiple_distinct_temporals_are_each_inlined_independently() {
+    let src = "module A\ntemporal VoidWindow = Duration.days(30)\ntemporal GracePeriod = Duration.days(3)\n\
+        validator V for Invoice errors IE {\n\
+            rule r1 { require invoice.createdAt.age < VoidWindow else true }\n\
+            rule r2 { require invoice.dueAt.age < GracePeriod else true }\n\
+        }";
+    let out = gen_validator(src);
+    assert_not_contains(&out, "VoidWindow");
+    assert_not_contains(&out, "GracePeriod");
+    assert_contains(&out, "Duration.days(30)");
+    assert_contains(&out, "Duration.days(3)");
+}
+
+#[test]
+fn validator_using_a_temporal_generates_parseable_source() {
+    let src = "module A\ntemporal VoidWindow = Duration.days(30)\n\
+        validator V for Invoice errors IE {\n    rule r { require invoice.createdAt.age < VoidWindow else true }\n}";
+    let generated = gen_validator(src);
+    let wrapped = format!("module __validators\n{}", generated);
+    assert!(certo_parser::parse(&wrapped).is_ok(),
+        "generated validator source using a temporal must parse:\n{}", generated);
+}
+
+// ------------------------------------------------------------------ //
 // Control flow — loops and match
 // ------------------------------------------------------------------ //
 
