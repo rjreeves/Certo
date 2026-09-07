@@ -2354,9 +2354,23 @@ fn http_post_takes_three_text_args() {
 #[test]
 fn http_response_accessors_registered() {
     let env = seeded_env();
-    for name in &["HttpResponse.status", "HttpResponse.body",
+    for name in &["HttpResponse.status", "HttpResponse.body", "HttpResponse.bodyBytes",
                   "HttpResponse.contentType", "HttpResponse.ok"] {
         assert!(env.lookup(name).is_some(), "missing: {}", name);
+    }
+}
+
+#[test]
+fn http_response_body_bytes_returns_bytes() {
+    let env = seeded_env();
+    let hr = Ty::Named { name: "HttpResponse".into(), args: vec![] };
+    let bytes = Ty::Named { name: "Bytes".into(), args: vec![] };
+    match env.lookup("HttpResponse.bodyBytes").unwrap() {
+        Ty::Fn { params, ret } => {
+            assert_eq!(params, &[hr]);
+            assert_eq!(ret.as_ref(), &bytes);
+        }
+        other => panic!("expected Fn, got {:?}", other),
     }
 }
 
@@ -2586,6 +2600,7 @@ fn http_c_contains_key_functions() {
     assert!(HTTP_C.contains("certo_http_response_status"), "missing response_status");
     assert!(HTTP_C.contains("certo_http_response_body"),   "missing response_body");
     assert!(HTTP_C.contains("certo_http_response_ok"),     "missing response_ok");
+    assert!(HTTP_C.contains("certo_http_response_body_bytes"), "missing response_body_bytes");
 }
 
 #[test]

@@ -286,6 +286,19 @@ int64_t      certo_http_response_body_length (CertoHttpResponse* r) { return r ?
 certo_text_t certo_http_response_content_type(CertoHttpResponse* r) { return r ? r->content_type : ""; }
 bool         certo_http_response_ok          (CertoHttpResponse* r) { return r && r->status >= 200 && r->status < 300; }
 
+/* `.body` is NUL-safe internally (length-tracked, never truncated while
+ * being read off the wire) but every other Text function treats it as a
+ * C string, so any response containing an embedded 0x00 byte -- any real
+ * binary download -- gets silently truncated the moment it's touched as
+ * Text. This copies the same underlying bytes into a real length-carrying
+ * Bytes value, so a binary response can actually be received intact. */
+CertoBytes* certo_http_response_body_bytes(CertoHttpResponse* r) {
+    int64_t len = r ? r->body_length : 0;
+    CertoBytes* out = certo_bytes_alloc(len);
+    if (len > 0 && r && r->body) memcpy(out->data, r->body, (size_t)len);
+    return out;
+}
+
 /* ================================================================
    Stdlib.Http — server. Windows: WinSock2. POSIX: BSD sockets.
    Both are a plain blocking, single-connection-at-a-time accept loop —
