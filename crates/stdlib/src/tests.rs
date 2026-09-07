@@ -1930,6 +1930,32 @@ fn file_c_contains_key_functions() {
     assert!(FILE_C.contains("certo_list_dir"),    "missing list_dir");
     assert!(FILE_C.contains("certo_append_file"), "missing append_file");
     assert!(FILE_C.contains("certo_delete_file"), "missing delete_file");
+    assert!(FILE_C.contains("certo_rename_file"), "missing rename_file");
+    assert!(FILE_C.contains("certo_remove_dir"),  "missing remove_dir");
+}
+
+#[test]
+fn rename_file_registered_and_returns_bool() {
+    let env = seeded_env();
+    match env.lookup("renameFile").expect("missing renameFile") {
+        Ty::Fn { params, ret } => {
+            assert_eq!(params, &[Ty::Text, Ty::Text]);
+            assert_eq!(ret.as_ref(), &Ty::Bool);
+        }
+        other => panic!("expected Fn, got {:?}", other),
+    }
+}
+
+#[test]
+fn remove_dir_registered_and_returns_bool() {
+    let env = seeded_env();
+    match env.lookup("removeDir").expect("missing removeDir") {
+        Ty::Fn { params, ret } => {
+            assert_eq!(params, &[Ty::Text]);
+            assert_eq!(ret.as_ref(), &Ty::Bool);
+        }
+        other => panic!("expected Fn, got {:?}", other),
+    }
 }
 
 // ------------------------------------------------------------------ //

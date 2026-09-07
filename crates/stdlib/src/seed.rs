@@ -1008,7 +1008,9 @@ pub fn seed_stdlib(env: &mut TypeEnv, counter: &mut u32) {
     def!("appendFile", fn2(Ty::Text, Ty::Text, Ty::Bool));
     def!("fileExists", fn1(Ty::Text, Ty::Bool));
     def!("deleteFile", fn1(Ty::Text, Ty::Bool));
+    def!("renameFile", fn2(Ty::Text, Ty::Text, Ty::Bool));
     def!("makeDir",    fn1(Ty::Text, Ty::Bool));
+    def!("removeDir",  fn1(Ty::Text, Ty::Bool));
     {
         let list_text = Ty::List(Box::new(Ty::Text));
         def!("listDir", fn1(Ty::Text, Ty::Option(Box::new(list_text))));
@@ -1608,6 +1610,7 @@ pub fn seed_stdlib(env: &mut TypeEnv, counter: &mut u32) {
     // File / Path
     pm!("writeFile",   "path", "content");
     pm!("appendFile",  "path", "content");
+    pm!("renameFile",  "from", "to");
     pm!("File.write",  "file", "content");
     pm!("Path.join",   "base", "part");
 

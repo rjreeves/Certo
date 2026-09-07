@@ -9,9 +9,12 @@ pub const FILE_C: &str = r#"
 #include <errno.h>
 #ifdef _WIN32
 #include <direct.h>
+#include <windows.h>
 #define CERTO_MKDIR(p) _mkdir(p)
 #else
 #include <sys/stat.h>
+#include <unistd.h>
+#include <dirent.h>
 #define CERTO_MKDIR(p) mkdir(p, 0777)
 #endif
 
@@ -158,6 +161,72 @@ bool certo_file_exists(certo_text_t path) {
 bool certo_delete_file(certo_text_t path) {
     if (!path) return false;
     return remove(path) == 0;
+}
+
+/* Rename/move `from` to `to`, replacing `to` if it already exists.
+ * Atomic when both paths are on the same volume/filesystem -- the
+ * write-temp-file-then-rename pattern for safely updating a file other
+ * processes might be reading concurrently depends on that guarantee, so
+ * callers relying on atomicity must keep `from` and `to` on the same
+ * volume (e.g. the same directory) themselves; this function does not
+ * check or enforce that. */
+bool certo_rename_file(certo_text_t from, certo_text_t to) {
+    if (!from || !to) return false;
+#ifdef _WIN32
+    return MoveFileExA(from, to, MOVEFILE_REPLACE_EXISTING) != 0;
+#else
+    return rename(from, to) == 0;
+#endif
+}
+
+/* Recursively remove a directory and everything inside it (like `rm -rf`
+ * for directories). Keeps going and reports overall failure rather than
+ * stopping at the first error, so a partially-removable tree still gets
+ * cleaned up as much as possible. */
+static bool certo_remove_dir_all_impl(const char* path) {
+    bool ok = true;
+#ifdef _WIN32
+    char pattern[4096];
+    snprintf(pattern, sizeof(pattern), "%s\\*", path);
+    WIN32_FIND_DATAA fd;
+    HANDLE h = FindFirstFileA(pattern, &fd);
+    if (h == INVALID_HANDLE_VALUE) return false;
+    do {
+        if (strcmp(fd.cFileName, ".") == 0 || strcmp(fd.cFileName, "..") == 0) continue;
+        char child[4096];
+        snprintf(child, sizeof(child), "%s\\%s", path, fd.cFileName);
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+            if (!certo_remove_dir_all_impl(child)) ok = false;
+        } else {
+            if (!DeleteFileA(child)) ok = false;
+        }
+    } while (FindNextFileA(h, &fd));
+    FindClose(h);
+    if (!RemoveDirectoryA(path)) ok = false;
+#else
+    DIR* d = opendir(path);
+    if (!d) return false;
+    struct dirent* entry;
+    while ((entry = readdir(d)) != NULL) {
+        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) continue;
+        char child[4096];
+        snprintf(child, sizeof(child), "%s/%s", path, entry->d_name);
+        struct stat st;
+        if (stat(child, &st) == 0 && S_ISDIR(st.st_mode)) {
+            if (!certo_remove_dir_all_impl(child)) ok = false;
+        } else {
+            if (remove(child) != 0) ok = false;
+        }
+    }
+    closedir(d);
+    if (rmdir(path) != 0) ok = false;
+#endif
+    return ok;
+}
+
+bool certo_remove_dir(certo_text_t path) {
+    if (!path || !*path) return false;
+    return certo_remove_dir_all_impl(path);
 }
 
 /* List directory entries (excluding . and ..).
