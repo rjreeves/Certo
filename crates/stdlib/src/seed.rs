@@ -1365,6 +1365,7 @@ pub fn seed_stdlib(env: &mut TypeEnv, counter: &mut u32) {
         def!("HttpResponse.status",      fn1(hr(), Ty::Int));
         def!("HttpResponse.body",        fn1(hr(), Ty::Text));
         def!("HttpResponse.bodyLength",  fn1(hr(), Ty::Int));
+        def!("HttpResponse.bodyBytes",   fn1(hr(), Ty::Named { name: "Bytes".into(), args: vec![] }));
         def!("HttpResponse.contentType", fn1(hr(), Ty::Text));
         def!("HttpResponse.ok",          fn1(hr(), Ty::Bool));
 
