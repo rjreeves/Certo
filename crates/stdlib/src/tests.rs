@@ -2426,7 +2426,9 @@ fn http_response_ok_returns_bool() {
 fn bytes_functions_registered() {
     let env = seeded_env();
     for name in &["Bytes.length", "Bytes.empty", "Bytes.slice", "Bytes.concat",
-                  "Bytes.toHex", "Bytes.fromText", "readFileBytes", "writeFileBytes"] {
+                  "Bytes.concatMany", "Bytes.byteAt", "Bytes.fromInt64LE",
+                  "Bytes.readInt64LE", "Bytes.toText", "Bytes.toHex",
+                  "Bytes.fromText", "readFileBytes", "writeFileBytes"] {
         assert!(env.lookup(name).is_some(), "missing: {}", name);
     }
 }
@@ -2615,6 +2617,9 @@ fn bytes_c_contains_key_functions() {
     assert!(BYTES_C.contains("certo_bytes_to_hex"),     "missing bytes_to_hex");
     assert!(BYTES_C.contains("certo_read_file_bytes"),  "missing read_file_bytes");
     assert!(BYTES_C.contains("certo_write_file_bytes"), "missing write_file_bytes");
+    assert!(BYTES_C.contains("certo_bytes_from_int64_l_e"), "missing int64 encoder");
+    assert!(BYTES_C.contains("certo_bytes_read_int64_l_e"), "missing int64 decoder");
+    assert!(full_c_runtime().contains("certo_bytes_concat_many"), "missing concat_many");
     assert!(full_c_runtime().contains("certo_bytes_slice"), "bytes missing from runtime");
 }
 

@@ -19,6 +19,31 @@ typedef struct {
     void**   data;
 } CertoList;
 
+/* Concatenate a freshly-built list of byte buffers in two linear passes.
+   This lives after CertoList's definition; CertoBytes is defined earlier in
+   the combined runtime. */
+CertoBytes* certo_bytes_concat_many(CertoList* parts) {
+    int64_t total = 0;
+    if (parts) {
+        for (int64_t i = 0; i < parts->len; i++) {
+            CertoBytes* part = (CertoBytes*)parts->data[i];
+            if (part && part->len > 0) total += part->len;
+        }
+    }
+    CertoBytes* out = certo_bytes_alloc(total);
+    int64_t offset = 0;
+    if (parts) {
+        for (int64_t i = 0; i < parts->len; i++) {
+            CertoBytes* part = (CertoBytes*)parts->data[i];
+            if (part && part->len > 0) {
+                memcpy(out->data + offset, part->data, (size_t)part->len);
+                offset += part->len;
+            }
+        }
+    }
+    return out;
+}
+
 static CertoList* list_alloc(int64_t cap) {
     if (cap < 8) cap = 8;
     CertoList* l = (CertoList*)malloc(sizeof(CertoList));
@@ -110,6 +135,23 @@ CertoList* certo_list_push(CertoList* l, void* item) {
     }
     n->data[n->len++] = item;
     return n;
+}
+
+/* List.pushMut is an explicit builder primitive for compiler/tool internals.
+   Unlike functional List.push it mutates the supplied list and grows its
+   backing allocation geometrically, making repeated construction amortized
+   O(1). Callers must not retain or observe aliases while building. */
+CertoList* certo_list_push_mut(CertoList* l, void* item) {
+    if (!l) l = list_alloc(8);
+    if (l->len >= l->cap) {
+        int64_t next_cap = l->cap < 8 ? 8 : l->cap * 2;
+        void** next_data = (void**)realloc(l->data, (size_t)next_cap * sizeof(void*));
+        if (!next_data) certo_panic("out of memory");
+        l->data = next_data;
+        l->cap = next_cap;
+    }
+    l->data[l->len++] = item;
+    return l;
 }
 
 CertoList* certo_list_concat(CertoList* a, CertoList* b) {

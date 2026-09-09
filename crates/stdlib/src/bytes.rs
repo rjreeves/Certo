@@ -48,6 +48,35 @@ CertoBytes* certo_bytes_concat(CertoBytes* a, CertoBytes* b) {
     return out;
 }
 
+int64_t certo_bytes_byte_at(CertoBytes* b, int64_t index) {
+    if (!b || index < 0 || index >= b->len) return -1;
+    return (int64_t)b->data[index];
+}
+
+CertoBytes* certo_bytes_from_int64_l_e(int64_t value) {
+    CertoBytes* out = certo_bytes_alloc(8);
+    uint64_t bits = (uint64_t)value;
+    for (int i = 0; i < 8; i++) out->data[i] = (uint8_t)(bits >> (i * 8));
+    return out;
+}
+
+int64_t certo_bytes_read_int64_l_e(CertoBytes* b, int64_t offset) {
+    if (!b || offset < 0 || offset > b->len - 8) return 0;
+    uint64_t bits = 0;
+    for (int i = 0; i < 8; i++) bits |= ((uint64_t)b->data[offset + i]) << (i * 8);
+    return (int64_t)bits;
+}
+
+/* Decode a byte slice known by the caller to contain UTF-8 text. */
+certo_text_t certo_bytes_to_text(CertoBytes* b) {
+    int64_t len = b ? b->len : 0;
+    char* out = (char*)malloc((size_t)len + 1);
+    if (!out) certo_panic("out of memory");
+    if (len > 0) memcpy(out, b->data, (size_t)len);
+    out[len] = 0;
+    return out;
+}
+
 /* Bytes -> lowercase hex text (2 chars per byte). */
 certo_text_t certo_bytes_to_hex(CertoBytes* b) {
     int64_t len = b ? b->len : 0;

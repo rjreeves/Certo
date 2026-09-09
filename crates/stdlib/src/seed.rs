@@ -313,6 +313,12 @@ pub fn seed_stdlib(env: &mut TypeEnv, counter: &mut u32) {
     {
         let a = fresh();
         let list_a = Ty::List(Box::new(Ty::Var(a)));
+        env.define("List.pushMut", poly1(a,
+            fn2(list_a.clone(), Ty::Var(a), list_a)));
+    }
+    {
+        let a = fresh();
+        let list_a = Ty::List(Box::new(Ty::Var(a)));
         env.define("List.concat", poly1(a,
             fn2(list_a.clone(), list_a.clone(), list_a)));
     }
@@ -731,6 +737,7 @@ pub fn seed_stdlib(env: &mut TypeEnv, counter: &mut u32) {
     // ---------------------------------------------------------------- //
 
     def!("Text.len",        fn1(Ty::Text, Ty::Int));
+    def!("Text.byteAtUnchecked", fn2(Ty::Text, Ty::Int, Ty::Text));
     def!("Text.byteLength", fn1(Ty::Text, Ty::Int));
     // BACKLOG item 269 — spec §9.3's own `text.length()` example, and its
     // explicit "(not byte count)" wording, distinguish a real *character*
@@ -994,6 +1001,11 @@ pub fn seed_stdlib(env: &mut TypeEnv, counter: &mut u32) {
         def!("Bytes.empty",   Ty::Fn { params: vec![], ret: Box::new(bytes()) });
         def!("Bytes.slice",   Ty::Fn { params: vec![bytes(), Ty::Int, Ty::Int], ret: Box::new(bytes()) });
         def!("Bytes.concat",  Ty::Fn { params: vec![bytes(), bytes()], ret: Box::new(bytes()) });
+        def!("Bytes.concatMany", Ty::Fn { params: vec![Ty::List(Box::new(bytes()))], ret: Box::new(bytes()) });
+        def!("Bytes.byteAt", Ty::Fn { params: vec![bytes(), Ty::Int], ret: Box::new(Ty::Int) });
+        def!("Bytes.fromInt64LE", fn1(Ty::Int, bytes()));
+        def!("Bytes.readInt64LE", Ty::Fn { params: vec![bytes(), Ty::Int], ret: Box::new(Ty::Int) });
+        def!("Bytes.toText", fn1(bytes(), Ty::Text));
         def!("Bytes.toHex",   fn1(bytes(), Ty::Text));
         def!("Bytes.fromText", fn1(Ty::Text, bytes()));
         def!("readFileBytes",  fn1(Ty::Text, Ty::Option(Box::new(bytes()))));
@@ -1080,6 +1092,7 @@ pub fn seed_stdlib(env: &mut TypeEnv, counter: &mut u32) {
 
         def!("JsonValue.length", fn1(jv(), Ty::Int));
         def!("JsonValue.at",     fn2(jv(), Ty::Int,  jv()));
+        def!("JsonValue.atText", fn2(jv(), Ty::Int, Ty::Text));
         def!("JsonValue.get",    fn2(jv(), Ty::Text, jv()));
         def!("JsonValue.keys",   fn1(jv(), list_text));
 
@@ -1520,6 +1533,7 @@ pub fn seed_stdlib(env: &mut TypeEnv, counter: &mut u32) {
     pm!("List.get",        "list", "index");
     pm!("List.getOrPanic", "list", "index");
     pm!("List.push",       "list", "item");
+    pm!("List.pushMut",    "list", "item");
     pm!("List.concat",     "a", "b");
     pm!("List.slice",      "list", "from", "to");
     pm!("List.contains",   "list", "item");
@@ -1567,12 +1581,14 @@ pub fn seed_stdlib(env: &mut TypeEnv, counter: &mut u32) {
     pm!("Text.startsWith", "text", "prefix");
     pm!("Text.endsWith",   "text", "suffix");
     pm!("Text.slice",      "text", "from", "to");
+    pm!("Text.byteAtUnchecked", "text", "index");
     pm!("Text.indexOf",    "text", "sub");
     pm!("Text.replace",    "text", "from", "to");
     pm!("Text.split",      "text", "sep");
     pm!("Text.join",       "parts", "sep");
     pm!("Text.repeat",     "text", "n");
     pm!("Text.charAt",     "text", "index");
+    pm!("Text.byteAt",     "text", "index");
 
     // DateTime
     pm!("DateTime.format",      "dt", "fmt");
@@ -1613,6 +1629,11 @@ pub fn seed_stdlib(env: &mut TypeEnv, counter: &mut u32) {
     pm!("renameFile",  "from", "to");
     pm!("File.write",  "file", "content");
     pm!("Path.join",   "base", "part");
+    pm!("Bytes.concatMany", "parts");
+    pm!("Bytes.byteAt", "bytes", "index");
+    pm!("Bytes.fromInt64LE", "value");
+    pm!("Bytes.readInt64LE", "bytes", "offset");
+    pm!("Bytes.toText", "bytes");
 
     // Process
     pm!("Process.exec",          "cmd", "args");
@@ -1625,6 +1646,7 @@ pub fn seed_stdlib(env: &mut TypeEnv, counter: &mut u32) {
 
     // Json
     pm!("JsonValue.at",   "value", "index");
+    pm!("JsonValue.atText", "value", "index");
     pm!("JsonValue.get",  "value", "key");
     pm!("JsonValue.push", "array", "item");
     pm!("JsonValue.set",  "obj", "key", "value");
