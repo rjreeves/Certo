@@ -344,6 +344,13 @@ CertoJsonValue* certo_json_at(CertoJsonValue* v, int64_t i) {
     return v->arr.items[i];
 }
 
+/* Serialized array access for consumers that do not need to retain the
+   JsonValue handle. This also avoids an unnecessary parse/stringify bridge in
+   generated tooling code. */
+certo_text_t certo_json_value_at_text(CertoJsonValue* v, int64_t i) {
+    return certo_json_stringify(certo_json_at(v, i));
+}
+
 CertoJsonValue* certo_json_get(CertoJsonValue* v, certo_text_t key) {
     if (!v || v->type != CERTO_JSON_OBJECT || !key) return json_new(CERTO_JSON_NULL);
     for (int64_t i = 0; i < v->obj.count; i++)

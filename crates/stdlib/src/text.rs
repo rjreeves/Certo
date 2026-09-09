@@ -22,6 +22,18 @@ int64_t certo_text_byte_length(certo_text_t s) {
     return s ? (int64_t)strlen(s) : 0;
 }
 
+/* Constant-time unchecked byte access for ASCII-oriented scanners. Callers
+   must first establish 0 <= i < Text.byteLength(s). Unicode-aware code should
+   use Text.charAt instead. */
+certo_text_t certo_text_byte_at_unchecked(certo_text_t s, int64_t i) {
+    if (!s || i < 0) return "";
+    char* out = (char*)malloc(2);
+    if (!out) certo_panic("out of memory");
+    out[0] = s[i];
+    out[1] = '\0';
+    return out;
+}
+
 certo_text_t certo_text_concat(certo_text_t a, certo_text_t b) {
     size_t la = a ? strlen(a) : 0;
     size_t lb = b ? strlen(b) : 0;
@@ -464,7 +476,7 @@ void* certo_text_split(certo_text_t s, certo_text_t sep) {
             char* ch = (char*)malloc(2);
             if (!ch) certo_panic("out of memory");
             ch[0] = s[i]; ch[1] = '\0';
-            out = (CertoList*)certo_list_push(out, ch);
+            out = certo_list_push_mut(out, ch);
         }
         return out;
     }
@@ -476,10 +488,10 @@ void* certo_text_split(certo_text_t s, certo_text_t sep) {
         char* seg = (char*)malloc(len + 1);
         if (!seg) certo_panic("out of memory");
         memcpy(seg, p, len); seg[len] = '\0';
-        out = (CertoList*)certo_list_push(out, seg);
+        out = certo_list_push_mut(out, seg);
         p = match + sep_len;
     }
-    out = (CertoList*)certo_list_push(out, (void*)p);  /* last segment */
+    out = certo_list_push_mut(out, (void*)p);  /* last segment */
     return out;
 }
 
