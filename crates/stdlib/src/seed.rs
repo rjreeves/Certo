@@ -770,6 +770,11 @@ pub fn seed_stdlib(env: &mut TypeEnv, counter: &mut u32) {
     def!("Text.trimStart",  fn1(Ty::Text, Ty::Text));
     def!("Text.trimEnd",    fn1(Ty::Text, Ty::Text));
     def!("Text.slice",      Ty::Fn { params: vec![Ty::Text, Ty::Int, Ty::Int], ret: Box::new(Ty::Text) });
+    // BACKLOG item 325 — caller-validated variant of Text.slice: skips the
+    // full-string strlen scan Text.slice pays on every call (real cost
+    // O(end - start) instead of O(Text.byteLength(text))). Caller must
+    // already know 0 <= start <= end <= Text.byteLength(text).
+    def!("Text.sliceUnchecked", Ty::Fn { params: vec![Ty::Text, Ty::Int, Ty::Int], ret: Box::new(Ty::Text) });
     def!("Text.indexOf",    fn2(Ty::Text, Ty::Text, Ty::Option(Box::new(Ty::Int))));
     def!("Text.replace",    Ty::Fn { params: vec![Ty::Text, Ty::Text, Ty::Text], ret: Box::new(Ty::Text) });
     def!("Text.split",      fn2(Ty::Text, Ty::Text, Ty::List(Box::new(Ty::Text))));
@@ -1581,6 +1586,7 @@ pub fn seed_stdlib(env: &mut TypeEnv, counter: &mut u32) {
     pm!("Text.startsWith", "text", "prefix");
     pm!("Text.endsWith",   "text", "suffix");
     pm!("Text.slice",      "text", "from", "to");
+    pm!("Text.sliceUnchecked", "text", "from", "to");
     pm!("Text.byteAtUnchecked", "text", "index");
     pm!("Text.indexOf",    "text", "sub");
     pm!("Text.replace",    "text", "from", "to");
