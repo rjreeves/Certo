@@ -428,6 +428,25 @@ certo_text_t certo_text_slice(certo_text_t s, int64_t start, int64_t end) {
     return out;
 }
 
+/* BACKLOG item 325 — certo_text_slice's own strlen(s) scans the *entire*
+   string on every call regardless of the requested range, turning repeated
+   small slices out of one large, unchanging Text (e.g. a lexer walking a
+   whole source file token by token) into an O(n^2) pass. This variant skips
+   that scan entirely: the caller must already know 0 <= start <= end <=
+   Text.byteLength(s) (an out-of-range `end` reads past the string, an
+   inverted start/end underflows the length computation into a huge
+   allocation) — real cost is O(end - start), matching certo_text_byte_at_
+   unchecked's identical "caller-validated, skip the safety scan" contract. */
+certo_text_t certo_text_slice_unchecked(certo_text_t s, int64_t start, int64_t end) {
+    if (!s || start >= end) return "";
+    int64_t len = end - start;
+    char* out = (char*)malloc((size_t)len + 1);
+    if (!out) certo_panic("out of memory");
+    memcpy(out, s + start, (size_t)len);
+    out[len] = '\0';
+    return out;
+}
+
 /* Returns NULL (None) if not found, else pointer to int64_t index */
 void* certo_text_index_of(certo_text_t haystack, certo_text_t needle) {
     if (!haystack || !needle) return NULL;

@@ -1431,9 +1431,34 @@ fn map_get_is_polymorphic() {
 fn text_extra_functions_registered() {
     let env = seeded_env();
     for name in &["Text.eq", "Text.startsWith", "Text.endsWith",
-                  "Text.trimStart", "Text.trimEnd", "Text.slice", "Text.repeat"] {
+                  "Text.trimStart", "Text.trimEnd", "Text.slice", "Text.repeat",
+                  "Text.sliceUnchecked"] {
         assert!(env.lookup(name).is_some(), "missing: {}", name);
     }
+}
+
+// BACKLOG item 325 — Text.sliceUnchecked is a caller-validated variant of
+// Text.slice that skips the full-string strlen scan (real cost O(end -
+// start) instead of O(Text.byteLength(text))), for hot paths like a lexer
+// slicing many small tokens out of one large, unchanging source string.
+#[test]
+fn text_slice_unchecked_same_signature_as_slice() {
+    let env = seeded_env();
+    assert_eq!(env.lookup("Text.slice"), env.lookup("Text.sliceUnchecked"),
+        "Text.sliceUnchecked should have the identical (Text, Int, Int) -> Text signature as Text.slice");
+}
+
+#[test]
+fn text_c_contains_slice_unchecked() {
+    assert!(TEXT_C.contains("certo_text_slice_unchecked"),
+        "missing certo_text_slice_unchecked in TEXT_C");
+    // The whole point of this variant is skipping strlen(s) entirely — confirm
+    // its body has no strlen call, unlike certo_text_slice right above it.
+    let idx = TEXT_C.find("certo_text_t certo_text_slice_unchecked(").unwrap();
+    let end = TEXT_C[idx..].find("\n}").map(|i| idx + i).unwrap_or(TEXT_C.len());
+    let body = &TEXT_C[idx..end];
+    assert!(!body.contains("strlen"),
+        "certo_text_slice_unchecked should not call strlen — that's the entire fix for item 325");
 }
 
 #[test]
