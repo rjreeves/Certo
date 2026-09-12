@@ -573,7 +573,10 @@ fn cmd_build(args: &[String], quiet: bool) {
     // symbols declared in RUNTIME_HEADER and used from HTTP_C's connection
     // teardown — HTTP_C is linked unconditionally (crates/stdlib/src/lib.rs),
     // so an ordinary non-DB HTTP program must not reference them at all.
-    let preamble = format!("#ifdef _WIN32\n\
+    let preamble = format!("#ifndef _GNU_SOURCE\n\
+                    #  define _GNU_SOURCE\n\
+                    #endif\n\
+                    #ifdef _WIN32\n\
                     #  ifndef WIN32_LEAN_AND_MEAN\n\
                     #    define WIN32_LEAN_AND_MEAN\n\
                     #  endif\n\
@@ -584,7 +587,7 @@ fn cmd_build(args: &[String], quiet: bool) {
                     #  include <ws2tcpip.h>\n\
                     #  pragma comment(lib, \"ws2_32.lib\")\n\
                     #endif\n\
-                    #include <stdint.h>\n#include <stdbool.h>\n#include <stddef.h>\n\
+                    #include <stdint.h>\n#include <stdbool.h>\n#include <stddef.h>\n#include <stdio.h>\n\
                     #include <inttypes.h>\n#include <stdarg.h>\n\
                     #define _CRT_SECURE_NO_WARNINGS\n\
                     {}{}",

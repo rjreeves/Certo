@@ -24,21 +24,37 @@ fn assert_success(output: &std::process::Output) -> String {
 const HOST_STRESS_SOURCE: &str = r#"module HostStressTest
 
 fn start(c: HostContext): Result<Unit, Text> = Ok(())
-fn stop(c: HostContext): Result<Unit, Text> = Ok(())
+fn quiesce(c: HostContext): Result<Unit, Text> [io] = {
+    sleep(2)
+    println("quiesced")
+    Ok(())
+}
+fn stop(c: HostContext): Result<Unit, Text> [io] = {
+    println("stopped")
+    Ok(())
+}
 fn work(c: HostContext): Result<Unit, Text> [io] = {
     HostContext.ready(c)
     while HostContext.sleep(c, Duration.milliseconds(1)) {}
     Ok(())
 }
 
-fn main(): Unit [io] = {
+fn main(): Unit [io, async] = {
     var iteration = 0
     while iteration < 50 {
-        val host = Host.new().add(Host.plugin("plugin", start, stop).worker("worker", work))
+        val plugin = HostPlugin.worker(
+            HostPlugin.quiesce(Host.plugin("plugin", start, stop), quiesce),
+            "worker",
+            work)
+        val host = Host.new().add(plugin)
         match Host.start(host) {
-            Ok(_) => match Host.stop(host) {
-                Ok(_) => ()
-                Err(error) => println(f"stop failed: {error}")
+            Ok(_) => {
+                val stopped = await parallel {
+                    Host.stop(host),
+                    Host.stop(host),
+                    Host.stop(host),
+                    Host.stop(host),
+                }
             }
             Err(error) => println(f"start failed: {error}")
         }
@@ -53,6 +69,16 @@ fn repeated_host_lifecycles_are_stable() {
     let stdout = assert_success(&run_certo(HOST_STRESS_SOURCE));
     assert!(stdout.contains("stress complete"), "{stdout}");
     assert!(!stdout.contains("failed:"), "{stdout}");
+    assert_eq!(
+        stdout.lines().filter(|line| *line == "quiesced").count(),
+        50,
+        "{stdout}"
+    );
+    assert_eq!(
+        stdout.lines().filter(|line| *line == "stopped").count(),
+        50,
+        "{stdout}"
+    );
 }
 
 #[cfg(not(windows))]
