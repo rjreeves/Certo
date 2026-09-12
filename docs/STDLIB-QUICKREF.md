@@ -1024,6 +1024,53 @@ See `examples/host.cto` for a complete lifecycle example.
 
 ---
 
+## Cli
+
+`import Stdlib.Cli`
+
+Declarative command-line parsing inspired by clap. Empty `short`, `long`, or
+`version` strings omit that part of a definition. `Cli.parse` reads the current
+process arguments and never exits; the application decides how to present an
+error, help, or version response.
+
+```
+Cli.command(name: Text, about: Text, version: Text): CliCommand
+Cli.option(cmd: CliCommand, name: Text, short: Text, long: Text,
+           valueName: Text, help: Text): CliCommand
+Cli.flag(cmd: CliCommand, name: Text, short: Text, long: Text,
+         help: Text): CliCommand
+Cli.positional(cmd: CliCommand, name: Text, valueName: Text,
+               help: Text): CliCommand
+Cli.required(cmd: CliCommand, name: Text): CliCommand
+Cli.defaultValue(cmd: CliCommand, name: Text, value: Text): CliCommand
+Cli.subcommand(cmd: CliCommand, child: CliCommand): CliCommand
+
+Cli.parse(cmd: CliCommand): CliMatches [io]
+Cli.help(cmd: CliCommand): Text
+Cli.version(cmd: CliCommand): Text
+
+CliMatches.ok(matches: CliMatches): Bool
+CliMatches.error(matches: CliMatches): Text
+CliMatches.helpRequested(matches: CliMatches): Bool
+CliMatches.versionRequested(matches: CliMatches): Bool
+CliMatches.help(matches: CliMatches): Text       // help for active command
+CliMatches.version(matches: CliMatches): Text    // version for active command
+CliMatches.has(matches: CliMatches, name: Text): Bool
+CliMatches.get(matches: CliMatches, name: Text): Text?
+CliMatches.getOr(matches: CliMatches, name: Text, fallback: Text): Text
+CliMatches.flag(matches: CliMatches, name: Text): Bool
+CliMatches.subcommand(matches: CliMatches): CliMatches?
+CliMatches.subcommandName(matches: CliMatches): Text
+```
+
+Long options accept `--output value` and `--output=value`. Short options accept
+`-o value` and attached values such as `-ofile`; flags may be grouped (`-vq`).
+`--` ends option parsing. `-h`/`--help` and `-V`/`--version` are built in.
+Errors and help/version requests in a subcommand are visible from the root
+matches; `matches.help()` and `matches.version()` select the active command.
+
+---
+
 ## Regex
 
 `import Stdlib.Regex`
