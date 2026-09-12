@@ -85,6 +85,7 @@ typedef struct CertoHost {
     bool running;
     volatile sig_atomic_t stop_requested;
     volatile int state;
+    volatile int startup_complete;
     volatile int shutdown_complete;
     certo_text_t shutdown_error;
     int64_t shutdown_timeout_ms;
@@ -196,6 +197,7 @@ CertoHost* certo_host_new(void) {
     host->quiesce_timeout_ms = 10000;
     host->stop_timeout_ms = 10000;
     CERTO_ATOMIC_STORE(&host->state, CERTO_HOST_NEW);
+    CERTO_ATOMIC_STORE(&host->startup_complete, 0);
     context->host = host;
 #if defined(_WIN32)
     InitializeCriticalSection(&host->wait_lock);
@@ -1000,6 +1002,7 @@ void* certo_host_start(CertoHost* host) {
         __certo_host_stop_started(host);
         return certo_err((intptr_t)readiness_error);
     }
+    CERTO_ATOMIC_STORE(&host->startup_complete, 1);
     CERTO_ATOMIC_STORE(&host->state, CERTO_HOST_HEALTHY);
     return certo_ok(0);
 }
@@ -1102,7 +1105,8 @@ int64_t certo_host_context_ready(CertoHostContext* context) {
         certo_host_context_gauge(context, "host.worker.ready", ready_workers);
         CERTO_ATOMIC_STORE(&context->worker->health, CERTO_WORKER_HEALTHY);
         int host_state = CERTO_ATOMIC_LOAD(&context->host->state);
-        if (ready_workers >= context->host->worker_count &&
+        if (CERTO_ATOMIC_LOAD(&context->host->startup_complete) &&
+            ready_workers >= context->host->worker_count &&
             host_state != CERTO_HOST_STOPPING && host_state != CERTO_HOST_FAILED)
             CERTO_ATOMIC_STORE(&context->host->state, CERTO_HOST_HEALTHY);
     }
