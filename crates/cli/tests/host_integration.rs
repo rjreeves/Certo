@@ -1,4 +1,4 @@
-use std::{fs, process::Command};
+use std::{env, fs, process::Command};
 
 fn run_certo(source: &str) -> std::process::Output {
     let dir = tempfile::tempdir().expect("temporary test directory");
@@ -133,6 +133,119 @@ fn main(): Unit [io, async] = {
 }
 "#;
 
+const HOST_RANDOMIZED_STRESS_SOURCE: &str = r#"module HostRandomizedStressTest
+
+fn start(c: HostContext): Result<Unit, Text> = Ok(())
+fn stop(c: HostContext): Result<Unit, Text> = Ok(())
+fn readyDelayKey(): ServiceKey<Channel<Int>> = Host.serviceKey("ready-delay")
+fn failureSignalKey(): ServiceKey<Channel<Int>> = Host.serviceKey("failure-signal")
+
+fn delayedReady(c: HostContext): Result<Unit, Text> [io] = {
+    match HostContext.service(c, readyDelayKey()) {
+        Some(delays) => match Channel.receive(delays) {
+            Some(delay) => {
+                val completed = HostContext.sleep(c, Duration.milliseconds(delay))
+                HostContext.ready(c)
+                while HostContext.sleep(c, Duration.milliseconds(1)) {}
+                Ok(())
+            }
+            None => Err("ready delay channel closed")
+        }
+        None => Err("ready delay service missing")
+    }
+}
+
+fn failWhenSignalled(c: HostContext): Result<Unit, Text> [io] = {
+    HostContext.ready(c)
+    var failed = false
+    while !failed and HostContext.sleep(c, Duration.milliseconds(1)) {
+        match HostContext.service(c, failureSignalKey()) {
+            Some(signal) => match Channel.tryReceive(signal) {
+                Some(_) => { failed = true }
+                None => {}
+            }
+            None => {}
+        }
+    }
+    if failed then Err("randomized race failure") else Ok(())
+}
+
+fn startAfter(host: Host, delay: Int): Result<Unit, Text> [io] = {
+    sleep(delay)
+    Host.start(host)
+}
+
+fn stopAfter(host: Host, delay: Int): Result<Unit, Text> [io] = {
+    sleep(delay)
+    Host.stop(host)
+}
+
+fn failAfter(signal: Channel<Int>, delay: Int): Result<Unit, Text> [io] = {
+    sleep(delay)
+    Channel.send(signal, 1)
+    Ok(())
+}
+
+fn main(): Unit [io, async] = {
+    var state = __SEED__
+    var iteration = 0
+    while iteration < __ITERATIONS__ {
+        state = (state * 48271) % 2147483647
+        val readyDelay = state % 5
+        state = (state * 48271) % 2147483647
+        val startDelay = state % 5
+        state = (state * 48271) % 2147483647
+        val startupStopDelay = state % 5
+
+        val readyDelays = Channel.new(capacity: 1)
+        Channel.send(readyDelays, readyDelay)
+        val readinessHost = Host.new()
+            .readinessTimeout(Duration.seconds(1))
+            .provide(readyDelayKey(), readyDelays)
+            .add(Host.plugin("readiness", start, stop)
+                .worker("delayed-ready", delayedReady))
+        val startupRace = await parallel {
+            startAfter(readinessHost, startDelay),
+            stopAfter(readinessHost, startupStopDelay),
+        }
+        val readinessCleanup = Host.stop(readinessHost)
+
+        state = (state * 48271) % 2147483647
+        val failureDelay = state % 5
+        state = (state * 48271) % 2147483647
+        val stopDelayA = state % 5
+        state = (state * 48271) % 2147483647
+        val stopDelayB = state % 5
+        state = (state * 48271) % 2147483647
+        val stopDelayC = state % 5
+
+        val failureSignal = Channel.new(capacity: 1)
+        val failureHost = Host.new()
+            .readinessTimeout(Duration.seconds(1))
+            .provide(failureSignalKey(), failureSignal)
+            .add(Host.plugin("failure", start, stop)
+                .worker("failing", failWhenSignalled)
+                .restart(RestartPolicy.onFailure(
+                    100, Duration.milliseconds(1), Duration.milliseconds(5))))
+        match Host.start(failureHost) {
+            Ok(_) => {
+                val failureRace = await parallel {
+                    failAfter(failureSignal, failureDelay),
+                    stopAfter(failureHost, stopDelayA),
+                    stopAfter(failureHost, stopDelayB),
+                    stopAfter(failureHost, stopDelayC),
+                }
+            }
+            Err(_) => {}
+        }
+        val settled = Host.waitUntilReady(failureHost, Duration.seconds(1))
+        val failureCleanup = Host.stop(failureHost)
+        iteration = iteration + 1
+    }
+    println("randomized lifecycle stress complete")
+}
+"#;
+
 #[test]
 fn repeated_host_lifecycles_are_stable() {
     let stdout = assert_success(&run_certo(HOST_STRESS_SOURCE));
@@ -211,6 +324,61 @@ fn thread_sanitizer_shutdown_race_has_no_data_races() {
         .expect("run ThreadSanitizer-backed host shutdown race test");
     let stdout = assert_success(&output);
     assert!(stdout.contains("shutdown race complete"), "{stdout}");
+}
+
+#[test]
+#[ignore = "scheduled sanitizer stress"]
+fn randomized_lifecycle_stress_is_reproducible() {
+    let raw_seed = env::var("CERTO_HOST_STRESS_SEED").unwrap_or_else(|_| "1".to_owned());
+    let parsed_seed = raw_seed
+        .parse::<i64>()
+        .expect("CERTO_HOST_STRESS_SEED must be an integer");
+    let normalized_seed = parsed_seed.rem_euclid(2_147_483_647);
+    let seed = if normalized_seed == 0 {
+        1
+    } else {
+        normalized_seed
+    };
+    let iterations = env::var("CERTO_HOST_STRESS_ITERATIONS")
+        .unwrap_or_else(|_| "50".to_owned())
+        .parse::<i64>()
+        .expect("CERTO_HOST_STRESS_ITERATIONS must be an integer")
+        .clamp(1, 10_000);
+    eprintln!("randomized host lifecycle stress: seed={seed} iterations={iterations}");
+
+    let source = HOST_RANDOMIZED_STRESS_SOURCE
+        .replace("__SEED__", &seed.to_string())
+        .replace("__ITERATIONS__", &iterations.to_string());
+    let dir = tempfile::tempdir().expect("temporary test directory");
+    let source_path = dir.path().join("host_randomized_lifecycle_stress.cto");
+    fs::write(&source_path, source).expect("write Certo source");
+
+    let mut command = Command::new(env!("CARGO_BIN_EXE_certo"));
+    command.arg("run").arg(&source_path);
+    match env::var("CERTO_HOST_STRESS_SANITIZER").as_deref() {
+        Ok("address") => {
+            command.arg("--sanitize-address").env("CC", "clang").env(
+                "ASAN_OPTIONS",
+                "detect_leaks=0:halt_on_error=1:abort_on_error=1",
+            );
+        }
+        Ok("thread") => {
+            command
+                .arg("--sanitize-thread")
+                .env("CC", "clang")
+                .env("TSAN_OPTIONS", "halt_on_error=1:abort_on_error=1");
+        }
+        Ok(other) => panic!("unknown CERTO_HOST_STRESS_SANITIZER: {other}"),
+        Err(_) => {}
+    }
+    let output = command
+        .output()
+        .expect("run randomized host lifecycle stress test");
+    let stdout = assert_success(&output);
+    assert!(
+        stdout.contains("randomized lifecycle stress complete"),
+        "{stdout}"
+    );
 }
 
 #[test]

@@ -1,6 +1,18 @@
 name: Host sanitizers
 
 on:
+  workflow_dispatch:
+    inputs:
+      seed:
+        description: Reproducible randomized lifecycle stress seed
+        required: false
+        default: "1"
+      iterations:
+        description: Randomized lifecycle stress iterations
+        required: false
+        default: "500"
+  schedule:
+    - cron: "17 3 * * *"
   push:
     paths:
       - "crates/stdlib/src/host.rs"
@@ -26,6 +38,13 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y clang
       - name: Run native host sanitizer stress test
         run: cargo test -p certo --test host_integration sanitizer_stress -- --nocapture
+      - name: Run scheduled randomized lifecycle stress under AddressSanitizer
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+        env:
+          CERTO_HOST_STRESS_SANITIZER: address
+          CERTO_HOST_STRESS_SEED: ${{ github.event.inputs.seed || github.run_id }}
+          CERTO_HOST_STRESS_ITERATIONS: ${{ github.event.inputs.iterations || '500' }}
+        run: cargo test -p certo --test host_integration randomized_lifecycle_stress -- --ignored --nocapture
 
   thread-sanitizer:
     runs-on: ubuntu-latest
@@ -38,6 +57,13 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y clang
       - name: Run native host concurrency test under ThreadSanitizer
         run: cargo test -p certo --test host_integration thread_sanitizer_ -- --nocapture
+      - name: Run scheduled randomized lifecycle stress under ThreadSanitizer
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+        env:
+          CERTO_HOST_STRESS_SANITIZER: thread
+          CERTO_HOST_STRESS_SEED: ${{ github.event.inputs.seed || github.run_id }}
+          CERTO_HOST_STRESS_ITERATIONS: ${{ github.event.inputs.iterations || '500' }}
+        run: cargo test -p certo --test host_integration randomized_lifecycle_stress -- --ignored --nocapture
 
   windows-stress:
     runs-on: windows-latest
