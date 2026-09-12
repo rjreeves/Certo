@@ -2010,7 +2010,7 @@ fn lower_expr(expr: &HirExpr, b: &mut Builder) -> Operand {
                   // `certo_some`'s own always-`int64_t`-cell `__certo_
                   // opt_box`, same as the callees above — double-boxes
                   // identically when the *result* type needs heap-boxing.
-                  "Option.map"];
+                  "Option.map", "HostContext.service"];
             let needs_opt_unwrap = matches!(&func.kind, HirExprKind::Global(name) if OPT_UNWRAP_CALLEES.contains(&name.as_str()))
                 && matches!(&expr.ty, Ty::Option(inner) if inner.needs_heap_box());
 

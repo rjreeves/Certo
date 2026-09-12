@@ -1064,6 +1064,170 @@ pub fn seed_stdlib(env: &mut TypeEnv, counter: &mut u32) {
     }
 
     // ---------------------------------------------------------------- //
+    // Host â€” ordered lifecycle for statically linked, in-process plugins
+    // ---------------------------------------------------------------- //
+
+    {
+        let host = Ty::Named { name: "Host".into(), args: vec![] };
+        let plugin = Ty::Named { name: "HostPlugin".into(), args: vec![] };
+        let context = Ty::Named { name: "HostContext".into(), args: vec![] };
+        let restart = Ty::Named { name: "RestartPolicy".into(), args: vec![] };
+        let lifecycle = fn1(
+            context.clone(),
+            Ty::Result(Box::new(Ty::Unit), Box::new(Ty::Text)),
+        );
+        let host_result = Ty::Result(Box::new(Ty::Unit), Box::new(Ty::Text));
+        def!("Host.new", Ty::Fn { params: vec![], ret: Box::new(host.clone()) });
+        def!("Host.plugin", Ty::Fn {
+            params: vec![Ty::Text, lifecycle.clone(), lifecycle.clone()],
+            ret: Box::new(plugin.clone()),
+        });
+        {
+            let t = fresh();
+            let key = Ty::Named { name: "ServiceKey".into(), args: vec![Ty::Var(t)] };
+            env.define("HostPlugin.provides", poly1(t, fn2(plugin.clone(), key, plugin.clone())));
+        }
+        {
+            let t = fresh();
+            let key = Ty::Named { name: "ServiceKey".into(), args: vec![Ty::Var(t)] };
+            env.define("HostPlugin.requires", poly1(t, fn2(plugin.clone(), key, plugin.clone())));
+        }
+        def!("HostPlugin.worker", Ty::Fn {
+            params: vec![plugin.clone(), Ty::Text, fn1(
+                context.clone(),
+                Ty::Result(Box::new(Ty::Unit), Box::new(Ty::Text)),
+            )],
+            ret: Box::new(plugin.clone()),
+        });
+        def!("HostPlugin.quiesce", fn2(plugin.clone(), lifecycle, plugin.clone()));
+        def!("RestartPolicy.never", Ty::Fn {
+            params: vec![], ret: Box::new(restart.clone()),
+        });
+        def!("RestartPolicy.onFailure", Ty::Fn {
+            params: vec![
+                Ty::Int,
+                Ty::Named { name: "Duration".into(), args: vec![] },
+                Ty::Named { name: "Duration".into(), args: vec![] },
+            ],
+            ret: Box::new(restart.clone()),
+        });
+        def!("RestartPolicy.always", Ty::Fn {
+            params: vec![
+                Ty::Int,
+                Ty::Named { name: "Duration".into(), args: vec![] },
+                Ty::Named { name: "Duration".into(), args: vec![] },
+            ],
+            ret: Box::new(restart.clone()),
+        });
+        def!("HostPlugin.restart", fn2(plugin.clone(), restart, plugin.clone()));
+        def!("Host.add", fn2(host.clone(), plugin, host.clone()));
+        def!("Host.configure", Ty::Fn {
+            params: vec![host.clone(), Ty::Text, Ty::Text],
+            ret: Box::new(host.clone()),
+        });
+        {
+            let t = fresh();
+            let key = Ty::Named { name: "ServiceKey".into(), args: vec![Ty::Var(t)] };
+            env.define("Host.serviceKey", poly1(t, fn1(Ty::Text, key)));
+        }
+        {
+            let t = fresh();
+            let key = Ty::Named { name: "ServiceKey".into(), args: vec![Ty::Var(t)] };
+            env.define("Host.provide", poly1(t, Ty::Fn {
+                params: vec![host.clone(), key, Ty::Var(t)],
+                ret: Box::new(host.clone()),
+            }));
+        }
+        {
+            let t = fresh();
+            let key = Ty::Named { name: "ServiceKey".into(), args: vec![Ty::Var(t)] };
+            env.define("HostContext.service", poly1(t, fn2(
+                context.clone(), key, Ty::Option(Box::new(Ty::Var(t))),
+            )));
+        }
+        def!("HostContext.config", fn2(context.clone(), Ty::Text, Ty::Option(Box::new(Ty::Text))));
+        def!("HostContext.configOr", Ty::Fn {
+            params: vec![context.clone(), Ty::Text, Ty::Text],
+            ret: Box::new(Ty::Text),
+        });
+        def!("Host.shutdownTimeout", fn2(
+            host.clone(),
+            Ty::Named { name: "Duration".into(), args: vec![] },
+            host.clone(),
+        ));
+        def!("Host.readinessTimeout", fn2(
+            host.clone(),
+            Ty::Named { name: "Duration".into(), args: vec![] },
+            host.clone(),
+        ));
+        def!("Host.quiesceTimeout", fn2(
+            host.clone(),
+            Ty::Named { name: "Duration".into(), args: vec![] },
+            host.clone(),
+        ));
+        def!("Host.drainTimeout", fn2(
+            host.clone(),
+            Ty::Named { name: "Duration".into(), args: vec![] },
+            host.clone(),
+        ));
+        def!("Host.stopTimeout", fn2(
+            host.clone(),
+            Ty::Named { name: "Duration".into(), args: vec![] },
+            host.clone(),
+        ));
+        def!("Host.start", fn1(host.clone(), host_result.clone()));
+        def!("Host.stop", fn1(host.clone(), host_result.clone()));
+        def!("Host.run", fn1(host.clone(), host_result.clone()));
+        def!("Host.waitUntilReady", fn2(
+            host.clone(),
+            Ty::Named { name: "Duration".into(), args: vec![] },
+            host_result,
+        ));
+        def!("Host.health", fn1(host.clone(), Ty::Text));
+        def!("Host.metrics", fn1(host.clone(), Ty::Text));
+        def!("Host.workerHealth", fn2(
+            host.clone(), Ty::Text, Ty::Option(Box::new(Ty::Text)),
+        ));
+        def!("Host.workerRestarts", fn2(
+            host.clone(), Ty::Text, Ty::Option(Box::new(Ty::Int)),
+        ));
+        def!("Host.workerLastError", fn2(
+            host, Ty::Text, Ty::Option(Box::new(Ty::Text)),
+        ));
+        def!("Host.requestStop", fn1(context.clone(), Ty::Unit));
+        def!("HostContext.ready", fn1(context.clone(), Ty::Unit));
+        def!("HostContext.fail", fn2(context.clone(), Ty::Text, Ty::Unit));
+        def!("HostContext.sleep", fn2(
+            context.clone(),
+            Ty::Named { name: "Duration".into(), args: vec![] },
+            Ty::Bool,
+        ));
+        def!("HostContext.waitUntil", Ty::Fn {
+            params: vec![
+                context.clone(),
+                fn1(context.clone(), Ty::Bool),
+                Ty::Named { name: "Duration".into(), args: vec![] },
+            ],
+            ret: Box::new(Ty::Bool),
+        });
+        def!("HostContext.log", Ty::Fn {
+            params: vec![context.clone(), Ty::Text, Ty::Text, Ty::Text],
+            ret: Box::new(Ty::Unit),
+        });
+        def!("HostContext.counter", Ty::Fn {
+            params: vec![context.clone(), Ty::Text, Ty::Int],
+            ret: Box::new(Ty::Unit),
+        });
+        def!("HostContext.gauge", Ty::Fn {
+            params: vec![context.clone(), Ty::Text, Ty::Int],
+            ret: Box::new(Ty::Unit),
+        });
+        def!("HostContext.isStopping", fn1(context.clone(), Ty::Bool));
+        def!("HostContext.pluginCount", fn1(context, Ty::Int));
+    }
+
+    // ---------------------------------------------------------------- //
+    // ---------------------------------------------------------------- //
     // Json
     // ---------------------------------------------------------------- //
 
@@ -1649,6 +1813,47 @@ pub fn seed_stdlib(env: &mut TypeEnv, counter: &mut u32) {
     pm!("Process.spawnDetached", "cmd", "args", "workingDir");
     pm!("Process.spawnDetachedHidden", "cmd", "args", "workingDir");
     pm!("Process.quit",          "code");
+
+    // Host
+    pm!("Host.plugin",             "name", "start", "stop");
+    pm!("HostPlugin.provides",     "plugin", "key");
+    pm!("HostPlugin.requires",     "plugin", "key");
+    pm!("HostPlugin.worker",       "plugin", "name", "run");
+    pm!("HostPlugin.quiesce",      "plugin", "callback");
+    pm!("HostPlugin.restart",       "plugin", "policy");
+    pm!("RestartPolicy.onFailure",  "maxRetries", "initialDelay", "maxDelay");
+    pm!("RestartPolicy.always",     "maxRetries", "initialDelay", "maxDelay");
+    pm!("Host.add",                "host", "plugin");
+    pm!("Host.configure",          "host", "key", "value");
+    pm!("Host.serviceKey",         "name");
+    pm!("Host.provide",            "host", "key", "service");
+    pm!("Host.shutdownTimeout",    "host", "timeout");
+    pm!("Host.readinessTimeout",   "host", "timeout");
+    pm!("Host.quiesceTimeout",     "host", "timeout");
+    pm!("Host.drainTimeout",       "host", "timeout");
+    pm!("Host.stopTimeout",        "host", "timeout");
+    pm!("Host.start",              "host");
+    pm!("Host.stop",               "host");
+    pm!("Host.run",                "host");
+    pm!("Host.waitUntilReady",     "host", "timeout");
+    pm!("Host.health",             "host");
+    pm!("Host.metrics",            "host");
+    pm!("Host.workerHealth",       "host", "name");
+    pm!("Host.workerRestarts",     "host", "name");
+    pm!("Host.workerLastError",    "host", "name");
+    pm!("Host.requestStop",        "context");
+    pm!("HostContext.ready",       "context");
+    pm!("HostContext.fail",        "context", "error");
+    pm!("HostContext.sleep",       "context", "duration");
+    pm!("HostContext.waitUntil",   "context", "predicate", "interval");
+    pm!("HostContext.log",         "context", "level", "event", "message");
+    pm!("HostContext.counter",     "context", "name", "amount");
+    pm!("HostContext.gauge",       "context", "name", "value");
+    pm!("HostContext.isStopping",  "context");
+    pm!("HostContext.pluginCount", "context");
+    pm!("HostContext.service",     "context", "key");
+    pm!("HostContext.config",      "context", "key");
+    pm!("HostContext.configOr",    "context", "key", "fallback");
 
     // Json
     pm!("JsonValue.at",   "value", "index");

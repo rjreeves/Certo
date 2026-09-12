@@ -167,7 +167,8 @@ impl Ty {
                     // one opaque name missing from this list, a latent bug
                     // (unreachable before item 164b, since nothing could
                     // construct a `Timestamp` value; live now that it can).
-                    | "Timestamp"))
+                    | "Timestamp" | "Host" | "HostPlugin" | "HostContext" | "ServiceKey"
+                    | "RestartPolicy"))
                     || name == "__CertoTask" || name == "Channel";
                 !opaque_handle
             }

@@ -54,6 +54,8 @@ pub fn ty_to_c(ty: &Ty) -> String {
         // convention as `Channel`/`__CertoTask`, must also be checked before
         // the generic `Ty::Named` catch-all below.
         Ty::Named { name, .. } if name == "File" => "void*".into(),
+        // Stdlib.Host values are opaque heap handles owned by the runtime.
+        Ty::Named { name, .. } if matches!(name.as_str(), "Host" | "HostPlugin" | "HostContext" | "ServiceKey" | "RestartPolicy") => "void*".into(),
         // These stdlib scalar types have a C-side typedef prefixed `Certo`
         // (`CertoDateTime`, etc. — see crates/stdlib/src/datetime.rs) rather
         // than matching their bare Certo name; an explicit `DateTime`/`Date`/

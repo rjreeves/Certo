@@ -517,6 +517,18 @@ fn generic_container_ret(full: Option<&str>, args: &[HirExpr]) -> Option<Ty> {
         Some("getOrElse") | Some("Result.getOrElse") => args.get(1).map(|a| a.ty.clone()),
         Some("Map.get") => args.first().and_then(map_kv).map(|(_, v)| Ty::Option(Box::new(v))),
         Some("Map.remove") | Some("Map.insert") => args.first().map(|a| a.ty.clone()),
+        Some("Host.provide") | Some("Host.configure") | Some("Host.add")
+        | Some("Host.shutdownTimeout") | Some("Host.readinessTimeout")
+        | Some("Host.quiesceTimeout") | Some("Host.drainTimeout")
+        | Some("Host.stopTimeout") | Some("HostPlugin.provides")
+        | Some("HostPlugin.requires") | Some("HostPlugin.worker")
+        | Some("HostPlugin.quiesce") | Some("HostPlugin.restart") =>
+            args.first().map(|a| a.ty.clone()),
+        Some("HostContext.service") => args.get(1).and_then(|key| match &key.ty {
+            Ty::Named { name, args } if name == "ServiceKey" && args.len() == 1 =>
+                Some(Ty::Option(Box::new(args[0].clone()))),
+            _ => None,
+        }),
         Some("Map.keys") => args.first().and_then(map_kv).map(|(k, _)| Ty::List(Box::new(k))),
         Some("Map.values") => args.first().and_then(map_kv).map(|(_, v)| Ty::List(Box::new(v))),
         // `dbQueryTyped`/`Query.list`/`Query.first`/`Query.groupedList` are
@@ -800,6 +812,20 @@ fn stdlib_param_names() -> HashMap<&'static str, &'static [&'static str]> {
     m.insert("Map.get",         &["map", "key"]);
     m.insert("Map.contains",    &["map", "key"]);
     m.insert("Map.remove",      &["map", "key"]);
+
+    // Host
+    m.insert("Host.configure",       &["host", "key", "value"]);
+    m.insert("Host.serviceKey",      &["name"]);
+    m.insert("Host.provide",         &["host", "key", "service"]);
+    m.insert("HostPlugin.provides",  &["plugin", "key"]);
+    m.insert("HostPlugin.requires",  &["plugin", "key"]);
+    m.insert("HostPlugin.worker",    &["plugin", "name", "run"]);
+    m.insert("HostPlugin.quiesce",   &["plugin", "callback"]);
+    m.insert("HostPlugin.restart",   &["plugin", "policy"]);
+    m.insert("Host.shutdownTimeout", &["host", "timeout"]);
+    m.insert("HostContext.service",  &["context", "key"]);
+    m.insert("HostContext.config",   &["context", "key"]);
+    m.insert("HostContext.configOr", &["context", "key", "fallback"]);
 
     // Text
     m.insert("Text.concat",     &["a", "b"]);
