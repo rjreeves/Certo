@@ -1642,6 +1642,34 @@ fn lower_expr(expr: &HirExpr, b: &mut Builder) -> Operand {
 
         HirExprKind::BinOp { op, lhs, rhs } => {
             let l = lower_expr(lhs, b);
+            if matches!(op, certo_hir::BinOp::And | certo_hir::BinOp::Or) {
+                let dest = b.declare_local("_short_circuit", Ty::Bool);
+                let rhs_bb = b.new_block();
+                let short_bb = b.new_block();
+                let join_bb = b.new_block();
+                let (true_bb, false_bb, short_value) = match op {
+                    certo_hir::BinOp::And => (rhs_bb, short_bb, false),
+                    certo_hir::BinOp::Or => (short_bb, rhs_bb, true),
+                    _ => unreachable!(),
+                };
+                b.terminate(Terminator::If {
+                    cond: l,
+                    true_bb,
+                    false_bb,
+                });
+
+                b.switch_to(short_bb);
+                b.assign(dest, Rvalue::Use(Operand::Const(MirConst::Bool(short_value))));
+                b.terminate(Terminator::Goto(join_bb));
+
+                b.switch_to(rhs_bb);
+                let r = lower_expr(rhs, b);
+                b.assign(dest, Rvalue::Use(r));
+                b.terminate(Terminator::Goto(join_bb));
+
+                b.switch_to(join_bb);
+                return Operand::Local(dest);
+            }
             let r = lower_expr(rhs, b);
             // HIR lowering leaves most node types as `Ty::Error`; bindings recover
             // the real type via `infer_operand_ty`, but a temp binop dest used to
