@@ -99,6 +99,24 @@ fn sanitizer_stress_has_no_native_memory_errors() {
     assert!(stdout.contains("stress complete"), "{stdout}");
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn thread_sanitizer_stress_has_no_data_races() {
+    let dir = tempfile::tempdir().expect("temporary test directory");
+    let source_path = dir.path().join("host_thread_sanitizer_stress.cto");
+    fs::write(&source_path, HOST_STRESS_SOURCE).expect("write Certo source");
+    let output = Command::new(env!("CARGO_BIN_EXE_certo"))
+        .arg("run")
+        .arg(&source_path)
+        .arg("--sanitize-thread")
+        .env("CC", "clang")
+        .env("TSAN_OPTIONS", "halt_on_error=1:abort_on_error=1")
+        .output()
+        .expect("run ThreadSanitizer-backed Certo host stress test");
+    let stdout = assert_success(&output);
+    assert!(stdout.contains("stress complete"), "{stdout}");
+}
+
 #[test]
 fn failed_worker_restarts_and_becomes_healthy() {
     let stdout = assert_success(&run_certo(

@@ -383,6 +383,7 @@ fn cmd_build(args: &[String], quiet: bool) {
     let mut watch    = false;
     let mut release  = false;
     let mut sanitize_address = false;
+    let mut sanitize_thread = false;
     let mut links: Vec<String> = Vec::new();
 
     let mut i = 0;
@@ -405,9 +406,10 @@ fn cmd_build(args: &[String], quiet: bool) {
             "--watch" | "-w"  => watch    = true,
             "--release"       => release  = true,
             "--sanitize-address" => sanitize_address = true,
+            "--sanitize-thread" => sanitize_thread = true,
             "--help" | "-h" => {
-                println!("Usage: certo <file.cto> [-o <out>] [--emit-c] [--emit-dll] [--windows-gui] [-v] [--watch] [--release] [--sanitize-address]");
-                println!("       certo build <file.cto> [-o <out>] [--emit-c] [--emit-dll] [--windows-gui] [-v] [--watch] [--release] [--sanitize-address]");
+                println!("Usage: certo <file.cto> [-o <out>] [--emit-c] [--emit-dll] [--windows-gui] [-v] [--watch] [--release] [--sanitize-address] [--sanitize-thread]");
+                println!("       certo build <file.cto> [-o <out>] [--emit-c] [--emit-dll] [--windows-gui] [-v] [--watch] [--release] [--sanitize-address] [--sanitize-thread]");
                 println!();
                 println!("Options:");
                 println!("  -o <file>    Output path");
@@ -420,6 +422,7 @@ fn cmd_build(args: &[String], quiet: bool) {
                 println!("  --release    Apply the [targets.production] profile from certo.toml");
                 println!("               (optimize/strip-debug/schema overrides — see docs/CLI-TOOLCHAIN.md)");
                 println!("  --sanitize-address  Build with AddressSanitizer and debug symbols");
+                println!("  --sanitize-thread   Build with ThreadSanitizer and debug symbols");
                 return;
             }
             other if other.starts_with('-') => {
@@ -521,6 +524,10 @@ fn cmd_build(args: &[String], quiet: bool) {
 
     let colour   = stderr_is_tty();
     let filename = input.display().to_string();
+
+    if sanitize_address && sanitize_thread {
+        die("--sanitize-address and --sanitize-thread cannot be combined", 2);
+    }
 
     let (mut module, src) = parse_file_or_exit(&input, colour);
 
@@ -678,7 +685,7 @@ fn cmd_build(args: &[String], quiet: bool) {
     let mut cmd = std::process::Command::new(&cc);
     cmd.arg(tmp.path())
        .arg("-o").arg(&out_path)
-       .arg(if sanitize_address { "-O1" } else if target_optimize { "-O2" } else { "-O0" })
+       .arg(if sanitize_address || sanitize_thread { "-O1" } else if target_optimize { "-O2" } else { "-O0" })
        .arg("-Wno-int-to-pointer-cast")
        .arg("-Wno-pointer-to-int-cast")
        .arg("-Wno-int-conversion")
@@ -687,6 +694,11 @@ fn cmd_build(args: &[String], quiet: bool) {
        .arg("-Wno-incompatible-function-pointer-types");
     if sanitize_address {
         cmd.arg("-fsanitize=address")
+           .arg("-fno-omit-frame-pointer")
+           .arg("-g");
+    }
+    if sanitize_thread {
+        cmd.arg("-fsanitize=thread")
            .arg("-fno-omit-frame-pointer")
            .arg("-g");
     }
