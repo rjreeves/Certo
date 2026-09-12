@@ -61,6 +61,11 @@ const IO_FUNCTIONS: &[&str] = &[
     // Process
     "Process.exec", "Process.execInherit", "Process.execWithInput", "Process.spawnDetached",
     "Process.spawnDetachedHidden", "Process.quit", "Process.lines",
+    // Host lifecycle invokes plugin callbacks and may wait for shutdown.
+    "Host.start", "Host.stop", "Host.run", "Host.waitUntilReady",
+    "Host.requestStop", "HostContext.ready", "HostContext.fail",
+    "HostContext.sleep", "HostContext.waitUntil",
+    "Host.metrics", "HostContext.log", "HostContext.counter", "HostContext.gauge",
     // DateTime
     "DateTime.now", "Date.today",
     // Json (in-place mutation)

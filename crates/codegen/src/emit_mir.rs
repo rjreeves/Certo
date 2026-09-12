@@ -633,7 +633,8 @@ fn emit_call_arg(func_c: &str, idx: usize, arg: &Operand, locals: &[MirLocalDecl
         // `List.upsert` (BACKLOG item 209) takes its new item at the same
         // argument position as `List.push` and needs the identical
         // treatment, for the identical reason.
-        ("certo_list_push", 1) | ("certo_list_push_mut", 1) | ("certo_list_upsert", 1) => box_value(&expr, &operand_ty(arg, locals)),
+        ("certo_list_push", 1) | ("certo_list_push_mut", 1) | ("certo_list_upsert", 1)
+        | ("certo_host_provide", 2) => box_value(&expr, &operand_ty(arg, locals)),
         _ => expr,
     }
 }

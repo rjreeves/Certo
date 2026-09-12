@@ -14,6 +14,7 @@ mod env;
 mod file;
 mod path;
 mod process;
+mod host;
 mod json;
 mod http;
 mod math;
@@ -43,6 +44,7 @@ pub use env::ENV_C;
 pub use file::FILE_C;
 pub use path::PATH_C;
 pub use process::PROCESS_C;
+pub use host::HOST_C;
 pub use json::JSON_C;
 pub use http::HTTP_C;
 pub use math::MATH_C;
@@ -54,7 +56,7 @@ pub use uuid::UUID_C;
 /// The full C runtime header: base types + all stdlib implementations.
 pub fn full_c_runtime() -> String {
     [CORE_C, BYTES_C, CREDENTIAL_C, COLLECTIONS_C, CHANNEL_C, RESULT_C, TEXT_C, DATETIME_C, MONEY_C,
-     ENV_C, FILE_C, PATH_C, PROCESS_C, JSON_C, HTTP_C, MATH_C,
+     ENV_C, FILE_C, PATH_C, PROCESS_C, HOST_C, JSON_C, HTTP_C, MATH_C,
      CRYPTO_C, REGEX_C, CSV_C, UUID_C].concat()
 }
 

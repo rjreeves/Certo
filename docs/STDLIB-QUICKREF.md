@@ -28,6 +28,7 @@ Signatures only — one line per function. For narrative usage see
 | [Path](#path) | `import Stdlib.Path` |
 | [Env](#env) | `import Stdlib.Env` |
 | [Process](#process) | `import Stdlib.Process` |
+| [Host](#host) | `import Stdlib.Host` |
 | [Regex](#regex) | `import Stdlib.Regex` |
 | [Csv](#csv) | `import Stdlib.Csv` |
 | [Crypto](#crypto) | `import Stdlib.Crypto` |
@@ -860,6 +861,160 @@ ProcessResult.exitCode(r: ProcessResult): Int
 ProcessResult.stdout(r: ProcessResult): Text
 ProcessResult.stderr(r: ProcessResult): Text
 ```
+
+---
+
+## Host
+
+`import Stdlib.Host`
+
+An in-process host for statically linked plugins. Plugins start in registration
+order and stop in reverse order. If startup fails, the host stops every plugin
+that already started before returning the original startup error.
+
+```
+Host.new(): Host
+Host.plugin(
+    name: Text,
+    start: fn(HostContext): Result<Unit, Text>,
+    stop: fn(HostContext): Result<Unit, Text>
+): HostPlugin
+HostPlugin.provides<T>(plugin: HostPlugin, key: ServiceKey<T>): HostPlugin
+HostPlugin.requires<T>(plugin: HostPlugin, key: ServiceKey<T>): HostPlugin
+HostPlugin.worker(
+    plugin: HostPlugin,
+    name: Text,
+    run: fn(HostContext): Result<Unit, Text>
+): HostPlugin
+HostPlugin.quiesce(
+    plugin: HostPlugin,
+    callback: fn(HostContext): Result<Unit, Text>
+): HostPlugin
+RestartPolicy.never(): RestartPolicy
+RestartPolicy.onFailure(
+    maxRetries: Int,
+    initialDelay: Duration,
+    maxDelay: Duration
+): RestartPolicy
+RestartPolicy.always(
+    maxRetries: Int,
+    initialDelay: Duration,
+    maxDelay: Duration
+): RestartPolicy
+HostPlugin.restart(plugin: HostPlugin, policy: RestartPolicy): HostPlugin
+Host.add(host: Host, plugin: HostPlugin): Host
+Host.configure(host: Host, key: Text, value: Text): Host
+Host.shutdownTimeout(host: Host, timeout: Duration): Host
+Host.readinessTimeout(host: Host, timeout: Duration): Host
+Host.quiesceTimeout(host: Host, timeout: Duration): Host
+Host.drainTimeout(host: Host, timeout: Duration): Host
+Host.stopTimeout(host: Host, timeout: Duration): Host
+
+Host.serviceKey<T>(name: Text): ServiceKey<T>
+Host.provide<T>(host: Host, key: ServiceKey<T>, service: T): Host
+
+Host.start(host: Host): Result<Unit, Text> [io]
+Host.stop(host: Host): Result<Unit, Text> [io]
+Host.run(host: Host): Result<Unit, Text> [io]
+Host.waitUntilReady(host: Host, timeout: Duration): Result<Unit, Text> [io]
+Host.health(host: Host): Text
+Host.metrics(host: Host): Text [io]
+Host.workerHealth(host: Host, name: Text): Text?
+Host.workerRestarts(host: Host, name: Text): Int?
+Host.workerLastError(host: Host, name: Text): Text?
+
+Host.requestStop(context: HostContext): Unit [io]
+HostContext.ready(context: HostContext): Unit [io]
+HostContext.fail(context: HostContext, error: Text): Unit [io]
+HostContext.sleep(context: HostContext, duration: Duration): Bool [io]
+HostContext.waitUntil(
+    context: HostContext,
+    predicate: fn(HostContext): Bool,
+    interval: Duration
+): Bool [io]
+HostContext.log(
+    context: HostContext,
+    level: Text,
+    event: Text,
+    message: Text
+): Unit [io]
+HostContext.counter(context: HostContext, name: Text, amount: Int): Unit [io]
+HostContext.gauge(context: HostContext, name: Text, value: Int): Unit [io]
+HostContext.isStopping(context: HostContext): Bool
+HostContext.pluginCount(context: HostContext): Int
+HostContext.service<T>(context: HostContext, key: ServiceKey<T>): T?
+HostContext.config(context: HostContext, key: Text): Text?
+HostContext.configOr(context: HostContext, key: Text, fallback: Text): Text
+```
+
+`Host.run` starts the host, waits until Ctrl+C, SIGTERM, or `requestStop`, then
+performs an orderly shutdown. Use `start` and `stop` separately for applications
+that already own their main loop. A host cannot be started twice or modified
+after startup.
+
+Services use typed keys rather than casts or string-based result types:
+
+```
+type Logger = { prefix: Text }
+
+fn loggerKey(): ServiceKey<Logger> = Host.serviceKey("logger")
+
+val host = Host.new()
+    .configure("worker.queue", "orders")
+    .provide(loggerKey(), Logger { prefix: "[app]" })
+    .add(workerPlugin().requires(loggerKey()))
+    .add(loggerPlugin().provides(loggerKey()))
+```
+
+Looking up `loggerKey()` returns `Logger?`; using a key with the wrong service
+type is rejected during type checking. Duplicate service names are rejected.
+Before startup, the host validates every requirement and performs a stable
+topological sort. Providers start before their consumers even when registered
+later; unrelated plugins retain registration order. Missing services, duplicate
+provider claims, and dependency cycles return an error without starting anything.
+
+Workers start only after every plugin has initialized. Each worker must call
+`HostContext.ready` after its own initialization; `Host.start` waits for all
+workers and fails if the readiness timeout elapses. The default is 10 seconds.
+`Host.waitUntilReady` supports an explicit deadline for callers that need to
+recheck readiness, and `Host.health` reports `Starting`, `Healthy`, `Stopping`,
+`Stopped`, or `Failed`. A worker may call `HostContext.fail` to record a fatal health error
+and request shutdown immediately.
+
+`HostContext.sleep` waits for the duration and returns `true`, or wakes early
+and returns `false` when shutdown begins. `HostContext.waitUntil` evaluates a
+predicate immediately and then at the requested interval; it returns `true`
+when the predicate succeeds or `false` when shutdown interrupts the wait. Both
+operations share the host's wake signal, so workers do not need polling loops.
+
+Shutdown invokes plugin `quiesce` callbacks in reverse dependency order before
+requesting worker cancellation. It then wakes and drains workers before invoking
+plugin `stop` callbacks in reverse order. Quiesce, drain, and stop have separate
+timeouts; `shutdownTimeout` remains as a compatibility alias for `drainTimeout`.
+Errors from every shutdown phase are aggregated into the returned error instead
+of discarding later failures. A worker error
+requests host shutdown and is returned by `Host.run`; a worker that misses the
+deadline produces a shutdown-timeout error. The default timeout is 10 seconds.
+
+`HostContext.log` writes one JSON object per line to stderr. Every record includes
+`timestamp_ms`, `level`, `event`, `message`, and plugin context; worker logs also
+include the worker name. Output is serialized across workers so records never
+interleave. `counter` atomically adds to a named counter, while `gauge` replaces
+a named integer gauge. `Host.metrics` returns a JSON snapshot containing host
+health, counters, and gauges. The host automatically records worker starts,
+ready workers, worker failures, and shutdown failures.
+
+The worker most recently added with `HostPlugin.worker` can be configured with
+`.restart(policy)`. `onFailure` restarts only failed workers; `always` also
+restarts workers that return successfully; `never` makes failure fatal
+immediately. Delays use exponential backoff capped by `maxDelay`. A restarting
+worker leaves readiness until it calls `HostContext.ready` again. Restarts are
+disabled during quiescing, and exhausting `maxRetries` fails the host and begins
+graceful shutdown. Restart events are logged and counted automatically.
+`workerHealth`, `workerRestarts`, and `workerLastError` expose supervisor state by
+worker name.
+
+See `examples/host.cto` for a complete lifecycle example.
 
 ---
 

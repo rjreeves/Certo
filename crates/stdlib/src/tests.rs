@@ -2795,6 +2795,167 @@ fn seed_stdlib_effects_leaves_pure_functions_unregistered() {
 }
 
 // ------------------------------------------------------------------ //
+// Host — plugin lifecycle
+// ------------------------------------------------------------------ //
+
+#[test]
+fn host_api_is_registered() {
+    let env = seeded_env();
+    for name in [
+        "Host.new", "Host.plugin", "Host.add", "Host.start", "Host.stop",
+        "Host.run", "Host.requestStop", "HostContext.isStopping",
+        "HostContext.pluginCount", "Host.configure", "Host.serviceKey",
+        "Host.provide", "HostContext.service", "HostContext.config",
+        "HostContext.configOr", "HostPlugin.provides", "HostPlugin.requires",
+        "HostPlugin.worker", "Host.shutdownTimeout", "Host.readinessTimeout",
+        "Host.waitUntilReady", "Host.health", "HostContext.ready", "HostContext.fail",
+        "HostContext.sleep", "HostContext.waitUntil",
+        "HostPlugin.quiesce", "Host.quiesceTimeout", "Host.drainTimeout",
+        "Host.stopTimeout",
+        "Host.metrics", "HostContext.log", "HostContext.counter", "HostContext.gauge",
+        "RestartPolicy.never", "RestartPolicy.onFailure", "RestartPolicy.always",
+        "HostPlugin.restart", "Host.workerHealth", "Host.workerRestarts",
+        "Host.workerLastError",
+    ] {
+        assert!(env.lookup(name).is_some(), "missing: {name}");
+    }
+}
+
+#[test]
+fn host_runtime_contains_ordered_lifecycle() {
+    assert!(crate::HOST_C.contains("host->plugins->data[i]"), "startup must iterate forward");
+    assert!(crate::HOST_C.contains("int64_t index = --host->started_count"), "shutdown must iterate in reverse");
+    assert!(crate::HOST_C.contains("__certo_host_stop_started(host)"), "failed startup must roll back started plugins");
+    assert!(crate::HOST_C.contains("signal(SIGINT, __certo_host_signal)"), "Host.run must handle Ctrl+C");
+    assert!(crate::HOST_C.contains("__certo_host_launch_workers(host)"), "workers must launch after plugin startup");
+    assert!(crate::HOST_C.contains("__certo_thread_join_timed"), "worker shutdown must enforce its timeout");
+    assert!(crate::HOST_C.contains("worker->host->context->stopping = 1"), "worker failure must request shutdown");
+    assert!(crate::HOST_C.contains("__certo_host_wait_until_ready"), "startup must wait for worker readiness");
+    assert!(crate::HOST_C.contains("__sync_add_and_fetch(&context->host->ready_workers"), "worker readiness must be reported once");
+    assert!(crate::HOST_C.contains("return \"Healthy\""), "host health must expose the healthy state");
+    assert!(crate::HOST_C.contains("WakeAllConditionVariable(&host->wait_changed)"), "Windows shutdown must wake sleeping workers");
+    assert!(crate::HOST_C.contains("pthread_cond_broadcast(&host->wait_changed)"), "POSIX shutdown must wake sleeping workers");
+    assert!(crate::HOST_C.contains("__certo_host_quiesce_started(host)"), "shutdown must quiesce before draining workers");
+    assert!(crate::HOST_C.contains("__certo_host_append_error"), "shutdown must aggregate phase errors");
+    assert!(crate::HOST_C.contains("case CERTO_HOST_STOPPED: return \"Stopped\""), "health must expose terminal success");
+    assert!(crate::HOST_C.contains("\\\"timestamp_ms\\\""), "structured logs must include timestamps");
+    assert!(crate::HOST_C.contains("\\\"plugin\\\""), "structured logs must include plugin context");
+    assert!(crate::HOST_C.contains("host.worker.starts"), "the host must emit built-in worker metrics");
+    assert!(crate::HOST_C.contains("host.worker.restarts"), "worker restarts must be metered");
+    assert!(crate::HOST_C.contains("worker.restarting"), "worker restarts must be logged");
+    assert!(crate::HOST_C.contains("CERTO_RESTART_ON_FAILURE"), "on-failure supervision must be implemented");
+    assert!(full_c_runtime().contains("certo_host_plugin"), "host runtime missing from full runtime");
+}
+
+#[test]
+fn host_source_typechecks() {
+    check_full(
+        "module A\n\
+         fn start(c: HostContext): Result<Unit, Text> = Ok(())\n\
+         fn stop(c: HostContext): Result<Unit, Text> = Ok(())\n\
+         fn build(): Host = Host.new().add(Host.plugin(\"p\", start, stop))\n\
+         fn cycle(): Result<Unit, Text> = { val h = build()\n Host.start(h)?\n Host.stop(h) }"
+    ).unwrap();
+}
+
+#[test]
+fn host_typed_services_and_config_typecheck() {
+    check_full(
+        "module A\n\
+         type Logger = { prefix: Text }\n\
+         fn key(): ServiceKey<Logger> = Host.serviceKey(\"logger\")\n\
+         fn build(): Host = Host.new().configure(\"mode\", \"test\").provide(key(), Logger { prefix: \"[t]\" })\n\
+         fn load(c: HostContext): Logger? = HostContext.service(c, key())\n\
+         fn mode(c: HostContext): Text = HostContext.configOr(c, \"mode\", \"dev\")"
+    ).unwrap();
+}
+
+#[test]
+fn host_plugin_dependencies_typecheck_with_typed_keys() {
+    check_full(
+        "module A\n\
+         fn key(): ServiceKey<Int> = Host.serviceKey(\"count\")\n\
+         fn start(c: HostContext): Result<Unit, Text> = Ok(())\n\
+         fn stop(c: HostContext): Result<Unit, Text> = Ok(())\n\
+         fn provider(): HostPlugin = Host.plugin(\"provider\", start, stop).provides(key())\n\
+         fn consumer(): HostPlugin = Host.plugin(\"consumer\", start, stop).requires(key())"
+    ).unwrap();
+}
+
+#[test]
+fn host_managed_worker_and_timeout_typecheck() {
+    check_full(
+        "module A\n\
+         fn start(c: HostContext): Result<Unit, Text> = Ok(())\n\
+         fn stop(c: HostContext): Result<Unit, Text> = Ok(())\n\
+         fn work(c: HostContext): Result<Unit, Text> = { HostContext.ready(c)\n Ok(()) }\n\
+         fn quiesce(c: HostContext): Result<Unit, Text> = Ok(())\n\
+         fn build(): Host = Host.new()\n\
+           .readinessTimeout(Duration.seconds(3))\n\
+           .quiesceTimeout(Duration.seconds(1))\n\
+           .drainTimeout(Duration.seconds(5))\n\
+           .stopTimeout(Duration.seconds(1))\n\
+           .add(Host.plugin(\"p\", start, stop).quiesce(quiesce).worker(\"w\", work))\n\
+         fn observe(h: Host): Text = Host.health(h)\n\
+         fn wait(h: Host): Result<Unit, Text> [io] = Host.waitUntilReady(h, Duration.seconds(1))\n\
+         fn fail(c: HostContext): Unit [io] = HostContext.fail(c, \"unhealthy\")"
+    ).unwrap();
+}
+
+#[test]
+fn host_interruptible_waits_typecheck() {
+    check_full(
+        "module A\n\
+         fn condition(c: HostContext): Bool = HostContext.pluginCount(c) > 0\n\
+         fn work(c: HostContext): Result<Unit, Text> [io] = {\n\
+           HostContext.ready(c)\n\
+           val elapsed = HostContext.sleep(c, Duration.milliseconds(10))\n\
+           val reached = HostContext.waitUntil(c, condition, Duration.milliseconds(5))\n\
+           Ok(())\n\
+         }"
+    ).unwrap();
+}
+
+#[test]
+fn host_logging_and_metrics_typecheck() {
+    check_full(
+        "module A\n\
+         fn observe(c: HostContext, h: Host): Text [io] = {\n\
+           HostContext.log(c, \"info\", \"job.started\", \"starting\")\n\
+           HostContext.counter(c, \"jobs.total\", 1)\n\
+           HostContext.gauge(c, \"jobs.active\", 2)\n\
+           Host.metrics(h)\n\
+         }"
+    ).unwrap();
+}
+
+#[test]
+fn host_worker_supervision_typechecks() {
+    check_full(
+        "module A\n\
+         fn start(c: HostContext): Result<Unit, Text> = Ok(())\n\
+         fn stop(c: HostContext): Result<Unit, Text> = Ok(())\n\
+         fn work(c: HostContext): Result<Unit, Text> [io] = { HostContext.ready(c)\n Ok(()) }\n\
+         fn build(): Host = Host.new().add(Host.plugin(\"p\", start, stop)\n\
+           .worker(\"w\", work)\n\
+           .restart(RestartPolicy.onFailure(3, Duration.milliseconds(10), Duration.seconds(1))))\n\
+         fn health(h: Host): Text? = Host.workerHealth(h, \"w\")\n\
+         fn restarts(h: Host): Int? = Host.workerRestarts(h, \"w\")\n\
+         fn error(h: Host): Text? = Host.workerLastError(h, \"w\")"
+    ).unwrap();
+}
+
+#[test]
+fn host_service_key_rejects_the_wrong_service_type() {
+    let errors = check_full(
+        "module A\n\
+         fn key(): ServiceKey<Int> = Host.serviceKey(\"number\")\n\
+         fn build(): Host = Host.provide(Host.new(), key(), \"not an int\")"
+    ).unwrap_err();
+    assert!(!errors.is_empty(), "a ServiceKey<Int> must reject a Text service");
+}
+
+// ------------------------------------------------------------------ //
 // Result combinators — full type-check against real source
 // ------------------------------------------------------------------ //
 

@@ -1,0 +1,79 @@
+module HostExample
+
+type Logger = { prefix: Text }
+
+fn loggerKey(): ServiceKey<Logger> = Host.serviceKey("logger")
+
+fn startLogger(ctx: HostContext): Result<Unit, Text> [io] = {
+    println(f"logger starting ({HostContext.pluginCount(ctx)} plugins registered)")
+    Ok(())
+}
+
+fn stopLogger(ctx: HostContext): Result<Unit, Text> [io] = {
+    println(f"logger stopping; stopping={HostContext.isStopping(ctx)}")
+    Ok(())
+}
+
+fn startWorker(ctx: HostContext): Result<Unit, Text> [io] = {
+    match HostContext.service(ctx, loggerKey()) {
+        Some(logger) => {
+            val queue = HostContext.configOr(ctx, "worker.queue", "default")
+            println(f"{logger.prefix} worker starting on {queue}")
+            Ok(())
+        }
+        None => Err("logger service is missing")
+    }
+}
+
+fn stopWorker(ctx: HostContext): Result<Unit, Text> [io] = {
+    println("worker stopping")
+    Ok(())
+}
+
+fn quiesceWorker(ctx: HostContext): Result<Unit, Text> [io] = {
+    println("worker quiescing")
+    Ok(())
+}
+
+fn consumeOrders(ctx: HostContext): Result<Unit, Text> [io] = {
+    HostContext.log(ctx, "info", "consumer.started", "order consumer running")
+    HostContext.ready(ctx)
+    HostContext.gauge(ctx, "orders.consumer.active", 1)
+    while HostContext.sleep(ctx, Duration.seconds(1)) {
+        HostContext.counter(ctx, "orders.polls", 1)
+    }
+    HostContext.gauge(ctx, "orders.consumer.active", 0)
+    HostContext.log(ctx, "info", "consumer.stopped", "order consumer stopped")
+    Ok(())
+}
+
+fn main(): Unit [io] = {
+    val host = Host.new()
+        .readinessTimeout(Duration.seconds(2))
+        .quiesceTimeout(Duration.seconds(2))
+        .drainTimeout(Duration.seconds(2))
+        .stopTimeout(Duration.seconds(2))
+        .configure("worker.queue", "orders")
+        .provide(loggerKey(), Logger { prefix: "[app]" })
+        .add(Host.plugin("worker", startWorker, stopWorker)
+            .quiesce(quiesceWorker)
+            .requires(loggerKey())
+            .worker("order-consumer", consumeOrders)
+            .restart(RestartPolicy.onFailure(
+                3,
+                Duration.milliseconds(100),
+                Duration.seconds(2))))
+        .add(Host.plugin("logger", startLogger, stopLogger).provides(loggerKey()))
+
+    val started = Host.start(host)
+    if Result.isOk(started) then {
+        println(f"host started; health={Host.health(host)}")
+        sleep(50)
+        val stopped = Host.stop(host)
+        if Result.isOk(stopped) then {
+            println(f"host stopped; health={Host.health(host)}")
+            println(Host.metrics(host))
+        }
+        else eprintln("host failed to stop")
+    } else eprintln("host failed to start")
+}
