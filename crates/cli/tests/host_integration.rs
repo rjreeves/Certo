@@ -153,11 +153,15 @@ fn main(): Unit [io] = {
         }
         Err(error) => println(f"unexpected start: {error}")
     }
+    match Host.stop(host) {
+        Ok(_) => println("unexpected second stop success")
+        Err(error) => println(error)
+    }
 }
 "#,
     ));
-    assert!(stdout.contains("quiesce broke"), "{stdout}");
-    assert!(stdout.contains("stop broke"), "{stdout}");
+    assert_eq!(stdout.matches("quiesce broke").count(), 2, "{stdout}");
+    assert_eq!(stdout.matches("stop broke").count(), 2, "{stdout}");
 }
 
 #[test]
@@ -224,4 +228,43 @@ fn main(): Unit = {
         "{}",
         String::from_utf8_lossy(&output.stderr),
     );
+}
+
+#[test]
+fn lifecycle_transitions_are_one_way_and_stop_is_idempotent() {
+    let stdout = assert_success(&run_certo(
+        r#"module HostLifecycleStateTest
+
+fn start(c: HostContext): Result<Unit, Text> = Ok(())
+fn stop(c: HostContext): Result<Unit, Text> = Ok(())
+
+fn main(): Unit [io] = {
+    val host = Host.new().add(Host.plugin("p", start, stop))
+    match Host.start(host) {
+        Ok(_) => println("started")
+        Err(error) => println(f"unexpected start: {error}")
+    }
+    match Host.start(host) {
+        Ok(_) => println("unexpected second start")
+        Err(error) => println(error)
+    }
+    match Host.stop(host) {
+        Ok(_) => println("stopped")
+        Err(error) => println(f"unexpected stop: {error}")
+    }
+    match Host.stop(host) {
+        Ok(_) => println("stopped again")
+        Err(error) => println(f"unexpected second stop: {error}")
+    }
+    match Host.start(host) {
+        Ok(_) => println("unexpected restart")
+        Err(error) => println(error)
+    }
+}
+"#,
+    ));
+
+    assert!(stdout.contains("host has already started"), "{stdout}");
+    assert!(stdout.contains("stopped again"), "{stdout}");
+    assert!(!stdout.contains("unexpected"), "{stdout}");
 }
