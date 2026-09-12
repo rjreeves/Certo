@@ -214,7 +214,7 @@ int64_t certo_process_quit(int64_t code) {
     return 0;
 }
 
-static int64_t certo_process_spawn_detached_with_flags(certo_text_t cmd, CertoList* args, certo_text_t working_dir, DWORD flags) {
+static int64_t certo_process_spawn_detached_with_flags(certo_text_t cmd, CertoList* args, certo_text_t working_dir, uint32_t flags) {
 #ifdef _WIN32
     size_t cap = 256;
     size_t pos = 0;

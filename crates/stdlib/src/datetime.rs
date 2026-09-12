@@ -303,7 +303,7 @@ static int64_t __certo_tz_offset_seconds(const char* name, int64_t epoch_secs, i
     return (int64_t)(zone_off + dst_off) / 1000;
 }
 
-#else /* POSIX */
+#elif defined(__APPLE__) || defined(__FreeBSD__)
 
 /* 1 = `name` is a real IANA zone, 0 = unknown. */
 static int __certo_tz_is_valid(const char* name) {
@@ -323,6 +323,44 @@ static int64_t __certo_tz_offset_seconds(const char* name, int64_t epoch_secs, i
     tzfree(tz);
     *ok = 1;
     return (int64_t)result.tm_gmtoff;
+}
+
+#else /* Linux/glibc: serialize the process-global TZ fallback. */
+
+#include <pthread.h>
+#include <unistd.h>
+
+static pthread_mutex_t __certo_tz_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static int __certo_tz_is_valid(const char* name) {
+    if (!name || !*name || *name == '/' || strstr(name, "..")) return 0;
+    char path[512];
+    int n = snprintf(path, sizeof(path), "/usr/share/zoneinfo/%s", name);
+    return n > 0 && (size_t)n < sizeof(path) && access(path, R_OK) == 0;
+}
+
+static int64_t __certo_tz_offset_seconds(const char* name, int64_t epoch_secs, int* ok) {
+    *ok = 0;
+    if (!__certo_tz_is_valid(name)) return 0;
+    pthread_mutex_lock(&__certo_tz_lock);
+    const char* current = getenv("TZ");
+    char* saved = current ? strdup(current) : NULL;
+    setenv("TZ", name, 1);
+    tzset();
+    time_t t = (time_t)epoch_secs;
+    struct tm result;
+    struct tm* converted = localtime_r(&t, &result);
+    int64_t offset = converted ? (int64_t)result.tm_gmtoff : 0;
+    if (saved) {
+        setenv("TZ", saved, 1);
+        free(saved);
+    } else {
+        unsetenv("TZ");
+    }
+    tzset();
+    pthread_mutex_unlock(&__certo_tz_lock);
+    if (converted) *ok = 1;
+    return offset;
 }
 
 #endif
