@@ -169,7 +169,7 @@ impl Ty {
                     // construct a `Timestamp` value; live now that it can).
                     | "Timestamp" | "Host" | "HostPlugin" | "HostContext" | "ServiceKey"
                     | "RestartPolicy"))
-                    || name == "__CertoTask" || name == "Channel";
+                    || name == "__CertoTask" || name == "Channel" || name == "File";
                 !opaque_handle
             }
             _ => false,
