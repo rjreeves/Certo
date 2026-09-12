@@ -95,6 +95,8 @@ pub fn ty_to_c(ty: &Ty) -> String {
         // to compile; confirmed via a direct repro before this fix (BACKLOG
         // item 137).
         Ty::Named { name, args } if args.is_empty() && name == "ProcessResult" => "CertoProcessResult*".into(),
+        Ty::Named { name, args } if args.is_empty() && name == "CliCommand" => "CertoCliCommand*".into(),
+        Ty::Named { name, args } if args.is_empty() && name == "CliMatches" => "CertoCliMatches*".into(),
         Ty::Named { name, .. } => {
             // A user-defined generic type (`Box<Int>`, `Box<Text>`, ...) isn't
             // monomorphized — there is exactly one `Box` struct, with its

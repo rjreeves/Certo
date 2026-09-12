@@ -1,7 +1,7 @@
 use certo_typeck::{Ty, TypeEnv};
 use crate::seed::seed_stdlib;
 use crate::{CORE_C, BYTES_C, CREDENTIAL_C, COLLECTIONS_C, CHANNEL_C, RESULT_C, TEXT_C, DATETIME_C, MONEY_C,
-            ENV_C, FILE_C, PATH_C, PROCESS_C, JSON_C, HTTP_C, DB_C, REGEX_C, UUID_C,
+            ENV_C, FILE_C, PATH_C, PROCESS_C, CLI_C, JSON_C, HTTP_C, DB_C, REGEX_C, UUID_C,
             full_c_runtime};
 
 fn seeded_env() -> TypeEnv {
@@ -2187,6 +2187,44 @@ fn process_c_contains_exec_inherit() {
 }
 
 // ------------------------------------------------------------------ //
+// Cli
+// ------------------------------------------------------------------ //
+
+#[test]
+fn cli_builder_and_matches_functions_are_registered() {
+    let env = seeded_env();
+    for name in ["Cli.command", "Cli.option", "Cli.flag", "Cli.positional",
+                 "Cli.required", "Cli.defaultValue", "Cli.subcommand", "Cli.parse",
+                 "Cli.help", "CliMatches.ok", "CliMatches.error", "CliMatches.get",
+                 "CliMatches.flag", "CliMatches.subcommand"] {
+        assert!(env.lookup(name).is_some(), "missing {name}");
+    }
+}
+
+#[test]
+fn cli_parse_returns_matches_and_get_returns_option_text() {
+    let env = seeded_env();
+    match env.lookup("Cli.parse").unwrap() {
+        Ty::Fn { ret, .. } => assert!(matches!(ret.as_ref(), Ty::Named { name, .. } if name == "CliMatches")),
+        other => panic!("expected Fn, got {other:?}"),
+    }
+    match env.lookup("CliMatches.get").unwrap() {
+        Ty::Fn { ret, .. } => assert_eq!(ret.as_ref(), &Ty::Option(Box::new(Ty::Text))),
+        other => panic!("expected Fn, got {other:?}"),
+    }
+}
+
+#[test]
+fn cli_runtime_contains_parser_help_and_match_accessors() {
+    for symbol in ["certo_cli_command", "certo_cli_option", "certo_cli_flag",
+                   "certo_cli_parse", "certo_cli_help", "certo_cli_matches_get",
+                   "certo_cli_matches_subcommand"] {
+        assert!(CLI_C.contains(symbol), "missing {symbol}");
+    }
+    assert!(full_c_runtime().contains("certo_cli_parse"), "Cli runtime not linked");
+}
+
+// ------------------------------------------------------------------ //
 // full_c_runtime includes new modules
 // ------------------------------------------------------------------ //
 
@@ -2197,6 +2235,7 @@ fn full_c_runtime_includes_new_modules() {
     assert!(rt.contains("certo_read_file"),    "missing file");
     assert!(rt.contains("certo_path_join"),    "missing path");
     assert!(rt.contains("certo_process_exec"), "missing process");
+    assert!(rt.contains("certo_cli_parse"),     "missing cli");
 }
 
 #[test]

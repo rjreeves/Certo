@@ -1,0 +1,32 @@
+module CliExample
+
+import Stdlib.Cli
+
+fn main(): Unit [io] = {
+    val serve = Cli.command("serve", "Start the HTTP server", "")
+        .option("port", "p", "port", "PORT", "Port to listen on")
+        .flag("verbose", "v", "verbose", "Enable verbose output")
+        .defaultValue("port", "8080")
+
+    val app = Cli.command("certo-app", "Example Certo command-line application", "1.0.0")
+        .flag("verbose", "v", "verbose", "Enable verbose output")
+        .positional("input", "FILE", "Input file")
+        .subcommand(serve)
+
+    val matches = Cli.parse(app)
+    if matches.helpRequested() then
+        println(matches.help())
+    else if matches.versionRequested() then
+        println(matches.version())
+    else if not matches.ok() then {
+        eprintln(matches.error())
+        eprintln(matches.help())
+        Process.quit(2)
+    } else if matches.subcommandName() == "serve" then
+        match matches.subcommand() {
+            Some(sub) => println("Serving on port " ++ sub.getOr("port", "8080"))
+            None => ()
+        }
+    else
+        println(matches.getOr("input", "no input"))
+}

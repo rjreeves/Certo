@@ -1227,6 +1227,46 @@ pub fn seed_stdlib(env: &mut TypeEnv, counter: &mut u32) {
     }
 
     // ---------------------------------------------------------------- //
+    // Cli — clap-style command definitions and parsed matches
+    // ---------------------------------------------------------------- //
+
+    {
+        let command = Ty::Named { name: "CliCommand".into(), args: vec![] };
+        let matches = Ty::Named { name: "CliMatches".into(), args: vec![] };
+        def!("Cli.command", Ty::Fn { params: vec![Ty::Text, Ty::Text, Ty::Text], ret: Box::new(command.clone()) });
+        def!("Cli.option", Ty::Fn { params: vec![command.clone(), Ty::Text, Ty::Text, Ty::Text, Ty::Text, Ty::Text], ret: Box::new(command.clone()) });
+        def!("Cli.flag", Ty::Fn { params: vec![command.clone(), Ty::Text, Ty::Text, Ty::Text, Ty::Text], ret: Box::new(command.clone()) });
+        def!("Cli.positional", Ty::Fn { params: vec![command.clone(), Ty::Text, Ty::Text, Ty::Text], ret: Box::new(command.clone()) });
+        def!("Cli.required", fn2(command.clone(), Ty::Text, command.clone()));
+        def!("Cli.defaultValue", Ty::Fn { params: vec![command.clone(), Ty::Text, Ty::Text], ret: Box::new(command.clone()) });
+        def!("Cli.subcommand", fn2(command.clone(), command.clone(), command.clone()));
+        def!("Cli.parse", fn1(command.clone(), matches.clone()));
+        def!("Cli.help", fn1(command.clone(), Ty::Text));
+        def!("Cli.version", fn1(command, Ty::Text));
+        def!("CliMatches.ok", fn1(matches.clone(), Ty::Bool));
+        def!("CliMatches.error", fn1(matches.clone(), Ty::Text));
+        def!("CliMatches.helpRequested", fn1(matches.clone(), Ty::Bool));
+        def!("CliMatches.versionRequested", fn1(matches.clone(), Ty::Bool));
+        def!("CliMatches.has", fn2(matches.clone(), Ty::Text, Ty::Bool));
+        def!("CliMatches.get", fn2(matches.clone(), Ty::Text, Ty::Option(Box::new(Ty::Text))));
+        def!("CliMatches.getOr", Ty::Fn { params: vec![matches.clone(), Ty::Text, Ty::Text], ret: Box::new(Ty::Text) });
+        def!("CliMatches.flag", fn2(matches.clone(), Ty::Text, Ty::Bool));
+        def!("CliMatches.subcommand", fn1(matches.clone(), Ty::Option(Box::new(matches.clone()))));
+        def!("CliMatches.subcommandName", fn1(matches, Ty::Text));
+        let matches = Ty::Named { name: "CliMatches".into(), args: vec![] };
+        def!("CliMatches.help", fn1(matches.clone(), Ty::Text));
+        def!("CliMatches.version", fn1(matches, Ty::Text));
+        // Receiver-qualified aliases make fluent command.option(...).flag(...)
+        // chains work through the ordinary UFCS rewrite.
+        let command = Ty::Named { name: "CliCommand".into(), args: vec![] };
+        def!("CliCommand.option", Ty::Fn { params: vec![command.clone(), Ty::Text, Ty::Text, Ty::Text, Ty::Text, Ty::Text], ret: Box::new(command.clone()) });
+        def!("CliCommand.flag", Ty::Fn { params: vec![command.clone(), Ty::Text, Ty::Text, Ty::Text, Ty::Text], ret: Box::new(command.clone()) });
+        def!("CliCommand.positional", Ty::Fn { params: vec![command.clone(), Ty::Text, Ty::Text, Ty::Text], ret: Box::new(command.clone()) });
+        def!("CliCommand.required", fn2(command.clone(), Ty::Text, command.clone()));
+        def!("CliCommand.defaultValue", Ty::Fn { params: vec![command.clone(), Ty::Text, Ty::Text], ret: Box::new(command.clone()) });
+        def!("CliCommand.subcommand", fn2(command.clone(), command.clone(), command));
+    }
+
     // ---------------------------------------------------------------- //
     // Json
     // ---------------------------------------------------------------- //
@@ -1854,6 +1894,28 @@ pub fn seed_stdlib(env: &mut TypeEnv, counter: &mut u32) {
     pm!("HostContext.service",     "context", "key");
     pm!("HostContext.config",      "context", "key");
     pm!("HostContext.configOr",    "context", "key", "fallback");
+
+    // Cli
+    pm!("Cli.command",     "name", "about", "version");
+    pm!("Cli.option",      "command", "name", "short", "long", "valueName", "help");
+    pm!("Cli.flag",        "command", "name", "short", "long", "help");
+    pm!("Cli.positional",  "command", "name", "valueName", "help");
+    pm!("Cli.required",    "command", "name");
+    pm!("Cli.defaultValue", "command", "name", "value");
+    pm!("Cli.subcommand",  "command", "subcommand");
+    pm!("Cli.parse",       "command");
+    pm!("Cli.help",        "command");
+    pm!("Cli.version",     "command");
+    pm!("CliMatches.has",  "matches", "name");
+    pm!("CliMatches.get",  "matches", "name");
+    pm!("CliMatches.getOr", "matches", "name", "fallback");
+    pm!("CliMatches.flag", "matches", "name");
+    pm!("CliCommand.option",      "command", "name", "short", "long", "valueName", "help");
+    pm!("CliCommand.flag",        "command", "name", "short", "long", "help");
+    pm!("CliCommand.positional",  "command", "name", "valueName", "help");
+    pm!("CliCommand.required",    "command", "name");
+    pm!("CliCommand.defaultValue", "command", "name", "value");
+    pm!("CliCommand.subcommand",  "command", "subcommand");
 
     // Json
     pm!("JsonValue.at",   "value", "index");
