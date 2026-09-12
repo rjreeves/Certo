@@ -1005,9 +1005,11 @@ fn eq_op_emits_double_equals() {
 }
 
 #[test]
-fn and_op_emits_double_ampersand() {
+fn and_op_emits_short_circuit_control_flow() {
     let c = codegen("module A\nfn both(a: Bool, b: Bool): Bool = a and b");
-    assert_contains(&c, "&&");
+    assert_contains(&c, "if (_l1) goto");
+    assert_contains(&c, "= false;");
+    assert_not_contains(&c, "&&");
 }
 
 // ------------------------------------------------------------------ //

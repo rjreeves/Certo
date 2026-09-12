@@ -49,6 +49,33 @@ fn binop_produces_assign() {
     assert!(has_binop, "expected BinOp assign");
 }
 
+#[test]
+fn logical_and_lowers_rhs_behind_a_conditional_branch() {
+    let mf = mir_fn_named(
+        "module A\nfn side(): Bool = true\nfn f(a: Bool): Bool = a and side()",
+        "f",
+    );
+    assert!(matches!(mf.blocks[0].terminator, Some(Terminator::If { .. })));
+    let call_blocks: Vec<_> = mf.blocks.iter().filter(|bb| matches!(&bb.terminator,
+        Some(Terminator::Call { func: Operand::Global(name), .. }) if name == "side"
+    )).collect();
+    assert_eq!(call_blocks.len(), 1, "RHS call must appear exactly once");
+    assert_ne!(call_blocks[0].id, 0, "RHS call must not be evaluated in the entry block");
+}
+
+#[test]
+fn logical_or_lowers_rhs_behind_a_conditional_branch() {
+    let mf = mir_fn_named(
+        "module A\nfn side(): Bool = false\nfn f(a: Bool): Bool = a or side()",
+        "f",
+    );
+    assert!(matches!(mf.blocks[0].terminator, Some(Terminator::If { .. })));
+    let eagerly_combined = mf.blocks.iter().any(|bb| bb.stmts.iter().any(|stmt| matches!(stmt,
+        MirStmt::Assign { rvalue: Rvalue::BinOp { op: certo_hir::BinOp::Or, .. }, .. }
+    )));
+    assert!(!eagerly_combined, "logical or must use control flow, not an eager MIR BinOp");
+}
+
 // `e?` on Result/Option — BACKLOG item 321 (Option-`?`)
 
 #[test]
