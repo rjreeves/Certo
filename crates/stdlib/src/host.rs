@@ -84,7 +84,9 @@ typedef struct CertoHost {
     int64_t started_count;
     bool running;
     volatile sig_atomic_t stop_requested;
-    int state;
+    volatile int state;
+    volatile int shutdown_complete;
+    certo_text_t shutdown_error;
     int64_t shutdown_timeout_ms;
     int64_t readiness_timeout_ms;
     int64_t quiesce_timeout_ms;
@@ -107,11 +109,12 @@ typedef void* (*CertoHostCallback)(void* env, void* context);
 static CertoHost* __certo_active_host = NULL;
 
 enum {
-    CERTO_HOST_STARTING = 0,
-    CERTO_HOST_HEALTHY = 1,
-    CERTO_HOST_STOPPING = 2,
-    CERTO_HOST_STOPPED = 3,
-    CERTO_HOST_FAILED = 4
+    CERTO_HOST_NEW = 0,
+    CERTO_HOST_STARTING = 1,
+    CERTO_HOST_HEALTHY = 2,
+    CERTO_HOST_STOPPING = 3,
+    CERTO_HOST_STOPPED = 4,
+    CERTO_HOST_FAILED = 5
 };
 
 enum {
@@ -160,6 +163,7 @@ static certo_text_t __certo_host_append_error(certo_text_t errors,
 
 static certo_text_t __certo_host_state_text(int state) {
     switch (state) {
+        case CERTO_HOST_NEW: return "New";
         case CERTO_HOST_HEALTHY: return "Healthy";
         case CERTO_HOST_STOPPING: return "Stopping";
         case CERTO_HOST_STOPPED: return "Stopped";
@@ -188,7 +192,7 @@ CertoHost* certo_host_new(void) {
     host->readiness_timeout_ms = 10000;
     host->quiesce_timeout_ms = 10000;
     host->stop_timeout_ms = 10000;
-    host->state = CERTO_HOST_STARTING;
+    host->state = CERTO_HOST_NEW;
     context->host = host;
 #if defined(_WIN32)
     InitializeCriticalSection(&host->wait_lock);
@@ -948,14 +952,17 @@ static certo_text_t __certo_host_stop_started(CertoHost* host) {
 
 void* certo_host_start(CertoHost* host) {
     if (!host) return certo_err((intptr_t)"host is null");
-    if (host->running || host->started_count > 0) {
+    if (!__sync_bool_compare_and_swap(
+            &host->state, CERTO_HOST_NEW, CERTO_HOST_STARTING)) {
         return certo_err((intptr_t)"host has already started");
     }
     host->context->stopping = 0;
     host->stop_requested = 0;
-    host->state = CERTO_HOST_STARTING;
     certo_text_t dependency_error = __certo_host_order_plugins(host);
-    if (dependency_error) return certo_err((intptr_t)dependency_error);
+    if (dependency_error) {
+        host->state = CERTO_HOST_FAILED;
+        return certo_err((intptr_t)dependency_error);
+    }
     host->running = true;
     for (int64_t i = 0; i < host->plugins->len; i++) {
         CertoHostPlugin* plugin = (CertoHostPlugin*)host->plugins->data[i];
@@ -995,10 +1002,29 @@ void* certo_host_wait_until_ready(CertoHost* host, int64_t timeout_ms) {
 
 void* certo_host_stop(CertoHost* host) {
     if (!host) return certo_err((intptr_t)"host is null");
-    if (!host->running && host->started_count == 0) {
+    if (host->shutdown_complete) {
+        return host->shutdown_error
+            ? certo_err((intptr_t)host->shutdown_error) : certo_ok(0);
+    }
+    if (!__sync_bool_compare_and_swap(
+            &host->state, CERTO_HOST_HEALTHY, CERTO_HOST_STOPPING)) {
+        if (host->state == CERTO_HOST_STOPPING) {
+#if defined(_WIN32)
+            EnterCriticalSection(&host->wait_lock);
+            while (!host->shutdown_complete)
+                SleepConditionVariableCS(&host->wait_changed, &host->wait_lock, INFINITE);
+            LeaveCriticalSection(&host->wait_lock);
+#else
+            pthread_mutex_lock(&host->wait_lock);
+            while (!host->shutdown_complete)
+                pthread_cond_wait(&host->wait_changed, &host->wait_lock);
+            pthread_mutex_unlock(&host->wait_lock);
+#endif
+            return host->shutdown_error
+                ? certo_err((intptr_t)host->shutdown_error) : certo_ok(0);
+        }
         return certo_err((intptr_t)"host is not running");
     }
-    host->state = CERTO_HOST_STOPPING;
     certo_text_t errors = __certo_host_quiesce_started(host);
     host->context->stopping = 1;
     __certo_host_wake_waiters(host);
@@ -1007,7 +1033,10 @@ void* certo_host_stop(CertoHost* host) {
     errors = __certo_host_append_error(errors, worker_error);
     errors = __certo_host_append_error(errors, stop_error);
     if (errors) __certo_host_metric_add(host, "host.shutdown.failures", 1);
+    host->shutdown_error = errors;
     host->state = errors ? CERTO_HOST_FAILED : CERTO_HOST_STOPPED;
+    host->shutdown_complete = 1;
+    __certo_host_wake_waiters(host);
     return errors ? certo_err((intptr_t)errors) : certo_ok(0);
 }
 
