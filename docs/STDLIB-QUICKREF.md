@@ -1014,6 +1014,12 @@ graceful shutdown. Restart events are logged and counted automatically.
 `workerHealth`, `workerRestarts`, and `workerLastError` expose supervisor state by
 worker name.
 
+Plugin names and worker names must be non-empty and unique within a host.
+Service-key names cannot be empty. Restart counts and delays cannot be negative,
+and `maxDelay` must be at least `initialDelay`. Metric names use the portable
+`[A-Za-z_:][A-Za-z0-9_.:-]*` form; empty log levels and event names are rejected.
+These checks run during host construction, before any plugin is started.
+
 See `examples/host.cto` for a complete lifecycle example.
 
 ---

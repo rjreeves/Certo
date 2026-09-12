@@ -9,6 +9,7 @@ pub const HOST_C: &str = r#"
    ================================================================ */
 
 #include <signal.h>
+#include <ctype.h>
 
 struct CertoHost;
 struct CertoHostWorker;
@@ -203,6 +204,7 @@ CertoHost* certo_host_new(void) {
 }
 
 CertoServiceKey* certo_host_service_key(certo_text_t name) {
+    if (!name || !*name) certo_panic("service key name cannot be empty");
     CertoServiceKey* key = (CertoServiceKey*)malloc(sizeof(CertoServiceKey));
     if (!key) certo_panic("out of memory");
     key->name = name;
@@ -279,6 +281,7 @@ certo_text_t certo_host_context_config_or(CertoHostContext* context,
 
 CertoHostPlugin* certo_host_plugin(certo_text_t name, certo_fn_t start,
                                     certo_fn_t stop) {
+    if (!name || !*name) certo_panic("plugin name cannot be empty");
     CertoHostPlugin* plugin = (CertoHostPlugin*)malloc(sizeof(CertoHostPlugin));
     if (!plugin) certo_panic("out of memory");
     plugin->name = name;
@@ -304,6 +307,12 @@ CertoHostPlugin* certo_host_plugin_worker(CertoHostPlugin* plugin,
                                            certo_fn_t callback) {
     if (!plugin || !name || !callback.fn)
         certo_panic("HostPlugin.worker requires a plugin, name, and callback");
+    if (!*name) certo_panic("worker name cannot be empty");
+    for (int64_t i = 0; i < plugin->workers->len; i++) {
+        CertoHostWorker* existing = (CertoHostWorker*)plugin->workers->data[i];
+        if (strcmp(existing->name, name) == 0)
+            certo_panic("duplicate worker name in plugin");
+    }
     CertoHostWorker* worker = (CertoHostWorker*)calloc(1, sizeof(CertoHostWorker));
     if (!worker) certo_panic("out of memory");
     worker->name = name;
@@ -317,14 +326,18 @@ static CertoRestartPolicy* __certo_restart_policy(int mode,
                                                    int64_t max_retries,
                                                    int64_t initial_delay_ms,
                                                    int64_t max_delay_ms) {
+    if (max_retries < 0) certo_panic("restart maxRetries cannot be negative");
+    if (initial_delay_ms < 0 || max_delay_ms < 0)
+        certo_panic("restart delays cannot be negative");
+    if (max_delay_ms < initial_delay_ms)
+        certo_panic("restart maxDelay cannot be less than initialDelay");
     CertoRestartPolicy* policy =
         (CertoRestartPolicy*)malloc(sizeof(CertoRestartPolicy));
     if (!policy) certo_panic("out of memory");
     policy->mode = mode;
-    policy->max_retries = max_retries < 0 ? 0 : max_retries;
-    policy->initial_delay_ms = initial_delay_ms < 0 ? 0 : initial_delay_ms;
-    policy->max_delay_ms = max_delay_ms < policy->initial_delay_ms
-        ? policy->initial_delay_ms : max_delay_ms;
+    policy->max_retries = max_retries;
+    policy->initial_delay_ms = initial_delay_ms;
+    policy->max_delay_ms = max_delay_ms;
     return policy;
 }
 
@@ -375,6 +388,21 @@ CertoHost* certo_host_add(CertoHost* host, CertoHostPlugin* plugin) {
     if (!plugin) certo_panic("Host.add called with a null plugin");
     if (host->running || host->started_count > 0) {
         certo_panic("plugins cannot be added after the host has started");
+    }
+    for (int64_t i = 0; i < host->plugins->len; i++) {
+        CertoHostPlugin* existing = (CertoHostPlugin*)host->plugins->data[i];
+        if (strcmp(existing->name, plugin->name) == 0)
+            certo_panic("duplicate plugin name");
+        for (int64_t w = 0; w < existing->workers->len; w++) {
+            CertoHostWorker* existing_worker =
+                (CertoHostWorker*)existing->workers->data[w];
+            for (int64_t p = 0; p < plugin->workers->len; p++) {
+                CertoHostWorker* new_worker =
+                    (CertoHostWorker*)plugin->workers->data[p];
+                if (strcmp(existing_worker->name, new_worker->name) == 0)
+                    certo_panic("duplicate worker name in host");
+            }
+        }
     }
     host->plugins = certo_list_push_mut(host->plugins, plugin);
     host->context->plugin_count = host->plugins->len;
@@ -538,10 +566,22 @@ static CertoHostMetric* __certo_host_metric(CertoHost* host,
     return metric;
 }
 
+static bool __certo_host_valid_metric_name(certo_text_t name) {
+    if (!name || !*name) return false;
+    unsigned char first = (unsigned char)*name;
+    if (!(isalpha(first) || first == '_' || first == ':')) return false;
+    for (const unsigned char* p = (const unsigned char*)name + 1; *p; p++) {
+        if (!(isalnum(*p) || *p == '_' || *p == '.' || *p == '-' || *p == ':'))
+            return false;
+    }
+    return true;
+}
+
 static void __certo_host_metric_add(CertoHost* host,
                                     certo_text_t name,
                                     int64_t amount) {
     if (!host || !name) return;
+    if (!__certo_host_valid_metric_name(name)) certo_panic("invalid metric name");
     __certo_host_lock(host);
     __certo_host_metric(host, name, false)->value += amount;
     __certo_host_unlock(host);
@@ -570,6 +610,8 @@ int64_t certo_host_context_log(CertoHostContext* context,
                                certo_text_t event,
                                certo_text_t message) {
     if (!context || !context->host) return 0;
+    if (!level || !*level) certo_panic("log level cannot be empty");
+    if (!event || !*event) certo_panic("log event cannot be empty");
     CertoHost* host = context->host;
     certo_text_t plugin = context->worker
         ? context->worker->plugin_name : context->plugin_name;
@@ -601,6 +643,7 @@ int64_t certo_host_context_gauge(CertoHostContext* context,
                                  certo_text_t name,
                                  int64_t value) {
     if (!context || !context->host || !name) return 0;
+    if (!__certo_host_valid_metric_name(name)) certo_panic("invalid metric name");
     __certo_host_lock(context->host);
     __certo_host_metric(context->host, name, true)->value = value;
     __certo_host_unlock(context->host);

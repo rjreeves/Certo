@@ -2844,6 +2844,10 @@ fn host_runtime_contains_ordered_lifecycle() {
     assert!(crate::HOST_C.contains("host.worker.restarts"), "worker restarts must be metered");
     assert!(crate::HOST_C.contains("worker.restarting"), "worker restarts must be logged");
     assert!(crate::HOST_C.contains("CERTO_RESTART_ON_FAILURE"), "on-failure supervision must be implemented");
+    assert!(crate::HOST_C.contains("duplicate plugin name"), "duplicate plugin names must be rejected");
+    assert!(crate::HOST_C.contains("duplicate worker name in host"), "duplicate worker names must be rejected");
+    assert!(crate::HOST_C.contains("invalid metric name"), "invalid metric names must be rejected");
+    assert!(crate::HOST_C.contains("restart maxDelay cannot be less than initialDelay"), "contradictory restart delays must be rejected");
     assert!(full_c_runtime().contains("certo_host_plugin"), "host runtime missing from full runtime");
 }
 
