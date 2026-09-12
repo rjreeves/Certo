@@ -382,6 +382,7 @@ fn cmd_build(args: &[String], quiet: bool) {
     let mut windows_gui = false;
     let mut watch    = false;
     let mut release  = false;
+    let mut sanitize_address = false;
     let mut links: Vec<String> = Vec::new();
 
     let mut i = 0;
@@ -403,9 +404,10 @@ fn cmd_build(args: &[String], quiet: bool) {
             "--verbose" | "-v" => verbose = true,
             "--watch" | "-w"  => watch    = true,
             "--release"       => release  = true,
+            "--sanitize-address" => sanitize_address = true,
             "--help" | "-h" => {
-                println!("Usage: certo <file.cto> [-o <out>] [--emit-c] [--emit-dll] [--windows-gui] [-v] [--watch] [--release]");
-                println!("       certo build <file.cto> [-o <out>] [--emit-c] [--emit-dll] [--windows-gui] [-v] [--watch] [--release]");
+                println!("Usage: certo <file.cto> [-o <out>] [--emit-c] [--emit-dll] [--windows-gui] [-v] [--watch] [--release] [--sanitize-address]");
+                println!("       certo build <file.cto> [-o <out>] [--emit-c] [--emit-dll] [--windows-gui] [-v] [--watch] [--release] [--sanitize-address]");
                 println!();
                 println!("Options:");
                 println!("  -o <file>    Output path");
@@ -417,6 +419,7 @@ fn cmd_build(args: &[String], quiet: bool) {
                 println!("  --watch, -w  Watch the source file and rebuild on change");
                 println!("  --release    Apply the [targets.production] profile from certo.toml");
                 println!("               (optimize/strip-debug/schema overrides — see docs/CLI-TOOLCHAIN.md)");
+                println!("  --sanitize-address  Build with AddressSanitizer and debug symbols");
                 return;
             }
             other if other.starts_with('-') => {
@@ -672,13 +675,18 @@ fn cmd_build(args: &[String], quiet: bool) {
     let mut cmd = std::process::Command::new(&cc);
     cmd.arg(tmp.path())
        .arg("-o").arg(&out_path)
-       .arg(if target_optimize { "-O2" } else { "-O0" })
+       .arg(if sanitize_address { "-O1" } else if target_optimize { "-O2" } else { "-O0" })
        .arg("-Wno-int-to-pointer-cast")
        .arg("-Wno-pointer-to-int-cast")
        .arg("-Wno-int-conversion")
        .arg("-Wno-implicit-function-declaration")
        .arg("-Wno-deprecated-declarations")
        .arg("-Wno-incompatible-function-pointer-types");
+    if sanitize_address {
+        cmd.arg("-fsanitize=address")
+           .arg("-fno-omit-frame-pointer")
+           .arg("-g");
+    }
     if target_strip_debug && !cfg!(windows) {
         // Strips the symbol table / relocation info from the linked binary — a
         // real effect on ELF/Mach-O regardless of whether -g was ever passed
