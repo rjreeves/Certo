@@ -21,6 +21,58 @@ fn assert_success(output: &std::process::Output) -> String {
     String::from_utf8_lossy(&output.stdout).into_owned()
 }
 
+const HOST_STRESS_SOURCE: &str = r#"module HostStressTest
+
+fn start(c: HostContext): Result<Unit, Text> = Ok(())
+fn stop(c: HostContext): Result<Unit, Text> = Ok(())
+fn work(c: HostContext): Result<Unit, Text> [io] = {
+    HostContext.ready(c)
+    while HostContext.sleep(c, Duration.milliseconds(1)) {}
+    Ok(())
+}
+
+fn main(): Unit [io] = {
+    var iteration = 0
+    while iteration < 50 {
+        val host = Host.new().add(Host.plugin("plugin", start, stop).worker("worker", work))
+        match Host.start(host) {
+            Ok(_) => match Host.stop(host) {
+                Ok(_) => ()
+                Err(error) => println(f"stop failed: {error}")
+            }
+            Err(error) => println(f"start failed: {error}")
+        }
+        iteration = iteration + 1
+    }
+    println("stress complete")
+}
+"#;
+
+#[test]
+fn repeated_host_lifecycles_are_stable() {
+    let stdout = assert_success(&run_certo(HOST_STRESS_SOURCE));
+    assert!(stdout.contains("stress complete"), "{stdout}");
+    assert!(!stdout.contains("failed:"), "{stdout}");
+}
+
+#[cfg(not(windows))]
+#[test]
+fn sanitizer_stress_has_no_native_memory_errors() {
+    let dir = tempfile::tempdir().expect("temporary test directory");
+    let source_path = dir.path().join("host_sanitizer_stress.cto");
+    fs::write(&source_path, HOST_STRESS_SOURCE).expect("write Certo source");
+    let output = Command::new(env!("CARGO_BIN_EXE_certo"))
+        .arg("run")
+        .arg(&source_path)
+        .arg("--sanitize-address")
+        .env("CC", "clang")
+        .env("ASAN_OPTIONS", "detect_leaks=0:halt_on_error=1:abort_on_error=1")
+        .output()
+        .expect("run sanitizer-backed Certo host stress test");
+    let stdout = assert_success(&output);
+    assert!(stdout.contains("stress complete"), "{stdout}");
+}
+
 #[test]
 fn failed_worker_restarts_and_becomes_healthy() {
     let stdout = assert_success(&run_certo(
