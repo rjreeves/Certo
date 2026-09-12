@@ -44,7 +44,16 @@ jobs:
           CERTO_HOST_STRESS_SANITIZER: address
           CERTO_HOST_STRESS_SEED: ${{ github.event.inputs.seed || github.run_id }}
           CERTO_HOST_STRESS_ITERATIONS: ${{ github.event.inputs.iterations || '500' }}
+          CERTO_HOST_STRESS_ARTIFACT_DIR: artifacts/address-sanitizer
         run: cargo test -p certo --test host_integration randomized_lifecycle_stress -- --ignored --nocapture
+      - name: Upload AddressSanitizer failure artifacts
+        if: failure() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+        uses: actions/upload-artifact@v4
+        with:
+          name: randomized-host-address-sanitizer-${{ github.run_id }}
+          path: artifacts/address-sanitizer
+          if-no-files-found: error
+          retention-days: 14
 
   thread-sanitizer:
     runs-on: ubuntu-latest
@@ -63,7 +72,16 @@ jobs:
           CERTO_HOST_STRESS_SANITIZER: thread
           CERTO_HOST_STRESS_SEED: ${{ github.event.inputs.seed || github.run_id }}
           CERTO_HOST_STRESS_ITERATIONS: ${{ github.event.inputs.iterations || '500' }}
+          CERTO_HOST_STRESS_ARTIFACT_DIR: artifacts/thread-sanitizer
         run: cargo test -p certo --test host_integration randomized_lifecycle_stress -- --ignored --nocapture
+      - name: Upload ThreadSanitizer failure artifacts
+        if: failure() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+        uses: actions/upload-artifact@v4
+        with:
+          name: randomized-host-thread-sanitizer-${{ github.run_id }}
+          path: artifacts/thread-sanitizer
+          if-no-files-found: error
+          retention-days: 14
 
   windows-stress:
     runs-on: windows-latest

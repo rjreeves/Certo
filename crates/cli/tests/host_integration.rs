@@ -1,4 +1,4 @@
-use std::{env, fs, process::Command};
+use std::{env, fs, path::PathBuf, process::Command};
 
 fn run_certo(source: &str) -> std::process::Output {
     let dir = tempfile::tempdir().expect("temporary test directory");
@@ -349,31 +349,57 @@ fn randomized_lifecycle_stress_is_reproducible() {
     let source = HOST_RANDOMIZED_STRESS_SOURCE
         .replace("__SEED__", &seed.to_string())
         .replace("__ITERATIONS__", &iterations.to_string());
+    let artifact_dir = env::var_os("CERTO_HOST_STRESS_ARTIFACT_DIR").map(PathBuf::from);
+    if let Some(path) = &artifact_dir {
+        fs::create_dir_all(path).expect("create randomized stress artifact directory");
+        fs::write(path.join("host_randomized_lifecycle_stress.cto"), &source)
+            .expect("write generated stress source artifact");
+    }
     let dir = tempfile::tempdir().expect("temporary test directory");
     let source_path = dir.path().join("host_randomized_lifecycle_stress.cto");
-    fs::write(&source_path, source).expect("write Certo source");
+    fs::write(&source_path, &source).expect("write Certo source");
 
     let mut command = Command::new(env!("CARGO_BIN_EXE_certo"));
     command.arg("run").arg(&source_path);
-    match env::var("CERTO_HOST_STRESS_SANITIZER").as_deref() {
-        Ok("address") => {
+    let sanitizer = env::var("CERTO_HOST_STRESS_SANITIZER").unwrap_or_else(|_| "none".to_owned());
+    match sanitizer.as_str() {
+        "address" => {
             command.arg("--sanitize-address").env("CC", "clang").env(
                 "ASAN_OPTIONS",
                 "detect_leaks=0:halt_on_error=1:abort_on_error=1",
             );
         }
-        Ok("thread") => {
+        "thread" => {
             command
                 .arg("--sanitize-thread")
                 .env("CC", "clang")
                 .env("TSAN_OPTIONS", "halt_on_error=1:abort_on_error=1");
         }
-        Ok(other) => panic!("unknown CERTO_HOST_STRESS_SANITIZER: {other}"),
-        Err(_) => {}
+        "none" => {}
+        other => panic!("unknown CERTO_HOST_STRESS_SANITIZER: {other}"),
     }
     let output = command
         .output()
         .expect("run randomized host lifecycle stress test");
+    if let Some(path) = &artifact_dir {
+        fs::write(path.join("stdout.log"), &output.stdout).expect("write stress stdout artifact");
+        fs::write(path.join("stderr.log"), &output.stderr).expect("write stress stderr artifact");
+        fs::write(
+            path.join("metadata.txt"),
+            format!(
+                "seed={seed}\niterations={iterations}\nsanitizer={sanitizer}\nexit_status={}\n",
+                output.status
+            ),
+        )
+        .expect("write stress metadata artifact");
+        fs::write(
+            path.join("reproduce.sh"),
+            format!(
+                "#!/usr/bin/env bash\nset -euo pipefail\nCERTO_HOST_STRESS_SEED={seed} \\\n+CERTO_HOST_STRESS_ITERATIONS={iterations} \\\n+CERTO_HOST_STRESS_SANITIZER={sanitizer} \\\n+cargo test -p certo --test host_integration randomized_lifecycle_stress -- --ignored --nocapture\n"
+            ),
+        )
+        .expect("write stress reproduction command artifact");
+    }
     let stdout = assert_success(&output);
     assert!(
         stdout.contains("randomized lifecycle stress complete"),
