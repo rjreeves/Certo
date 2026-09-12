@@ -37,7 +37,7 @@ jobs:
       - name: Install Clang
         run: sudo apt-get update && sudo apt-get install -y clang
       - name: Run native host concurrency test under ThreadSanitizer
-        run: cargo test -p certo --test host_integration thread_sanitizer_stress -- --nocapture
+        run: cargo test -p certo --test host_integration thread_sanitizer_ -- --nocapture
 
   windows-stress:
     runs-on: windows-latest
@@ -45,4 +45,4 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - name: Run portable native host stress test
-        run: cargo test -p certo --test host_integration repeated_host_lifecycles -- --nocapture
+        run: cargo test -p certo --test host_integration are_stable -- --nocapture

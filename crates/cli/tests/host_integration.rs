@@ -64,6 +64,75 @@ fn main(): Unit [io, async] = {
 }
 "#;
 
+const HOST_SHUTDOWN_RACE_SOURCE: &str = r#"module HostShutdownRaceTest
+
+fn start(c: HostContext): Result<Unit, Text> = Ok(())
+fn stop(c: HostContext): Result<Unit, Text> = Ok(())
+fn failureSignalKey(): ServiceKey<Channel<Int>> = Host.serviceKey("failure-signal")
+
+fn delayedReady(c: HostContext): Result<Unit, Text> [io] = {
+    val completed = HostContext.sleep(c, Duration.milliseconds(1))
+    HostContext.ready(c)
+    while HostContext.sleep(c, Duration.milliseconds(1)) {}
+    Ok(())
+}
+
+fn failAfterReady(c: HostContext): Result<Unit, Text> [io] = {
+    HostContext.ready(c)
+    match HostContext.service(c, failureSignalKey()) {
+        Some(signal) => {
+            val fired = Channel.receive(signal)
+            Err("intentional race failure")
+        }
+        None => Err("failure signal missing")
+    }
+}
+
+fn triggerFailure(signal: Channel<Int>): Result<Unit, Text> = {
+    Channel.send(signal, 1)
+    Ok(())
+}
+
+fn main(): Unit [io, async] = {
+    var iteration = 0
+    while iteration < 50 {
+        val readinessHost = Host.new()
+            .readinessTimeout(Duration.seconds(1))
+            .add(Host.plugin("readiness", start, stop)
+                .worker("delayed-ready", delayedReady))
+        val startupRace = await parallel {
+            Host.start(readinessHost),
+            Host.stop(readinessHost),
+        }
+        val readinessCleanup = Host.stop(readinessHost)
+
+        val failureSignal = Channel.new(capacity: 1)
+        val failureHost = Host.new()
+            .readinessTimeout(Duration.seconds(1))
+            .provide(failureSignalKey(), failureSignal)
+            .add(Host.plugin("failure", start, stop)
+                .worker("failing", failAfterReady)
+                .restart(RestartPolicy.onFailure(
+                    100, Duration.milliseconds(5), Duration.milliseconds(5))))
+        match Host.start(failureHost) {
+            Ok(_) => {
+                val shutdownRace = await parallel {
+                    triggerFailure(failureSignal),
+                    Host.stop(failureHost),
+                    Host.stop(failureHost),
+                    Host.stop(failureHost),
+                    Host.stop(failureHost),
+                }
+            }
+            Err(_) => {}
+        }
+        val failureCleanup = Host.stop(failureHost)
+        iteration = iteration + 1
+    }
+    println("shutdown race complete")
+}
+"#;
+
 #[test]
 fn repeated_host_lifecycles_are_stable() {
     let stdout = assert_success(&run_certo(HOST_STRESS_SOURCE));
@@ -81,6 +150,12 @@ fn repeated_host_lifecycles_are_stable() {
     );
 }
 
+#[test]
+fn shutdown_races_are_stable() {
+    let stdout = assert_success(&run_certo(HOST_SHUTDOWN_RACE_SOURCE));
+    assert!(stdout.contains("shutdown race complete"), "{stdout}");
+}
+
 #[cfg(not(windows))]
 #[test]
 fn sanitizer_stress_has_no_native_memory_errors() {
@@ -92,7 +167,10 @@ fn sanitizer_stress_has_no_native_memory_errors() {
         .arg(&source_path)
         .arg("--sanitize-address")
         .env("CC", "clang")
-        .env("ASAN_OPTIONS", "detect_leaks=0:halt_on_error=1:abort_on_error=1")
+        .env(
+            "ASAN_OPTIONS",
+            "detect_leaks=0:halt_on_error=1:abort_on_error=1",
+        )
         .output()
         .expect("run sanitizer-backed Certo host stress test");
     let stdout = assert_success(&output);
@@ -115,6 +193,24 @@ fn thread_sanitizer_stress_has_no_data_races() {
         .expect("run ThreadSanitizer-backed Certo host stress test");
     let stdout = assert_success(&output);
     assert!(stdout.contains("stress complete"), "{stdout}");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn thread_sanitizer_shutdown_race_has_no_data_races() {
+    let dir = tempfile::tempdir().expect("temporary test directory");
+    let source_path = dir.path().join("host_thread_sanitizer_shutdown_race.cto");
+    fs::write(&source_path, HOST_SHUTDOWN_RACE_SOURCE).expect("write Certo source");
+    let output = Command::new(env!("CARGO_BIN_EXE_certo"))
+        .arg("run")
+        .arg(&source_path)
+        .arg("--sanitize-thread")
+        .env("CC", "clang")
+        .env("TSAN_OPTIONS", "halt_on_error=1:abort_on_error=1")
+        .output()
+        .expect("run ThreadSanitizer-backed host shutdown race test");
+    let stdout = assert_success(&output);
+    assert!(stdout.contains("shutdown race complete"), "{stdout}");
 }
 
 #[test]
@@ -318,9 +414,8 @@ fn main(): Unit = {
     );
     assert!(!output.status.success());
     assert!(
-        String::from_utf8_lossy(&output.stderr).contains(
-            "restart maxDelay cannot be less than initialDelay"
-        ),
+        String::from_utf8_lossy(&output.stderr)
+            .contains("restart maxDelay cannot be less than initialDelay"),
         "{}",
         String::from_utf8_lossy(&output.stderr),
     );
