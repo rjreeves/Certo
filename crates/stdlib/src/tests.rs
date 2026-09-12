@@ -2868,7 +2868,7 @@ fn host_runtime_contains_ordered_lifecycle() {
     assert!(crate::HOST_C.contains("signal(SIGINT, __certo_host_signal)"), "Host.run must handle Ctrl+C");
     assert!(crate::HOST_C.contains("__certo_host_launch_workers(host)"), "workers must launch after plugin startup");
     assert!(crate::HOST_C.contains("__certo_thread_join_timed"), "worker shutdown must enforce its timeout");
-    assert!(crate::HOST_C.contains("worker->host->context->stopping = 1"), "worker failure must request shutdown");
+    assert!(crate::HOST_C.contains("CERTO_ATOMIC_STORE(&worker->host->context->stopping, 1)"), "worker failure must atomically request shutdown");
     assert!(crate::HOST_C.contains("__certo_host_wait_until_ready"), "startup must wait for worker readiness");
     assert!(crate::HOST_C.contains("__sync_add_and_fetch(&context->host->ready_workers"), "worker readiness must be reported once");
     assert!(crate::HOST_C.contains("return \"Healthy\""), "host health must expose the healthy state");
