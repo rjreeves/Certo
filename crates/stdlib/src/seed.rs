@@ -1064,7 +1064,7 @@ pub fn seed_stdlib(env: &mut TypeEnv, counter: &mut u32) {
     }
 
     // ---------------------------------------------------------------- //
-    // Host â€” ordered lifecycle for statically linked, in-process plugins
+    // Host — ordered lifecycle for statically linked, in-process plugins
     // ---------------------------------------------------------------- //
 
     {
