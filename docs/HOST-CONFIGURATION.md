@@ -20,7 +20,7 @@ existing snapshot in place.
 Sources are merged from lowest to highest precedence:
 
 1. typed defaults registered by the application;
-2. `certo.toml`;
+2. the `[host]` subtree in `certo.toml`;
 3. environment variables;
 4. command-line configuration arguments;
 5. programmatic overrides registered with `Host.configure`.
@@ -37,6 +37,10 @@ the `CERTO__` prefix and double underscores for path separators, so
 registered typed key rather than an inferred spelling algorithm. Command-line
 overrides use `--config key=value`; a missing value or malformed key is a
 startup error.
+
+Application keys live below `[host]`; for example `[host.database]` plus
+`poolSize = "10"` supplies `database.poolSize`. Other manifest sections belong
+to the compiler toolchain and are not Host configuration sources.
 
 The default `certo.toml` is optional when absent. Once a file is explicitly
 configured, absence, unreadability, malformed TOML, or an unsupported value

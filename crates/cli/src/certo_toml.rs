@@ -34,6 +34,9 @@ pub struct CertoToml {
     pub dev_dependencies: Option<HashMap<String, String>>,
     pub features: Option<FeaturesSection>,
     pub targets: Option<HashMap<String, TargetSection>>,
+    /// Application-host configuration. Values are interpreted by Stdlib.Host;
+    /// the CLI validates TOML syntax but deliberately preserves this subtree.
+    pub host: Option<toml::Table>,
 }
 
 #[derive(Debug, Default, Clone, Deserialize)]

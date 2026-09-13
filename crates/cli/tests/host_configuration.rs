@@ -21,6 +21,32 @@ fn assert_success(output: &std::process::Output) -> String {
     String::from_utf8_lossy(&output.stdout).into_owned()
 }
 
+fn build_and_run(
+    source: &str,
+    manifest: &str,
+    environment: &[(&str, &str)],
+    arguments: &[&str],
+) -> std::process::Output {
+    let dir = tempfile::tempdir().expect("temporary test directory");
+    let source_path = dir.path().join("main.cto");
+    let executable = dir.path().join(if cfg!(windows) { "app.exe" } else { "app" });
+    fs::write(&source_path, source).expect("write Certo source");
+    fs::write(dir.path().join("certo.toml"), manifest).expect("write manifest");
+    let build = Command::new(env!("CARGO_BIN_EXE_certo"))
+        .arg("build")
+        .arg(&source_path)
+        .arg("-o")
+        .arg(&executable)
+        .current_dir(dir.path())
+        .output()
+        .expect("build Certo program");
+    assert!(build.status.success(), "build failed: {}", String::from_utf8_lossy(&build.stderr));
+    let mut command = Command::new(&executable);
+    command.current_dir(dir.path()).args(arguments);
+    for (key, value) in environment { command.env(key, value); }
+    command.output().expect("run generated program")
+}
+
 #[test]
 fn typed_programmatic_configuration_is_bound_validated_and_immutable() {
     let stdout = assert_success(&run_certo(r#"module HostTypedConfigurationTest
@@ -82,6 +108,7 @@ fn create(c: HostContext): Result<Int, Text> [io] = {
     println("unexpected factory")
     Ok(1)
 }
+
 fn dispose(c: HostContext): Result<Unit, Text> = Ok(())
 fn start(c: HostContext): Result<Unit, Text> [io] = {
     println("unexpected plugin")
@@ -143,4 +170,49 @@ fn main(): Unit [io] = {
     );
     assert!(!stdout.contains("bad-secret-value"), "raw values must not leak: {stdout}");
     assert!(!stdout.contains("unexpected"), "callbacks ran before validation: {stdout}");
+}
+
+#[test]
+fn external_sources_follow_default_toml_environment_cli_programmatic_precedence() {
+    let output = build_and_run(
+        r#"module HostConfigurationPrecedenceTest
+
+fn parse(value: Text): Result<Text, Text> = Ok(value)
+fn defaultKey(): ConfigKey<Text> = Host.configKey("default.value", parse)
+fn tomlKey(): ConfigKey<Text> = Host.configKey("toml.value", parse)
+fn envKey(): ConfigKey<Text> = Host.configKey("env.value", parse)
+fn cliKey(): ConfigKey<Text> = Host.configKey("cli.value", parse)
+fn programKey(): ConfigKey<Text> = Host.configKey("program.value", parse)
+fn start(c: HostContext): Result<Unit, Text> [io] = {
+    println(HostContext.configValue(c, defaultKey()))
+    println(HostContext.configValue(c, tomlKey()))
+    println(HostContext.configValue(c, envKey()))
+    println(HostContext.configValue(c, cliKey()))
+    println(HostContext.configValue(c, programKey()))
+    Ok(())
+}
+fn stop(c: HostContext): Result<Unit, Text> = Ok(())
+fn main(): Unit [io] = {
+    val host = Host.new()
+        .defaultConfig(defaultKey(), "default")
+        .defaultConfig(tomlKey(), "default")
+        .defaultConfig(envKey(), "default")
+        .defaultConfig(cliKey(), "default")
+        .defaultConfig(programKey(), "default")
+        .configure("program.value", "old")
+        .configure("program.value", "programmatic")
+        .add(Host.plugin("reader", start, stop))
+    val started = Host.start(host)
+    val stopped = Host.stop(host)
+}
+"#,
+        "[host.toml]\nvalue = \"toml\"\n[host.env]\nvalue = \"toml\"\n[host.cli]\nvalue = \"toml\"\n[host.program]\nvalue = \"toml\"\n",
+        &[("CERTO__ENV__VALUE", "environment"), ("CERTO__CLI__VALUE", "environment")],
+        &["--config", "cli.value=old", "--config=cli.value=command-line"],
+    );
+    let stdout = assert_success(&output);
+    assert_eq!(
+        stdout.lines().collect::<Vec<_>>(),
+        ["default", "toml", "environment", "command-line", "programmatic"]
+    );
 }

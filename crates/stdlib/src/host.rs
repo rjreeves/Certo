@@ -50,11 +50,16 @@ typedef struct CertoHostService {
 typedef struct CertoHostConfig {
     certo_text_t key;
     certo_text_t value;
+    certo_text_t source;
+    certo_text_t location;
+    int precedence;
+    int64_t sequence;
 } CertoHostConfig;
 
 typedef struct CertoConfigKey {
     certo_text_t name;
     certo_fn_t parse;
+    bool parsed_value_boxed;
 } CertoConfigKey;
 
 typedef struct CertoHostConfigBinding {
@@ -173,6 +178,7 @@ typedef struct CertoHost {
     CertoList* service_construction_order;
     CertoList* config_bindings;
     CertoList* configuration_errors;
+    int64_t config_sequence;
 #if defined(_WIN32)
     CRITICAL_SECTION wait_lock;
     CONDITION_VARIABLE wait_changed;
@@ -432,30 +438,29 @@ CertoHost* certo_host_configure(CertoHost* host, certo_text_t key, certo_text_t 
     if (CERTO_ATOMIC_LOAD(&host->state) != CERTO_HOST_NEW) {
         certo_panic("configuration cannot be changed after the host has started");
     }
-    for (int64_t i = 0; i < host->context->config->len; i++) {
-        CertoHostConfig* item = (CertoHostConfig*)host->context->config->data[i];
-        if (strcmp(item->key, key) == 0) {
-            item->value = value;
-            return host;
-        }
-    }
     CertoHostConfig* item = (CertoHostConfig*)malloc(sizeof(CertoHostConfig));
     if (!item) certo_panic("out of memory");
     item->key = key;
     item->value = value;
+    item->source = "Programmatic";
+    item->location = "Host.configure";
+    item->precedence = 5;
+    item->sequence = host->config_sequence++;
     host->context->config = certo_list_push_mut(host->context->config, item);
     return host;
 }
 
 void* certo_host_context_config(CertoHostContext* context, certo_text_t key) {
     if (!context || !key) return NULL;
-    for (int64_t i = context->config->len; i > 0; i--) {
-        CertoHostConfig* item = (CertoHostConfig*)context->config->data[i - 1];
-        if (strcmp(item->key, key) == 0) {
-            return __certo_opt_box((int64_t)(intptr_t)item->value);
-        }
+    CertoHostConfig* best = NULL;
+    for (int64_t i = 0; i < context->config->len; i++) {
+        CertoHostConfig* item = (CertoHostConfig*)context->config->data[i];
+        if (strcmp(item->key, key) == 0 && (!best ||
+            item->precedence > best->precedence ||
+            (item->precedence == best->precedence && item->sequence > best->sequence)))
+            best = item;
     }
-    return NULL;
+    return best ? __certo_opt_box((int64_t)(intptr_t)best->value) : NULL;
 }
 
 certo_text_t certo_host_context_config_or(CertoHostContext* context,
@@ -476,13 +481,15 @@ static CertoHostConfigBinding* __certo_host_config_binding(
     return NULL;
 }
 
-CertoConfigKey* certo_host_config_key(certo_text_t name, certo_fn_t parse) {
+CertoConfigKey* certo_host_config_key(certo_text_t name, certo_fn_t parse,
+                                      bool parsed_value_boxed) {
     if (!name || !*name || !parse.fn)
         certo_panic("Host.configKey requires a name and parser");
     CertoConfigKey* key = (CertoConfigKey*)malloc(sizeof(CertoConfigKey));
     if (!key) certo_panic("out of memory");
     key->name = name;
     key->parse = parse;
+    key->parsed_value_boxed = parsed_value_boxed;
     return key;
 }
 
@@ -548,6 +555,151 @@ intptr_t certo_host_context_config_value(CertoHostContext* context,
 typedef void* (*CertoHostConfigParser)(void* env, certo_text_t value);
 typedef void* (*CertoHostConfigValidator)(void* env, void* value);
 
+static void __certo_host_add_raw_config(CertoHost* host, certo_text_t key,
+        certo_text_t value, certo_text_t source, certo_text_t location,
+        int precedence) {
+    CertoHostConfig* item = (CertoHostConfig*)malloc(sizeof(CertoHostConfig));
+    if (!item) certo_panic("out of memory");
+    item->key = key;
+    item->value = value;
+    item->source = source;
+    item->location = location;
+    item->precedence = precedence;
+    item->sequence = host->config_sequence++;
+    host->context->config = certo_list_push_mut(host->context->config, item);
+}
+
+static bool __certo_host_has_config_key(CertoHost* host, certo_text_t name) {
+    for (int64_t i = 0; i < host->config_bindings->len; i++) {
+        CertoHostConfigBinding* binding =
+            (CertoHostConfigBinding*)host->config_bindings->data[i];
+        if (strcmp(binding->key->name, name) == 0) return true;
+    }
+    return false;
+}
+
+static CertoHostConfig* __certo_host_winning_config(
+        CertoHost* host, certo_text_t key) {
+    CertoHostConfig* best = NULL;
+    for (int64_t i = 0; i < host->context->config->len; i++) {
+        CertoHostConfig* item =
+            (CertoHostConfig*)host->context->config->data[i];
+        if (strcmp(item->key, key) != 0) continue;
+        if (!best || item->precedence > best->precedence ||
+            (item->precedence == best->precedence &&
+             item->sequence > best->sequence)) best = item;
+    }
+    return best;
+}
+
+static char* __certo_host_trim(char* text) {
+    while (*text && isspace((unsigned char)*text)) text++;
+    char* end = text + strlen(text);
+    while (end > text && isspace((unsigned char)end[-1])) end--;
+    *end = '\0';
+    return text;
+}
+
+static certo_text_t __certo_host_load_toml(CertoHost* host) {
+    FILE* file = fopen("certo.toml", "rb");
+    if (!file) return NULL;
+    char line[4096];
+    char section[1024] = "";
+    int64_t line_number = 0;
+    while (fgets(line, sizeof(line), file)) {
+        line_number++;
+        char* text = __certo_host_trim(line);
+        if (!*text || *text == '#') continue;
+        char* comment = strchr(text, '#');
+        if (comment) { *comment = '\0'; text = __certo_host_trim(text); }
+        size_t len = strlen(text);
+        if (text[0] == '[' && len > 2 && text[len - 1] == ']') {
+            text[len - 1] = '\0';
+            snprintf(section, sizeof(section), "%s", __certo_host_trim(text + 1));
+            continue;
+        }
+        char* equals = strchr(text, '=');
+        if (!equals) { fclose(file); return "malformed certo.toml assignment"; }
+        *equals = '\0';
+        char* leaf = __certo_host_trim(text);
+        char* value = __certo_host_trim(equals + 1);
+        char key[2048];
+        if (strcmp(section, "host") == 0)
+            snprintf(key, sizeof(key), "%s", leaf);
+        else if (strncmp(section, "host.", 5) == 0)
+            snprintf(key, sizeof(key), "%s.%s", section + 5, leaf);
+        else continue;
+        if (!__certo_host_has_config_key(host, key)) continue;
+        len = strlen(value);
+        if (len >= 2 && value[0] == '"' && value[len - 1] == '"') {
+            value[len - 1] = '\0'; value++;
+        }
+        char* stored_key = strdup(key);
+        char* stored_value = strdup(value);
+        char* location = (char*)malloc(64);
+        if (!stored_key || !stored_value || !location) certo_panic("out of memory");
+        snprintf(location, 64, "certo.toml:%lld", (long long)line_number);
+        __certo_host_add_raw_config(host, stored_key, stored_value,
+                                    "Toml", location, 2);
+    }
+    fclose(file);
+    return NULL;
+}
+
+static void __certo_host_load_environment(CertoHost* host) {
+    for (int64_t i = 0; i < host->config_bindings->len; i++) {
+        CertoHostConfigBinding* binding =
+            (CertoHostConfigBinding*)host->config_bindings->data[i];
+        const char* key = binding->key->name;
+        size_t n = strlen(key);
+        char* variable = (char*)malloc(n * 2 + 8);
+        if (!variable) certo_panic("out of memory");
+        strcpy(variable, "CERTO__");
+        size_t out = 7;
+        for (size_t p = 0; p < n; p++) {
+            unsigned char ch = (unsigned char)key[p];
+            if (ch == '.') { variable[out++] = '_'; variable[out++] = '_'; }
+            else if (isupper(ch)) { variable[out++] = '_'; variable[out++] = (char)ch; }
+            else variable[out++] = (char)toupper(ch);
+        }
+        variable[out] = '\0';
+        const char* value = getenv(variable);
+        if (value) __certo_host_add_raw_config(
+            host, binding->key->name, strdup(value), "Environment", variable, 3);
+        else free(variable);
+    }
+}
+
+static certo_text_t __certo_host_load_arguments(CertoHost* host) {
+    for (int i = 1; i < __certo_argc; i++) {
+        const char* value = NULL;
+        if (strcmp(__certo_argv[i], "--config") == 0) {
+            if (++i >= __certo_argc) return "--config requires key=value";
+            value = __certo_argv[i];
+        } else if (strncmp(__certo_argv[i], "--config=", 9) == 0) {
+            value = __certo_argv[i] + 9;
+        } else continue;
+        const char* equals = strchr(value, '=');
+        if (!equals || equals == value) return "--config requires key=value";
+        size_t key_len = (size_t)(equals - value);
+        char* key = (char*)malloc(key_len + 1);
+        char* location = (char*)malloc(64);
+        if (!key || !location) certo_panic("out of memory");
+        memcpy(key, value, key_len); key[key_len] = '\0';
+        snprintf(location, 64, "argument %d", i);
+        __certo_host_add_raw_config(host, key, strdup(equals + 1),
+                                    "CommandLine", location, 4);
+    }
+    return NULL;
+}
+
+static certo_text_t __certo_host_load_configuration_sources(CertoHost* host) {
+    certo_text_t error = __certo_host_load_toml(host);
+    if (error) return error;
+    __certo_host_load_environment(host);
+    return __certo_host_load_arguments(host);
+}
+
 static certo_text_t __certo_host_add_configuration_error(
         CertoHost* host, certo_text_t errors, certo_text_t key,
         certo_text_t source, certo_text_t location,
@@ -572,27 +724,28 @@ static certo_text_t __certo_host_bind_configuration(CertoHost* host) {
     for (int64_t i = 0; i < host->config_bindings->len; i++) {
         CertoHostConfigBinding* binding =
             (CertoHostConfigBinding*)host->config_bindings->data[i];
-        CertoHostConfig* raw = NULL;
-        for (int64_t r = host->context->config->len; r > 0; r--) {
-            CertoHostConfig* candidate =
-                (CertoHostConfig*)host->context->config->data[r - 1];
-            if (strcmp(candidate->key, binding->key->name) == 0) {
-                raw = candidate;
-                break;
-            }
-        }
+        CertoHostConfig* raw =
+            __certo_host_winning_config(host, binding->key->name);
         if (raw) {
             CertoHostConfigParser parse =
                 (CertoHostConfigParser)binding->key->parse.fn;
             void* result = parse(binding->key->parse.env, raw->value);
             if (!__result_is_ok(result)) {
                 errors = __certo_host_add_configuration_error(
-                    host, errors, binding->key->name, "Programmatic",
-                    "Host.configure", "Parse",
+                    host, errors, binding->key->name, raw->source,
+                    raw->location, "Parse",
                     (certo_text_t)__result_unwrap(result));
                 continue;
             }
-            binding->value = (void*)(intptr_t)__result_unwrap(result);
+            intptr_t parsed = __result_unwrap(result);
+            if (binding->key->parsed_value_boxed) {
+                binding->value = (void*)parsed;
+            } else {
+                intptr_t* boxed = (intptr_t*)malloc(sizeof(intptr_t));
+                if (!boxed) certo_panic("out of memory");
+                *boxed = parsed;
+                binding->value = boxed;
+            }
             binding->bound = true;
         } else if (binding->has_default) {
             binding->value = binding->default_value;
@@ -604,7 +757,7 @@ static certo_text_t __certo_host_bind_configuration(CertoHost* host) {
             continue;
         }
         if (!binding->bound) continue;
-        certo_text_t source = raw ? "Programmatic" : "Default";
+        certo_text_t source = raw ? raw->source : "Default";
         for (int64_t v = 0; v < binding->validators->len; v++) {
             certo_fn_t* callback =
                 (certo_fn_t*)binding->validators->data[v];
@@ -615,7 +768,7 @@ static certo_text_t __certo_host_bind_configuration(CertoHost* host) {
             if (!__result_is_ok(result))
                 errors = __certo_host_add_configuration_error(
                     host, errors, binding->key->name, source,
-                    raw ? "Host.configure" : "typed default", "Validation",
+                    raw ? raw->location : "typed default", "Validation",
                     (certo_text_t)__result_unwrap(result));
         }
     }
@@ -1665,6 +1818,21 @@ void* certo_host_start(CertoHost* host) {
     CERTO_ATOMIC_STORE(&host->context->stopping, 0);
     CERTO_ATOMIC_STORE(&host->stop_requested, 0);
     CERTO_ATOMIC_STORE(&host->last_failure, NULL);
+    host->configuration_errors = certo_list_new_empty();
+    certo_text_t source_error = __certo_host_load_configuration_sources(host);
+    if (source_error) {
+        bool arguments = strncmp(source_error, "--config", 8) == 0;
+        certo_text_t errors = __certo_host_add_configuration_error(
+            host, NULL, arguments ? "<arguments>" : "<document>",
+            arguments ? "CommandLine" : "Toml",
+            arguments ? "arguments" : "certo.toml", "Syntax", source_error);
+        __certo_host_record_failure(host, "ConfigurationFailure", "configuration",
+                                    arguments ? "<arguments>" : "<document>",
+                                    source_error, false);
+        CERTO_ATOMIC_STORE(&host->state, CERTO_HOST_FAILED);
+        __certo_host_wake_waiters(host);
+        return certo_err((intptr_t)errors);
+    }
     certo_text_t configuration_error = __certo_host_bind_configuration(host);
     if (configuration_error) {
         CERTO_ATOMIC_STORE(&host->state, CERTO_HOST_FAILED);

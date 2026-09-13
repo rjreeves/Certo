@@ -356,15 +356,16 @@ fn emit_stmt(stmt: &MirStmt, locals: &[MirLocalDecl], fn_cname: &str, spawn_idx:
         }
         Rvalue::Call { func, args } => {
             let args_str = emit_call_args(func, args, locals);
+            let callee = emit_callee(func, locals);
             if is_void_noreturn_callee(func) {
                 // `panic(msg)` — genuinely `noreturn void` in C (unlike an
                 // ordinary `Unit`-returning Certo function, which fakes a
                 // capturable `int64_t` return of 0); assigning its result
                 // is a compile error. `lhs` is left unset, which is sound
                 // since `noreturn` means nothing after this line executes.
-                writeln!(out, "    {}({});", emit_callee(func, locals), args_str).unwrap();
+                writeln!(out, "    {}({});", callee, args_str).unwrap();
             } else {
-                writeln!(out, "    {} = {}({});", lhs, emit_callee(func, locals), args_str).unwrap();
+                writeln!(out, "    {} = {}({});", lhs, callee, args_str).unwrap();
             }
         }
         Rvalue::Field { base, field } => {
@@ -620,6 +621,20 @@ fn emit_call_args(func: &Operand, args: &[Operand], locals: &[MirLocalDecl]) -> 
     let func_c = emit_operand(func);
     let mut parts: Vec<String> = emit_call_env_arg(func, locals).into_iter().collect();
     parts.extend(args.iter().enumerate().map(|(idx, arg)| emit_call_arg(&func_c, idx, arg, locals)));
+    if func_c == "certo_host_config_key" {
+        let parsed_ty = args.get(1).and_then(|parser| match operand_ty(parser, locals) {
+            Ty::Fn { ret, .. } => match ret.as_ref() {
+                Ty::Result(ok, _) => Some(ok.as_ref().clone()),
+                _ => None,
+            },
+            _ => None,
+        });
+        let payload_boxed = parsed_ty.map(|ty| {
+            let c_ty = ty_to_c(&ty);
+            !(c_ty.contains('*') || c_ty == "certo_text_t")
+        }).unwrap_or(true);
+        parts.push(if payload_boxed { "true" } else { "false" }.to_string());
+    }
     parts.join(", ")
 }
 
