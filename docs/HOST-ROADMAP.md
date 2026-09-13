@@ -178,8 +178,12 @@ contract is defined in [`HOST-CONFIGURATION.md`](HOST-CONFIGURATION.md).
 Keep the current zero-dependency local telemetry while adding export interfaces
 for production systems.
 
+The normative event, sink, metrics, correlation, and shutdown contract is
+defined in [`HOST-OBSERVABILITY.md`](HOST-OBSERVABILITY.md).
+
 ### Scope
 
+- ✅ Define the production observability contract before implementation.
 - Structured event schema with stable field names and severity levels.
 - Pluggable log sinks with backpressure and failure policy.
 - Metrics registry with counter, gauge, and histogram instruments.
@@ -278,5 +282,5 @@ Every Host milestone must satisfy the following gates:
 
 ## Recommended next implementation item
 
-Begin H4 by defining the structured event schema, pluggable log-sink contract,
-and bounded backpressure and sink-failure policies before implementation.
+Implement H4's typed structured-event foundation: severity, typed fields,
+immutable event snapshots, stable sequencing, and the compatibility log adapter.
