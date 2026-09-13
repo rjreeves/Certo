@@ -920,6 +920,7 @@ Host.readinessTimeout(host: Host, timeout: Duration): Host
 Host.quiesceTimeout(host: Host, timeout: Duration): Host
 Host.drainTimeout(host: Host, timeout: Duration): Host
 Host.stopTimeout(host: Host, timeout: Duration): Host
+Host.disposalTimeout(host: Host, timeout: Duration): Host
 
 Host.serviceKey<T>(name: Text): ServiceKey<T>
 Host.provide<T>(host: Host, key: ServiceKey<T>, service: T): Host
@@ -1068,8 +1069,8 @@ Callback execution and API rules:
 | worker | one host-owned thread per worker; workers run concurrently | all `HostContext` worker methods, status, logging, metrics |
 | plugin `quiesce` | serial, reverse dependency order; may overlap a callback that exceeded its timeout | context reads, status, logging, metrics, bounded cleanup |
 | plugin `stop` | serial, reverse dependency order; runs after worker drain | context reads, status, logging, metrics, bounded cleanup |
-| host service disposer | serial, reverse construction order, after all plugins stop | resolve the service being disposed and dependencies that outlive it, context reads, logging, metrics |
-| scoped service disposer | serial, reverse local construction order, immediately after its plugin stops | resolve only that plugin's scoped services and host services, context reads, logging, metrics |
+| host service disposer | serial, reverse construction order, after all plugins stop; a timeout retains the rest of the scope | resolve the service being disposed and dependencies that outlive it, context reads, logging, metrics |
+| scoped service disposer | serial within its scope, reverse local construction order, immediately after its plugin stops; a timeout may overlap cleanup of independent plugin scopes | resolve only that plugin's scoped services and host services, context reads, logging, metrics |
 
 Callbacks must not call `Host.start*`, `Host.run*`, or `Host.stop*` on their own
 host. Those operations own or wait for the callback's lifecycle phase and a
@@ -1112,6 +1113,15 @@ current plugin's completed services, then rolls back previously started plugins
 and their scopes. If a plugin stop callback exceeds its timeout, its scoped
 services are retained because the callback may still be using them.
 
+Service disposers have an independent `disposalTimeout`, defaulting to 10
+seconds. A timed-out disposer reports a typed `Timeout` in phase `dispose`; its
+subject is `host/<service>` or `<plugin>/<service>`. Because callback timeouts
+are cooperative, the host retains the timed-out service and its remaining
+dependencies. Cleanup continues with independent plugin scopes. If a scoped
+disposer times out, host-owned services are also retained because that callback
+can still resolve them. This deliberate retention lasts until process teardown
+and prevents use-after-disposal; the timed-out callback is never retried.
+
 Looking up `loggerKey()` returns `Logger?`; using a key with the wrong service
 type is rejected during type checking. Duplicate service names are rejected.
 Before startup, the host validates every requirement and performs a stable
@@ -1135,8 +1145,9 @@ operations share the host's wake signal, so workers do not need polling loops.
 
 Shutdown invokes plugin `quiesce` callbacks in reverse dependency order before
 requesting worker cancellation. It then wakes and drains workers before invoking
-plugin `stop` callbacks in reverse order. Quiesce, drain, and stop have separate
-timeouts; `shutdownTimeout` remains as a compatibility alias for `drainTimeout`.
+plugin `stop` callbacks in reverse order. Quiesce, drain, stop, and service
+disposal have separate timeouts; `shutdownTimeout` remains as a compatibility
+alias for `drainTimeout`.
 Errors from every shutdown phase are aggregated into the returned error instead
 of discarding later failures. A worker error
 requests host shutdown and is returned by `Host.run`; a worker that misses the

@@ -520,7 +520,8 @@ fn generic_container_ret(full: Option<&str>, args: &[HirExpr]) -> Option<Ty> {
         Some("Host.provide") | Some("Host.configure") | Some("Host.add")
         | Some("Host.shutdownTimeout") | Some("Host.readinessTimeout")
         | Some("Host.quiesceTimeout") | Some("Host.drainTimeout")
-        | Some("Host.stopTimeout") | Some("HostPlugin.provides")
+        | Some("Host.stopTimeout") | Some("Host.disposalTimeout")
+        | Some("HostPlugin.provides")
         | Some("HostPlugin.requires") | Some("HostPlugin.worker")
         | Some("HostPlugin.quiesce") | Some("HostPlugin.restart") =>
             args.first().map(|a| a.ty.clone()),

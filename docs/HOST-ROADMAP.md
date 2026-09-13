@@ -117,7 +117,7 @@ more extension points.
 
 ## Milestone H2 — Scoped services and disposal
 
-**Status: Next**
+**Status: Shipped**
 
 Evolve the service registry from a typed value map into a lifecycle-aware
 dependency container without hiding ownership.
@@ -133,7 +133,8 @@ dependency container without hiding ownership.
   host services, but not another plugin's scope.
 - ✅ Missing, duplicate, and cyclic factory dependencies fail before callbacks
   run; factories use stable topological construction order.
-- Explicit rules for borrowing, sharing, and thread safety.
+- ✅ Explicit rules for borrowing, sharing, and thread safety, including bounded
+  disposal and retention after cooperative timeouts.
 
 ### Exit criteria
 
@@ -143,7 +144,7 @@ dependency container without hiding ownership.
 
 ## Milestone H3 — Configuration and secrets
 
-**Status: Planned**
+**Status: Next**
 
 Provide one typed configuration pipeline suitable for local development,
 testing, and production deployment.
@@ -270,7 +271,5 @@ Every Host milestone must satisfy the following gates:
 
 ## Recommended next implementation item
 
-Complete H2's ownership contract with bounded service-disposal callbacks and an
-explicit timeout aftermath policy. A timed-out disposer must not block later
-cleanup, and diagnostics must identify the service and scope without permitting
-use-after-disposal by a still-running callback.
+Begin H3 with a design for deterministic layered configuration precedence,
+typed binding, validation diagnostics, and secret-safe source attribution.

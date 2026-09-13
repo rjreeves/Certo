@@ -64,3 +64,84 @@ fn scoped_factory_failure_rolls_back_current_and_started_plugin_scopes() {
     ]);
     assert!(lines[7].contains("failed to construct scoped service"), "{stdout}");
 }
+
+#[test]
+fn scoped_disposal_timeout_retains_reachable_services_and_continues_cleanup() {
+    let stdout = assert_success(&run_certo(r#"module HostScopedDisposalTimeoutTest
+
+type Resource = { value: Int }
+fn eventsKey(): ServiceKey<Channel<Int>> = Host.serviceKey("events")
+fn hostKey(): ServiceKey<Resource> = Host.serviceKey("host-resource")
+fn aKey(): ServiceKey<Resource> = Host.serviceKey("a-resource")
+fn bKey(): ServiceKey<Resource> = Host.serviceKey("b-resource")
+
+fn emit(c: HostContext, value: Int): Unit [io] = {
+    match HostContext.service(c, eventsKey()) {
+        Some(events) => Channel.send(events, value)
+        None => ()
+    }
+}
+fn create(c: HostContext): Result<Resource, Text> = Ok(Resource { value: 7 })
+fn disposeHost(c: HostContext): Result<Unit, Text> [io] = {
+    emit(c, 9)
+    Ok(())
+}
+fn disposeA(c: HostContext): Result<Unit, Text> [io] = {
+    emit(c, 2)
+    Ok(())
+}
+fn disposeB(c: HostContext): Result<Unit, Text> [io] = {
+    emit(c, 1)
+    sleep(50)
+    match HostContext.service(c, bKey()) {
+        Some(_) => emit(c, 3)
+        None => emit(c, 30)
+    }
+    match HostContext.service(c, hostKey()) {
+        Some(_) => emit(c, 4)
+        None => emit(c, 40)
+    }
+    Ok(())
+}
+fn start(c: HostContext): Result<Unit, Text> = Ok(())
+fn stop(c: HostContext): Result<Unit, Text> = Ok(())
+
+fn main(): Unit [io] = {
+    val events = Channel.new(capacity: 8)
+    val a = Host.plugin("a", start, stop).provideFactory(aKey(), create, disposeA)
+    val b = Host.plugin("b", start, stop).provideFactory(bKey(), create, disposeB)
+    val host = Host.new()
+        .disposalTimeout(Duration.milliseconds(5))
+        .provide(eventsKey(), events)
+        .provideFactory(hostKey(), create, disposeHost)
+        .add(a)
+        .add(b)
+    val started = Host.start(host)
+    match Host.stopTyped(host) {
+        Ok(_) => println("unexpected success")
+        Err(error) => {
+            println(HostFailureKind.name(HostLifecycleError.kind(error)))
+            println(HostLifecycleError.phase(error))
+            println(HostLifecycleError.subject(error))
+            println(boolToText(HostLifecycleError.isTimeout(error)))
+        }
+    }
+    sleep(75)
+    for i in 0..3 {
+        match Channel.tryReceive(events) {
+            Some(value) => println(intToText(value))
+            None => println("missing event")
+        }
+    }
+}
+"#));
+
+    assert_eq!(
+        stdout.lines().collect::<Vec<_>>(),
+        ["Timeout", "dispose", "b/b-resource", "true", "1", "2", "3", "4"],
+        "{stdout}"
+    );
+    assert!(!stdout.contains("9"), "host service disposer must be retained: {stdout}");
+    assert!(!stdout.contains("30"), "timed-out scoped service became unavailable: {stdout}");
+    assert!(!stdout.contains("40"), "host dependency became unavailable: {stdout}");
+}
