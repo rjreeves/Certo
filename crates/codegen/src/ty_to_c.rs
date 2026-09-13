@@ -57,13 +57,13 @@ pub fn ty_to_c(ty: &Ty) -> String {
         // Typed Host discriminants remain distinct Certo types while using
         // immutable text constants at the native ABI boundary.
         Ty::Named { name, .. } if matches!(name.as_str(),
-            "HostState" | "HostWorkerState" | "HostFailureKind"
+            "HostState" | "HostWorkerState" | "HostFailureKind" | "HostLogSeverity"
         ) => "certo_text_t".into(),
         // Stdlib.Host values are opaque heap handles owned by the runtime.
         Ty::Named { name, .. } if matches!(name.as_str(),
             "Host" | "HostPlugin" | "HostContext" | "ServiceKey" | "ConfigKey" | "RestartPolicy" |
             "HostStatusSnapshot" | "HostWorkerStatus" | "HostMetricSnapshot" |
-            "HostLifecycleError" | "HostConfigurationError"
+            "HostLifecycleError" | "HostConfigurationError" | "HostLogEvent" | "HostLogField"
         ) => "void*".into(),
         // These stdlib scalar types have a C-side typedef prefixed `Certo`
         // (`CertoDateTime`, etc. — see crates/stdlib/src/datetime.rs) rather

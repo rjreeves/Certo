@@ -859,11 +859,11 @@ fn ast_ty_to_c_str(te: &certo_ast::types::TypeExpr) -> String {
                 "DateTime" | "Date" | "Duration" | "Timezone" => format!("Certo{}", name),
                 "Timestamp" => "CertoDateTime".to_string(),
                 "JsonValue" | "ProcessResult" => format!("Certo{}*", name),
-                "HostState" | "HostWorkerState" | "HostFailureKind" =>
+                "HostState" | "HostWorkerState" | "HostFailureKind" | "HostLogSeverity" =>
                     "certo_text_t".to_string(),
                 "Host" | "HostPlugin" | "HostContext" | "ServiceKey" | "ConfigKey" | "RestartPolicy" |
                 "HostStatusSnapshot" | "HostWorkerStatus" | "HostMetricSnapshot" |
-                "HostLifecycleError" | "HostConfigurationError" =>
+                "HostLifecycleError" | "HostConfigurationError" | "HostLogEvent" | "HostLogField" =>
                     "void*".to_string(),
                 other     => c_ident(other),
             }

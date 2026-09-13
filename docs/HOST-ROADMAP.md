@@ -184,7 +184,7 @@ defined in [`HOST-OBSERVABILITY.md`](HOST-OBSERVABILITY.md).
 ### Scope
 
 - ✅ Define the production observability contract before implementation.
-- Structured event schema with stable field names and severity levels.
+- ✅ Structured event schema with stable field names and severity levels.
 - Pluggable log sinks with backpressure and failure policy.
 - Metrics registry with counter, gauge, and histogram instruments.
 - Prometheus text export.
@@ -282,5 +282,5 @@ Every Host milestone must satisfy the following gates:
 
 ## Recommended next implementation item
 
-Implement H4's typed structured-event foundation: severity, typed fields,
-immutable event snapshots, stable sequencing, and the compatibility log adapter.
+Implement H4's pluggable log sinks with bounded per-sink queues, explicit
+overflow and callback-failure policies, and deadline-bound shutdown.

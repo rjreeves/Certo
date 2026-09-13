@@ -2868,6 +2868,11 @@ fn host_api_is_registered() {
         "HostLifecycleError.configurationErrors", "HostConfigurationError.key",
         "HostConfigurationError.source", "HostConfigurationError.category",
         "HostConfigurationError.location", "HostConfigurationError.message",
+        "HostLogSeverity.info", "HostLogSeverity.name", "HostLogField.text",
+        "HostLogField.int", "HostLogField.float", "HostLogField.bool",
+        "HostLogEvent.create", "HostLogEvent.schema", "HostLogEvent.sequence",
+        "HostLogEvent.timestampUnixMs", "HostLogEvent.severity",
+        "HostLogEvent.fields", "HostContext.logEvent",
     ] {
         assert!(env.lookup(name).is_some(), "missing: {name}");
     }
@@ -2900,7 +2905,9 @@ fn host_runtime_contains_ordered_lifecycle() {
     assert!(crate::HOST_C.contains("__certo_host_quiesce_started(host)"), "shutdown must quiesce before draining workers");
     assert!(crate::HOST_C.contains("__certo_host_append_error"), "shutdown must aggregate phase errors");
     assert!(crate::HOST_C.contains("case CERTO_HOST_STOPPED: return \"Stopped\""), "health must expose terminal success");
-    assert!(crate::HOST_C.contains("\\\"timestamp_ms\\\""), "structured logs must include timestamps");
+    assert!(crate::HOST_C.contains("\\\"timestamp_unix_ms\\\""), "structured logs must include Unix timestamps");
+    assert!(crate::HOST_C.contains("certo.host.event/v1"), "structured logs must carry a stable schema identifier");
+    assert!(crate::HOST_C.contains("accepted->sequence = ++host->event_sequence"), "structured logs must be sequenced under the host lock");
     assert!(crate::HOST_C.contains("\\\"plugin\\\""), "structured logs must include plugin context");
     assert!(crate::HOST_C.contains("host.worker.starts"), "the host must emit built-in worker metrics");
     assert!(crate::HOST_C.contains("host.worker.restarts"), "worker restarts must be metered");
@@ -3034,11 +3041,36 @@ fn host_logging_and_metrics_typecheck() {
         "module A\n\
          fn observe(c: HostContext, h: Host): Text [io] = {\n\
            HostContext.log(c, \"info\", \"job.started\", \"starting\")\n\
+           val event = HostLogEvent.create(HostLogSeverity.warn(), \"job.delayed\", \"waiting\", [\n\
+             HostLogField.text(\"queue\", \"critical\"),\n\
+             HostLogField.int(\"attempt\", 2),\n\
+             HostLogField.float(\"ratio\", 0.5),\n\
+             HostLogField.bool(\"retrying\", true)\n\
+           ])\n\
+           HostContext.logEvent(c, event)\n\
+           val sequence: Int = HostLogEvent.sequence(event)\n\
            HostContext.counter(c, \"jobs.total\", 1)\n\
            HostContext.gauge(c, \"jobs.active\", 2)\n\
            Host.metrics(h)\n\
          }"
     ).unwrap();
+}
+
+#[test]
+fn host_logging_rejects_structural_secrets() {
+    let error = check_full(
+        "module HostSecretLogTest\n\
+         type Secret<T> = priv Secret(T)\n\
+         impl<T> Secret { fn wrap(v: T): Secret<T> = Secret(v) }\n\
+         fn reject(c: HostContext): Unit [io] = {\n\
+           val password: Secret<Text> = Secret.wrap(\"hidden\")\n\
+           val field = HostLogField.text(\"password\", password)\n\
+         }"
+    ).expect_err("secret field must be rejected");
+    assert!(error.iter().any(|item| matches!(
+        item.kind,
+        certo_typeck::TypeErrorKind::SecretInSensitiveContext { .. }
+    )), "expected secret-sensitive sink error, got {error:?}");
 }
 
 #[test]

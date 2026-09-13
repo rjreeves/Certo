@@ -1009,6 +1009,22 @@ HostContext.log(
     event: Text,
     message: Text
 ): Unit [io]
+HostLogSeverity.trace/debug/info/warn/error/fatal(): HostLogSeverity
+HostLogSeverity.name(severity: HostLogSeverity): Text
+HostLogField.text(name: Text, value: Text): HostLogField
+HostLogField.int(name: Text, value: Int): HostLogField
+HostLogField.float(name: Text, value: Float): HostLogField
+HostLogField.bool(name: Text, value: Bool): HostLogField
+HostLogEvent.create(
+    severity: HostLogSeverity,
+    event: Text,
+    message: Text,
+    fields: List<HostLogField>
+): HostLogEvent
+HostContext.logEvent(context: HostContext, event: HostLogEvent): Unit [io]
+HostLogEvent.schema/sequence/timestampUnixMs/severity/event/message/hostId(...)
+HostLogEvent.plugin/worker/correlationId(...)
+HostLogEvent.fields(event: HostLogEvent): List<HostLogField>
 HostContext.counter(context: HostContext, name: Text, amount: Int): Unit [io]
 HostContext.gauge(context: HostContext, name: Text, value: Int): Unit [io]
 HostContext.isStopping(context: HostContext): Bool
