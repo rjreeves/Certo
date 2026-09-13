@@ -1149,6 +1149,22 @@ pub fn seed_stdlib(env: &mut TypeEnv, counter: &mut u32) {
         {
             let t = fresh();
             let key = Ty::Named { name: "ServiceKey".into(), args: vec![Ty::Var(t)] };
+            let factory = fn1(
+                context.clone(),
+                Ty::Result(Box::new(Ty::Var(t)), Box::new(Ty::Text)),
+            );
+            let dispose = fn1(
+                context.clone(),
+                Ty::Result(Box::new(Ty::Unit), Box::new(Ty::Text)),
+            );
+            env.define("Host.provideFactory", poly1(t, Ty::Fn {
+                params: vec![host.clone(), key, factory, dispose],
+                ret: Box::new(host.clone()),
+            }));
+        }
+        {
+            let t = fresh();
+            let key = Ty::Named { name: "ServiceKey".into(), args: vec![Ty::Var(t)] };
             env.define("HostContext.service", poly1(t, fn2(
                 context.clone(), key, Ty::Option(Box::new(Ty::Var(t))),
             )));
@@ -1910,6 +1926,7 @@ pub fn seed_stdlib(env: &mut TypeEnv, counter: &mut u32) {
     pm!("Host.configure",          "host", "key", "value");
     pm!("Host.serviceKey",         "name");
     pm!("Host.provide",            "host", "key", "service");
+    pm!("Host.provideFactory",     "host", "key", "factory", "dispose");
     pm!("Host.shutdownTimeout",    "host", "timeout");
     pm!("Host.readinessTimeout",   "host", "timeout");
     pm!("Host.quiesceTimeout",     "host", "timeout");
