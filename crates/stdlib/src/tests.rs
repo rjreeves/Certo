@@ -2844,7 +2844,8 @@ fn host_api_is_registered() {
         "Host.new", "Host.plugin", "Host.add", "Host.start", "Host.stop",
         "Host.run", "Host.requestStop", "HostContext.isStopping",
         "HostContext.pluginCount", "Host.configure", "Host.serviceKey",
-        "Host.provide", "Host.provideFactory", "HostContext.service", "HostContext.config",
+        "Host.provide", "Host.provideFactory", "Host.factoryDependsOn",
+        "HostContext.service", "HostContext.config",
         "HostContext.configOr", "HostPlugin.provides", "HostPlugin.requires",
         "HostPlugin.worker", "Host.shutdownTimeout", "Host.readinessTimeout",
         "Host.waitUntilReady", "Host.health", "HostContext.ready", "HostContext.fail",
@@ -2939,7 +2940,9 @@ fn host_service_factories_and_disposers_typecheck() {
          fn key(): ServiceKey<Int> = Host.serviceKey(\"count\")\n\
          fn create(c: HostContext): Result<Int, Text> = Ok(42)\n\
          fn dispose(c: HostContext): Result<Unit, Text> = Ok(())\n\
-         fn build(): Host = Host.new().provideFactory(key(), create, dispose)"
+         fn dependency(): ServiceKey<Text> = Host.serviceKey(\"name\")\n\
+         fn build(): Host = Host.new().provideFactory(key(), create, dispose)\n\
+           .factoryDependsOn(key(), dependency())"
     ).unwrap();
 }
 

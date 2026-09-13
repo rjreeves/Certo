@@ -912,6 +912,17 @@ Host.stopTimeout(host: Host, timeout: Duration): Host
 
 Host.serviceKey<T>(name: Text): ServiceKey<T>
 Host.provide<T>(host: Host, key: ServiceKey<T>, service: T): Host
+Host.provideFactory<T>(
+    host: Host,
+    key: ServiceKey<T>,
+    factory: fn(HostContext): Result<T, Text>,
+    dispose: fn(HostContext): Result<Unit, Text>
+): Host
+Host.factoryDependsOn<T, U>(
+    host: Host,
+    factoryKey: ServiceKey<T>,
+    dependencyKey: ServiceKey<U>
+): Host
 
 Host.start(host: Host): Result<Unit, Text> [io]
 Host.stop(host: Host): Result<Unit, Text> [io]
@@ -1040,10 +1051,12 @@ Callback execution and API rules:
 
 | Callback | Ordering and concurrency | Safe operations |
 |---|---|---|
+| service factory | serial, stable dependency order, before plugins | resolve declared earlier dependencies, context config reads, logging, metrics |
 | plugin `start` | serial, dependency order, on the `start*` caller | context service/config reads, status, logging, metrics, interruptible waits |
 | worker | one host-owned thread per worker; workers run concurrently | all `HostContext` worker methods, status, logging, metrics |
 | plugin `quiesce` | serial, reverse dependency order; may overlap a callback that exceeded its timeout | context reads, status, logging, metrics, bounded cleanup |
 | plugin `stop` | serial, reverse dependency order; runs after worker drain | context reads, status, logging, metrics, bounded cleanup |
+| service disposer | serial, reverse construction order, after plugins stop | resolve the service being disposed and dependencies that outlive it, context reads, logging, metrics |
 
 Callbacks must not call `Host.start*`, `Host.run*`, or `Host.stop*` on their own
 host. Those operations own or wait for the callback's lifecycle phase and a
@@ -1065,6 +1078,15 @@ val host = Host.new()
     .add(workerPlugin().requires(loggerKey()))
     .add(loggerPlugin().provides(loggerKey()))
 ```
+
+Host-owned singleton services use `provideFactory`. Declare dependencies with
+`factoryDependsOn`; registration order is only the stable tie-breaker. The host
+validates missing dependencies and cycles before invoking any factory, then
+constructs factories in topological order. A disposer retrieves its typed value
+through `HostContext.service` and runs in reverse construction order. Factory or
+plugin startup failure disposes every service that was already constructed.
+Values registered with `provide` remain caller-owned and are never disposed by
+the host.
 
 Looking up `loggerKey()` returns `Logger?`; using a key with the wrong service
 type is rejected during type checking. Duplicate service names are rejected.

@@ -1225,8 +1225,9 @@ fn main(): Unit [io] = {
     val events = Channel.new(capacity: 8)
     val host = Host.new()
         .provide(eventsKey(), events)
-        .provideFactory(firstKey(), createFirst, disposeFirst)
         .provideFactory(secondKey(), createSecond, disposeSecond)
+        .factoryDependsOn(secondKey(), firstKey())
+        .provideFactory(firstKey(), createFirst, disposeFirst)
         .add(Host.plugin("plugin", start, stop))
     val started = Host.start(host)
     val stopped = Host.stop(host)
@@ -1300,5 +1301,60 @@ fn main(): Unit [io] = {
     assert!(stdout.lines().next().unwrap_or_default().contains("failed to construct service"), "{stdout}");
     assert!(stdout.lines().next().unwrap_or_default().contains("factory unavailable"), "{stdout}");
     assert_eq!(stdout.lines().skip(1).collect::<Vec<_>>(), ["1", "2", "100"], "{stdout}");
+    assert!(!stdout.contains("unexpected"), "{stdout}");
+}
+
+#[test]
+fn service_factory_dependency_validation_runs_before_factories() {
+    let stdout = assert_success(&run_certo(
+        r#"module HostServiceFactoryDependencyValidationTest
+
+type Resource = { value: Int }
+fn eventsKey(): ServiceKey<Channel<Int>> = Host.serviceKey("events")
+fn firstKey(): ServiceKey<Resource> = Host.serviceKey("first")
+fn secondKey(): ServiceKey<Resource> = Host.serviceKey("second")
+fn missingKey(): ServiceKey<Resource> = Host.serviceKey("missing")
+fn create(c: HostContext): Result<Resource, Text> [io] = {
+    match HostContext.service(c, eventsKey()) {
+        Some(events) => Channel.send(events, 1)
+        None => ()
+    }
+    Ok(Resource { value: 1 })
+}
+fn dispose(c: HostContext): Result<Unit, Text> = Ok(())
+fn printStart(host: Host): Unit [io] = {
+    match Host.start(host) {
+        Ok(_) => println("unexpected success")
+        Err(error) => println(error)
+    }
+}
+
+fn main(): Unit [io] = {
+    val events = Channel.new(capacity: 4)
+    val missing = Host.new()
+        .provide(eventsKey(), events)
+        .provideFactory(firstKey(), create, dispose)
+        .factoryDependsOn(firstKey(), missingKey())
+    printStart(missing)
+
+    val cyclic = Host.new()
+        .provide(eventsKey(), events)
+        .provideFactory(firstKey(), create, dispose)
+        .provideFactory(secondKey(), create, dispose)
+        .factoryDependsOn(firstKey(), secondKey())
+        .factoryDependsOn(secondKey(), firstKey())
+    printStart(cyclic)
+    match Channel.tryReceive(events) {
+        Some(_) => println("unexpected factory callback")
+        None => println("no factories ran")
+    }
+}
+"#,
+    ));
+
+    let lines = stdout.lines().collect::<Vec<_>>();
+    assert!(lines[0].contains("missing factory dependency"), "{stdout}");
+    assert!(lines[1].contains("dependencies form a cycle"), "{stdout}");
+    assert_eq!(lines[2], "no factories ran", "{stdout}");
     assert!(!stdout.contains("unexpected"), "{stdout}");
 }

@@ -41,6 +41,7 @@ typedef struct CertoHostService {
     void* value;
     certo_fn_t factory;
     certo_fn_t dispose;
+    CertoList* dependencies;
     bool constructed;
     bool owned;
 } CertoHostService;
@@ -139,6 +140,7 @@ typedef struct CertoHost {
     certo_text_t worker_error;
     CertoHostLifecycleError* last_failure;
     CertoList* metrics;
+    CertoList* service_construction_order;
 #if defined(_WIN32)
     CRITICAL_SECTION wait_lock;
     CONDITION_VARIABLE wait_changed;
@@ -277,6 +279,7 @@ CertoHost* certo_host_new(void) {
     context->services = certo_list_new_empty();
     context->config = certo_list_new_empty();
     host->metrics = certo_list_new_empty();
+    host->service_construction_order = certo_list_new_empty();
     return host;
 }
 
@@ -303,6 +306,7 @@ CertoHost* certo_host_provide(CertoHost* host, CertoServiceKey* key, void* value
     if (!service) certo_panic("out of memory");
     service->key = key;
     service->value = value;
+    service->dependencies = certo_list_new_empty();
     service->constructed = true;
     host->context->services = certo_list_push_mut(host->context->services, service);
     return host;
@@ -324,8 +328,38 @@ CertoHost* certo_host_provide_factory(CertoHost* host, CertoServiceKey* key,
     service->key = key;
     service->factory = factory;
     service->dispose = dispose;
+    service->dependencies = certo_list_new_empty();
     service->owned = true;
     host->context->services = certo_list_push_mut(host->context->services, service);
+    return host;
+}
+
+CertoHost* certo_host_factory_depends_on(CertoHost* host,
+                                         CertoServiceKey* factory_key,
+                                         CertoServiceKey* dependency_key) {
+    if (!host || !factory_key || !dependency_key)
+        certo_panic("Host.factoryDependsOn requires a host and two service keys");
+    if (CERTO_ATOMIC_LOAD(&host->state) != CERTO_HOST_NEW)
+        certo_panic("factory dependencies cannot be changed after startup begins");
+    CertoHostService* factory = NULL;
+    for (int64_t i = 0; i < host->context->services->len; i++) {
+        CertoHostService* service =
+            (CertoHostService*)host->context->services->data[i];
+        if (strcmp(service->key->name, factory_key->name) == 0) {
+            factory = service;
+            break;
+        }
+    }
+    if (!factory || !factory->owned)
+        certo_panic("factory dependency target is not a registered factory");
+    for (int64_t i = 0; i < factory->dependencies->len; i++) {
+        CertoServiceKey* existing =
+            (CertoServiceKey*)factory->dependencies->data[i];
+        if (strcmp(existing->name, dependency_key->name) == 0)
+            certo_panic("duplicate service factory dependency");
+    }
+    factory->dependencies = certo_list_push_mut(
+        factory->dependencies, dependency_key);
     return host;
 }
 
@@ -1042,9 +1076,9 @@ static certo_text_t __certo_host_order_plugins(CertoHost* host) {
 
 static certo_text_t __certo_host_dispose_services(CertoHost* host) {
     certo_text_t errors = NULL;
-    for (int64_t i = host->context->services->len; i > 0; i--) {
+    for (int64_t i = host->service_construction_order->len; i > 0; i--) {
         CertoHostService* service =
-            (CertoHostService*)host->context->services->data[i - 1];
+            (CertoHostService*)host->service_construction_order->data[i - 1];
         if (!service->owned || !service->constructed) continue;
         void* result = __certo_host_call(service->dispose, host->context);
         if (!__result_is_ok(result)) {
@@ -1061,9 +1095,65 @@ static certo_text_t __certo_host_dispose_services(CertoHost* host) {
 }
 
 static certo_text_t __certo_host_construct_services(CertoHost* host) {
-    for (int64_t i = 0; i < host->context->services->len; i++) {
+    int64_t n = host->context->services->len;
+    if (n == 0) return NULL;
+    int64_t* indegree = (int64_t*)calloc((size_t)n, sizeof(int64_t));
+    bool* emitted = (bool*)calloc((size_t)n, sizeof(bool));
+    bool* edges = (bool*)calloc((size_t)(n * n), sizeof(bool));
+    int64_t* order = (int64_t*)calloc((size_t)n, sizeof(int64_t));
+    if (!indegree || !emitted || !edges || !order) certo_panic("out of memory");
+
+    for (int64_t dependent = 0; dependent < n; dependent++) {
         CertoHostService* service =
-            (CertoHostService*)host->context->services->data[i];
+            (CertoHostService*)host->context->services->data[dependent];
+        if (!service->owned) continue;
+        for (int64_t d = 0; d < service->dependencies->len; d++) {
+            CertoServiceKey* dependency =
+                (CertoServiceKey*)service->dependencies->data[d];
+            int64_t provider = -1;
+            for (int64_t candidate = 0; candidate < n; candidate++) {
+                CertoHostService* possible =
+                    (CertoHostService*)host->context->services->data[candidate];
+                if (strcmp(possible->key->name, dependency->name) == 0) {
+                    provider = candidate;
+                    break;
+                }
+            }
+            if (provider < 0) {
+                free(indegree); free(emitted); free(edges); free(order);
+                return __certo_host_error("missing factory dependency for",
+                                          service->key->name, dependency->name);
+            }
+            if (!edges[provider * n + dependent]) {
+                edges[provider * n + dependent] = true;
+                indegree[dependent]++;
+            }
+        }
+    }
+
+    for (int64_t position = 0; position < n; position++) {
+        int64_t next = -1;
+        for (int64_t candidate = 0; candidate < n; candidate++) {
+            if (!emitted[candidate] && indegree[candidate] == 0) {
+                next = candidate;
+                break;
+            }
+        }
+        if (next < 0) {
+            free(indegree); free(emitted); free(edges); free(order);
+            return "service factory dependencies form a cycle";
+        }
+        emitted[next] = true;
+        order[position] = next;
+        for (int64_t dependent = 0; dependent < n; dependent++) {
+            if (edges[next * n + dependent]) indegree[dependent]--;
+        }
+    }
+    free(indegree); free(emitted); free(edges);
+
+    for (int64_t position = 0; position < n; position++) {
+        CertoHostService* service =
+            (CertoHostService*)host->context->services->data[order[position]];
         if (!service->owned) continue;
         host->context->plugin_name = "host";
         void* result = __certo_host_call(service->factory, host->context);
@@ -1074,11 +1164,15 @@ static certo_text_t __certo_host_construct_services(CertoHost* host) {
             certo_text_t rollback_error = __certo_host_dispose_services(host);
             __certo_host_record_failure(host, "StartupFailure", "service",
                                         service->key->name, detail, false);
+            free(order);
             return __certo_host_append_error(error, rollback_error);
         }
         service->value = (void*)(intptr_t)__result_unwrap(result);
         service->constructed = true;
+        host->service_construction_order = certo_list_push_mut(
+            host->service_construction_order, service);
     }
+    free(order);
     return NULL;
 }
 
