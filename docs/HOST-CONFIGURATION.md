@@ -11,9 +11,13 @@ service or invoking a plugin callback. Every factory, plugin, and worker in one
 host lifecycle observes that same snapshot. Source files and environment
 variables are never read lazily from `HostContext`.
 
-The initial H3 implementation does not reload configuration. A future reload
-feature must publish a complete new snapshot atomically; it must never mutate an
-existing snapshot in place.
+H3 intentionally does not reload configuration. Source changes take effect only
+after constructing and starting a new host, normally through a process restart.
+This keeps every callback in one lifecycle on the same immutable snapshot and
+avoids adding watcher, rebinding, and partial-update semantics to the initial
+contract. Reload may be proposed as a future milestone; any such design must
+publish a complete new snapshot atomically and must never mutate an existing
+snapshot in place.
 
 ## Deterministic precedence
 

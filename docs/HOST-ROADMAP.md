@@ -144,7 +144,7 @@ dependency container without hiding ownership.
 
 ## Milestone H3 — Configuration and secrets
 
-**Status: Next**
+**Status: Shipped**
 
 Provide one typed configuration pipeline suitable for local development,
 testing, and production deployment.
@@ -162,17 +162,18 @@ contract is defined in [`HOST-CONFIGURATION.md`](HOST-CONFIGURATION.md).
   and ordered configuration diagnostics at host startup.
 - ✅ Source attribution for diagnostics without exposing secret values.
 - ✅ Integration with Certo's `Secret<T>` protections.
-- Optional configuration reload with an immutable snapshot model.
+- Configuration reload explicitly deferred; H3 uses one immutable snapshot per
+  host lifecycle and configuration changes require a process restart.
 
 ### Exit criteria
 
-- Precedence and reload behavior are deterministic and documented.
-- Invalid configuration prevents plugin startup with field-level diagnostics.
-- Secrets never appear in logs, metrics, snapshots, or error artifacts.
+- ✅ Precedence and the no-reload lifecycle are deterministic and documented.
+- ✅ Invalid configuration prevents plugin startup with field-level diagnostics.
+- ✅ Secrets never appear in logs, metrics, snapshots, or error artifacts.
 
 ## Milestone H4 — Production observability
 
-**Status: Planned**
+**Status: Next**
 
 Keep the current zero-dependency local telemetry while adding export interfaces
 for production systems.
@@ -277,5 +278,5 @@ Every Host milestone must satisfy the following gates:
 
 ## Recommended next implementation item
 
-Complete H3 by deciding whether configuration reload belongs in the initial
-host contract and, if retained, implement atomic immutable snapshot publication.
+Begin H4 by defining the structured event schema, pluggable log-sink contract,
+and bounded backpressure and sink-failure policies before implementation.

@@ -1030,6 +1030,9 @@ Keys whose parsed type structurally contains `Secret<_>` redact parser and
 validator messages. Their source and location remain visible, but raw access
 through `HostContext.config` or `configOr` is rejected; use `configValue`.
 
+Configuration is snapshotted once during startup and is not reloaded. Restart
+the process to apply changes to files, environment variables, or arguments.
+
 `Host.run` starts the host, waits until Ctrl+C, SIGTERM, or `requestStop`, then
 performs an orderly shutdown. Use `start` and `stop` separately for applications
 that already own their main loop. A host cannot be started twice or modified
