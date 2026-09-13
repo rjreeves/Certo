@@ -1011,6 +1011,47 @@ their plugin, typed state, readiness, restart count, and last callback error.
 Counters and gauges are copied into typed metric entries. `Host.metrics`,
 `Host.health`, and the individual `worker*` methods remain compatibility views.
 
+Host lifecycle transitions are deterministic:
+
+| Current state | Event | Result | Next state |
+|---|---|---|---|
+| `New` | `start*` / `run*` | plugins and workers begin starting | `Starting` |
+| `New` | `stop*` | `Err` (`host is not running`) | `New` |
+| initial `Starting` | startup succeeds and all workers are ready | `Ok` | `Healthy` |
+| initial `Starting` | plugin/worker/readiness failure | typed failure | `Failed` |
+| initial `Starting` | `stop*` | requests cancellation, waits for rollback, then returns `Ok` | `Failed` |
+| restart `Starting` | restarted workers become ready | — | `Healthy` |
+| restart `Starting` | `stop*` | owns or joins graceful shutdown | `Stopping` |
+| `Healthy` | first `stop*` | owns graceful shutdown | `Stopping` |
+| `Stopping` | another `stop*` | waits and returns the owner's shared result | `Stopped` or `Failed` |
+| `Stopped` | `stop*` | returns the cached `Ok` result | `Stopped` |
+| any non-`New` state | `start*` / `run*` | `Err` (`host has already started`) | unchanged |
+| `Failed` | `stop*` after a completed failed shutdown | returns the cached failure | `Failed` |
+
+Here, `start*`, `stop*`, and `run*` mean both typed and text-compatible forms.
+A readiness timeout cancels and drains workers, rolls back plugins, records a
+typed `Timeout`, and leaves the host `Failed`. Quiesce, drain, or stop timeout
+records `Timeout`; shutdown continues through later phases and finishes
+`Failed`. Callback timeouts are cooperative: the host does not forcibly kill a
+native callback thread. `ForcedTermination` is therefore never emitted by this
+version.
+
+Callback execution and API rules:
+
+| Callback | Ordering and concurrency | Safe operations |
+|---|---|---|
+| plugin `start` | serial, dependency order, on the `start*` caller | context service/config reads, status, logging, metrics, interruptible waits |
+| worker | one host-owned thread per worker; workers run concurrently | all `HostContext` worker methods, status, logging, metrics |
+| plugin `quiesce` | serial, reverse dependency order; may overlap a callback that exceeded its timeout | context reads, status, logging, metrics, bounded cleanup |
+| plugin `stop` | serial, reverse dependency order; runs after worker drain | context reads, status, logging, metrics, bounded cleanup |
+
+Callbacks must not call `Host.start*`, `Host.run*`, or `Host.stop*` on their own
+host. Those operations own or wait for the callback's lifecycle phase and a
+reentrant call can wait on itself. `Host.requestStop(context)` is the safe way for
+a callback to request eventual shutdown. Registration, service provisioning,
+configuration, and timeout setters are pre-start operations and must not be
+called from lifecycle callbacks.
+
 Services use typed keys rather than casts or string-based result types:
 
 ```
