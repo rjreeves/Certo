@@ -149,8 +149,13 @@ dependency container without hiding ownership.
 Provide one typed configuration pipeline suitable for local development,
 testing, and production deployment.
 
+The normative precedence, binding, validation, diagnostic, and secret-handling
+contract is defined in [`HOST-CONFIGURATION.md`](HOST-CONFIGURATION.md).
+
 ### Scope
 
+- ✅ Define deterministic precedence and typed validation contracts before
+  implementation.
 - Layered configuration from defaults, `certo.toml`, environment variables,
   command-line arguments, and programmatic overrides.
 - Typed binding and validation at host startup.
