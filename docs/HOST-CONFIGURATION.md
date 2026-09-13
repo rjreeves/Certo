@@ -1,7 +1,7 @@
 # Host configuration contract
 
-This document defines the H3 configuration contract. The typed programmatic
-foundation is implemented; external source layering remains staged work.
+This document defines the H3 configuration contract. The typed configuration
+pipeline, external source layering, and secret-bearing key protections are implemented.
 Precedence, validation timing, diagnostics, and secret handling are normative.
 
 ## Configuration snapshot
@@ -120,13 +120,15 @@ A `ConfigKey<Secret<T>>`, or any key whose result structurally contains
 `Secret<_>`, is secret-bearing. The compiler's existing `Secret<_>` sink rules
 continue to reject logging and serialization of the bound value.
 
-The host additionally guarantees that secret-bearing raw text and parsed values
-never appear in logs, metrics, status snapshots, lifecycle messages, panic
-messages, or sanitizer failure artifacts. Parser and validator callbacks for a
-secret-bearing key may return descriptive errors, but the host never appends the
-input value to them. Source names and locations are safe to report.
+The host marks secret-bearing keys from their parsed type at compile time. It
+replaces parser and validator failure text for those keys with stable redacted
+messages. The host additionally guarantees that secret-bearing raw text and
+parsed values never appear in logs, metrics, status snapshots, lifecycle
+messages, panic messages, or sanitizer failure artifacts. Parser and validator
+callbacks for a secret-bearing key may return descriptive errors, but the host
+never appends their returned text. Source names and locations are safe to report.
 
-Raw compatibility lookup of a registered secret-bearing key is rejected; callers
+Raw compatibility lookup of a registered secret-bearing key fails at runtime; callers
 must use its typed `ConfigKey`. This prevents `HostContext.config` from turning a
 protected secret back into unrestricted `Text`.
 

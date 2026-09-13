@@ -191,6 +191,7 @@ fn start(c: HostContext): Result<Unit, Text> [io] = {
     println(HostContext.configValue(c, programKey()))
     Ok(())
 }
+
 fn stop(c: HostContext): Result<Unit, Text> = Ok(())
 fn main(): Unit [io] = {
     val host = Host.new()
@@ -205,6 +206,7 @@ fn main(): Unit [io] = {
     val started = Host.start(host)
     val stopped = Host.stop(host)
 }
+
 "#,
         "[host.toml]\nvalue = \"toml\"\n[host.env]\nvalue = \"toml\"\n[host.cli]\nvalue = \"toml\"\n[host.program]\nvalue = \"toml\"\n",
         &[("CERTO__ENV__VALUE", "environment"), ("CERTO__CLI__VALUE", "environment")],
@@ -215,4 +217,91 @@ fn main(): Unit [io] = {
         stdout.lines().collect::<Vec<_>>(),
         ["default", "toml", "environment", "command-line", "programmatic"]
     );
+}
+
+#[test]
+fn secret_configuration_redacts_parser_and_validator_messages() {
+    let stdout = assert_success(&run_certo(r#"module HostSecretConfigurationTest
+
+type Secret<T> = | Hidden
+fn parseRejected(value: Text): Result<Secret<Text>, Text> = Err(value)
+fn parseNestedRejected(value: Text): Result<List<Secret<Text>>, Text> = Err(value)
+fn parseAccepted(value: Text): Result<Secret<Text>, Text> = Ok(Hidden)
+fn reject(value: Secret<Text>): Result<Unit, Text> = Err("validation-secret-2b4c")
+fn parseKey(): ConfigKey<Secret<Text>> = Host.configKey("secret.parse", parseRejected)
+fn nestedKey(): ConfigKey<List<Secret<Text>>> = Host.configKey("secret.nested", parseNestedRejected)
+fn validationKey(): ConfigKey<Secret<Text>> = Host.configKey("secret.validation", parseAccepted)
+
+fn report(host: Host): Unit [io] = match Host.startTyped(host) {
+    Ok(_) => println("unexpected success")
+    Err(failure) => for error in HostLifecycleError.configurationErrors(failure) {
+        println(HostConfigurationError.source(error))
+        println(HostConfigurationError.location(error))
+        println(HostConfigurationError.message(error))
+    }
+}
+
+fn main(): Unit [io] = {
+    report(Host.new()
+        .configure("secret.parse", "parse-secret-7f9a")
+        .requireConfig(parseKey()))
+    report(Host.new()
+        .configure("secret.nested", "nested-secret-61de")
+        .requireConfig(nestedKey()))
+    report(Host.new()
+        .configure("secret.validation", "validation-secret-2b4c")
+        .requireConfig(validationKey())
+        .validateConfig(validationKey(), reject))
+}
+"#));
+
+    assert_eq!(
+        stdout.lines().collect::<Vec<_>>(),
+        [
+            "Programmatic",
+            "Host.configure",
+            "secret configuration value could not be parsed",
+            "Programmatic",
+            "Host.configure",
+            "secret configuration value could not be parsed",
+            "Programmatic",
+            "Host.configure",
+            "secret configuration value failed validation",
+        ]
+    );
+    assert!(!stdout.contains("parse-secret-7f9a"), "parser leaked secret: {stdout}");
+    assert!(!stdout.contains("nested-secret-61de"), "nested parser leaked secret: {stdout}");
+    assert!(!stdout.contains("validation-secret-2b4c"), "validator leaked secret: {stdout}");
+}
+
+#[test]
+fn raw_compatibility_lookup_rejects_registered_secret_keys_without_leaking() {
+    let output = run_certo(r#"module HostSecretRawLookupTest
+
+type Secret<T> = | Hidden
+fn parse(value: Text): Result<Secret<Text>, Text> = Ok(Hidden)
+fn passwordKey(): ConfigKey<Secret<Text>> = Host.configKey("database.password", parse)
+fn start(c: HostContext): Result<Unit, Text> = {
+    val raw = HostContext.config(c, "database.password")
+    Ok(())
+}
+fn stop(c: HostContext): Result<Unit, Text> = Ok(())
+
+fn main(): Unit [io] = {
+    val host = Host.new()
+        .configure("database.password", "raw-secret-a81d")
+        .requireConfig(passwordKey())
+        .add(Host.plugin("reader", start, stop))
+    val started = Host.start(host)
+}
+"#);
+
+    assert!(!output.status.success(), "raw secret lookup unexpectedly succeeded");
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    assert!(combined.contains("raw lookup is not allowed for secret configuration"), "{combined}");
+    assert!(!combined.contains("raw-secret-a81d"), "raw lookup leaked secret: {combined}");
 }

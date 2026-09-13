@@ -60,6 +60,7 @@ typedef struct CertoConfigKey {
     certo_text_t name;
     certo_fn_t parse;
     bool parsed_value_boxed;
+    bool secret_bearing;
 } CertoConfigKey;
 
 typedef struct CertoHostConfigBinding {
@@ -452,6 +453,15 @@ CertoHost* certo_host_configure(CertoHost* host, certo_text_t key, certo_text_t 
 
 void* certo_host_context_config(CertoHostContext* context, certo_text_t key) {
     if (!context || !key) return NULL;
+    if (context->host) {
+        for (int64_t i = 0; i < context->host->config_bindings->len; i++) {
+            CertoHostConfigBinding* binding =
+                (CertoHostConfigBinding*)context->host->config_bindings->data[i];
+            if (strcmp(binding->key->name, key) == 0 &&
+                binding->key->secret_bearing)
+                certo_panic("raw lookup is not allowed for secret configuration; use HostContext.configValue");
+        }
+    }
     CertoHostConfig* best = NULL;
     for (int64_t i = 0; i < context->config->len; i++) {
         CertoHostConfig* item = (CertoHostConfig*)context->config->data[i];
@@ -482,7 +492,8 @@ static CertoHostConfigBinding* __certo_host_config_binding(
 }
 
 CertoConfigKey* certo_host_config_key(certo_text_t name, certo_fn_t parse,
-                                      bool parsed_value_boxed) {
+                                      bool parsed_value_boxed,
+                                      bool secret_bearing) {
     if (!name || !*name || !parse.fn)
         certo_panic("Host.configKey requires a name and parser");
     CertoConfigKey* key = (CertoConfigKey*)malloc(sizeof(CertoConfigKey));
@@ -490,6 +501,7 @@ CertoConfigKey* certo_host_config_key(certo_text_t name, certo_fn_t parse,
     key->name = name;
     key->parse = parse;
     key->parsed_value_boxed = parsed_value_boxed;
+    key->secret_bearing = secret_bearing;
     return key;
 }
 
@@ -734,7 +746,9 @@ static certo_text_t __certo_host_bind_configuration(CertoHost* host) {
                 errors = __certo_host_add_configuration_error(
                     host, errors, binding->key->name, raw->source,
                     raw->location, "Parse",
-                    (certo_text_t)__result_unwrap(result));
+                    binding->key->secret_bearing
+                        ? "secret configuration value could not be parsed"
+                        : (certo_text_t)__result_unwrap(result));
                 continue;
             }
             intptr_t parsed = __result_unwrap(result);
@@ -769,7 +783,9 @@ static certo_text_t __certo_host_bind_configuration(CertoHost* host) {
                 errors = __certo_host_add_configuration_error(
                     host, errors, binding->key->name, source,
                     raw ? raw->location : "typed default", "Validation",
-                    (certo_text_t)__result_unwrap(result));
+                    binding->key->secret_bearing
+                        ? "secret configuration value failed validation"
+                        : (certo_text_t)__result_unwrap(result));
         }
     }
     if (errors) {
