@@ -859,6 +859,12 @@ fn ast_ty_to_c_str(te: &certo_ast::types::TypeExpr) -> String {
                 "DateTime" | "Date" | "Duration" | "Timezone" => format!("Certo{}", name),
                 "Timestamp" => "CertoDateTime".to_string(),
                 "JsonValue" | "ProcessResult" => format!("Certo{}*", name),
+                "HostState" | "HostWorkerState" | "HostFailureKind" =>
+                    "certo_text_t".to_string(),
+                "Host" | "HostPlugin" | "HostContext" | "ServiceKey" | "RestartPolicy" |
+                "HostStatusSnapshot" | "HostWorkerStatus" | "HostMetricSnapshot" |
+                "HostLifecycleError" =>
+                    "void*".to_string(),
                 other     => c_ident(other),
             }
         }

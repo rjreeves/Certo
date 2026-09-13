@@ -923,6 +923,44 @@ Host.workerHealth(host: Host, name: Text): Text?
 Host.workerRestarts(host: Host, name: Text): Int?
 Host.workerLastError(host: Host, name: Text): Text?
 
+Host.startTyped(host: Host): Result<Unit, HostLifecycleError> [io]
+Host.stopTyped(host: Host): Result<Unit, HostLifecycleError> [io]
+Host.runTyped(host: Host): Result<Unit, HostLifecycleError> [io]
+Host.waitUntilReadyTyped(
+    host: Host,
+    timeout: Duration
+): Result<Unit, HostLifecycleError> [io]
+Host.status(host: Host): HostStatusSnapshot [io]
+
+HostStatusSnapshot.state(snapshot: HostStatusSnapshot): HostState
+HostStatusSnapshot.isReady(snapshot: HostStatusSnapshot): Bool
+HostStatusSnapshot.isLive(snapshot: HostStatusSnapshot): Bool
+HostStatusSnapshot.workerCount(snapshot: HostStatusSnapshot): Int
+HostStatusSnapshot.readyWorkers(snapshot: HostStatusSnapshot): Int
+HostStatusSnapshot.workers(snapshot: HostStatusSnapshot): List<HostWorkerStatus>
+HostStatusSnapshot.counters(snapshot: HostStatusSnapshot): List<HostMetricSnapshot>
+HostStatusSnapshot.gauges(snapshot: HostStatusSnapshot): List<HostMetricSnapshot>
+HostStatusSnapshot.lastFailure(snapshot: HostStatusSnapshot): HostLifecycleError?
+
+HostWorkerStatus.name(worker: HostWorkerStatus): Text
+HostWorkerStatus.plugin(worker: HostWorkerStatus): Text
+HostWorkerStatus.state(worker: HostWorkerStatus): HostWorkerState
+HostWorkerStatus.isReady(worker: HostWorkerStatus): Bool
+HostWorkerStatus.isLive(worker: HostWorkerStatus): Bool
+HostWorkerStatus.restarts(worker: HostWorkerStatus): Int
+HostWorkerStatus.lastError(worker: HostWorkerStatus): Text?
+HostMetricSnapshot.name(metric: HostMetricSnapshot): Text
+HostMetricSnapshot.value(metric: HostMetricSnapshot): Int
+
+HostState.name(state): Text
+HostWorkerState.name(state): Text
+HostLifecycleError.kind(error): HostFailureKind
+HostLifecycleError.phase(error): Text
+HostLifecycleError.subject(error): Text
+HostLifecycleError.message(error): Text
+HostLifecycleError.isTimeout(error): Bool
+HostFailureKind.name(kind): Text
+
 Host.requestStop(context: HostContext): Unit [io]
 HostContext.ready(context: HostContext): Unit [io]
 HostContext.fail(context: HostContext, error: Text): Unit [io]
@@ -955,6 +993,23 @@ startup cancellation and waits for rollback to finish. `Host.start` then returns
 `Err("host startup cancelled")`, while the waiting `Host.stop` returns `Ok(())`
 after every successfully started plugin has been stopped. Calling `Host.stop`
 while a worker is restarting performs an ordinary graceful shutdown.
+
+The `*Typed` lifecycle methods preserve those contracts but return structured
+errors. `HostFailureKind.name` is one of `StartupFailure`, `StartupCancelled`,
+`WorkerFailure`, `ShutdownFailure`, `Timeout`, or `ForcedTermination` (the last
+is reserved until forced termination is implemented). `phase` identifies the
+lifecycle boundary, `subject` identifies the host, plugin, or worker, and
+`message` retains the original diagnostic. Existing lifecycle methods remain
+compatibility adapters returning the same `Text` errors as before.
+
+`Host.status` captures an immutable point-in-time operational snapshot. A host
+is ready only when its state is `Healthy` and all launched workers are ready. It
+is live in `New`, `Starting`, `Healthy`, or `Stopping`, and not live after
+`Stopped` or `Failed`. A worker is live while `Starting`, `Healthy`, or
+`Restarting`; it is not live after `Stopped` or `Failed`. Worker entries include
+their plugin, typed state, readiness, restart count, and last callback error.
+Counters and gauges are copied into typed metric entries. `Host.metrics`,
+`Host.health`, and the individual `worker*` methods remain compatibility views.
 
 Services use typed keys rather than casts or string-based result types:
 
