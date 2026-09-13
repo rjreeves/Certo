@@ -1019,6 +1019,13 @@ HostContext.configOr(context: HostContext, key: Text, fallback: Text): Text
 HostContext.configValue<T>(context: HostContext, key: ConfigKey<T>): T
 ```
 
+Typed host configuration is merged at startup in this order: typed defaults,
+the `[host]` subtree of `certo.toml`, `CERTO__...` environment variables,
+repeatable `--config key=value` arguments, then `Host.configure` overrides.
+Later entries win within one source. Parsing and validation complete before any
+service factory or plugin callback runs. `HostConfigurationError` reports the
+winning source and location without including its raw value.
+
 `Host.run` starts the host, waits until Ctrl+C, SIGTERM, or `requestStop`, then
 performs an orderly shutdown. Use `start` and `stop` separately for applications
 that already own their main loop. A host cannot be started twice or modified

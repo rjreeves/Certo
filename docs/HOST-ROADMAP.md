@@ -156,8 +156,8 @@ contract is defined in [`HOST-CONFIGURATION.md`](HOST-CONFIGURATION.md).
 
 - ✅ Define deterministic precedence and typed validation contracts before
   implementation.
-- Layered configuration from defaults, `certo.toml`, environment variables,
-  command-line arguments, and programmatic overrides.
+- ✅ Layered configuration from defaults, the `certo.toml` `[host]` subtree,
+  environment variables, command-line arguments, and programmatic overrides.
 - ✅ Typed programmatic keys, defaults, binding, validation, immutable lookup,
   and ordered configuration diagnostics at host startup.
 - Source attribution for diagnostics without exposing secret values.
