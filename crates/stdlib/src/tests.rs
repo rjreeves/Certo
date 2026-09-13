@@ -2873,6 +2873,8 @@ fn host_runtime_contains_ordered_lifecycle() {
     assert!(crate::HOST_C.contains("__certo_host_stop_started(host)"), "failed startup must roll back started plugins");
     assert!(crate::HOST_C.contains("signal(SIGINT, __certo_host_signal)"), "Host.run must handle Ctrl+C");
     assert!(crate::HOST_C.contains("__certo_host_launch_workers(host)"), "workers must launch after plugin startup");
+    assert!(!crate::HOST_C.contains("*worker->context = *host->context"), "worker launch must not copy concurrently mutable host context");
+    assert!(crate::HOST_C.contains("worker->context->services = host->context->services"), "worker context must initialize immutable host fields explicitly");
     let worker_launch = crate::HOST_C.find("worker->hdr.thread = __certo_thread_spawn").unwrap();
     let startup_complete = crate::HOST_C.find("CERTO_ATOMIC_STORE(&host->startup_complete, 1)").unwrap();
     assert!(worker_launch < startup_complete, "startup must publish completion after storing worker handles");
