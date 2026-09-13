@@ -1147,6 +1147,23 @@ pub fn seed_stdlib(env: &mut TypeEnv, counter: &mut u32) {
             }));
         }
         {
+            let service_t = fresh();
+            let dependency_t = fresh();
+            let service_key = Ty::Named {
+                name: "ServiceKey".into(), args: vec![Ty::Var(service_t)],
+            };
+            let dependency_key = Ty::Named {
+                name: "ServiceKey".into(), args: vec![Ty::Var(dependency_t)],
+            };
+            env.define("Host.factoryDependsOn", poly2(
+                service_t, dependency_t,
+                Ty::Fn {
+                    params: vec![host.clone(), service_key, dependency_key],
+                    ret: Box::new(host.clone()),
+                },
+            ));
+        }
+        {
             let t = fresh();
             let key = Ty::Named { name: "ServiceKey".into(), args: vec![Ty::Var(t)] };
             let factory = fn1(
@@ -1927,6 +1944,7 @@ pub fn seed_stdlib(env: &mut TypeEnv, counter: &mut u32) {
     pm!("Host.serviceKey",         "name");
     pm!("Host.provide",            "host", "key", "service");
     pm!("Host.provideFactory",     "host", "key", "factory", "dispose");
+    pm!("Host.factoryDependsOn",   "host", "factoryKey", "dependencyKey");
     pm!("Host.shutdownTimeout",    "host", "timeout");
     pm!("Host.readinessTimeout",   "host", "timeout");
     pm!("Host.quiesceTimeout",     "host", "timeout");
