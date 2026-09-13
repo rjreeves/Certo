@@ -1249,6 +1249,11 @@ pub fn seed_stdlib(env: &mut TypeEnv, counter: &mut u32) {
             Ty::Named { name: "Duration".into(), args: vec![] },
             host.clone(),
         ));
+        def!("Host.disposalTimeout", fn2(
+            host.clone(),
+            Ty::Named { name: "Duration".into(), args: vec![] },
+            host.clone(),
+        ));
         def!("Host.start", fn1(host.clone(), host_result.clone()));
         def!("Host.stop", fn1(host.clone(), host_result.clone()));
         def!("Host.run", fn1(host.clone(), host_result.clone()));
@@ -1985,6 +1990,7 @@ pub fn seed_stdlib(env: &mut TypeEnv, counter: &mut u32) {
     pm!("Host.quiesceTimeout",     "host", "timeout");
     pm!("Host.drainTimeout",       "host", "timeout");
     pm!("Host.stopTimeout",        "host", "timeout");
+    pm!("Host.disposalTimeout",    "host", "timeout");
     pm!("Host.start",              "host");
     pm!("Host.stop",               "host");
     pm!("Host.run",                "host");

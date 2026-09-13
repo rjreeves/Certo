@@ -2852,7 +2852,7 @@ fn host_api_is_registered() {
         "Host.waitUntilReady", "Host.health", "HostContext.ready", "HostContext.fail",
         "HostContext.sleep", "HostContext.waitUntil",
         "HostPlugin.quiesce", "Host.quiesceTimeout", "Host.drainTimeout",
-        "Host.stopTimeout",
+        "Host.stopTimeout", "Host.disposalTimeout",
         "Host.metrics", "HostContext.log", "HostContext.counter", "HostContext.gauge",
         "RestartPolicy.never", "RestartPolicy.onFailure", "RestartPolicy.always",
         "HostPlugin.restart", "Host.workerHealth", "Host.workerRestarts",

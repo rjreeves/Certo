@@ -138,6 +138,8 @@ typedef struct CertoHost {
     int64_t readiness_timeout_ms;
     int64_t quiesce_timeout_ms;
     int64_t stop_timeout_ms;
+    int64_t disposal_timeout_ms;
+    volatile int retain_host_services;
     volatile int64_t ready_workers;
     int64_t worker_count;
     certo_text_t worker_error;
@@ -268,6 +270,7 @@ CertoHost* certo_host_new(void) {
     host->readiness_timeout_ms = 10000;
     host->quiesce_timeout_ms = 10000;
     host->stop_timeout_ms = 10000;
+    host->disposal_timeout_ms = 10000;
     CERTO_ATOMIC_STORE(&host->state, CERTO_HOST_NEW);
     CERTO_ATOMIC_STORE(&host->startup_complete, 0);
     CERTO_ATOMIC_STORE(&host->startup_cancel_requested, 0);
@@ -651,6 +654,14 @@ CertoHost* certo_host_stop_timeout(CertoHost* host, int64_t timeout_ms) {
     if (host->running || host->started_count > 0)
         certo_panic("stop timeout cannot be changed after the host has started");
     host->stop_timeout_ms = timeout_ms < 0 ? 0 : timeout_ms;
+    return host;
+}
+
+CertoHost* certo_host_disposal_timeout(CertoHost* host, int64_t timeout_ms) {
+    if (!host) certo_panic("Host.disposalTimeout called with a null host");
+    if (host->running || host->started_count > 0)
+        certo_panic("disposal timeout cannot be changed after the host has started");
+    host->disposal_timeout_ms = timeout_ms < 0 ? 0 : timeout_ms;
     return host;
 }
 
@@ -1233,14 +1244,32 @@ static certo_text_t __certo_host_validate_scoped_services(CertoHost* host) {
 
 static certo_text_t __certo_host_dispose_service_order(
         CertoHost* host, CertoHostContext* context,
-        CertoList* construction_order) {
+        CertoList* construction_order, certo_text_t scope) {
     certo_text_t errors = NULL;
     for (int64_t i = construction_order->len; i > 0; i--) {
         CertoHostService* service =
             (CertoHostService*)construction_order->data[i - 1];
         if (!service->owned || !service->constructed) continue;
-        void* result = __certo_host_call(service->dispose, context);
-        if (!__result_is_ok(result)) {
+        bool timed_out = false;
+        void* result = __certo_host_call_timed(
+            service->dispose, context, host->disposal_timeout_ms, &timed_out);
+        if (timed_out) {
+            size_t subject_len = strlen(scope) + strlen(service->key->name) + 2;
+            char* subject = (char*)malloc(subject_len);
+            if (!subject) certo_panic("out of memory");
+            snprintf(subject, subject_len, "%s/%s", scope, service->key->name);
+            __certo_host_record_failure(host, "Timeout", "dispose",
+                                        subject, "timeout elapsed", true);
+            errors = __certo_host_append_error(errors,
+                __certo_host_error("failed to dispose", subject, "timeout elapsed"));
+            /* The callback remains cooperative and may still resolve its own
+               service and dependencies. Retain the timed-out service and all
+               remaining services in this scope. A scoped callback can also
+               resolve host services, so retain those until process teardown. */
+            if (strcmp(scope, "host") != 0)
+                CERTO_ATOMIC_STORE(&host->retain_host_services, 1);
+            break;
+        } else if (!__result_is_ok(result)) {
             certo_text_t detail = (certo_text_t)__result_unwrap(result);
             __certo_host_record_failure(host, "ShutdownFailure", "dispose",
                                         service->key->name, detail, false);
@@ -1254,8 +1283,9 @@ static certo_text_t __certo_host_dispose_service_order(
 }
 
 static certo_text_t __certo_host_dispose_services(CertoHost* host) {
+    if (CERTO_ATOMIC_LOAD(&host->retain_host_services)) return NULL;
     return __certo_host_dispose_service_order(
-        host, host->context, host->service_construction_order);
+        host, host->context, host->service_construction_order, "host");
 }
 
 static certo_text_t __certo_host_construct_scoped_services(
@@ -1276,7 +1306,8 @@ static certo_text_t __certo_host_construct_scoped_services(
             certo_text_t error = __certo_host_error(
                 "failed to construct scoped service", service->key->name, detail);
             certo_text_t rollback_error = __certo_host_dispose_service_order(
-                host, plugin->context, plugin->scoped_construction_order);
+                host, plugin->context, plugin->scoped_construction_order,
+                plugin->name);
             __certo_host_record_failure(host, "StartupFailure", "service",
                                         service->key->name, detail, false);
             free(order);
@@ -1421,7 +1452,8 @@ static certo_text_t __certo_host_stop_started(CertoHost* host) {
         }
         if (!timed_out) {
             certo_text_t scoped_error = __certo_host_dispose_service_order(
-                host, plugin->context, plugin->scoped_construction_order);
+                host, plugin->context, plugin->scoped_construction_order,
+                plugin->name);
             errors = __certo_host_append_error(errors, scoped_error);
         }
     }
@@ -1493,7 +1525,8 @@ void* certo_host_start(CertoHost* host) {
         }
         if (CERTO_ATOMIC_LOAD(&host->startup_cancel_requested)) {
             __certo_host_dispose_service_order(
-                host, plugin->context, plugin->scoped_construction_order);
+                host, plugin->context, plugin->scoped_construction_order,
+                plugin->name);
             __certo_host_record_failure(host, "StartupCancelled", "startup",
                                         plugin->name, "host startup cancelled", false);
             CERTO_ATOMIC_STORE(&host->context->stopping, 1);
@@ -1515,7 +1548,8 @@ void* certo_host_start(CertoHost* host) {
             CERTO_ATOMIC_STORE(&host->state, CERTO_HOST_FAILED);
             certo_text_t scoped_dispose_error =
                 __certo_host_dispose_service_order(
-                    host, plugin->context, plugin->scoped_construction_order);
+                    host, plugin->context, plugin->scoped_construction_order,
+                    plugin->name);
             __certo_host_stop_started(host);
             __certo_host_dispose_services(host);
             __certo_host_wake_waiters(host);
