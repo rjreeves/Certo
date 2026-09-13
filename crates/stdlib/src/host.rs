@@ -39,6 +39,10 @@ typedef struct CertoServiceKey {
 typedef struct CertoHostService {
     CertoServiceKey* key;
     void* value;
+    certo_fn_t factory;
+    certo_fn_t dispose;
+    bool constructed;
+    bool owned;
 } CertoHostService;
 
 typedef struct CertoHostConfig {
@@ -295,10 +299,32 @@ CertoHost* certo_host_provide(CertoHost* host, CertoServiceKey* key, void* value
             certo_panic("a service with this name is already registered");
         }
     }
-    CertoHostService* service = (CertoHostService*)malloc(sizeof(CertoHostService));
+    CertoHostService* service = (CertoHostService*)calloc(1, sizeof(CertoHostService));
     if (!service) certo_panic("out of memory");
     service->key = key;
     service->value = value;
+    service->constructed = true;
+    host->context->services = certo_list_push_mut(host->context->services, service);
+    return host;
+}
+
+CertoHost* certo_host_provide_factory(CertoHost* host, CertoServiceKey* key,
+                                      certo_fn_t factory, certo_fn_t dispose) {
+    if (!host || !key || !key->name || !factory.fn || !dispose.fn)
+        certo_panic("Host.provideFactory requires a host, service key, factory, and disposer");
+    if (host->running || host->started_count > 0)
+        certo_panic("services cannot be added after the host has started");
+    for (int64_t i = 0; i < host->context->services->len; i++) {
+        CertoHostService* existing = (CertoHostService*)host->context->services->data[i];
+        if (strcmp(existing->key->name, key->name) == 0)
+            certo_panic("a service with this name is already registered");
+    }
+    CertoHostService* service = (CertoHostService*)calloc(1, sizeof(CertoHostService));
+    if (!service) certo_panic("out of memory");
+    service->key = key;
+    service->factory = factory;
+    service->dispose = dispose;
+    service->owned = true;
     host->context->services = certo_list_push_mut(host->context->services, service);
     return host;
 }
@@ -307,7 +333,7 @@ void* certo_host_context_service(CertoHostContext* context, CertoServiceKey* key
     if (!context || !key || !key->name) return NULL;
     for (int64_t i = 0; i < context->services->len; i++) {
         CertoHostService* service = (CertoHostService*)context->services->data[i];
-        if (strcmp(service->key->name, key->name) == 0) {
+        if (service->constructed && strcmp(service->key->name, key->name) == 0) {
             return __certo_opt_box((int64_t)(intptr_t)service->value);
         }
     }
@@ -1014,6 +1040,48 @@ static certo_text_t __certo_host_order_plugins(CertoHost* host) {
     return NULL;
 }
 
+static certo_text_t __certo_host_dispose_services(CertoHost* host) {
+    certo_text_t errors = NULL;
+    for (int64_t i = host->context->services->len; i > 0; i--) {
+        CertoHostService* service =
+            (CertoHostService*)host->context->services->data[i - 1];
+        if (!service->owned || !service->constructed) continue;
+        void* result = __certo_host_call(service->dispose, host->context);
+        if (!__result_is_ok(result)) {
+            certo_text_t detail = (certo_text_t)__result_unwrap(result);
+            __certo_host_record_failure(host, "ShutdownFailure", "dispose",
+                                        service->key->name, detail, false);
+            errors = __certo_host_append_error(errors,
+                __certo_host_error("failed to dispose", service->key->name, detail));
+        }
+        service->constructed = false;
+        service->value = NULL;
+    }
+    return errors;
+}
+
+static certo_text_t __certo_host_construct_services(CertoHost* host) {
+    for (int64_t i = 0; i < host->context->services->len; i++) {
+        CertoHostService* service =
+            (CertoHostService*)host->context->services->data[i];
+        if (!service->owned) continue;
+        host->context->plugin_name = "host";
+        void* result = __certo_host_call(service->factory, host->context);
+        if (!__result_is_ok(result)) {
+            certo_text_t detail = (certo_text_t)__result_unwrap(result);
+            certo_text_t error = __certo_host_error(
+                "failed to construct service", service->key->name, detail);
+            certo_text_t rollback_error = __certo_host_dispose_services(host);
+            __certo_host_record_failure(host, "StartupFailure", "service",
+                                        service->key->name, detail, false);
+            return __certo_host_append_error(error, rollback_error);
+        }
+        service->value = (void*)(intptr_t)__result_unwrap(result);
+        service->constructed = true;
+    }
+    return NULL;
+}
+
 static certo_text_t __certo_host_quiesce_started(CertoHost* host) {
     certo_text_t errors = NULL;
     for (int64_t i = host->started_count; i > 0; i--) {
@@ -1091,6 +1159,20 @@ void* certo_host_start(CertoHost* host) {
         __certo_host_wake_waiters(host);
         return certo_err((intptr_t)"host startup cancelled");
     }
+    certo_text_t service_error = __certo_host_construct_services(host);
+    if (service_error) {
+        CERTO_ATOMIC_STORE(&host->state, CERTO_HOST_FAILED);
+        __certo_host_wake_waiters(host);
+        return certo_err((intptr_t)service_error);
+    }
+    if (CERTO_ATOMIC_LOAD(&host->startup_cancel_requested)) {
+        __certo_host_dispose_services(host);
+        __certo_host_record_failure(host, "StartupCancelled", "startup",
+                                    "host", "host startup cancelled", false);
+        CERTO_ATOMIC_STORE(&host->state, CERTO_HOST_FAILED);
+        __certo_host_wake_waiters(host);
+        return certo_err((intptr_t)"host startup cancelled");
+    }
     host->running = true;
     for (int64_t i = 0; i < host->plugins->len; i++) {
         CertoHostPlugin* plugin = (CertoHostPlugin*)host->plugins->data[i];
@@ -1106,6 +1188,7 @@ void* certo_host_start(CertoHost* host) {
             CERTO_ATOMIC_STORE(&host->context->stopping, 1);
             CERTO_ATOMIC_STORE(&host->state, CERTO_HOST_FAILED);
             __certo_host_stop_started(host);
+            __certo_host_dispose_services(host);
             __certo_host_wake_waiters(host);
             return certo_err((intptr_t)error);
         }
@@ -1116,6 +1199,7 @@ void* certo_host_start(CertoHost* host) {
             CERTO_ATOMIC_STORE(&host->context->stopping, 1);
             CERTO_ATOMIC_STORE(&host->state, CERTO_HOST_FAILED);
             __certo_host_stop_started(host);
+            __certo_host_dispose_services(host);
             __certo_host_wake_waiters(host);
             return certo_err((intptr_t)"host startup cancelled");
         }
@@ -1135,6 +1219,7 @@ void* certo_host_start(CertoHost* host) {
         CERTO_ATOMIC_STORE(&host->state, CERTO_HOST_FAILED);
         __certo_host_join_workers(host);
         __certo_host_stop_started(host);
+        __certo_host_dispose_services(host);
         __certo_host_wake_waiters(host);
         return certo_err((intptr_t)readiness_error);
     }
@@ -1202,8 +1287,10 @@ void* certo_host_stop(CertoHost* host) {
     __certo_host_wake_waiters(host);
     certo_text_t worker_error = __certo_host_join_workers(host);
     certo_text_t stop_error = __certo_host_stop_started(host);
+    certo_text_t dispose_error = __certo_host_dispose_services(host);
     errors = __certo_host_append_error(errors, worker_error);
     errors = __certo_host_append_error(errors, stop_error);
+    errors = __certo_host_append_error(errors, dispose_error);
     if (errors) __certo_host_metric_add(host, "host.shutdown.failures", 1);
     CERTO_ATOMIC_STORE(&host->shutdown_error, errors);
     CERTO_ATOMIC_STORE(&host->state, errors ? CERTO_HOST_FAILED : CERTO_HOST_STOPPED);

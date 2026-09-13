@@ -1158,3 +1158,147 @@ fn main(): Unit [io, async] = {
     );
     assert!(!stdout.contains("unexpected"), "{stdout}");
 }
+
+#[test]
+fn service_factories_construct_before_plugins_and_dispose_in_reverse_order() {
+    let stdout = assert_success(&run_certo(
+        r#"module HostServiceFactoryTest
+
+fn eventsKey(): ServiceKey<Channel<Int>> = Host.serviceKey("events")
+type Resource = { value: Int }
+fn firstKey(): ServiceKey<Resource> = Host.serviceKey("first")
+fn secondKey(): ServiceKey<Resource> = Host.serviceKey("second")
+
+fn emit(c: HostContext, value: Int): Unit [io] = {
+    match HostContext.service(c, eventsKey()) {
+        Some(events) => Channel.send(events, value)
+        None => ()
+    }
+}
+
+fn createFirst(c: HostContext): Result<Resource, Text> [io] = {
+    emit(c, 1)
+    Ok(Resource { value: 10 })
+}
+fn disposeFirst(c: HostContext): Result<Unit, Text> [io] = {
+    match HostContext.service(c, firstKey()) {
+        Some(value) => {
+            emit(c, value.value + 90)
+            Ok(())
+        }
+        None => Err("first service unavailable during disposal")
+    }
+}
+fn createSecond(c: HostContext): Result<Resource, Text> [io] = {
+    match HostContext.service(c, firstKey()) {
+        Some(value) => {
+            emit(c, 2)
+            Ok(Resource { value: value.value + 10 })
+        }
+        None => Err("first service unavailable")
+    }
+}
+fn disposeSecond(c: HostContext): Result<Unit, Text> [io] = {
+    match HostContext.service(c, secondKey()) {
+        Some(value) => {
+            emit(c, value.value + 180)
+            Ok(())
+        }
+        None => Err("second service unavailable during disposal")
+    }
+}
+fn start(c: HostContext): Result<Unit, Text> [io] = {
+    match HostContext.service(c, secondKey()) {
+        Some(_) => {
+            emit(c, 3)
+            Ok(())
+        }
+        None => Err("second service unavailable")
+    }
+}
+fn stop(c: HostContext): Result<Unit, Text> [io] = {
+    emit(c, 4)
+    Ok(())
+}
+
+fn main(): Unit [io] = {
+    val events = Channel.new(capacity: 8)
+    val host = Host.new()
+        .provide(eventsKey(), events)
+        .provideFactory(firstKey(), createFirst, disposeFirst)
+        .provideFactory(secondKey(), createSecond, disposeSecond)
+        .add(Host.plugin("plugin", start, stop))
+    val started = Host.start(host)
+    val stopped = Host.stop(host)
+    for i in 0..5 {
+        match Channel.tryReceive(events) {
+            Some(value) => println(intToText(value))
+            None => println("missing event")
+        }
+    }
+}
+"#,
+    ));
+
+    assert_eq!(stdout.lines().collect::<Vec<_>>(), ["1", "2", "3", "4", "200", "100"]);
+}
+
+#[test]
+fn service_factory_failure_disposes_already_constructed_services() {
+    let stdout = assert_success(&run_certo(
+        r#"module HostServiceFactoryRollbackTest
+
+type Resource = { value: Int }
+fn eventsKey(): ServiceKey<Channel<Int>> = Host.serviceKey("events")
+fn firstKey(): ServiceKey<Resource> = Host.serviceKey("first")
+fn failingKey(): ServiceKey<Resource> = Host.serviceKey("failing")
+fn emit(c: HostContext, value: Int): Unit [io] = {
+    match HostContext.service(c, eventsKey()) {
+        Some(events) => Channel.send(events, value)
+        None => ()
+    }
+}
+fn createFirst(c: HostContext): Result<Resource, Text> [io] = {
+    emit(c, 1)
+    Ok(Resource { value: 10 })
+}
+fn disposeFirst(c: HostContext): Result<Unit, Text> [io] = {
+    match HostContext.service(c, firstKey()) {
+        Some(value) => {
+            emit(c, value.value + 90)
+            Ok(())
+        }
+        None => Err("first service unavailable during rollback")
+    }
+}
+fn failCreate(c: HostContext): Result<Resource, Text> [io] = {
+    emit(c, 2)
+    Err("factory unavailable")
+}
+fn disposeFailing(c: HostContext): Result<Unit, Text> = Ok(())
+
+fn main(): Unit [io] = {
+    val events = Channel.new(capacity: 4)
+    val host = Host.new()
+        .provide(eventsKey(), events)
+        .provideFactory(firstKey(), createFirst, disposeFirst)
+        .provideFactory(failingKey(), failCreate, disposeFailing)
+    match Host.start(host) {
+        Ok(_) => println("unexpected success")
+        Err(error) => println(error)
+    }
+    for i in 0..2 {
+        match Channel.tryReceive(events) {
+            Some(value) => println(intToText(value))
+            None => println("missing event")
+        }
+    }
+}
+"#,
+    ));
+
+    assert!(stdout.lines().next().unwrap_or_default().contains("failed to construct service"), "{stdout}");
+    assert!(stdout.lines().next().unwrap_or_default().contains("factory unavailable"), "{stdout}");
+    assert_eq!(stdout.lines().skip(1).collect::<Vec<_>>(), ["1", "2", "100"], "{stdout}");
+    assert!(!stdout.contains("unexpected"), "{stdout}");
+}

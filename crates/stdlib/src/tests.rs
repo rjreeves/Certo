@@ -2844,7 +2844,7 @@ fn host_api_is_registered() {
         "Host.new", "Host.plugin", "Host.add", "Host.start", "Host.stop",
         "Host.run", "Host.requestStop", "HostContext.isStopping",
         "HostContext.pluginCount", "Host.configure", "Host.serviceKey",
-        "Host.provide", "HostContext.service", "HostContext.config",
+        "Host.provide", "Host.provideFactory", "HostContext.service", "HostContext.config",
         "HostContext.configOr", "HostPlugin.provides", "HostPlugin.requires",
         "HostPlugin.worker", "Host.shutdownTimeout", "Host.readinessTimeout",
         "Host.waitUntilReady", "Host.health", "HostContext.ready", "HostContext.fail",
@@ -2929,6 +2929,17 @@ fn host_typed_services_and_config_typecheck() {
          fn build(): Host = Host.new().configure(\"mode\", \"test\").provide(key(), Logger { prefix: \"[t]\" })\n\
          fn load(c: HostContext): Logger? = HostContext.service(c, key())\n\
          fn mode(c: HostContext): Text = HostContext.configOr(c, \"mode\", \"dev\")"
+    ).unwrap();
+}
+
+#[test]
+fn host_service_factories_and_disposers_typecheck() {
+    check_full(
+        "module HostFactoryTest\n\
+         fn key(): ServiceKey<Int> = Host.serviceKey(\"count\")\n\
+         fn create(c: HostContext): Result<Int, Text> = Ok(42)\n\
+         fn dispose(c: HostContext): Result<Unit, Text> = Ok(())\n\
+         fn build(): Host = Host.new().provideFactory(key(), create, dispose)"
     ).unwrap();
 }
 

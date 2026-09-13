@@ -88,7 +88,7 @@ explicit interoperability layer rather than a requirement for the core host.
 
 ## Milestone H1 — Operational contracts
 
-**Status: Verification**
+**Status: Shipped**
 
 Turn the current runtime behavior into explicit, stable contracts before adding
 more extension points.
@@ -117,17 +117,17 @@ more extension points.
 
 ## Milestone H2 — Scoped services and disposal
 
-**Status: Planned**
+**Status: Next**
 
 Evolve the service registry from a typed value map into a lifecycle-aware
 dependency container without hiding ownership.
 
 ### Scope
 
-- Singleton host services and per-plugin scopes.
-- Factory registration for services requiring runtime construction.
-- Deterministic reverse-order disposal.
-- Startup rollback disposes every service created before failure.
+- ✅ Singleton factory registration for services requiring runtime construction.
+- ✅ Deterministic reverse-order disposal for host-owned singleton services.
+- ✅ Startup rollback disposes every successfully constructed service.
+- Per-plugin scopes.
 - Duplicate and cyclic factory dependencies fail before callbacks run where
   statically discoverable.
 - Explicit rules for borrowing, sharing, and thread safety.
@@ -267,7 +267,6 @@ Every Host milestone must satisfy the following gates:
 
 ## Recommended next implementation item
 
-Verify the completed H1 operational contract under Linux AddressSanitizer and
-ThreadSanitizer. The typed API, transition table, callback rules, timeout
-aftermath, transitional snapshots, and repeated/concurrent call tests are now
-implemented and pass the native Windows suite.
+Complete H2's ownership contract by adding per-plugin service scopes and
+explicit factory dependency declarations. Construction and disposal must remain
+deterministic, and dependency cycles must fail before any factory callback runs.
