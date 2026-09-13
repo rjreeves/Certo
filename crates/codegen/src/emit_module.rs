@@ -861,9 +861,9 @@ fn ast_ty_to_c_str(te: &certo_ast::types::TypeExpr) -> String {
                 "JsonValue" | "ProcessResult" => format!("Certo{}*", name),
                 "HostState" | "HostWorkerState" | "HostFailureKind" =>
                     "certo_text_t".to_string(),
-                "Host" | "HostPlugin" | "HostContext" | "ServiceKey" | "RestartPolicy" |
+                "Host" | "HostPlugin" | "HostContext" | "ServiceKey" | "ConfigKey" | "RestartPolicy" |
                 "HostStatusSnapshot" | "HostWorkerStatus" | "HostMetricSnapshot" |
-                "HostLifecycleError" =>
+                "HostLifecycleError" | "HostConfigurationError" =>
                     "void*".to_string(),
                 other     => c_ident(other),
             }

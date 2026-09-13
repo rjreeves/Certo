@@ -1,9 +1,8 @@
 # Host configuration contract
 
-This document defines the H3 configuration contract before its runtime APIs are
-implemented. Names in the proposed API section may be refined during
-implementation, but precedence, validation timing, diagnostics, and secret
-handling are normative.
+This document defines the H3 configuration contract. The typed programmatic
+foundation is implemented; external source layering remains staged work.
+Precedence, validation timing, diagnostics, and secret handling are normative.
 
 ## Configuration snapshot
 
@@ -54,7 +53,7 @@ Applications register typed keys before startup. A key owns:
 - zero or more validators returning `Result<Unit, Text>`;
 - whether its result structurally contains `Secret<_>`.
 
-The intended API shape is:
+The typed foundation API is:
 
 ```certo
 Host.configKey<T>(name: Text, parse: fn(Text): Result<T, Text>): ConfigKey<T>
@@ -84,8 +83,8 @@ Configuration failures use a typed `ConfigurationFailure` lifecycle kind and
 phase `configuration`. Each item reports:
 
 - canonical key name;
-- source kind: `Default`, `Toml`, `Environment`, `CommandLine`, or
-  `Programmatic`;
+- source kind: `Default`, `Toml`, `Environment`, `CommandLine`,
+  `Programmatic`, or `None` for a missing required value;
 - non-secret source location, such as a TOML path and line, environment variable
   name, argument index, or programmatic registration index;
 - category: `Missing`, `Parse`, `Validation`, `Duplicate`, `Io`, or `Syntax`;

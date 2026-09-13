@@ -158,7 +158,8 @@ contract is defined in [`HOST-CONFIGURATION.md`](HOST-CONFIGURATION.md).
   implementation.
 - Layered configuration from defaults, `certo.toml`, environment variables,
   command-line arguments, and programmatic overrides.
-- Typed binding and validation at host startup.
+- ✅ Typed programmatic keys, defaults, binding, validation, immutable lookup,
+  and ordered configuration diagnostics at host startup.
 - Source attribution for diagnostics without exposing secret values.
 - Integration with Certo's `Secret<T>` protections.
 - Optional configuration reload with an immutable snapshot model.

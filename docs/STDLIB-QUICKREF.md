@@ -915,6 +915,10 @@ HostPlugin.factoryDependsOn<T, U>(
 ): HostPlugin
 Host.add(host: Host, plugin: HostPlugin): Host
 Host.configure(host: Host, key: Text, value: Text): Host
+Host.configKey<T>(name: Text, parse: fn(Text): Result<T, Text>): ConfigKey<T>
+Host.requireConfig<T>(host: Host, key: ConfigKey<T>): Host
+Host.defaultConfig<T>(host: Host, key: ConfigKey<T>, value: T): Host
+Host.validateConfig<T>(host: Host, key: ConfigKey<T>, validator: fn(T): Result<Unit, Text>): Host
 Host.shutdownTimeout(host: Host, timeout: Duration): Host
 Host.readinessTimeout(host: Host, timeout: Duration): Host
 Host.quiesceTimeout(host: Host, timeout: Duration): Host
@@ -982,6 +986,12 @@ HostLifecycleError.phase(error): Text
 HostLifecycleError.subject(error): Text
 HostLifecycleError.message(error): Text
 HostLifecycleError.isTimeout(error): Bool
+HostLifecycleError.configurationErrors(error): List<HostConfigurationError>
+HostConfigurationError.key(error): Text
+HostConfigurationError.source(error): Text
+HostConfigurationError.location(error): Text
+HostConfigurationError.category(error): Text
+HostConfigurationError.message(error): Text
 HostFailureKind.name(kind): Text
 
 Host.requestStop(context: HostContext): Unit [io]
@@ -1006,6 +1016,7 @@ HostContext.pluginCount(context: HostContext): Int
 HostContext.service<T>(context: HostContext, key: ServiceKey<T>): T?
 HostContext.config(context: HostContext, key: Text): Text?
 HostContext.configOr(context: HostContext, key: Text, fallback: Text): Text
+HostContext.configValue<T>(context: HostContext, key: ConfigKey<T>): T
 ```
 
 `Host.run` starts the host, waits until Ctrl+C, SIGTERM, or `requestStop`, then
