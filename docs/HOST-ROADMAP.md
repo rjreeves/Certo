@@ -127,7 +127,10 @@ dependency container without hiding ownership.
 - ✅ Singleton factory registration for services requiring runtime construction.
 - ✅ Deterministic reverse-order disposal for host-owned singleton services.
 - ✅ Startup rollback disposes every successfully constructed service.
-- Per-plugin scopes.
+- ✅ Per-plugin factory scopes constructed before the owning plugin and disposed
+  after it stops.
+- ✅ Scoped services are visible only to their owning plugin and may depend on
+  host services, but not another plugin's scope.
 - ✅ Missing, duplicate, and cyclic factory dependencies fail before callbacks
   run; factories use stable topological construction order.
 - Explicit rules for borrowing, sharing, and thread safety.
@@ -267,7 +270,7 @@ Every Host milestone must satisfy the following gates:
 
 ## Recommended next implementation item
 
-Complete H2's ownership contract by adding per-plugin service scopes with
-explicit visibility boundaries. Scoped services must be constructed before
-their owning plugin starts and disposed after that plugin stops without becoming
-visible to unrelated plugins.
+Complete H2's ownership contract with bounded service-disposal callbacks and an
+explicit timeout aftermath policy. A timed-out disposer must not block later
+cleanup, and diagnostics must identify the service and scope without permitting
+use-after-disposal by a still-running callback.

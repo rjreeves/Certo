@@ -1,0 +1,55 @@
+module HostPluginScopeRollbackTest
+
+type Resource = { value: Int }
+fn aKey(): ServiceKey<Resource> = Host.serviceKey("a")
+fn bKey(): ServiceKey<Resource> = Host.serviceKey("b")
+fn failureKey(): ServiceKey<Resource> = Host.serviceKey("failure")
+
+fn createA(c: HostContext): Result<Resource, Text> [io] = {
+    println("a-create")
+    Ok(Resource { value: 1 })
+}
+fn disposeA(c: HostContext): Result<Unit, Text> [io] = {
+    println("a-dispose")
+    Ok(())
+}
+fn startA(c: HostContext): Result<Unit, Text> [io] = {
+    println("a-start")
+    Ok(())
+}
+fn stopA(c: HostContext): Result<Unit, Text> [io] = {
+    println("a-stop")
+    Ok(())
+}
+
+fn createB(c: HostContext): Result<Resource, Text> [io] = {
+    println("b-create")
+    Ok(Resource { value: 2 })
+}
+fn disposeB(c: HostContext): Result<Unit, Text> [io] = {
+    println("b-dispose")
+    Ok(())
+}
+fn failB(c: HostContext): Result<Resource, Text> [io] = {
+    println("b-fail")
+    Err("scoped factory unavailable")
+}
+fn disposeFailure(c: HostContext): Result<Unit, Text> = Ok(())
+fn startB(c: HostContext): Result<Unit, Text> [io] = {
+    println("unexpected b-start")
+    Ok(())
+}
+fn stopB(c: HostContext): Result<Unit, Text> = Ok(())
+
+fn main(): Unit [io] = {
+    val a = Host.plugin("a", startA, stopA)
+        .provideFactory(aKey(), createA, disposeA)
+    val b = Host.plugin("b", startB, stopB)
+        .provideFactory(bKey(), createB, disposeB)
+        .provideFactory(failureKey(), failB, disposeFailure)
+    val host = Host.new().add(a).add(b)
+    match Host.start(host) {
+        Ok(_) => println("unexpected success")
+        Err(error) => println(error)
+    }
+}
