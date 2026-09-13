@@ -160,8 +160,8 @@ contract is defined in [`HOST-CONFIGURATION.md`](HOST-CONFIGURATION.md).
   environment variables, command-line arguments, and programmatic overrides.
 - ✅ Typed programmatic keys, defaults, binding, validation, immutable lookup,
   and ordered configuration diagnostics at host startup.
-- Source attribution for diagnostics without exposing secret values.
-- Integration with Certo's `Secret<T>` protections.
+- ✅ Source attribution for diagnostics without exposing secret values.
+- ✅ Integration with Certo's `Secret<T>` protections.
 - Optional configuration reload with an immutable snapshot model.
 
 ### Exit criteria
@@ -277,5 +277,5 @@ Every Host milestone must satisfy the following gates:
 
 ## Recommended next implementation item
 
-Begin H3 with a design for deterministic layered configuration precedence,
-typed binding, validation diagnostics, and secret-safe source attribution.
+Complete H3 by deciding whether configuration reload belongs in the initial
+host contract and, if retained, implement atomic immutable snapshot publication.

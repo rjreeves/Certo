@@ -629,11 +629,13 @@ fn emit_call_args(func: &Operand, args: &[Operand], locals: &[MirLocalDecl]) -> 
             },
             _ => None,
         });
-        let payload_boxed = parsed_ty.map(|ty| {
-            let c_ty = ty_to_c(&ty);
+        let payload_boxed = parsed_ty.as_ref().map(|ty| {
+            let c_ty = ty_to_c(ty);
             !(c_ty.contains('*') || c_ty == "certo_text_t")
         }).unwrap_or(true);
         parts.push(if payload_boxed { "true" } else { "false" }.to_string());
+        let secret_bearing = parsed_ty.as_ref().is_some_and(Ty::contains_secret);
+        parts.push(if secret_bearing { "true" } else { "false" }.to_string());
     }
     parts.join(", ")
 }

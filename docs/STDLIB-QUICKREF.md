@@ -1026,6 +1026,10 @@ Later entries win within one source. Parsing and validation complete before any
 service factory or plugin callback runs. `HostConfigurationError` reports the
 winning source and location without including its raw value.
 
+Keys whose parsed type structurally contains `Secret<_>` redact parser and
+validator messages. Their source and location remain visible, but raw access
+through `HostContext.config` or `configOr` is rejected; use `configValue`.
+
 `Host.run` starts the host, waits until Ctrl+C, SIGTERM, or `requestStop`, then
 performs an orderly shutdown. Use `start` and `stop` separately for applications
 that already own their main loop. A host cannot be started twice or modified
