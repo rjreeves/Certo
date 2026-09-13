@@ -950,7 +950,11 @@ HostContext.configOr(context: HostContext, key: Text, fallback: Text): Text
 `Host.run` starts the host, waits until Ctrl+C, SIGTERM, or `requestStop`, then
 performs an orderly shutdown. Use `start` and `stop` separately for applications
 that already own their main loop. A host cannot be started twice or modified
-after startup.
+after startup. Calling `Host.stop` while initial startup is in progress requests
+startup cancellation and waits for rollback to finish. `Host.start` then returns
+`Err("host startup cancelled")`, while the waiting `Host.stop` returns `Ok(())`
+after every successfully started plugin has been stopped. Calling `Host.stop`
+while a worker is restarting performs an ordinary graceful shutdown.
 
 Services use typed keys rather than casts or string-based result types:
 

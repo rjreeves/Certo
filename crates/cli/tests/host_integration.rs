@@ -744,3 +744,62 @@ fn main(): Unit [io] = {
     assert!(stdout.contains("stopped again"), "{stdout}");
     assert!(!stdout.contains("unexpected"), "{stdout}");
 }
+
+#[test]
+fn stop_during_startup_cancels_and_waits_for_rollback() {
+    let stdout = assert_success(&run_certo(
+        r#"module HostStartupCancellationTest
+
+fn slowStart(c: HostContext): Result<Unit, Text> [io] = {
+    sleep(25)
+    println("startup callback finished")
+    Ok(())
+}
+
+fn stop(c: HostContext): Result<Unit, Text> [io] = {
+    println("plugin stopped")
+    Ok(())
+}
+
+fn startHost(host: Host): Unit [io] = {
+    match Host.start(host) {
+        Ok(_) => println("unexpected startup success")
+        Err(error) => println(error)
+    }
+}
+
+fn stopHost(host: Host): Unit [io] = {
+    sleep(1)
+    match Host.stop(host) {
+        Ok(_) => println("startup cancellation completed")
+        Err(error) => println(f"unexpected stop error: {error}")
+    }
+}
+
+fn main(): Unit [io, async] = {
+    val host = Host.new().add(Host.plugin("slow", slowStart, stop))
+    val completed = await parallel {
+        startHost(host),
+        stopHost(host),
+    }
+    println(Host.health(host))
+}
+"#,
+    ));
+
+    assert!(stdout.contains("host startup cancelled"), "{stdout}");
+    assert!(
+        stdout.contains("startup cancellation completed"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("Failed"), "{stdout}");
+    assert_eq!(
+        stdout
+            .lines()
+            .filter(|line| *line == "plugin stopped")
+            .count(),
+        1,
+        "{stdout}"
+    );
+    assert!(!stdout.contains("unexpected"), "{stdout}");
+}

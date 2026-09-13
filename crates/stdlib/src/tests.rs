@@ -2871,6 +2871,8 @@ fn host_runtime_contains_ordered_lifecycle() {
     let startup_complete = crate::HOST_C.find("CERTO_ATOMIC_STORE(&host->startup_complete, 1)").unwrap();
     assert!(worker_launch < startup_complete, "startup must publish completion after storing worker handles");
     assert!(crate::HOST_C.contains("CERTO_ATOMIC_LOAD(&context->host->startup_complete)"), "worker readiness must not publish host health during launch");
+    assert!(crate::HOST_C.contains("__certo_host_wait_for_startup"), "shutdown during startup must wait for rollback");
+    assert!(crate::HOST_C.contains("host startup cancelled"), "startup cancellation must have a stable diagnostic");
     assert!(crate::HOST_C.contains("__certo_thread_join_timed"), "worker shutdown must enforce its timeout");
     assert!(crate::HOST_C.contains("CERTO_ATOMIC_STORE(&worker->host->context->stopping, 1)"), "worker failure must atomically request shutdown");
     assert!(crate::HOST_C.contains("__certo_host_wait_until_ready"), "startup must wait for worker readiness");

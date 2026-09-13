@@ -119,6 +119,9 @@ See [docs/GUIDE.md](docs/GUIDE.md) for the full developer guide, including:
 - LLVM / WASM targets
 - FFI and C interop
 
+See [docs/HOST-ROADMAP.md](docs/HOST-ROADMAP.md) for the `Stdlib.Host`
+capability roadmap, shipped guarantees, and production-readiness gates.
+
 ## Build scripts
 
 ```powershell
