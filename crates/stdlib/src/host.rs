@@ -123,6 +123,7 @@ typedef struct CertoHost {
     volatile int state;
     volatile int startup_complete;
     volatile int startup_cancel_requested;
+    volatile int shutdown_started;
     volatile int shutdown_complete;
     certo_text_t shutdown_error;
     int64_t shutdown_timeout_ms;
@@ -805,7 +806,8 @@ static void* __certo_host_worker_main(void* raw) {
         int64_t restart_count =
             __atomic_add_fetch(&worker->restart_count, 1, __ATOMIC_ACQ_REL);
         CERTO_ATOMIC_STORE(&worker->health, CERTO_WORKER_RESTARTING);
-        CERTO_ATOMIC_STORE(&worker->host->state, CERTO_HOST_STARTING);
+        __sync_bool_compare_and_swap(
+            &worker->host->state, CERTO_HOST_HEALTHY, CERTO_HOST_STARTING);
         __certo_host_metric_add(worker->host, "host.worker.restarts", 1);
         certo_text_t restart_reason = CERTO_ATOMIC_LOAD(&worker->last_error);
         certo_host_context_log(worker->context, "warn", "worker.restarting",
@@ -1168,31 +1170,33 @@ void* certo_host_stop(CertoHost* host) {
             !CERTO_ATOMIC_LOAD(&host->worker_error))
             return certo_ok(0);
     }
-    bool owns_shutdown = __sync_bool_compare_and_swap(
-        &host->state, CERTO_HOST_HEALTHY, CERTO_HOST_STOPPING);
-    if (!owns_shutdown && CERTO_ATOMIC_LOAD(&host->startup_complete)) {
-        owns_shutdown = __sync_bool_compare_and_swap(
-            &host->state, CERTO_HOST_STARTING, CERTO_HOST_STOPPING);
-    }
-    if (!owns_shutdown) {
-        if (CERTO_ATOMIC_LOAD(&host->state) == CERTO_HOST_STOPPING) {
-#if defined(_WIN32)
-            EnterCriticalSection(&host->wait_lock);
-            while (!CERTO_ATOMIC_LOAD(&host->shutdown_complete))
-                SleepConditionVariableCS(&host->wait_changed, &host->wait_lock, INFINITE);
-            LeaveCriticalSection(&host->wait_lock);
-#else
-            pthread_mutex_lock(&host->wait_lock);
-            while (!CERTO_ATOMIC_LOAD(&host->shutdown_complete))
-                pthread_cond_wait(&host->wait_changed, &host->wait_lock);
-            pthread_mutex_unlock(&host->wait_lock);
-#endif
-            certo_text_t shutdown_error = CERTO_ATOMIC_LOAD(&host->shutdown_error);
-            return shutdown_error
-                ? certo_err((intptr_t)shutdown_error) : certo_ok(0);
-        }
+    int state = CERTO_ATOMIC_LOAD(&host->state);
+    bool can_shutdown = state == CERTO_HOST_HEALTHY ||
+        (state == CERTO_HOST_STARTING &&
+         CERTO_ATOMIC_LOAD(&host->startup_complete)) ||
+        (state == CERTO_HOST_FAILED && CERTO_ATOMIC_LOAD(&host->worker_error));
+    if (!can_shutdown && !CERTO_ATOMIC_LOAD(&host->shutdown_started))
         return certo_err((intptr_t)"host is not running");
+
+    bool owns_shutdown = can_shutdown && __sync_bool_compare_and_swap(
+        &host->shutdown_started, 0, 1);
+    if (!owns_shutdown) {
+#if defined(_WIN32)
+        EnterCriticalSection(&host->wait_lock);
+        while (!CERTO_ATOMIC_LOAD(&host->shutdown_complete))
+            SleepConditionVariableCS(&host->wait_changed, &host->wait_lock, INFINITE);
+        LeaveCriticalSection(&host->wait_lock);
+#else
+        pthread_mutex_lock(&host->wait_lock);
+        while (!CERTO_ATOMIC_LOAD(&host->shutdown_complete))
+            pthread_cond_wait(&host->wait_changed, &host->wait_lock);
+        pthread_mutex_unlock(&host->wait_lock);
+#endif
+        certo_text_t shutdown_error = CERTO_ATOMIC_LOAD(&host->shutdown_error);
+        return shutdown_error
+            ? certo_err((intptr_t)shutdown_error) : certo_ok(0);
     }
+    CERTO_ATOMIC_STORE(&host->state, CERTO_HOST_STOPPING);
     certo_text_t errors = __certo_host_quiesce_started(host);
     CERTO_ATOMIC_STORE(&host->context->stopping, 1);
     __certo_host_wake_waiters(host);
