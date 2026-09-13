@@ -746,6 +746,169 @@ fn main(): Unit [io] = {
 }
 
 #[test]
+fn typed_snapshots_cover_startup_restart_and_shutdown_transitions() {
+    let startup = assert_success(&run_certo(
+        r#"module HostStartupSnapshotTest
+fn slowStart(c: HostContext): Result<Unit, Text> [io] = {
+    sleep(40)
+    Ok(())
+}
+fn stop(c: HostContext): Result<Unit, Text> = Ok(())
+fn startHost(host: Host): Unit [io] = {
+    val result = Host.startTyped(host)
+    ()
+}
+fn observe(host: Host): Unit [io] = {
+    sleep(5)
+    val status = Host.status(host)
+    println(HostState.name(HostStatusSnapshot.state(status)))
+    println(boolToText(HostStatusSnapshot.isReady(status)))
+    println(boolToText(HostStatusSnapshot.isLive(status)))
+}
+fn main(): Unit [io, async] = {
+    val host = Host.new().add(Host.plugin("slow", slowStart, stop))
+    val completed = await parallel { startHost(host), observe(host) }
+    val stopped = Host.stopTyped(host)
+}
+"#,
+    ));
+    assert_eq!(startup.lines().collect::<Vec<_>>(), ["Starting", "false", "true"]);
+
+    let restart = assert_success(&run_certo(
+        r#"module HostRestartSnapshotTest
+fn attemptsKey(): ServiceKey<Channel<Int>> = Host.serviceKey("attempts")
+fn start(c: HostContext): Result<Unit, Text> = Ok(())
+fn stop(c: HostContext): Result<Unit, Text> = Ok(())
+fn work(c: HostContext): Result<Unit, Text> [io] = {
+    match HostContext.service(c, attemptsKey()) {
+        Some(attempts) => match Channel.tryReceive(attempts) {
+            Some(_) => Err("transient")
+            None => {
+                HostContext.ready(c)
+                while HostContext.sleep(c, Duration.milliseconds(1)) {}
+                Ok(())
+            }
+        }
+        None => Err("missing attempts")
+    }
+}
+fn startHost(host: Host): Unit [io] = {
+    val result = Host.startTyped(host)
+    ()
+}
+fn observe(host: Host): Unit [io] = {
+    sleep(20)
+    val status = Host.status(host)
+    println(HostState.name(HostStatusSnapshot.state(status)))
+    match List.first(HostStatusSnapshot.workers(status)) {
+        Some(worker) => {
+            println(HostWorkerState.name(HostWorkerStatus.state(worker)))
+            println(boolToText(HostWorkerStatus.isReady(worker)))
+            println(boolToText(HostWorkerStatus.isLive(worker)))
+            println(intToText(HostWorkerStatus.restarts(worker)))
+        }
+        None => println("missing worker")
+    }
+}
+fn main(): Unit [io, async] = {
+    val attempts = Channel.new(capacity: 1)
+    Channel.send(attempts, 1)
+    val host = Host.new().provide(attemptsKey(), attempts)
+        .add(Host.plugin("plugin", start, stop).worker("worker", work)
+            .restart(RestartPolicy.onFailure(2, Duration.milliseconds(100), Duration.milliseconds(100))))
+    val completed = await parallel { startHost(host), observe(host) }
+    val stopped = Host.stopTyped(host)
+}
+"#,
+    ));
+    assert_eq!(
+        restart.lines().collect::<Vec<_>>(),
+        ["Starting", "Restarting", "false", "true", "1"]
+    );
+
+    let shutdown = assert_success(&run_certo(
+        r#"module HostShutdownSnapshotTest
+fn start(c: HostContext): Result<Unit, Text> = Ok(())
+fn quiesce(c: HostContext): Result<Unit, Text> [io] = {
+    sleep(40)
+    Ok(())
+}
+fn stop(c: HostContext): Result<Unit, Text> = Ok(())
+fn stopHost(host: Host): Unit [io] = {
+    val result = Host.stopTyped(host)
+    ()
+}
+fn observe(host: Host): Unit [io] = {
+    sleep(5)
+    val status = Host.status(host)
+    println(HostState.name(HostStatusSnapshot.state(status)))
+    println(boolToText(HostStatusSnapshot.isReady(status)))
+    println(boolToText(HostStatusSnapshot.isLive(status)))
+}
+fn main(): Unit [io, async] = {
+    val host = Host.new().add(Host.plugin("plugin", start, stop).quiesce(quiesce))
+    val started = Host.startTyped(host)
+    val completed = await parallel { stopHost(host), observe(host) }
+    val finalStatus = Host.status(host)
+    println(HostState.name(HostStatusSnapshot.state(finalStatus)))
+    println(boolToText(HostStatusSnapshot.isLive(finalStatus)))
+}
+"#,
+    ));
+    assert_eq!(
+        shutdown.lines().collect::<Vec<_>>(),
+        ["Stopping", "false", "true", "Stopped", "false"]
+    );
+}
+
+#[test]
+fn typed_lifecycle_calls_are_deterministic_when_repeated_and_concurrent() {
+    let stdout = assert_success(&run_certo(
+        r#"module HostTypedConcurrencyTest
+fn start(c: HostContext): Result<Unit, Text> [io] = {
+    sleep(25)
+    Ok(())
+}
+fn stop(c: HostContext): Result<Unit, Text> = Ok(())
+fn startOne(host: Host): Unit [io] = {
+    match Host.startTyped(host) {
+        Ok(_) => println("start-ok")
+        Err(error) => println(HostFailureKind.name(HostLifecycleError.kind(error)))
+    }
+}
+fn stopOne(host: Host): Unit [io] = {
+    match Host.stopTyped(host) {
+        Ok(_) => println("stop-ok")
+        Err(error) => println(HostLifecycleError.message(error))
+    }
+}
+fn main(): Unit [io, async] = {
+    val host = Host.new().add(Host.plugin("plugin", start, stop))
+    println(HostState.name(HostStatusSnapshot.state(Host.status(host))))
+    val starts = await parallel { startOne(host), startOne(host) }
+    println(HostState.name(HostStatusSnapshot.state(Host.status(host))))
+    val stops = await parallel { stopOne(host), stopOne(host), stopOne(host), stopOne(host) }
+    match Host.stopTyped(host) {
+        Ok(_) => println("repeat-stop-ok")
+        Err(error) => println(HostLifecycleError.message(error))
+    }
+    match Host.startTyped(host) {
+        Ok(_) => println("unexpected restart")
+        Err(error) => println(HostFailureKind.name(HostLifecycleError.kind(error)))
+    }
+}
+"#,
+    ));
+    assert_eq!(stdout.lines().filter(|line| *line == "start-ok").count(), 1, "{stdout}");
+    assert_eq!(stdout.lines().filter(|line| *line == "StartupFailure").count(), 2, "{stdout}");
+    assert_eq!(stdout.lines().filter(|line| *line == "stop-ok").count(), 4, "{stdout}");
+    assert_eq!(stdout.lines().filter(|line| *line == "New").count(), 1, "{stdout}");
+    assert!(stdout.lines().any(|line| line == "Healthy"), "{stdout}");
+    assert!(stdout.lines().any(|line| line == "repeat-stop-ok"), "{stdout}");
+    assert!(!stdout.contains("unexpected"), "{stdout}");
+}
+
+#[test]
 fn typed_status_snapshot_exposes_host_workers_and_metrics() {
     let stdout = assert_success(&run_certo(
         r#"module HostTypedStatusTest
@@ -784,7 +947,14 @@ fn main(): Unit [io] = {
                 None => println("missing worker")
             }
             match Host.stopTyped(host) {
-                Ok(_) => println(HostState.name(HostStatusSnapshot.state(Host.status(host))))
+                Ok(_) => {
+                    val stopped = Host.status(host)
+                    println(HostState.name(HostStatusSnapshot.state(stopped)))
+                    match List.first(HostStatusSnapshot.workers(stopped)) {
+                        Some(worker) => println(HostWorkerState.name(HostWorkerStatus.state(worker)))
+                        None => println("missing stopped worker")
+                    }
+                }
                 Err(error) => println(HostLifecycleError.message(error))
             }
         }
@@ -799,7 +969,7 @@ fn main(): Unit [io] = {
         "Healthy", "true", "true", "1", "1", "2", "2", "worker", "plugin",
         "Healthy", "true", "true", "0",
     ]), "{stdout}");
-    assert_eq!(lines.last(), Some(&"Stopped"), "{stdout}");
+    assert!(lines.ends_with(&["Stopped", "Stopped"]), "{stdout}");
     assert!(!stdout.contains("missing worker"), "{stdout}");
 }
 

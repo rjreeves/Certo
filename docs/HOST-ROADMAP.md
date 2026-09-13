@@ -88,7 +88,7 @@ explicit interoperability layer rather than a requirement for the core host.
 
 ## Milestone H1 — Operational contracts
 
-**Status: In progress**
+**Status: Verification**
 
 Turn the current runtime behavior into explicit, stable contracts before adding
 more extension points.
@@ -98,14 +98,15 @@ more extension points.
 - ✅ Define a typed host status snapshot instead of requiring consumers to
   parse the `Host.metrics` JSON string.
 - ✅ Define readiness and liveness semantics for the host and every worker.
-- Distinguish startup failure, runtime worker failure, shutdown failure, and
-  forced termination in public diagnostics.
+- ✅ Distinguish startup failure, runtime worker failure, shutdown failure, and
+  timeout in public diagnostics; reserve `ForcedTermination` for the future
+  non-cooperative termination mechanism.
 - ✅ Add typed lifecycle errors for startup cancellation and other operational
   failure categories while retaining the stable text compatibility API.
-- Specify timeout boundaries and the state reported after each timeout.
-- Document callback concurrency rules and which Host APIs are safe inside each
-  callback phase.
-- Add contract tests for every state transition and repeated/concurrent call.
+- ✅ Specify timeout boundaries and the state reported after each timeout.
+- ✅ Document callback concurrency rules and which Host APIs are safe inside
+  each callback phase.
+- ✅ Add contract tests for every state transition and repeated/concurrent call.
 
 ### Exit criteria
 
@@ -266,7 +267,7 @@ Every Host milestone must satisfy the following gates:
 
 ## Recommended next implementation item
 
-Continue H1 by documenting the complete lifecycle transition table and adding
-contract tests for timeout, worker-failure, shutdown-failure, and repeated or
-concurrent typed calls. The typed snapshot and lifecycle-error surface is now
-implemented; the remaining work is to prove every transition and timeout state.
+Verify the completed H1 operational contract under Linux AddressSanitizer and
+ThreadSanitizer. The typed API, transition table, callback rules, timeout
+aftermath, transitional snapshots, and repeated/concurrent call tests are now
+implemented and pass the native Windows suite.
