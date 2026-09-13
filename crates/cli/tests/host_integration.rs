@@ -1,4 +1,8 @@
-use std::{env, fs, path::PathBuf, process::Command};
+use std::{
+    env, fs,
+    path::{Path, PathBuf},
+    process::Command,
+};
 
 fn run_certo(source: &str) -> std::process::Output {
     let dir = tempfile::tempdir().expect("temporary test directory");
@@ -19,6 +23,35 @@ fn assert_success(output: &std::process::Output) -> String {
         String::from_utf8_lossy(&output.stderr),
     );
     String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
+fn write_stress_artifacts(
+    path: &Path,
+    source: &str,
+    seed: i64,
+    iterations: i64,
+    sanitizer: &str,
+    exit_status: &str,
+    stdout: &[u8],
+    stderr: &[u8],
+) -> std::io::Result<()> {
+    fs::create_dir_all(path)?;
+    fs::write(path.join("host_randomized_lifecycle_stress.cto"), source)?;
+    fs::write(path.join("stdout.log"), stdout)?;
+    fs::write(path.join("stderr.log"), stderr)?;
+    fs::write(
+        path.join("metadata.txt"),
+        format!(
+            "seed={seed}\niterations={iterations}\nsanitizer={sanitizer}\nexit_status={exit_status}\n"
+        ),
+    )?;
+    fs::write(
+        path.join("reproduce.sh"),
+        format!(
+            "#!/usr/bin/env bash\nset -euo pipefail\nCERTO_HOST_STRESS_SEED={seed} CERTO_HOST_STRESS_ITERATIONS={iterations} CERTO_HOST_STRESS_SANITIZER={sanitizer} cargo test -p certo --test host_integration randomized_lifecycle_stress -- --ignored --nocapture\n"
+        ),
+    )?;
+    Ok(())
 }
 
 const HOST_STRESS_SOURCE: &str = r#"module HostStressTest
@@ -327,6 +360,53 @@ fn thread_sanitizer_shutdown_race_has_no_data_races() {
 }
 
 #[test]
+fn randomized_stress_artifacts_capture_reproduction_context() {
+    let dir = tempfile::tempdir().expect("temporary artifact directory");
+    let source = HOST_RANDOMIZED_STRESS_SOURCE
+        .replace("__SEED__", "41")
+        .replace("__ITERATIONS__", "17");
+    write_stress_artifacts(
+        dir.path(),
+        &source,
+        41,
+        17,
+        "thread",
+        "exit code: 66",
+        b"partial stdout\n",
+        b"WARNING: ThreadSanitizer: data race\n",
+    )
+    .expect("write synthetic failure artifacts");
+
+    let saved_source = fs::read_to_string(dir.path().join("host_randomized_lifecycle_stress.cto"))
+        .expect("read generated source artifact");
+    assert!(saved_source.contains("var state = 41"), "{saved_source}");
+    assert!(
+        saved_source.contains("while iteration < 17"),
+        "{saved_source}"
+    );
+    assert_eq!(
+        fs::read_to_string(dir.path().join("metadata.txt")).unwrap(),
+        "seed=41\niterations=17\nsanitizer=thread\nexit_status=exit code: 66\n"
+    );
+    assert_eq!(
+        fs::read(dir.path().join("stdout.log")).unwrap(),
+        b"partial stdout\n"
+    );
+    assert_eq!(
+        fs::read(dir.path().join("stderr.log")).unwrap(),
+        b"WARNING: ThreadSanitizer: data race\n"
+    );
+    let reproduce = fs::read_to_string(dir.path().join("reproduce.sh")).unwrap();
+    assert!(reproduce.starts_with("#!/usr/bin/env bash\nset -euo pipefail\n"));
+    assert!(reproduce.contains("CERTO_HOST_STRESS_SEED=41"));
+    assert!(reproduce.contains("CERTO_HOST_STRESS_ITERATIONS=17"));
+    assert!(reproduce.contains("CERTO_HOST_STRESS_SANITIZER=thread"));
+    assert!(reproduce.contains(
+        "cargo test -p certo --test host_integration randomized_lifecycle_stress -- --ignored --nocapture"
+    ));
+}
+
+#[test]
 #[ignore = "scheduled sanitizer stress"]
 fn randomized_lifecycle_stress_is_reproducible() {
     let raw_seed = env::var("CERTO_HOST_STRESS_SEED").unwrap_or_else(|_| "1".to_owned());
@@ -399,6 +479,17 @@ fn randomized_lifecycle_stress_is_reproducible() {
             ),
         )
         .expect("write stress reproduction command artifact");
+        write_stress_artifacts(
+            path,
+            &source,
+            seed,
+            iterations,
+            &sanitizer,
+            &output.status.to_string(),
+            &output.stdout,
+            &output.stderr,
+        )
+        .expect("write randomized stress artifacts");
     }
     let stdout = assert_success(&output);
     assert!(
