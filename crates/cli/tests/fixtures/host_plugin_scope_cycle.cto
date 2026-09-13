@@ -1,0 +1,27 @@
+module HostPluginScopeCycleTest
+
+type Resource = { value: Int }
+fn firstKey(): ServiceKey<Resource> = Host.serviceKey("first")
+fn secondKey(): ServiceKey<Resource> = Host.serviceKey("second")
+fn create(c: HostContext): Result<Resource, Text> [io] = {
+    println("unexpected factory")
+    Ok(Resource { value: 1 })
+}
+fn dispose(c: HostContext): Result<Unit, Text> = Ok(())
+fn start(c: HostContext): Result<Unit, Text> [io] = {
+    println("unexpected start")
+    Ok(())
+}
+fn stop(c: HostContext): Result<Unit, Text> = Ok(())
+
+fn main(): Unit [io] = {
+    val plugin = Host.plugin("cyclic", start, stop)
+        .provideFactory(firstKey(), create, dispose)
+        .provideFactory(secondKey(), create, dispose)
+        .factoryDependsOn(firstKey(), secondKey())
+        .factoryDependsOn(secondKey(), firstKey())
+    match Host.start(Host.new().add(plugin)) {
+        Ok(_) => println("unexpected success")
+        Err(error) => println(error)
+    }
+}

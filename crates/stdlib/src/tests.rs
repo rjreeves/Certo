@@ -2847,6 +2847,7 @@ fn host_api_is_registered() {
         "Host.provide", "Host.provideFactory", "Host.factoryDependsOn",
         "HostContext.service", "HostContext.config",
         "HostContext.configOr", "HostPlugin.provides", "HostPlugin.requires",
+        "HostPlugin.provideFactory", "HostPlugin.factoryDependsOn",
         "HostPlugin.worker", "Host.shutdownTimeout", "Host.readinessTimeout",
         "Host.waitUntilReady", "Host.health", "HostContext.ready", "HostContext.fail",
         "HostContext.sleep", "HostContext.waitUntil",
@@ -2943,6 +2944,23 @@ fn host_service_factories_and_disposers_typecheck() {
          fn dependency(): ServiceKey<Text> = Host.serviceKey(\"name\")\n\
          fn build(): Host = Host.new().provideFactory(key(), create, dispose)\n\
            .factoryDependsOn(key(), dependency())"
+    ).unwrap();
+}
+
+#[test]
+fn host_plugin_scoped_service_factories_typecheck() {
+    check_full(
+        "module HostScopedFactoryTest\n\
+         type Resource = { value: Int }\n\
+         fn resourceKey(): ServiceKey<Resource> = Host.serviceKey(\"resource\")\n\
+         fn dependencyKey(): ServiceKey<Text> = Host.serviceKey(\"dependency\")\n\
+         fn create(c: HostContext): Result<Resource, Text> = Ok(Resource { value: 1 })\n\
+         fn dispose(c: HostContext): Result<Unit, Text> = Ok(())\n\
+         fn start(c: HostContext): Result<Unit, Text> = Ok(())\n\
+         fn stop(c: HostContext): Result<Unit, Text> = Ok(())\n\
+         fn plugin(): HostPlugin = Host.plugin(\"p\", start, stop)\n\
+           .provideFactory(resourceKey(), create, dispose)\n\
+           .factoryDependsOn(resourceKey(), dependencyKey())"
     ).unwrap();
 }
 

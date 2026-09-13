@@ -1,0 +1,27 @@
+module HostPluginScopeValidationTest
+
+type Resource = { value: Int }
+fn aKey(): ServiceKey<Resource> = Host.serviceKey("a-only")
+fn bKey(): ServiceKey<Resource> = Host.serviceKey("b-only")
+fn create(c: HostContext): Result<Resource, Text> [io] = {
+    println("unexpected factory")
+    Ok(Resource { value: 1 })
+}
+fn dispose(c: HostContext): Result<Unit, Text> = Ok(())
+fn start(c: HostContext): Result<Unit, Text> [io] = {
+    println("unexpected start")
+    Ok(())
+}
+fn stop(c: HostContext): Result<Unit, Text> = Ok(())
+
+fn main(): Unit [io] = {
+    val a = Host.plugin("a", start, stop).provideFactory(aKey(), create, dispose)
+    val b = Host.plugin("b", start, stop)
+        .provideFactory(bKey(), create, dispose)
+        .factoryDependsOn(bKey(), aKey())
+    val host = Host.new().add(a).add(b)
+    match Host.start(host) {
+        Ok(_) => println("unexpected success")
+        Err(error) => println(error)
+    }
+}

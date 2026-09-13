@@ -1,0 +1,100 @@
+module HostPluginScopeTest
+
+type Resource = { value: Int }
+fn rootKey(): ServiceKey<Text> = Host.serviceKey("root")
+fn baseKey(): ServiceKey<Resource> = Host.serviceKey("a-base")
+fn derivedKey(): ServiceKey<Resource> = Host.serviceKey("a-derived")
+fn bKey(): ServiceKey<Resource> = Host.serviceKey("b-only")
+
+fn createBase(c: HostContext): Result<Resource, Text> [io] = {
+    match HostContext.service(c, rootKey()) {
+        Some(_) => {
+            println("a-base-create")
+            Ok(Resource { value: 10 })
+        }
+        None => Err("root unavailable")
+    }
+}
+fn createDerived(c: HostContext): Result<Resource, Text> [io] = {
+    match HostContext.service(c, baseKey()) {
+        Some(base) => {
+            println("a-derived-create")
+            Ok(Resource { value: base.value + 1 })
+        }
+        None => Err("base unavailable")
+    }
+}
+fn disposeBase(c: HostContext): Result<Unit, Text> [io] = {
+    println("a-base-dispose")
+    Ok(())
+}
+fn disposeDerived(c: HostContext): Result<Unit, Text> [io] = {
+    println("a-derived-dispose")
+    Ok(())
+}
+fn startA(c: HostContext): Result<Unit, Text> [io] = {
+    match HostContext.service(c, derivedKey()) {
+        Some(value) => println(intToText(value.value))
+        None => println("missing a-derived")
+    }
+    match HostContext.service(c, bKey()) {
+        Some(_) => println("leaked b service")
+        None => println("b-hidden")
+    }
+    Ok(())
+}
+fn stopA(c: HostContext): Result<Unit, Text> [io] = {
+    println("a-stop")
+    Ok(())
+}
+
+fn createB(c: HostContext): Result<Resource, Text> [io] = {
+    println("b-create")
+    Ok(Resource { value: 20 })
+}
+fn disposeB(c: HostContext): Result<Unit, Text> [io] = {
+    println("b-dispose")
+    Ok(())
+}
+fn startB(c: HostContext): Result<Unit, Text> [io] = {
+    match HostContext.service(c, bKey()) {
+        Some(value) => println(intToText(value.value))
+        None => println("missing b")
+    }
+    match HostContext.service(c, derivedKey()) {
+        Some(_) => println("leaked a service")
+        None => println("a-hidden")
+    }
+    Ok(())
+}
+fn stopB(c: HostContext): Result<Unit, Text> [io] = {
+    println("b-stop")
+    Ok(())
+}
+fn workB(c: HostContext): Result<Unit, Text> [io] = {
+    match HostContext.service(c, bKey()) {
+        Some(value) => println(f"b-worker-{value.value}")
+        None => println("missing b worker service")
+    }
+    match HostContext.service(c, derivedKey()) {
+        Some(_) => println("leaked a worker service")
+        None => println("a-worker-hidden")
+    }
+    HostContext.ready(c)
+    while HostContext.sleep(c, Duration.milliseconds(1)) {}
+    Ok(())
+}
+
+fn main(): Unit [io] = {
+    val pluginA = Host.plugin("a", startA, stopA)
+        .provideFactory(derivedKey(), createDerived, disposeDerived)
+        .factoryDependsOn(derivedKey(), baseKey())
+        .provideFactory(baseKey(), createBase, disposeBase)
+        .factoryDependsOn(baseKey(), rootKey())
+    val pluginB = Host.plugin("b", startB, stopB)
+        .provideFactory(bKey(), createB, disposeB)
+        .worker("b-worker", workB)
+    val host = Host.new().provide(rootKey(), "ready").add(pluginA).add(pluginB)
+    val started = Host.start(host)
+    val stopped = Host.stop(host)
+}

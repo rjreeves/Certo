@@ -902,6 +902,17 @@ RestartPolicy.always(
     maxDelay: Duration
 ): RestartPolicy
 HostPlugin.restart(plugin: HostPlugin, policy: RestartPolicy): HostPlugin
+HostPlugin.provideFactory<T>(
+    plugin: HostPlugin,
+    key: ServiceKey<T>,
+    factory: fn(HostContext): Result<T, Text>,
+    dispose: fn(HostContext): Result<Unit, Text>
+): HostPlugin
+HostPlugin.factoryDependsOn<T, U>(
+    plugin: HostPlugin,
+    factoryKey: ServiceKey<T>,
+    dependencyKey: ServiceKey<U>
+): HostPlugin
 Host.add(host: Host, plugin: HostPlugin): Host
 Host.configure(host: Host, key: Text, value: Text): Host
 Host.shutdownTimeout(host: Host, timeout: Duration): Host
@@ -1051,12 +1062,14 @@ Callback execution and API rules:
 
 | Callback | Ordering and concurrency | Safe operations |
 |---|---|---|
-| service factory | serial, stable dependency order, before plugins | resolve declared earlier dependencies, context config reads, logging, metrics |
+| host service factory | serial, stable dependency order, before plugins | resolve declared host dependencies, context config reads, logging, metrics |
+| scoped service factory | serial, stable local dependency order, immediately before its plugin | resolve that plugin's scoped services and host services, context reads, logging, metrics |
 | plugin `start` | serial, dependency order, on the `start*` caller | context service/config reads, status, logging, metrics, interruptible waits |
 | worker | one host-owned thread per worker; workers run concurrently | all `HostContext` worker methods, status, logging, metrics |
 | plugin `quiesce` | serial, reverse dependency order; may overlap a callback that exceeded its timeout | context reads, status, logging, metrics, bounded cleanup |
 | plugin `stop` | serial, reverse dependency order; runs after worker drain | context reads, status, logging, metrics, bounded cleanup |
-| service disposer | serial, reverse construction order, after plugins stop | resolve the service being disposed and dependencies that outlive it, context reads, logging, metrics |
+| host service disposer | serial, reverse construction order, after all plugins stop | resolve the service being disposed and dependencies that outlive it, context reads, logging, metrics |
+| scoped service disposer | serial, reverse local construction order, immediately after its plugin stops | resolve only that plugin's scoped services and host services, context reads, logging, metrics |
 
 Callbacks must not call `Host.start*`, `Host.run*`, or `Host.stop*` on their own
 host. Those operations own or wait for the callback's lifecycle phase and a
@@ -1087,6 +1100,17 @@ through `HostContext.service` and runs in reverse construction order. Factory or
 plugin startup failure disposes every service that was already constructed.
 Values registered with `provide` remain caller-owned and are never disposed by
 the host.
+
+Plugin-local services use `HostPlugin.provideFactory` and declare dependencies
+with `HostPlugin.factoryDependsOn`. They are constructed immediately before the
+owning plugin starts and disposed immediately after it stops. A plugin callback
+or worker can resolve its own scoped services before host services, but scoped
+services from other plugins are invisible. Cross-plugin scoped dependencies,
+missing dependencies, and local dependency cycles fail during preflight before
+any factory or plugin callback runs. A scoped factory failure disposes the
+current plugin's completed services, then rolls back previously started plugins
+and their scopes. If a plugin stop callback exceeds its timeout, its scoped
+services are retained because the callback may still be using them.
 
 Looking up `loggerKey()` returns `Logger?`; using a key with the wrong service
 type is rejected during type checking. Duplicate service names are rejected.

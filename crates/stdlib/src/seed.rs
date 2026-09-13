@@ -1108,6 +1108,39 @@ pub fn seed_stdlib(env: &mut TypeEnv, counter: &mut u32) {
             ret: Box::new(plugin.clone()),
         });
         def!("HostPlugin.quiesce", fn2(plugin.clone(), lifecycle, plugin.clone()));
+        {
+            let t = fresh();
+            let key = Ty::Named { name: "ServiceKey".into(), args: vec![Ty::Var(t)] };
+            let factory = fn1(
+                context.clone(),
+                Ty::Result(Box::new(Ty::Var(t)), Box::new(Ty::Text)),
+            );
+            let dispose = fn1(
+                context.clone(),
+                Ty::Result(Box::new(Ty::Unit), Box::new(Ty::Text)),
+            );
+            env.define("HostPlugin.provideFactory", poly1(t, Ty::Fn {
+                params: vec![plugin.clone(), key, factory, dispose],
+                ret: Box::new(plugin.clone()),
+            }));
+        }
+        {
+            let service_t = fresh();
+            let dependency_t = fresh();
+            let service_key = Ty::Named {
+                name: "ServiceKey".into(), args: vec![Ty::Var(service_t)],
+            };
+            let dependency_key = Ty::Named {
+                name: "ServiceKey".into(), args: vec![Ty::Var(dependency_t)],
+            };
+            env.define("HostPlugin.factoryDependsOn", poly2(
+                service_t, dependency_t,
+                Ty::Fn {
+                    params: vec![plugin.clone(), service_key, dependency_key],
+                    ret: Box::new(plugin.clone()),
+                },
+            ));
+        }
         def!("RestartPolicy.never", Ty::Fn {
             params: vec![], ret: Box::new(restart.clone()),
         });
@@ -1945,6 +1978,8 @@ pub fn seed_stdlib(env: &mut TypeEnv, counter: &mut u32) {
     pm!("Host.provide",            "host", "key", "service");
     pm!("Host.provideFactory",     "host", "key", "factory", "dispose");
     pm!("Host.factoryDependsOn",   "host", "factoryKey", "dependencyKey");
+    pm!("HostPlugin.provideFactory", "plugin", "key", "factory", "dispose");
+    pm!("HostPlugin.factoryDependsOn", "plugin", "factoryKey", "dependencyKey");
     pm!("Host.shutdownTimeout",    "host", "timeout");
     pm!("Host.readinessTimeout",   "host", "timeout");
     pm!("Host.quiesceTimeout",     "host", "timeout");

@@ -59,6 +59,9 @@ typedef struct CertoHostPlugin {
     CertoList* provides;
     CertoList* requires;
     CertoList* workers;
+    CertoList* scoped_services;
+    CertoList* scoped_construction_order;
+    CertoHostContext* context;
 } CertoHostPlugin;
 
 typedef struct CertoHostWorker {
@@ -365,6 +368,21 @@ CertoHost* certo_host_factory_depends_on(CertoHost* host,
 
 void* certo_host_context_service(CertoHostContext* context, CertoServiceKey* key) {
     if (!context || !key || !key->name) return NULL;
+    if (context->host && context->plugin_name) {
+        for (int64_t p = 0; p < context->host->plugins->len; p++) {
+            CertoHostPlugin* plugin =
+                (CertoHostPlugin*)context->host->plugins->data[p];
+            if (strcmp(plugin->name, context->plugin_name) != 0) continue;
+            for (int64_t i = 0; i < plugin->scoped_services->len; i++) {
+                CertoHostService* service =
+                    (CertoHostService*)plugin->scoped_services->data[i];
+                if (service->constructed &&
+                    strcmp(service->key->name, key->name) == 0)
+                    return __certo_opt_box((int64_t)(intptr_t)service->value);
+            }
+            break;
+        }
+    }
     for (int64_t i = 0; i < context->services->len; i++) {
         CertoHostService* service = (CertoHostService*)context->services->data[i];
         if (service->constructed && strcmp(service->key->name, key->name) == 0) {
@@ -424,6 +442,57 @@ CertoHostPlugin* certo_host_plugin(certo_text_t name, certo_fn_t start,
     plugin->provides = certo_list_new_empty();
     plugin->requires = certo_list_new_empty();
     plugin->workers = certo_list_new_empty();
+    plugin->scoped_services = certo_list_new_empty();
+    plugin->scoped_construction_order = certo_list_new_empty();
+    return plugin;
+}
+
+CertoHostPlugin* certo_host_plugin_provide_factory(
+        CertoHostPlugin* plugin, CertoServiceKey* key,
+        certo_fn_t factory, certo_fn_t dispose) {
+    if (!plugin || !key || !key->name || !factory.fn || !dispose.fn)
+        certo_panic("HostPlugin.provideFactory requires a plugin, service key, factory, and disposer");
+    for (int64_t i = 0; i < plugin->scoped_services->len; i++) {
+        CertoHostService* existing =
+            (CertoHostService*)plugin->scoped_services->data[i];
+        if (strcmp(existing->key->name, key->name) == 0)
+            certo_panic("a scoped service with this name is already registered");
+    }
+    CertoHostService* service = (CertoHostService*)calloc(1, sizeof(CertoHostService));
+    if (!service) certo_panic("out of memory");
+    service->key = key;
+    service->factory = factory;
+    service->dispose = dispose;
+    service->dependencies = certo_list_new_empty();
+    service->owned = true;
+    plugin->scoped_services = certo_list_push_mut(plugin->scoped_services, service);
+    return plugin;
+}
+
+CertoHostPlugin* certo_host_plugin_factory_depends_on(
+        CertoHostPlugin* plugin, CertoServiceKey* factory_key,
+        CertoServiceKey* dependency_key) {
+    if (!plugin || !factory_key || !dependency_key)
+        certo_panic("HostPlugin.factoryDependsOn requires a plugin and two service keys");
+    CertoHostService* factory = NULL;
+    for (int64_t i = 0; i < plugin->scoped_services->len; i++) {
+        CertoHostService* service =
+            (CertoHostService*)plugin->scoped_services->data[i];
+        if (strcmp(service->key->name, factory_key->name) == 0) {
+            factory = service;
+            break;
+        }
+    }
+    if (!factory)
+        certo_panic("scoped dependency target is not a registered factory");
+    for (int64_t i = 0; i < factory->dependencies->len; i++) {
+        CertoServiceKey* existing =
+            (CertoServiceKey*)factory->dependencies->data[i];
+        if (strcmp(existing->name, dependency_key->name) == 0)
+            certo_panic("duplicate scoped service factory dependency");
+    }
+    factory->dependencies = certo_list_push_mut(
+        factory->dependencies, dependency_key);
     return plugin;
 }
 
@@ -539,6 +608,13 @@ CertoHost* certo_host_add(CertoHost* host, CertoHostPlugin* plugin) {
     }
     host->plugins = certo_list_push_mut(host->plugins, plugin);
     host->context->plugin_count = host->plugins->len;
+    plugin->context = (CertoHostContext*)calloc(1, sizeof(CertoHostContext));
+    if (!plugin->context) certo_panic("out of memory");
+    plugin->context->plugin_count = host->plugins->len;
+    plugin->context->services = host->context->services;
+    plugin->context->config = host->context->config;
+    plugin->context->host = host;
+    plugin->context->plugin_name = plugin->name;
     return host;
 }
 
@@ -1074,13 +1150,96 @@ static certo_text_t __certo_host_order_plugins(CertoHost* host) {
     return NULL;
 }
 
-static certo_text_t __certo_host_dispose_services(CertoHost* host) {
-    certo_text_t errors = NULL;
-    for (int64_t i = host->service_construction_order->len; i > 0; i--) {
+static bool __certo_host_has_registered_service(CertoList* services,
+                                                certo_text_t name) {
+    for (int64_t i = 0; i < services->len; i++) {
+        CertoHostService* service = (CertoHostService*)services->data[i];
+        if (strcmp(service->key->name, name) == 0) return true;
+    }
+    return false;
+}
+
+static certo_text_t __certo_host_order_scoped_services(
+        CertoHost* host, CertoHostPlugin* plugin, int64_t* order) {
+    int64_t n = plugin->scoped_services->len;
+    if (n == 0) return NULL;
+    int64_t* indegree = (int64_t*)calloc((size_t)n, sizeof(int64_t));
+    bool* emitted = (bool*)calloc((size_t)n, sizeof(bool));
+    bool* edges = (bool*)calloc((size_t)(n * n), sizeof(bool));
+    if (!indegree || !emitted || !edges) certo_panic("out of memory");
+    for (int64_t dependent = 0; dependent < n; dependent++) {
         CertoHostService* service =
-            (CertoHostService*)host->service_construction_order->data[i - 1];
+            (CertoHostService*)plugin->scoped_services->data[dependent];
+        for (int64_t d = 0; d < service->dependencies->len; d++) {
+            CertoServiceKey* dependency =
+                (CertoServiceKey*)service->dependencies->data[d];
+            int64_t provider = -1;
+            for (int64_t candidate = 0; candidate < n; candidate++) {
+                CertoHostService* possible =
+                    (CertoHostService*)plugin->scoped_services->data[candidate];
+                if (strcmp(possible->key->name, dependency->name) == 0) {
+                    provider = candidate;
+                    break;
+                }
+            }
+            if (provider < 0) {
+                if (__certo_host_has_registered_service(
+                        host->context->services, dependency->name)) continue;
+                free(indegree); free(emitted); free(edges);
+                return __certo_host_error("missing scoped dependency for",
+                                          plugin->name, dependency->name);
+            }
+            if (!edges[provider * n + dependent]) {
+                edges[provider * n + dependent] = true;
+                indegree[dependent]++;
+            }
+        }
+    }
+    for (int64_t position = 0; position < n; position++) {
+        int64_t next = -1;
+        for (int64_t candidate = 0; candidate < n; candidate++) {
+            if (!emitted[candidate] && indegree[candidate] == 0) {
+                next = candidate;
+                break;
+            }
+        }
+        if (next < 0) {
+            free(indegree); free(emitted); free(edges);
+            return __certo_host_error("scoped service dependencies form a cycle in",
+                                      plugin->name, "factory graph");
+        }
+        emitted[next] = true;
+        order[position] = next;
+        for (int64_t dependent = 0; dependent < n; dependent++)
+            if (edges[next * n + dependent]) indegree[dependent]--;
+    }
+    free(indegree); free(emitted); free(edges);
+    return NULL;
+}
+
+static certo_text_t __certo_host_validate_scoped_services(CertoHost* host) {
+    for (int64_t p = 0; p < host->plugins->len; p++) {
+        CertoHostPlugin* plugin = (CertoHostPlugin*)host->plugins->data[p];
+        int64_t n = plugin->scoped_services->len;
+        int64_t* order = n > 0
+            ? (int64_t*)calloc((size_t)n, sizeof(int64_t)) : NULL;
+        if (n > 0 && !order) certo_panic("out of memory");
+        certo_text_t error = __certo_host_order_scoped_services(host, plugin, order);
+        free(order);
+        if (error) return error;
+    }
+    return NULL;
+}
+
+static certo_text_t __certo_host_dispose_service_order(
+        CertoHost* host, CertoHostContext* context,
+        CertoList* construction_order) {
+    certo_text_t errors = NULL;
+    for (int64_t i = construction_order->len; i > 0; i--) {
+        CertoHostService* service =
+            (CertoHostService*)construction_order->data[i - 1];
         if (!service->owned || !service->constructed) continue;
-        void* result = __certo_host_call(service->dispose, host->context);
+        void* result = __certo_host_call(service->dispose, context);
         if (!__result_is_ok(result)) {
             certo_text_t detail = (certo_text_t)__result_unwrap(result);
             __certo_host_record_failure(host, "ShutdownFailure", "dispose",
@@ -1092,6 +1251,44 @@ static certo_text_t __certo_host_dispose_services(CertoHost* host) {
         service->value = NULL;
     }
     return errors;
+}
+
+static certo_text_t __certo_host_dispose_services(CertoHost* host) {
+    return __certo_host_dispose_service_order(
+        host, host->context, host->service_construction_order);
+}
+
+static certo_text_t __certo_host_construct_scoped_services(
+        CertoHost* host, CertoHostPlugin* plugin) {
+    int64_t n = plugin->scoped_services->len;
+    if (n == 0) return NULL;
+    int64_t* order = (int64_t*)calloc((size_t)n, sizeof(int64_t));
+    if (!order) certo_panic("out of memory");
+    certo_text_t graph_error =
+        __certo_host_order_scoped_services(host, plugin, order);
+    if (graph_error) { free(order); return graph_error; }
+    for (int64_t position = 0; position < n; position++) {
+        CertoHostService* service =
+            (CertoHostService*)plugin->scoped_services->data[order[position]];
+        void* result = __certo_host_call(service->factory, plugin->context);
+        if (!__result_is_ok(result)) {
+            certo_text_t detail = (certo_text_t)__result_unwrap(result);
+            certo_text_t error = __certo_host_error(
+                "failed to construct scoped service", service->key->name, detail);
+            certo_text_t rollback_error = __certo_host_dispose_service_order(
+                host, plugin->context, plugin->scoped_construction_order);
+            __certo_host_record_failure(host, "StartupFailure", "service",
+                                        service->key->name, detail, false);
+            free(order);
+            return __certo_host_append_error(error, rollback_error);
+        }
+        service->value = (void*)(intptr_t)__result_unwrap(result);
+        service->constructed = true;
+        plugin->scoped_construction_order = certo_list_push_mut(
+            plugin->scoped_construction_order, service);
+    }
+    free(order);
+    return NULL;
 }
 
 static certo_text_t __certo_host_construct_services(CertoHost* host) {
@@ -1181,10 +1378,9 @@ static certo_text_t __certo_host_quiesce_started(CertoHost* host) {
     for (int64_t i = host->started_count; i > 0; i--) {
         CertoHostPlugin* plugin = (CertoHostPlugin*)host->plugins->data[i - 1];
         if (!plugin->quiesce.fn) continue;
-        host->context->plugin_name = plugin->name;
         bool timed_out = false;
         void* result = __certo_host_call_timed(
-            plugin->quiesce, host->context, host->quiesce_timeout_ms, &timed_out);
+            plugin->quiesce, plugin->context, host->quiesce_timeout_ms, &timed_out);
         if (timed_out) {
             __certo_host_record_failure(host, "Timeout", "quiesce",
                                         plugin->name, "timeout elapsed", true);
@@ -1207,10 +1403,9 @@ static certo_text_t __certo_host_stop_started(CertoHost* host) {
     while (host->started_count > 0) {
         int64_t index = --host->started_count;
         CertoHostPlugin* plugin = (CertoHostPlugin*)host->plugins->data[index];
-        host->context->plugin_name = plugin->name;
         bool timed_out = false;
         void* result = __certo_host_call_timed(
-            plugin->stop, host->context, host->stop_timeout_ms, &timed_out);
+            plugin->stop, plugin->context, host->stop_timeout_ms, &timed_out);
         if (timed_out) {
             __certo_host_record_failure(host, "Timeout", "stop",
                                         plugin->name, "timeout elapsed", true);
@@ -1223,6 +1418,11 @@ static certo_text_t __certo_host_stop_started(CertoHost* host) {
             errors = __certo_host_append_error(errors,
                 __certo_host_error("failed to stop", plugin->name,
                     (certo_text_t)__result_unwrap(result)));
+        }
+        if (!timed_out) {
+            certo_text_t scoped_error = __certo_host_dispose_service_order(
+                host, plugin->context, plugin->scoped_construction_order);
+            errors = __certo_host_append_error(errors, scoped_error);
         }
     }
     host->running = false;
@@ -1239,6 +1439,14 @@ void* certo_host_start(CertoHost* host) {
     CERTO_ATOMIC_STORE(&host->stop_requested, 0);
     CERTO_ATOMIC_STORE(&host->last_failure, NULL);
     certo_text_t dependency_error = __certo_host_order_plugins(host);
+    if (dependency_error) {
+        __certo_host_record_failure(host, "StartupFailure", "dependencies",
+                                    "host", dependency_error, false);
+        CERTO_ATOMIC_STORE(&host->state, CERTO_HOST_FAILED);
+        __certo_host_wake_waiters(host);
+        return certo_err((intptr_t)dependency_error);
+    }
+    dependency_error = __certo_host_validate_scoped_services(host);
     if (dependency_error) {
         __certo_host_record_failure(host, "StartupFailure", "dependencies",
                                     "host", dependency_error, false);
@@ -1270,8 +1478,32 @@ void* certo_host_start(CertoHost* host) {
     host->running = true;
     for (int64_t i = 0; i < host->plugins->len; i++) {
         CertoHostPlugin* plugin = (CertoHostPlugin*)host->plugins->data[i];
-        host->context->plugin_name = plugin->name;
-        void* result = __certo_host_call(plugin->start, host->context);
+        plugin->context->plugin_count = host->plugins->len;
+        plugin->context->services = host->context->services;
+        plugin->context->config = host->context->config;
+        certo_text_t scoped_error =
+            __certo_host_construct_scoped_services(host, plugin);
+        if (scoped_error) {
+            CERTO_ATOMIC_STORE(&host->context->stopping, 1);
+            CERTO_ATOMIC_STORE(&host->state, CERTO_HOST_FAILED);
+            __certo_host_stop_started(host);
+            __certo_host_dispose_services(host);
+            __certo_host_wake_waiters(host);
+            return certo_err((intptr_t)scoped_error);
+        }
+        if (CERTO_ATOMIC_LOAD(&host->startup_cancel_requested)) {
+            __certo_host_dispose_service_order(
+                host, plugin->context, plugin->scoped_construction_order);
+            __certo_host_record_failure(host, "StartupCancelled", "startup",
+                                        plugin->name, "host startup cancelled", false);
+            CERTO_ATOMIC_STORE(&host->context->stopping, 1);
+            CERTO_ATOMIC_STORE(&host->state, CERTO_HOST_FAILED);
+            __certo_host_stop_started(host);
+            __certo_host_dispose_services(host);
+            __certo_host_wake_waiters(host);
+            return certo_err((intptr_t)"host startup cancelled");
+        }
+        void* result = __certo_host_call(plugin->start, plugin->context);
         if (!__result_is_ok(result)) {
             certo_text_t detail = (certo_text_t)__result_unwrap(result);
             certo_text_t error = __certo_host_error(
@@ -1281,10 +1513,14 @@ void* certo_host_start(CertoHost* host) {
                                         plugin->name, detail, false);
             CERTO_ATOMIC_STORE(&host->context->stopping, 1);
             CERTO_ATOMIC_STORE(&host->state, CERTO_HOST_FAILED);
+            certo_text_t scoped_dispose_error =
+                __certo_host_dispose_service_order(
+                    host, plugin->context, plugin->scoped_construction_order);
             __certo_host_stop_started(host);
             __certo_host_dispose_services(host);
             __certo_host_wake_waiters(host);
-            return certo_err((intptr_t)error);
+            return certo_err((intptr_t)__certo_host_append_error(
+                error, scoped_dispose_error));
         }
         host->started_count++;
         if (CERTO_ATOMIC_LOAD(&host->startup_cancel_requested)) {
