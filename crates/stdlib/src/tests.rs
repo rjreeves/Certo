@@ -2854,7 +2854,13 @@ fn host_api_is_registered() {
         "Host.metrics", "HostContext.log", "HostContext.counter", "HostContext.gauge",
         "RestartPolicy.never", "RestartPolicy.onFailure", "RestartPolicy.always",
         "HostPlugin.restart", "Host.workerHealth", "Host.workerRestarts",
-        "Host.workerLastError",
+        "Host.workerLastError", "Host.status", "Host.startTyped", "Host.stopTyped",
+        "Host.runTyped", "Host.waitUntilReadyTyped", "HostStatusSnapshot.state",
+        "HostStatusSnapshot.isReady", "HostStatusSnapshot.isLive",
+        "HostStatusSnapshot.workers", "HostStatusSnapshot.counters",
+        "HostStatusSnapshot.gauges", "HostStatusSnapshot.lastFailure",
+        "HostWorkerStatus.state", "HostLifecycleError.kind",
+        "HostFailureKind.name",
     ] {
         assert!(env.lookup(name).is_some(), "missing: {name}");
     }
@@ -2893,6 +2899,9 @@ fn host_runtime_contains_ordered_lifecycle() {
     assert!(crate::HOST_C.contains("duplicate worker name in host"), "duplicate worker names must be rejected");
     assert!(crate::HOST_C.contains("invalid metric name"), "invalid metric names must be rejected");
     assert!(crate::HOST_C.contains("restart maxDelay cannot be less than initialDelay"), "contradictory restart delays must be rejected");
+    assert!(crate::HOST_C.contains("certo_host_status("), "typed host snapshots must be implemented");
+    assert!(crate::HOST_C.contains("certo_host_start_typed"), "typed lifecycle results must be implemented");
+    assert!(crate::HOST_C.contains("StartupCancelled"), "startup cancellation must have a typed failure kind");
     assert!(full_c_runtime().contains("certo_host_plugin"), "host runtime missing from full runtime");
 }
 
@@ -2991,6 +3000,30 @@ fn host_worker_supervision_typechecks() {
          fn health(h: Host): Text? = Host.workerHealth(h, \"w\")\n\
          fn restarts(h: Host): Int? = Host.workerRestarts(h, \"w\")\n\
          fn error(h: Host): Text? = Host.workerLastError(h, \"w\")"
+    ).unwrap();
+}
+
+#[test]
+fn host_typed_operational_api_typechecks() {
+    check_full(
+        "module A\n\
+         fn inspect(h: Host): Text = {\n\
+           val status = Host.status(h)\n\
+           val state = HostState.name(HostStatusSnapshot.state(status))\n\
+           val ready = HostStatusSnapshot.isReady(status)\n\
+           val live = HostStatusSnapshot.isLive(status)\n\
+           val workers: List<HostWorkerStatus> = HostStatusSnapshot.workers(status)\n\
+           val counters: List<HostMetricSnapshot> = HostStatusSnapshot.counters(status)\n\
+           state\n\
+         }\n\
+         fn failure(error: HostLifecycleError): Text = {\n\
+           val kind = HostFailureKind.name(HostLifecycleError.kind(error))\n\
+           val phase = HostLifecycleError.phase(error)\n\
+           val subject = HostLifecycleError.subject(error)\n\
+           val message = HostLifecycleError.message(error)\n\
+           kind\n\
+         }\n\
+         fn start(h: Host): Result<Unit, HostLifecycleError> [io] = Host.startTyped(h)"
     ).unwrap();
 }
 

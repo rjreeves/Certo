@@ -1072,11 +1072,19 @@ pub fn seed_stdlib(env: &mut TypeEnv, counter: &mut u32) {
         let plugin = Ty::Named { name: "HostPlugin".into(), args: vec![] };
         let context = Ty::Named { name: "HostContext".into(), args: vec![] };
         let restart = Ty::Named { name: "RestartPolicy".into(), args: vec![] };
+        let status = Ty::Named { name: "HostStatusSnapshot".into(), args: vec![] };
+        let worker_status = Ty::Named { name: "HostWorkerStatus".into(), args: vec![] };
+        let metric_status = Ty::Named { name: "HostMetricSnapshot".into(), args: vec![] };
+        let host_state = Ty::Named { name: "HostState".into(), args: vec![] };
+        let worker_state = Ty::Named { name: "HostWorkerState".into(), args: vec![] };
+        let lifecycle_error = Ty::Named { name: "HostLifecycleError".into(), args: vec![] };
+        let failure_kind = Ty::Named { name: "HostFailureKind".into(), args: vec![] };
         let lifecycle = fn1(
             context.clone(),
             Ty::Result(Box::new(Ty::Unit), Box::new(Ty::Text)),
         );
         let host_result = Ty::Result(Box::new(Ty::Unit), Box::new(Ty::Text));
+        let typed_host_result = Ty::Result(Box::new(Ty::Unit), Box::new(lifecycle_error.clone()));
         def!("Host.new", Ty::Fn { params: vec![], ret: Box::new(host.clone()) });
         def!("Host.plugin", Ty::Fn {
             params: vec![Ty::Text, lifecycle.clone(), lifecycle.clone()],
@@ -1178,11 +1186,46 @@ pub fn seed_stdlib(env: &mut TypeEnv, counter: &mut u32) {
         def!("Host.start", fn1(host.clone(), host_result.clone()));
         def!("Host.stop", fn1(host.clone(), host_result.clone()));
         def!("Host.run", fn1(host.clone(), host_result.clone()));
+        def!("Host.startTyped", fn1(host.clone(), typed_host_result.clone()));
+        def!("Host.stopTyped", fn1(host.clone(), typed_host_result.clone()));
+        def!("Host.runTyped", fn1(host.clone(), typed_host_result.clone()));
         def!("Host.waitUntilReady", fn2(
             host.clone(),
             Ty::Named { name: "Duration".into(), args: vec![] },
             host_result,
         ));
+        def!("Host.waitUntilReadyTyped", fn2(
+            host.clone(),
+            Ty::Named { name: "Duration".into(), args: vec![] },
+            typed_host_result,
+        ));
+        def!("Host.status", fn1(host.clone(), status.clone()));
+        def!("HostStatusSnapshot.state", fn1(status.clone(), host_state.clone()));
+        def!("HostStatusSnapshot.isReady", fn1(status.clone(), Ty::Bool));
+        def!("HostStatusSnapshot.isLive", fn1(status.clone(), Ty::Bool));
+        def!("HostStatusSnapshot.workerCount", fn1(status.clone(), Ty::Int));
+        def!("HostStatusSnapshot.readyWorkers", fn1(status.clone(), Ty::Int));
+        def!("HostStatusSnapshot.workers", fn1(status.clone(), Ty::List(Box::new(worker_status.clone()))));
+        def!("HostStatusSnapshot.counters", fn1(status.clone(), Ty::List(Box::new(metric_status.clone()))));
+        def!("HostStatusSnapshot.gauges", fn1(status.clone(), Ty::List(Box::new(metric_status.clone()))));
+        def!("HostStatusSnapshot.lastFailure", fn1(status.clone(), Ty::Option(Box::new(lifecycle_error.clone()))));
+        def!("HostWorkerStatus.name", fn1(worker_status.clone(), Ty::Text));
+        def!("HostWorkerStatus.plugin", fn1(worker_status.clone(), Ty::Text));
+        def!("HostWorkerStatus.state", fn1(worker_status.clone(), worker_state.clone()));
+        def!("HostWorkerStatus.isReady", fn1(worker_status.clone(), Ty::Bool));
+        def!("HostWorkerStatus.isLive", fn1(worker_status.clone(), Ty::Bool));
+        def!("HostWorkerStatus.restarts", fn1(worker_status.clone(), Ty::Int));
+        def!("HostWorkerStatus.lastError", fn1(worker_status, Ty::Option(Box::new(Ty::Text))));
+        def!("HostMetricSnapshot.name", fn1(metric_status.clone(), Ty::Text));
+        def!("HostMetricSnapshot.value", fn1(metric_status, Ty::Int));
+        def!("HostState.name", fn1(host_state, Ty::Text));
+        def!("HostWorkerState.name", fn1(worker_state, Ty::Text));
+        def!("HostLifecycleError.kind", fn1(lifecycle_error.clone(), failure_kind.clone()));
+        def!("HostLifecycleError.phase", fn1(lifecycle_error.clone(), Ty::Text));
+        def!("HostLifecycleError.subject", fn1(lifecycle_error.clone(), Ty::Text));
+        def!("HostLifecycleError.message", fn1(lifecycle_error.clone(), Ty::Text));
+        def!("HostLifecycleError.isTimeout", fn1(lifecycle_error, Ty::Bool));
+        def!("HostFailureKind.name", fn1(failure_kind, Ty::Text));
         def!("Host.health", fn1(host.clone(), Ty::Text));
         def!("Host.metrics", fn1(host.clone(), Ty::Text));
         def!("Host.workerHealth", fn2(
@@ -1875,7 +1918,38 @@ pub fn seed_stdlib(env: &mut TypeEnv, counter: &mut u32) {
     pm!("Host.start",              "host");
     pm!("Host.stop",               "host");
     pm!("Host.run",                "host");
+    pm!("Host.startTyped",         "host");
+    pm!("Host.stopTyped",          "host");
+    pm!("Host.runTyped",           "host");
     pm!("Host.waitUntilReady",     "host", "timeout");
+    pm!("Host.waitUntilReadyTyped", "host", "timeout");
+    pm!("Host.status",             "host");
+    pm!("HostStatusSnapshot.state", "snapshot");
+    pm!("HostStatusSnapshot.isReady", "snapshot");
+    pm!("HostStatusSnapshot.isLive", "snapshot");
+    pm!("HostStatusSnapshot.workerCount", "snapshot");
+    pm!("HostStatusSnapshot.readyWorkers", "snapshot");
+    pm!("HostStatusSnapshot.workers", "snapshot");
+    pm!("HostStatusSnapshot.counters", "snapshot");
+    pm!("HostStatusSnapshot.gauges", "snapshot");
+    pm!("HostStatusSnapshot.lastFailure", "snapshot");
+    pm!("HostWorkerStatus.name",    "worker");
+    pm!("HostWorkerStatus.plugin",  "worker");
+    pm!("HostWorkerStatus.state",   "worker");
+    pm!("HostWorkerStatus.isReady", "worker");
+    pm!("HostWorkerStatus.isLive",  "worker");
+    pm!("HostWorkerStatus.restarts", "worker");
+    pm!("HostWorkerStatus.lastError", "worker");
+    pm!("HostMetricSnapshot.name",  "metric");
+    pm!("HostMetricSnapshot.value", "metric");
+    pm!("HostState.name",           "state");
+    pm!("HostWorkerState.name",     "state");
+    pm!("HostLifecycleError.kind",  "error");
+    pm!("HostLifecycleError.phase", "error");
+    pm!("HostLifecycleError.subject", "error");
+    pm!("HostLifecycleError.message", "error");
+    pm!("HostLifecycleError.isTimeout", "error");
+    pm!("HostFailureKind.name",     "kind");
     pm!("Host.health",             "host");
     pm!("Host.metrics",            "host");
     pm!("Host.workerHealth",       "host", "name");

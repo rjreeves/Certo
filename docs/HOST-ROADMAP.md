@@ -88,20 +88,20 @@ explicit interoperability layer rather than a requirement for the core host.
 
 ## Milestone H1 — Operational contracts
 
-**Status: Next**
+**Status: In progress**
 
 Turn the current runtime behavior into explicit, stable contracts before adding
 more extension points.
 
 ### Scope
 
-- Define a typed host status snapshot instead of requiring consumers to parse
-  the `Host.metrics` JSON string.
-- Define readiness and liveness semantics for the host and every worker.
+- ✅ Define a typed host status snapshot instead of requiring consumers to
+  parse the `Host.metrics` JSON string.
+- ✅ Define readiness and liveness semantics for the host and every worker.
 - Distinguish startup failure, runtime worker failure, shutdown failure, and
   forced termination in public diagnostics.
-- Replace startup cancellation's stable text error with a typed lifecycle error
-  once Host exposes typed operational diagnostics.
+- ✅ Add typed lifecycle errors for startup cancellation and other operational
+  failure categories while retaining the stable text compatibility API.
 - Specify timeout boundaries and the state reported after each timeout.
 - Document callback concurrency rules and which Host APIs are safe inside each
   callback phase.
@@ -266,7 +266,7 @@ Every Host milestone must satisfy the following gates:
 
 ## Recommended next implementation item
 
-Continue H1 by defining a typed host status snapshot and typed lifecycle errors.
-The startup-cancellation contract is now deterministic and tested; typed status
-and diagnostics will let operational consumers use that contract without
-parsing JSON snapshots or human-oriented error strings.
+Continue H1 by documenting the complete lifecycle transition table and adding
+contract tests for timeout, worker-failure, shutdown-failure, and repeated or
+concurrent typed calls. The typed snapshot and lifecycle-error surface is now
+implemented; the remaining work is to prove every transition and timeout state.

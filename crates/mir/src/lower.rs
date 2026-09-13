@@ -1264,7 +1264,11 @@ fn needs_result_box(ty: &Ty) -> bool {
     matches!(ty, Ty::Decimal(_) | Ty::Uuid)
         || matches!(ty, Ty::Named { name, args } if args.is_empty()
             && !matches!(name.as_str(),
-                "HttpRequest" | "HttpResponse" | "Bytes" | "DbResult" | "Query" | "Mutation" | "__CertoTask"))
+                "HttpRequest" | "HttpResponse" | "Bytes" | "DbResult" | "Query" | "Mutation" |
+                "__CertoTask" | "Host" | "HostPlugin" | "HostContext" | "ServiceKey" |
+                "RestartPolicy" | "HostStatusSnapshot" | "HostWorkerStatus" |
+                "HostMetricSnapshot" | "HostState" | "HostWorkerState" |
+                "HostLifecycleError" | "HostFailureKind"))
         // BACKLOG item 251 — a generic `Ok(v)`/`Err(e)` construction always
         // heap-boxes `v`/`e` (it's a bare, opaque type-param value at that
         // construction site — item 119/120's own established convention),
@@ -2040,7 +2044,11 @@ fn lower_expr(expr: &HirExpr, b: &mut Builder) -> Operand {
                   // identically when the *result* type needs heap-boxing.
                   "Option.map", "HostContext.service"];
             let needs_opt_unwrap = matches!(&func.kind, HirExprKind::Global(name) if OPT_UNWRAP_CALLEES.contains(&name.as_str()))
-                && matches!(&expr.ty, Ty::Option(inner) if inner.needs_heap_box());
+                && matches!(&expr.ty, Ty::Option(inner) if inner.needs_heap_box()
+                    && !matches!(inner.as_ref(), Ty::Named { name, .. } if matches!(name.as_str(),
+                        "Host" | "HostPlugin" | "HostContext" | "ServiceKey" | "RestartPolicy" |
+                        "HostStatusSnapshot" | "HostWorkerStatus" | "HostMetricSnapshot" |
+                        "HostState" | "HostWorkerState" | "HostLifecycleError" | "HostFailureKind")));
 
             let dest = b.declare_local("_call", if needs_return_unbox { Ty::Var(0) } else { expr.ty.clone() });
             let next = b.new_block();
