@@ -834,10 +834,14 @@ static void __certo_host_launch_workers(CertoHost* host) {
         CertoHostPlugin* plugin = (CertoHostPlugin*)host->plugins->data[i];
         for (int64_t w = 0; w < plugin->workers->len; w++) {
             CertoHostWorker* worker = (CertoHostWorker*)plugin->workers->data[w];
-            worker->context = (CertoHostContext*)malloc(sizeof(CertoHostContext));
+            worker->context = (CertoHostContext*)calloc(1, sizeof(CertoHostContext));
             if (!worker->context) certo_panic("out of memory");
-            *worker->context = *host->context;
+            worker->context->plugin_count = host->context->plugin_count;
+            worker->context->services = host->context->services;
+            worker->context->config = host->context->config;
+            worker->context->host = host;
             worker->context->worker = worker;
+            worker->context->plugin_name = plugin->name;
             worker->host = host;
             worker->result = NULL;
             worker->joined = false;
