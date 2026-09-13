@@ -24,14 +24,14 @@ Every accepted event is an immutable value with these stable fields:
 |---|---|---:|---|
 | `schema` | `Text` | yes | Schema identifier, initially `certo.host.event/v1`. |
 | `sequence` | `Int` | yes | Host-local, monotonically increasing acceptance sequence. |
-| `timestampUnixMs` | `Int` | yes | UTC Unix time when the host accepts the event. |
+| `timestamp_unix_ms` | `Int` | yes | UTC Unix time when the host accepts the event. |
 | `severity` | `HostLogSeverity` | yes | `Trace`, `Debug`, `Info`, `Warn`, `Error`, or `Fatal`. |
 | `event` | `Text` | yes | Stable machine-readable event name. |
 | `message` | `Text?` | no | Human-readable explanation, not an identity or grouping key. |
-| `hostId` | `Text` | yes | Stable identity for one host instance. |
+| `host_id` | `Text` | yes | Stable identity for one host instance. |
 | `plugin` | `Text?` | no | Plugin identity inherited from the callback context. |
 | `worker` | `Text?` | no | Worker identity inherited from the callback context. |
-| `correlationId` | `Text?` | no | Current correlation identity, when present. |
+| `correlation_id` | `Text?` | no | Current correlation identity, when present. |
 | `fields` | `List<HostLogField>` | yes | Ordered typed fields; empty when none were supplied. |
 
 Event names and field names use the same restricted identifier grammar as

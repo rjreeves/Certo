@@ -574,7 +574,11 @@ pub fn infer(expr: &S<Expr>, ctx: &mut Ctx<'_>) -> Ty {
             // going to get. `Log.info`/`Json.encode` (the spec's own
             // names, §13.2) don't exist in this compiler — these are the
             // real sinks that do.
-            const SENSITIVE_SINKS: &[&str] = &["println", "print", "eprint", "Json.stringify"];
+            const SENSITIVE_SINKS: &[&str] = &[
+                "println", "print", "eprint", "Json.stringify",
+                "HostContext.log", "HostContext.logEvent",
+                "HostLogField.text", "HostLogEvent.create",
+            ];
             if let Some(name) = &fn_name {
                 if SENSITIVE_SINKS.contains(&name.as_str()) {
                     for (arg_ty, arg_span) in &arg_info {

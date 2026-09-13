@@ -141,6 +141,29 @@ typedef struct CertoHostMetricSnapshot {
     int64_t value;
 } CertoHostMetricSnapshot;
 
+typedef struct CertoHostLogField {
+    certo_text_t name;
+    int kind;
+    certo_text_t text_value;
+    int64_t int_value;
+    double float_value;
+    bool bool_value;
+} CertoHostLogField;
+
+typedef struct CertoHostLogEvent {
+    certo_text_t schema;
+    int64_t sequence;
+    int64_t timestamp_unix_ms;
+    certo_text_t severity;
+    certo_text_t event;
+    certo_text_t message;
+    certo_text_t host_id;
+    certo_text_t plugin;
+    certo_text_t worker;
+    certo_text_t correlation_id;
+    CertoList* fields;
+} CertoHostLogEvent;
+
 typedef struct CertoHostStatusSnapshot {
     certo_text_t state;
     bool ready;
@@ -180,6 +203,8 @@ typedef struct CertoHost {
     CertoList* config_bindings;
     CertoList* configuration_errors;
     int64_t config_sequence;
+    certo_text_t host_id;
+    int64_t event_sequence;
 #if defined(_WIN32)
     CRITICAL_SECTION wait_lock;
     CONDITION_VARIABLE wait_changed;
@@ -325,6 +350,10 @@ CertoHost* certo_host_new(void) {
     host->service_construction_order = certo_list_new_empty();
     host->config_bindings = certo_list_new_empty();
     host->configuration_errors = certo_list_new_empty();
+    char* host_id = (char*)malloc(48);
+    if (!host_id) certo_panic("out of memory");
+    snprintf(host_id, 48, "host-%p", (void*)host);
+    host->host_id = host_id;
     return host;
 }
 
@@ -1205,31 +1234,186 @@ static void __certo_host_write_json_string(FILE* stream, certo_text_t text) {
     fputc('"', stream);
 }
 
-int64_t certo_host_context_log(CertoHostContext* context,
-                               certo_text_t level,
-                               certo_text_t event,
-                               certo_text_t message) {
-    if (!context || !context->host) return 0;
-    if (!level || !*level) certo_panic("log level cannot be empty");
-    if (!event || !*event) certo_panic("log event cannot be empty");
+static bool __certo_host_text_equal_ascii_ci(certo_text_t left,
+                                              certo_text_t right) {
+    if (!left || !right) return false;
+    while (*left && *right) {
+        if (tolower((unsigned char)*left) != tolower((unsigned char)*right))
+            return false;
+        left++; right++;
+    }
+    return *left == '\0' && *right == '\0';
+}
+
+static certo_text_t __certo_host_log_severity(certo_text_t level) {
+    static const char* levels[] = { "Trace", "Debug", "Info", "Warn", "Error", "Fatal" };
+    for (int i = 0; i < 6; i++)
+        if (__certo_host_text_equal_ascii_ci(level, levels[i])) return levels[i];
+    certo_panic("invalid host log severity");
+}
+
+certo_text_t certo_host_log_severity_trace(void) { return "Trace"; }
+certo_text_t certo_host_log_severity_debug(void) { return "Debug"; }
+certo_text_t certo_host_log_severity_info(void) { return "Info"; }
+certo_text_t certo_host_log_severity_warn(void) { return "Warn"; }
+certo_text_t certo_host_log_severity_error(void) { return "Error"; }
+certo_text_t certo_host_log_severity_fatal(void) { return "Fatal"; }
+certo_text_t certo_host_log_severity_name(certo_text_t severity) {
+    return __certo_host_log_severity(severity);
+}
+
+static CertoHostLogField* __certo_host_log_field(certo_text_t name, int kind) {
+    if (!__certo_host_valid_metric_name(name)) certo_panic("invalid host log field name");
+    CertoHostLogField* field = (CertoHostLogField*)calloc(1, sizeof(CertoHostLogField));
+    if (!field) certo_panic("out of memory");
+    field->name = name;
+    field->kind = kind;
+    return field;
+}
+
+CertoHostLogField* certo_host_log_field_text(certo_text_t name, certo_text_t value) {
+    CertoHostLogField* field = __certo_host_log_field(name, 0);
+    field->text_value = value;
+    return field;
+}
+CertoHostLogField* certo_host_log_field_int(certo_text_t name, int64_t value) {
+    CertoHostLogField* field = __certo_host_log_field(name, 1);
+    field->int_value = value;
+    return field;
+}
+CertoHostLogField* certo_host_log_field_float(certo_text_t name, double value) {
+    CertoHostLogField* field = __certo_host_log_field(name, 2);
+    field->float_value = value;
+    return field;
+}
+CertoHostLogField* certo_host_log_field_bool(certo_text_t name, bool value) {
+    CertoHostLogField* field = __certo_host_log_field(name, 3);
+    field->bool_value = value;
+    return field;
+}
+certo_text_t certo_host_log_field_name(CertoHostLogField* field) {
+    return field ? field->name : "";
+}
+certo_text_t certo_host_log_field_kind(CertoHostLogField* field) {
+    if (!field) return "Text";
+    switch (field->kind) {
+        case 1: return "Int";
+        case 2: return "Float";
+        case 3: return "Bool";
+        default: return "Text";
+    }
+}
+
+CertoHostLogEvent* certo_host_log_event_create(certo_text_t severity,
+                                                certo_text_t event,
+                                                certo_text_t message,
+                                                CertoList* fields) {
+    if (!event || !*event || !__certo_host_valid_metric_name(event))
+        certo_panic("invalid host log event name");
+    CertoHostLogEvent* item = (CertoHostLogEvent*)calloc(1, sizeof(CertoHostLogEvent));
+    if (!item) certo_panic("out of memory");
+    item->schema = "certo.host.event/v1";
+    item->severity = __certo_host_log_severity(severity);
+    item->event = event;
+    item->message = message ? message : "";
+    item->fields = fields ? fields : certo_list_new_empty();
+    for (int64_t i = 0; i < item->fields->len; i++) {
+        CertoHostLogField* field = (CertoHostLogField*)item->fields->data[i];
+        if (!field) certo_panic("host log fields cannot contain null values");
+        for (int64_t j = 0; j < i; j++) {
+            CertoHostLogField* earlier = (CertoHostLogField*)item->fields->data[j];
+            if (strcmp(earlier->name, field->name) == 0)
+                certo_panic("duplicate host log field name");
+        }
+    }
+    return item;
+}
+
+static void __certo_host_write_log_field(CertoHostLogField* field) {
+    __certo_host_write_json_string(stderr, field->name);
+    fputc(':', stderr);
+    switch (field->kind) {
+        case 1: fprintf(stderr, "%" PRId64, field->int_value); break;
+        case 2: fprintf(stderr, "%.17g", field->float_value); break;
+        case 3: fputs(field->bool_value ? "true" : "false", stderr); break;
+        default: __certo_host_write_json_string(stderr, field->text_value); break;
+    }
+}
+
+static int64_t __certo_host_emit_log_event(CertoHostContext* context,
+                                           CertoHostLogEvent* event) {
+    if (!context || !context->host || !event) return 0;
     CertoHost* host = context->host;
+    CertoHostLogEvent* accepted =
+        (CertoHostLogEvent*)malloc(sizeof(CertoHostLogEvent));
+    if (!accepted) certo_panic("out of memory");
+    *accepted = *event;
     certo_text_t plugin = context->worker
         ? context->worker->plugin_name : context->plugin_name;
     certo_text_t worker = context->worker ? context->worker->name : NULL;
     __certo_host_lock(host);
-    fputs("{\"timestamp_ms\":", stderr);
-    fprintf(stderr, "%" PRId64, certo_monotonic_millis());
-    fputs(",\"level\":", stderr); __certo_host_write_json_string(stderr, level);
-    fputs(",\"event\":", stderr); __certo_host_write_json_string(stderr, event);
-    fputs(",\"message\":", stderr); __certo_host_write_json_string(stderr, message);
-    fputs(",\"plugin\":", stderr); __certo_host_write_json_string(stderr, plugin);
-    if (worker) {
-        fputs(",\"worker\":", stderr); __certo_host_write_json_string(stderr, worker);
+    accepted->sequence = ++host->event_sequence;
+    accepted->timestamp_unix_ms = (int64_t)time(NULL) * 1000;
+    accepted->host_id = host->host_id;
+    accepted->plugin = plugin;
+    accepted->worker = worker;
+    fputs("{\"schema\":", stderr); __certo_host_write_json_string(stderr, accepted->schema);
+    fprintf(stderr, ",\"sequence\":%" PRId64, accepted->sequence);
+    fprintf(stderr, ",\"timestamp_unix_ms\":%" PRId64, accepted->timestamp_unix_ms);
+    fputs(",\"severity\":", stderr); __certo_host_write_json_string(stderr, accepted->severity);
+    fputs(",\"event\":", stderr); __certo_host_write_json_string(stderr, accepted->event);
+    fputs(",\"message\":", stderr); __certo_host_write_json_string(stderr, accepted->message);
+    fputs(",\"host_id\":", stderr); __certo_host_write_json_string(stderr, accepted->host_id);
+    fputs(",\"plugin\":", stderr);
+    if (accepted->plugin) __certo_host_write_json_string(stderr, accepted->plugin); else fputs("null", stderr);
+    fputs(",\"worker\":", stderr);
+    if (accepted->worker) __certo_host_write_json_string(stderr, accepted->worker); else fputs("null", stderr);
+    fputs(",\"correlation_id\":", stderr);
+    if (accepted->correlation_id) __certo_host_write_json_string(stderr, accepted->correlation_id); else fputs("null", stderr);
+    fputs(",\"fields\":{", stderr);
+    for (int64_t i = 0; i < accepted->fields->len; i++) {
+        if (i) fputc(',', stderr);
+        __certo_host_write_log_field((CertoHostLogField*)accepted->fields->data[i]);
     }
-    fputs("}\n", stderr);
+    fputs("}}\n", stderr);
     fflush(stderr);
     __certo_host_unlock(host);
+    free(accepted);
     return 0;
+}
+
+int64_t certo_host_context_log(CertoHostContext* context,
+                               certo_text_t level,
+                               certo_text_t event,
+                               certo_text_t message) {
+    CertoHostLogEvent* item = certo_host_log_event_create(
+        level, event, message, certo_list_new_empty());
+    return __certo_host_emit_log_event(context, item);
+}
+
+int64_t certo_host_context_log_event(CertoHostContext* context,
+                                     CertoHostLogEvent* event) {
+    return __certo_host_emit_log_event(context, event);
+}
+
+certo_text_t certo_host_log_event_schema(CertoHostLogEvent* event) { return event ? event->schema : ""; }
+int64_t certo_host_log_event_sequence(CertoHostLogEvent* event) { return event ? event->sequence : 0; }
+int64_t certo_host_log_event_timestamp_unix_ms(CertoHostLogEvent* event) { return event ? event->timestamp_unix_ms : 0; }
+certo_text_t certo_host_log_event_severity(CertoHostLogEvent* event) { return event ? event->severity : "Info"; }
+certo_text_t certo_host_log_event_event(CertoHostLogEvent* item) { return item ? item->event : ""; }
+certo_text_t certo_host_log_event_message(CertoHostLogEvent* event) { return event ? event->message : ""; }
+certo_text_t certo_host_log_event_host_id(CertoHostLogEvent* event) { return event ? event->host_id : ""; }
+void* certo_host_log_event_plugin(CertoHostLogEvent* event) {
+    return event && event->plugin ? __certo_opt_box((int64_t)(intptr_t)event->plugin) : NULL;
+}
+void* certo_host_log_event_worker(CertoHostLogEvent* event) {
+    return event && event->worker ? __certo_opt_box((int64_t)(intptr_t)event->worker) : NULL;
+}
+void* certo_host_log_event_correlation_id(CertoHostLogEvent* event) {
+    return event && event->correlation_id ? __certo_opt_box((int64_t)(intptr_t)event->correlation_id) : NULL;
+}
+CertoList* certo_host_log_event_fields(CertoHostLogEvent* event) {
+    return event ? event->fields : certo_list_new_empty();
 }
 
 int64_t certo_host_context_counter(CertoHostContext* context,

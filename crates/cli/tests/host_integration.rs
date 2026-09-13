@@ -25,6 +25,98 @@ fn assert_success(output: &std::process::Output) -> String {
     String::from_utf8_lossy(&output.stdout).into_owned()
 }
 
+#[test]
+fn typed_host_events_preserve_schema_fields_context_and_sequence() {
+    let output = run_certo(r#"module HostTypedEventTest
+
+fn start(c: HostContext): Result<Unit, Text> [io] = {
+    val event = HostLogEvent.create(HostLogSeverity.info(), "job.started", "starting", [
+        HostLogField.text("queue", "critical"),
+        HostLogField.int("attempt", 2),
+        HostLogField.float("ratio", 0.5),
+        HostLogField.bool("retrying", true)
+    ])
+    HostContext.logEvent(c, event)
+    println(HostLogEvent.schema(event))
+    println(intToText(HostLogEvent.sequence(event)))
+    println(HostLogSeverity.name(HostLogEvent.severity(event)))
+    HostContext.log(c, "wArN", "job.waiting", "waiting")
+    Ok(())
+}
+fn stop(c: HostContext): Result<Unit, Text> = Ok(())
+fn main(): Unit [io] = {
+    val host = Host.new().add(Host.plugin("typed", start, stop))
+    val started = Host.start(host)
+    val stopped = Host.stop(host)
+}
+"#);
+    let stdout = assert_success(&output);
+    assert_eq!(stdout.lines().collect::<Vec<_>>(), ["certo.host.event/v1", "0", "Info"]);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let lines = stderr.lines().collect::<Vec<_>>();
+    assert_eq!(lines.len(), 2, "{stderr}");
+    assert!(lines[0].contains("\"schema\":\"certo.host.event/v1\""), "{stderr}");
+    assert!(lines[0].contains("\"sequence\":1"), "{stderr}");
+    assert!(lines[0].contains("\"timestamp_unix_ms\":"), "{stderr}");
+    assert!(lines[0].contains("\"severity\":\"Info\""), "{stderr}");
+    assert!(lines[0].contains("\"plugin\":\"typed\""), "{stderr}");
+    assert!(lines[0].contains("\"worker\":null"), "{stderr}");
+    assert!(lines[0].contains("\"correlation_id\":null"), "{stderr}");
+    assert!(lines[0].contains("\"fields\":{\"queue\":\"critical\",\"attempt\":2,\"ratio\":0.5,\"retrying\":true}"), "{stderr}");
+    assert!(lines[1].contains("\"sequence\":2"), "{stderr}");
+    assert!(lines[1].contains("\"severity\":\"Warn\""), "{stderr}");
+}
+
+#[test]
+fn concurrent_worker_events_have_one_total_sequence_order() {
+    let output = run_certo(r#"module HostConcurrentEventTest
+fn start(c: HostContext): Result<Unit, Text> = Ok(())
+fn stop(c: HostContext): Result<Unit, Text> = Ok(())
+fn work(c: HostContext): Result<Unit, Text> [io] = {
+    HostContext.ready(c)
+    var i = 0
+    while i < 20 {
+        HostContext.log(c, "info", "worker.tick", intToText(i))
+        i = i + 1
+    }
+    Ok(())
+}
+fn main(): Unit [io] = {
+    val host = Host.new().add(Host.plugin("workers", start, stop)
+        .worker("one", work).worker("two", work))
+    val started = Host.start(host)
+    val stopped = Host.stop(host)
+}
+"#);
+    assert_success(&output);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let lines = stderr.lines().collect::<Vec<_>>();
+    assert_eq!(lines.len(), 40, "{stderr}");
+    for (index, line) in lines.iter().enumerate() {
+        assert!(line.contains(&format!("\"sequence\":{}", index + 1)), "{line}");
+        assert!(line.contains("\"worker\":"), "{line}");
+    }
+}
+
+#[test]
+fn compatibility_log_rejects_unknown_severity_before_emission() {
+    let output = run_certo(r#"module HostInvalidSeverityTest
+fn start(c: HostContext): Result<Unit, Text> [io] = {
+    HostContext.log(c, "notice", "job.started", "no event should be written")
+    Ok(())
+}
+fn stop(c: HostContext): Result<Unit, Text> = Ok(())
+fn main(): Unit [io] = {
+    val host = Host.new().add(Host.plugin("invalid", start, stop))
+    val started = Host.start(host)
+}
+"#);
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("invalid host log severity"), "{stderr}");
+    assert!(!stderr.contains("certo.host.event/v1"), "invalid event was emitted: {stderr}");
+}
+
 fn write_stress_artifacts(
     path: &Path,
     source: &str,

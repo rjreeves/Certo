@@ -1080,6 +1080,9 @@ pub fn seed_stdlib(env: &mut TypeEnv, counter: &mut u32) {
         let lifecycle_error = Ty::Named { name: "HostLifecycleError".into(), args: vec![] };
         let configuration_error = Ty::Named { name: "HostConfigurationError".into(), args: vec![] };
         let failure_kind = Ty::Named { name: "HostFailureKind".into(), args: vec![] };
+        let log_severity = Ty::Named { name: "HostLogSeverity".into(), args: vec![] };
+        let log_field = Ty::Named { name: "HostLogField".into(), args: vec![] };
+        let log_event = Ty::Named { name: "HostLogEvent".into(), args: vec![] };
         let lifecycle = fn1(
             context.clone(),
             Ty::Result(Box::new(Ty::Unit), Box::new(Ty::Text)),
@@ -1348,6 +1351,37 @@ pub fn seed_stdlib(env: &mut TypeEnv, counter: &mut u32) {
         def!("HostConfigurationError.category", fn1(configuration_error.clone(), Ty::Text));
         def!("HostConfigurationError.message", fn1(configuration_error, Ty::Text));
         def!("HostFailureKind.name", fn1(failure_kind, Ty::Text));
+        def!("HostLogSeverity.trace", Ty::Fn { params: vec![], ret: Box::new(log_severity.clone()) });
+        def!("HostLogSeverity.debug", Ty::Fn { params: vec![], ret: Box::new(log_severity.clone()) });
+        def!("HostLogSeverity.info", Ty::Fn { params: vec![], ret: Box::new(log_severity.clone()) });
+        def!("HostLogSeverity.warn", Ty::Fn { params: vec![], ret: Box::new(log_severity.clone()) });
+        def!("HostLogSeverity.error", Ty::Fn { params: vec![], ret: Box::new(log_severity.clone()) });
+        def!("HostLogSeverity.fatal", Ty::Fn { params: vec![], ret: Box::new(log_severity.clone()) });
+        def!("HostLogSeverity.name", fn1(log_severity.clone(), Ty::Text));
+        def!("HostLogField.text", fn2(Ty::Text, Ty::Text, log_field.clone()));
+        def!("HostLogField.int", fn2(Ty::Text, Ty::Int, log_field.clone()));
+        def!("HostLogField.float", fn2(Ty::Text, Ty::Float, log_field.clone()));
+        def!("HostLogField.bool", fn2(Ty::Text, Ty::Bool, log_field.clone()));
+        def!("HostLogField.name", fn1(log_field.clone(), Ty::Text));
+        def!("HostLogField.kind", fn1(log_field.clone(), Ty::Text));
+        def!("HostLogEvent.create", Ty::Fn {
+            params: vec![
+                log_severity.clone(), Ty::Text, Ty::Text,
+                Ty::List(Box::new(log_field.clone())),
+            ],
+            ret: Box::new(log_event.clone()),
+        });
+        def!("HostLogEvent.schema", fn1(log_event.clone(), Ty::Text));
+        def!("HostLogEvent.sequence", fn1(log_event.clone(), Ty::Int));
+        def!("HostLogEvent.timestampUnixMs", fn1(log_event.clone(), Ty::Int));
+        def!("HostLogEvent.severity", fn1(log_event.clone(), log_severity));
+        def!("HostLogEvent.event", fn1(log_event.clone(), Ty::Text));
+        def!("HostLogEvent.message", fn1(log_event.clone(), Ty::Text));
+        def!("HostLogEvent.hostId", fn1(log_event.clone(), Ty::Text));
+        def!("HostLogEvent.plugin", fn1(log_event.clone(), Ty::Option(Box::new(Ty::Text))));
+        def!("HostLogEvent.worker", fn1(log_event.clone(), Ty::Option(Box::new(Ty::Text))));
+        def!("HostLogEvent.correlationId", fn1(log_event.clone(), Ty::Option(Box::new(Ty::Text))));
+        def!("HostLogEvent.fields", fn1(log_event.clone(), Ty::List(Box::new(log_field))));
         def!("Host.health", fn1(host.clone(), Ty::Text));
         def!("Host.metrics", fn1(host.clone(), Ty::Text));
         def!("Host.workerHealth", fn2(
@@ -1379,6 +1413,7 @@ pub fn seed_stdlib(env: &mut TypeEnv, counter: &mut u32) {
             params: vec![context.clone(), Ty::Text, Ty::Text, Ty::Text],
             ret: Box::new(Ty::Unit),
         });
+        def!("HostContext.logEvent", fn2(context.clone(), log_event, Ty::Unit));
         def!("HostContext.counter", Ty::Fn {
             params: vec![context.clone(), Ty::Text, Ty::Int],
             ret: Box::new(Ty::Unit),
@@ -2087,6 +2122,25 @@ pub fn seed_stdlib(env: &mut TypeEnv, counter: &mut u32) {
     pm!("HostConfigurationError.category", "error");
     pm!("HostConfigurationError.message", "error");
     pm!("HostFailureKind.name",     "kind");
+    pm!("HostLogSeverity.name",     "severity");
+    pm!("HostLogField.text",        "name", "value");
+    pm!("HostLogField.int",         "name", "value");
+    pm!("HostLogField.float",       "name", "value");
+    pm!("HostLogField.bool",        "name", "value");
+    pm!("HostLogField.name",        "field");
+    pm!("HostLogField.kind",        "field");
+    pm!("HostLogEvent.create",      "severity", "event", "message", "fields");
+    pm!("HostLogEvent.schema",      "event");
+    pm!("HostLogEvent.sequence",    "event");
+    pm!("HostLogEvent.timestampUnixMs", "event");
+    pm!("HostLogEvent.severity",    "event");
+    pm!("HostLogEvent.event",       "event");
+    pm!("HostLogEvent.message",     "event");
+    pm!("HostLogEvent.hostId",      "event");
+    pm!("HostLogEvent.plugin",      "event");
+    pm!("HostLogEvent.worker",      "event");
+    pm!("HostLogEvent.correlationId", "event");
+    pm!("HostLogEvent.fields",      "event");
     pm!("Host.health",             "host");
     pm!("Host.metrics",            "host");
     pm!("Host.workerHealth",       "host", "name");
@@ -2098,6 +2152,7 @@ pub fn seed_stdlib(env: &mut TypeEnv, counter: &mut u32) {
     pm!("HostContext.sleep",       "context", "duration");
     pm!("HostContext.waitUntil",   "context", "predicate", "interval");
     pm!("HostContext.log",         "context", "level", "event", "message");
+    pm!("HostContext.logEvent",    "context", "event");
     pm!("HostContext.counter",     "context", "name", "amount");
     pm!("HostContext.gauge",       "context", "name", "value");
     pm!("HostContext.isStopping",  "context");

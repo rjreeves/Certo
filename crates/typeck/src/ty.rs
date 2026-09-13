@@ -168,7 +168,8 @@ impl Ty {
                     // (unreachable before item 164b, since nothing could
                     // construct a `Timestamp` value; live now that it can).
                     | "Timestamp" | "Host" | "HostPlugin" | "HostContext" | "ServiceKey"
-                    | "ConfigKey" | "RestartPolicy" | "HostConfigurationError"))
+                    | "ConfigKey" | "RestartPolicy" | "HostConfigurationError"
+                    | "HostLogEvent" | "HostLogField"))
                     || name == "ConfigKey" || name == "__CertoTask" || name == "Channel" || name == "File";
                 !opaque_handle
             }
