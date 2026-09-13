@@ -2845,6 +2845,8 @@ fn host_api_is_registered() {
         "Host.run", "Host.requestStop", "HostContext.isStopping",
         "HostContext.pluginCount", "Host.configure", "Host.serviceKey",
         "Host.provide", "Host.provideFactory", "Host.factoryDependsOn",
+        "Host.configKey", "Host.requireConfig", "Host.defaultConfig",
+        "Host.validateConfig", "HostContext.configValue",
         "HostContext.service", "HostContext.config",
         "HostContext.configOr", "HostPlugin.provides", "HostPlugin.requires",
         "HostPlugin.provideFactory", "HostPlugin.factoryDependsOn",
@@ -2863,6 +2865,9 @@ fn host_api_is_registered() {
         "HostStatusSnapshot.gauges", "HostStatusSnapshot.lastFailure",
         "HostWorkerStatus.state", "HostLifecycleError.kind",
         "HostFailureKind.name",
+        "HostLifecycleError.configurationErrors", "HostConfigurationError.key",
+        "HostConfigurationError.source", "HostConfigurationError.category",
+        "HostConfigurationError.location", "HostConfigurationError.message",
     ] {
         assert!(env.lookup(name).is_some(), "missing: {name}");
     }
@@ -2931,6 +2936,19 @@ fn host_typed_services_and_config_typecheck() {
          fn build(): Host = Host.new().configure(\"mode\", \"test\").provide(key(), Logger { prefix: \"[t]\" })\n\
          fn load(c: HostContext): Logger? = HostContext.service(c, key())\n\
          fn mode(c: HostContext): Text = HostContext.configOr(c, \"mode\", \"dev\")"
+    ).unwrap();
+}
+
+#[test]
+fn host_typed_configuration_foundation_typechecks() {
+    check_full(
+        "module HostTypedConfigTest\n\
+         fn parseCount(value: Text): Result<Int, Text> = Ok(7)\n\
+         fn positive(value: Int): Result<Unit, Text> = if value > 0 then Ok(()) else Err(\"must be positive\")\n\
+         fn key(): ConfigKey<Int> = Host.configKey(\"worker.count\", parseCount)\n\
+         fn build(): Host = Host.new().requireConfig(key()).validateConfig(key(), positive)\n\
+         fn defaulted(): Host = Host.new().defaultConfig(key(), 3).validateConfig(key(), positive)\n\
+         fn read(c: HostContext): Int = HostContext.configValue(c, key())"
     ).unwrap();
 }
 

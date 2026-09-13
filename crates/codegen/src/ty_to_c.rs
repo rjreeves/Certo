@@ -61,9 +61,9 @@ pub fn ty_to_c(ty: &Ty) -> String {
         ) => "certo_text_t".into(),
         // Stdlib.Host values are opaque heap handles owned by the runtime.
         Ty::Named { name, .. } if matches!(name.as_str(),
-            "Host" | "HostPlugin" | "HostContext" | "ServiceKey" | "RestartPolicy" |
+            "Host" | "HostPlugin" | "HostContext" | "ServiceKey" | "ConfigKey" | "RestartPolicy" |
             "HostStatusSnapshot" | "HostWorkerStatus" | "HostMetricSnapshot" |
-            "HostLifecycleError"
+            "HostLifecycleError" | "HostConfigurationError"
         ) => "void*".into(),
         // These stdlib scalar types have a C-side typedef prefixed `Certo`
         // (`CertoDateTime`, etc. — see crates/stdlib/src/datetime.rs) rather

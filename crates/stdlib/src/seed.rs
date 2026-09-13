@@ -1078,6 +1078,7 @@ pub fn seed_stdlib(env: &mut TypeEnv, counter: &mut u32) {
         let host_state = Ty::Named { name: "HostState".into(), args: vec![] };
         let worker_state = Ty::Named { name: "HostWorkerState".into(), args: vec![] };
         let lifecycle_error = Ty::Named { name: "HostLifecycleError".into(), args: vec![] };
+        let configuration_error = Ty::Named { name: "HostConfigurationError".into(), args: vec![] };
         let failure_kind = Ty::Named { name: "HostFailureKind".into(), args: vec![] };
         let lifecycle = fn1(
             context.clone(),
@@ -1168,6 +1169,41 @@ pub fn seed_stdlib(env: &mut TypeEnv, counter: &mut u32) {
         });
         {
             let t = fresh();
+            let key = Ty::Named { name: "ConfigKey".into(), args: vec![Ty::Var(t)] };
+            let parse = fn1(
+                Ty::Text,
+                Ty::Result(Box::new(Ty::Var(t)), Box::new(Ty::Text)),
+            );
+            env.define("Host.configKey", poly1(t, fn2(Ty::Text, parse, key)));
+        }
+        {
+            let t = fresh();
+            let key = Ty::Named { name: "ConfigKey".into(), args: vec![Ty::Var(t)] };
+            env.define("Host.requireConfig", poly1(t,
+                fn2(host.clone(), key, host.clone())));
+        }
+        {
+            let t = fresh();
+            let key = Ty::Named { name: "ConfigKey".into(), args: vec![Ty::Var(t)] };
+            env.define("Host.defaultConfig", poly1(t, Ty::Fn {
+                params: vec![host.clone(), key, Ty::Var(t)],
+                ret: Box::new(host.clone()),
+            }));
+        }
+        {
+            let t = fresh();
+            let key = Ty::Named { name: "ConfigKey".into(), args: vec![Ty::Var(t)] };
+            let validator = fn1(
+                Ty::Var(t),
+                Ty::Result(Box::new(Ty::Unit), Box::new(Ty::Text)),
+            );
+            env.define("Host.validateConfig", poly1(t, Ty::Fn {
+                params: vec![host.clone(), key, validator],
+                ret: Box::new(host.clone()),
+            }));
+        }
+        {
+            let t = fresh();
             let key = Ty::Named { name: "ServiceKey".into(), args: vec![Ty::Var(t)] };
             env.define("Host.serviceKey", poly1(t, fn1(Ty::Text, key)));
         }
@@ -1224,6 +1260,12 @@ pub fn seed_stdlib(env: &mut TypeEnv, counter: &mut u32) {
             params: vec![context.clone(), Ty::Text, Ty::Text],
             ret: Box::new(Ty::Text),
         });
+        {
+            let t = fresh();
+            let key = Ty::Named { name: "ConfigKey".into(), args: vec![Ty::Var(t)] };
+            env.define("HostContext.configValue", poly1(t,
+                fn2(context.clone(), key, Ty::Var(t))));
+        }
         def!("Host.shutdownTimeout", fn2(
             host.clone(),
             Ty::Named { name: "Duration".into(), args: vec![] },
@@ -1296,6 +1338,15 @@ pub fn seed_stdlib(env: &mut TypeEnv, counter: &mut u32) {
         def!("HostLifecycleError.subject", fn1(lifecycle_error.clone(), Ty::Text));
         def!("HostLifecycleError.message", fn1(lifecycle_error.clone(), Ty::Text));
         def!("HostLifecycleError.isTimeout", fn1(lifecycle_error, Ty::Bool));
+        def!("HostLifecycleError.configurationErrors", fn1(
+            Ty::Named { name: "HostLifecycleError".into(), args: vec![] },
+            Ty::List(Box::new(configuration_error.clone())),
+        ));
+        def!("HostConfigurationError.key", fn1(configuration_error.clone(), Ty::Text));
+        def!("HostConfigurationError.source", fn1(configuration_error.clone(), Ty::Text));
+        def!("HostConfigurationError.location", fn1(configuration_error.clone(), Ty::Text));
+        def!("HostConfigurationError.category", fn1(configuration_error.clone(), Ty::Text));
+        def!("HostConfigurationError.message", fn1(configuration_error, Ty::Text));
         def!("HostFailureKind.name", fn1(failure_kind, Ty::Text));
         def!("Host.health", fn1(host.clone(), Ty::Text));
         def!("Host.metrics", fn1(host.clone(), Ty::Text));
@@ -1979,6 +2030,10 @@ pub fn seed_stdlib(env: &mut TypeEnv, counter: &mut u32) {
     pm!("RestartPolicy.always",     "maxRetries", "initialDelay", "maxDelay");
     pm!("Host.add",                "host", "plugin");
     pm!("Host.configure",          "host", "key", "value");
+    pm!("Host.configKey",          "name", "parse");
+    pm!("Host.requireConfig",      "host", "key");
+    pm!("Host.defaultConfig",      "host", "key", "value");
+    pm!("Host.validateConfig",     "host", "key", "validator");
     pm!("Host.serviceKey",         "name");
     pm!("Host.provide",            "host", "key", "service");
     pm!("Host.provideFactory",     "host", "key", "factory", "dispose");
@@ -2025,6 +2080,12 @@ pub fn seed_stdlib(env: &mut TypeEnv, counter: &mut u32) {
     pm!("HostLifecycleError.subject", "error");
     pm!("HostLifecycleError.message", "error");
     pm!("HostLifecycleError.isTimeout", "error");
+    pm!("HostLifecycleError.configurationErrors", "error");
+    pm!("HostConfigurationError.key", "error");
+    pm!("HostConfigurationError.source", "error");
+    pm!("HostConfigurationError.location", "error");
+    pm!("HostConfigurationError.category", "error");
+    pm!("HostConfigurationError.message", "error");
     pm!("HostFailureKind.name",     "kind");
     pm!("Host.health",             "host");
     pm!("Host.metrics",            "host");
@@ -2044,6 +2105,7 @@ pub fn seed_stdlib(env: &mut TypeEnv, counter: &mut u32) {
     pm!("HostContext.service",     "context", "key");
     pm!("HostContext.config",      "context", "key");
     pm!("HostContext.configOr",    "context", "key", "fallback");
+    pm!("HostContext.configValue", "context", "key");
 
     // Cli
     pm!("Cli.command",     "name", "about", "version");

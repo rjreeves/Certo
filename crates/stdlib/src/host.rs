@@ -14,6 +14,7 @@ pub const HOST_C: &str = r#"
 struct CertoHost;
 struct CertoHostWorker;
 struct CertoHostLifecycleError;
+struct CertoConfigKey;
 
 typedef struct CertoRestartPolicy {
     int mode;
@@ -50,6 +51,29 @@ typedef struct CertoHostConfig {
     certo_text_t key;
     certo_text_t value;
 } CertoHostConfig;
+
+typedef struct CertoConfigKey {
+    certo_text_t name;
+    certo_fn_t parse;
+} CertoConfigKey;
+
+typedef struct CertoHostConfigBinding {
+    CertoConfigKey* key;
+    bool required;
+    bool has_default;
+    void* default_value;
+    void* value;
+    bool bound;
+    CertoList* validators;
+} CertoHostConfigBinding;
+
+typedef struct CertoHostConfigurationError {
+    certo_text_t key;
+    certo_text_t source;
+    certo_text_t location;
+    certo_text_t category;
+    certo_text_t message;
+} CertoHostConfigurationError;
 
 typedef struct CertoHostPlugin {
     certo_text_t name;
@@ -93,6 +117,7 @@ typedef struct CertoHostLifecycleError {
     certo_text_t subject;
     certo_text_t message;
     bool timed_out;
+    CertoList* configuration_errors;
 } CertoHostLifecycleError;
 
 typedef struct CertoHostWorkerStatus {
@@ -146,6 +171,8 @@ typedef struct CertoHost {
     CertoHostLifecycleError* last_failure;
     CertoList* metrics;
     CertoList* service_construction_order;
+    CertoList* config_bindings;
+    CertoList* configuration_errors;
 #if defined(_WIN32)
     CRITICAL_SECTION wait_lock;
     CONDITION_VARIABLE wait_changed;
@@ -247,6 +274,9 @@ static CertoHostLifecycleError* __certo_host_record_failure(
     error->subject = subject ? subject : "host";
     error->message = message ? message : "unknown error";
     error->timed_out = timed_out;
+    error->configuration_errors =
+        host && strcmp(error->kind, "ConfigurationFailure") == 0
+            ? host->configuration_errors : certo_list_new_empty();
     if (host) CERTO_ATOMIC_STORE(&host->last_failure, error);
     return error;
 }
@@ -286,6 +316,8 @@ CertoHost* certo_host_new(void) {
     context->config = certo_list_new_empty();
     host->metrics = certo_list_new_empty();
     host->service_construction_order = certo_list_new_empty();
+    host->config_bindings = certo_list_new_empty();
+    host->configuration_errors = certo_list_new_empty();
     return host;
 }
 
@@ -397,7 +429,7 @@ void* certo_host_context_service(CertoHostContext* context, CertoServiceKey* key
 
 CertoHost* certo_host_configure(CertoHost* host, certo_text_t key, certo_text_t value) {
     if (!host || !key) certo_panic("Host.configure requires a host and key");
-    if (host->running || host->started_count > 0) {
+    if (CERTO_ATOMIC_LOAD(&host->state) != CERTO_HOST_NEW) {
         certo_panic("configuration cannot be changed after the host has started");
     }
     for (int64_t i = 0; i < host->context->config->len; i++) {
@@ -431,6 +463,169 @@ certo_text_t certo_host_context_config_or(CertoHostContext* context,
                                            certo_text_t fallback) {
     void* found = certo_host_context_config(context, key);
     return found ? (certo_text_t)(intptr_t)(*(int64_t*)found) : fallback;
+}
+
+static CertoHostConfigBinding* __certo_host_config_binding(
+        CertoHost* host, CertoConfigKey* key) {
+    if (!host || !key) return NULL;
+    for (int64_t i = 0; i < host->config_bindings->len; i++) {
+        CertoHostConfigBinding* binding =
+            (CertoHostConfigBinding*)host->config_bindings->data[i];
+        if (strcmp(binding->key->name, key->name) == 0) return binding;
+    }
+    return NULL;
+}
+
+CertoConfigKey* certo_host_config_key(certo_text_t name, certo_fn_t parse) {
+    if (!name || !*name || !parse.fn)
+        certo_panic("Host.configKey requires a name and parser");
+    CertoConfigKey* key = (CertoConfigKey*)malloc(sizeof(CertoConfigKey));
+    if (!key) certo_panic("out of memory");
+    key->name = name;
+    key->parse = parse;
+    return key;
+}
+
+static CertoHostConfigBinding* __certo_host_register_config(
+        CertoHost* host, CertoConfigKey* key) {
+    if (!host || !key)
+        certo_panic("typed configuration registration requires a host and key");
+    if (CERTO_ATOMIC_LOAD(&host->state) != CERTO_HOST_NEW)
+        certo_panic("typed configuration cannot be changed after startup begins");
+    if (__certo_host_config_binding(host, key))
+        certo_panic("a typed configuration key with this name is already registered");
+    CertoHostConfigBinding* binding =
+        (CertoHostConfigBinding*)calloc(1, sizeof(CertoHostConfigBinding));
+    if (!binding) certo_panic("out of memory");
+    binding->key = key;
+    binding->validators = certo_list_new_empty();
+    host->config_bindings = certo_list_push_mut(host->config_bindings, binding);
+    return binding;
+}
+
+CertoHost* certo_host_require_config(CertoHost* host, CertoConfigKey* key) {
+    CertoHostConfigBinding* binding = __certo_host_register_config(host, key);
+    binding->required = true;
+    return host;
+}
+
+CertoHost* certo_host_default_config(CertoHost* host, CertoConfigKey* key,
+                                      void* value) {
+    CertoHostConfigBinding* binding = __certo_host_register_config(host, key);
+    binding->has_default = true;
+    intptr_t* boxed = (intptr_t*)malloc(sizeof(intptr_t));
+    if (!boxed) certo_panic("out of memory");
+    *boxed = (intptr_t)value;
+    binding->default_value = boxed;
+    return host;
+}
+
+CertoHost* certo_host_validate_config(CertoHost* host, CertoConfigKey* key,
+                                       certo_fn_t validator) {
+    if (!host || !key || !validator.fn)
+        certo_panic("Host.validateConfig requires a host, key, and validator");
+    if (CERTO_ATOMIC_LOAD(&host->state) != CERTO_HOST_NEW)
+        certo_panic("configuration validators cannot be changed after startup begins");
+    CertoHostConfigBinding* binding = __certo_host_config_binding(host, key);
+    if (!binding)
+        certo_panic("configuration key must be required or defaulted before validation");
+    certo_fn_t* stored = (certo_fn_t*)malloc(sizeof(certo_fn_t));
+    if (!stored) certo_panic("out of memory");
+    *stored = validator;
+    binding->validators = certo_list_push_mut(binding->validators, stored);
+    return host;
+}
+
+intptr_t certo_host_context_config_value(CertoHostContext* context,
+                                          CertoConfigKey* key) {
+    CertoHostConfigBinding* binding = context && context->host
+        ? __certo_host_config_binding(context->host, key) : NULL;
+    if (!binding || !binding->bound)
+        certo_panic("typed configuration value is unavailable before successful binding");
+    return *(intptr_t*)binding->value;
+}
+
+typedef void* (*CertoHostConfigParser)(void* env, certo_text_t value);
+typedef void* (*CertoHostConfigValidator)(void* env, void* value);
+
+static certo_text_t __certo_host_add_configuration_error(
+        CertoHost* host, certo_text_t errors, certo_text_t key,
+        certo_text_t source, certo_text_t location,
+        certo_text_t category, certo_text_t message) {
+    CertoHostConfigurationError* error =
+        (CertoHostConfigurationError*)malloc(sizeof(CertoHostConfigurationError));
+    if (!error) certo_panic("out of memory");
+    error->key = key;
+    error->source = source;
+    error->location = location;
+    error->category = category;
+    error->message = message;
+    host->configuration_errors =
+        certo_list_push_mut(host->configuration_errors, error);
+    return __certo_host_append_error(errors,
+        __certo_host_error("configuration", key, message));
+}
+
+static certo_text_t __certo_host_bind_configuration(CertoHost* host) {
+    certo_text_t errors = NULL;
+    host->configuration_errors = certo_list_new_empty();
+    for (int64_t i = 0; i < host->config_bindings->len; i++) {
+        CertoHostConfigBinding* binding =
+            (CertoHostConfigBinding*)host->config_bindings->data[i];
+        CertoHostConfig* raw = NULL;
+        for (int64_t r = host->context->config->len; r > 0; r--) {
+            CertoHostConfig* candidate =
+                (CertoHostConfig*)host->context->config->data[r - 1];
+            if (strcmp(candidate->key, binding->key->name) == 0) {
+                raw = candidate;
+                break;
+            }
+        }
+        if (raw) {
+            CertoHostConfigParser parse =
+                (CertoHostConfigParser)binding->key->parse.fn;
+            void* result = parse(binding->key->parse.env, raw->value);
+            if (!__result_is_ok(result)) {
+                errors = __certo_host_add_configuration_error(
+                    host, errors, binding->key->name, "Programmatic",
+                    "Host.configure", "Parse",
+                    (certo_text_t)__result_unwrap(result));
+                continue;
+            }
+            binding->value = (void*)(intptr_t)__result_unwrap(result);
+            binding->bound = true;
+        } else if (binding->has_default) {
+            binding->value = binding->default_value;
+            binding->bound = true;
+        } else if (binding->required) {
+            errors = __certo_host_add_configuration_error(
+                host, errors, binding->key->name, "None", "", "Missing",
+                "required configuration value is missing");
+            continue;
+        }
+        if (!binding->bound) continue;
+        certo_text_t source = raw ? "Programmatic" : "Default";
+        for (int64_t v = 0; v < binding->validators->len; v++) {
+            certo_fn_t* callback =
+                (certo_fn_t*)binding->validators->data[v];
+            CertoHostConfigValidator validate =
+                (CertoHostConfigValidator)callback->fn;
+            void* result = validate(
+                callback->env, (void*)(intptr_t)(*(intptr_t*)binding->value));
+            if (!__result_is_ok(result))
+                errors = __certo_host_add_configuration_error(
+                    host, errors, binding->key->name, source,
+                    raw ? "Host.configure" : "typed default", "Validation",
+                    (certo_text_t)__result_unwrap(result));
+        }
+    }
+    if (errors) {
+        CertoHostConfigurationError* first =
+            (CertoHostConfigurationError*)host->configuration_errors->data[0];
+        __certo_host_record_failure(host, "ConfigurationFailure", "configuration",
+                                    first->key, first->message, false);
+    }
+    return errors;
 }
 
 CertoHostPlugin* certo_host_plugin(certo_text_t name, certo_fn_t start,
@@ -1470,6 +1665,12 @@ void* certo_host_start(CertoHost* host) {
     CERTO_ATOMIC_STORE(&host->context->stopping, 0);
     CERTO_ATOMIC_STORE(&host->stop_requested, 0);
     CERTO_ATOMIC_STORE(&host->last_failure, NULL);
+    certo_text_t configuration_error = __certo_host_bind_configuration(host);
+    if (configuration_error) {
+        CERTO_ATOMIC_STORE(&host->state, CERTO_HOST_FAILED);
+        __certo_host_wake_waiters(host);
+        return certo_err((intptr_t)configuration_error);
+    }
     certo_text_t dependency_error = __certo_host_order_plugins(host);
     if (dependency_error) {
         __certo_host_record_failure(host, "StartupFailure", "dependencies",
@@ -1788,6 +1989,37 @@ certo_text_t certo_host_lifecycle_error_message(CertoHostLifecycleError* error) 
 
 bool certo_host_lifecycle_error_is_timeout(CertoHostLifecycleError* error) {
     return error && error->timed_out;
+}
+
+CertoList* certo_host_lifecycle_error_configuration_errors(
+        CertoHostLifecycleError* error) {
+    return error && error->configuration_errors
+        ? error->configuration_errors : certo_list_new_empty();
+}
+
+certo_text_t certo_host_configuration_error_key(
+        CertoHostConfigurationError* error) {
+    return error ? error->key : "";
+}
+
+certo_text_t certo_host_configuration_error_source(
+        CertoHostConfigurationError* error) {
+    return error ? error->source : "None";
+}
+
+certo_text_t certo_host_configuration_error_category(
+        CertoHostConfigurationError* error) {
+    return error ? error->category : "Validation";
+}
+
+certo_text_t certo_host_configuration_error_location(
+        CertoHostConfigurationError* error) {
+    return error ? error->location : "";
+}
+
+certo_text_t certo_host_configuration_error_message(
+        CertoHostConfigurationError* error) {
+    return error ? error->message : "unknown configuration error";
 }
 
 static void* __certo_host_typed_result(CertoHost* host, void* result,

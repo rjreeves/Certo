@@ -518,6 +518,8 @@ fn generic_container_ret(full: Option<&str>, args: &[HirExpr]) -> Option<Ty> {
         Some("Map.get") => args.first().and_then(map_kv).map(|(_, v)| Ty::Option(Box::new(v))),
         Some("Map.remove") | Some("Map.insert") => args.first().map(|a| a.ty.clone()),
         Some("Host.provide") | Some("Host.configure") | Some("Host.add")
+        | Some("Host.requireConfig") | Some("Host.defaultConfig")
+        | Some("Host.validateConfig")
         | Some("Host.shutdownTimeout") | Some("Host.readinessTimeout")
         | Some("Host.quiesceTimeout") | Some("Host.drainTimeout")
         | Some("Host.stopTimeout") | Some("Host.disposalTimeout")
@@ -528,6 +530,11 @@ fn generic_container_ret(full: Option<&str>, args: &[HirExpr]) -> Option<Ty> {
         Some("HostContext.service") => args.get(1).and_then(|key| match &key.ty {
             Ty::Named { name, args } if name == "ServiceKey" && args.len() == 1 =>
                 Some(Ty::Option(Box::new(args[0].clone()))),
+            _ => None,
+        }),
+        Some("HostContext.configValue") => args.get(1).and_then(|key| match &key.ty {
+            Ty::Named { name, args } if name == "ConfigKey" && args.len() == 1 =>
+                Some(args[0].clone()),
             _ => None,
         }),
         Some("Map.keys") => args.first().and_then(map_kv).map(|(k, _)| Ty::List(Box::new(k))),
