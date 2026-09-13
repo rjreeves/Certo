@@ -86,6 +86,7 @@ typedef struct CertoHost {
     volatile sig_atomic_t stop_requested;
     volatile int state;
     volatile int startup_complete;
+    volatile int startup_cancel_requested;
     volatile int shutdown_complete;
     certo_text_t shutdown_error;
     int64_t shutdown_timeout_ms;
@@ -198,6 +199,7 @@ CertoHost* certo_host_new(void) {
     host->stop_timeout_ms = 10000;
     CERTO_ATOMIC_STORE(&host->state, CERTO_HOST_NEW);
     CERTO_ATOMIC_STORE(&host->startup_complete, 0);
+    CERTO_ATOMIC_STORE(&host->startup_cancel_requested, 0);
     context->host = host;
 #if defined(_WIN32)
     InitializeCriticalSection(&host->wait_lock);
@@ -508,6 +510,22 @@ static void __certo_host_wake_waiters(CertoHost* host) {
 #endif
 }
 
+static void __certo_host_wait_for_startup(CertoHost* host) {
+#if defined(_WIN32)
+    EnterCriticalSection(&host->wait_lock);
+    while (CERTO_ATOMIC_LOAD(&host->state) == CERTO_HOST_STARTING &&
+           !CERTO_ATOMIC_LOAD(&host->startup_complete))
+        SleepConditionVariableCS(&host->wait_changed, &host->wait_lock, INFINITE);
+    LeaveCriticalSection(&host->wait_lock);
+#else
+    pthread_mutex_lock(&host->wait_lock);
+    while (CERTO_ATOMIC_LOAD(&host->state) == CERTO_HOST_STARTING &&
+           !CERTO_ATOMIC_LOAD(&host->startup_complete))
+        pthread_cond_wait(&host->wait_changed, &host->wait_lock);
+    pthread_mutex_unlock(&host->wait_lock);
+#endif
+}
+
 /* Wait for the requested interval or until shutdown. True means the full
    interval elapsed; false means cancellation won. The deadline loop handles
    spurious condition-variable wakeups without extending the requested wait. */
@@ -777,6 +795,8 @@ static certo_text_t __certo_host_wait_until_ready(CertoHost* host,
                                                    int64_t timeout_ms) {
     int64_t deadline = certo_monotonic_millis() + (timeout_ms < 0 ? 0 : timeout_ms);
     while (CERTO_ATOMIC_LOAD(&host->ready_workers) < host->worker_count) {
+        if (CERTO_ATOMIC_LOAD(&host->startup_cancel_requested))
+            return "host startup cancelled";
         certo_text_t worker_error = CERTO_ATOMIC_LOAD(&host->worker_error);
         if (worker_error) return worker_error;
         if (certo_monotonic_millis() >= deadline) {
@@ -792,6 +812,8 @@ static certo_text_t __certo_host_wait_until_ready(CertoHost* host,
         nanosleep(&delay, NULL);
 #endif
     }
+    if (CERTO_ATOMIC_LOAD(&host->startup_cancel_requested))
+        return "host startup cancelled";
     return CERTO_ATOMIC_LOAD(&host->worker_error);
 }
 
@@ -974,7 +996,13 @@ void* certo_host_start(CertoHost* host) {
     certo_text_t dependency_error = __certo_host_order_plugins(host);
     if (dependency_error) {
         CERTO_ATOMIC_STORE(&host->state, CERTO_HOST_FAILED);
+        __certo_host_wake_waiters(host);
         return certo_err((intptr_t)dependency_error);
+    }
+    if (CERTO_ATOMIC_LOAD(&host->startup_cancel_requested)) {
+        CERTO_ATOMIC_STORE(&host->state, CERTO_HOST_FAILED);
+        __certo_host_wake_waiters(host);
+        return certo_err((intptr_t)"host startup cancelled");
     }
     host->running = true;
     for (int64_t i = 0; i < host->plugins->len; i++) {
@@ -988,9 +1016,17 @@ void* certo_host_start(CertoHost* host) {
             CERTO_ATOMIC_STORE(&host->context->stopping, 1);
             CERTO_ATOMIC_STORE(&host->state, CERTO_HOST_FAILED);
             __certo_host_stop_started(host);
+            __certo_host_wake_waiters(host);
             return certo_err((intptr_t)error);
         }
         host->started_count++;
+        if (CERTO_ATOMIC_LOAD(&host->startup_cancel_requested)) {
+            CERTO_ATOMIC_STORE(&host->context->stopping, 1);
+            CERTO_ATOMIC_STORE(&host->state, CERTO_HOST_FAILED);
+            __certo_host_stop_started(host);
+            __certo_host_wake_waiters(host);
+            return certo_err((intptr_t)"host startup cancelled");
+        }
     }
     __certo_host_launch_workers(host);
     certo_text_t readiness_error = __certo_host_wait_until_ready(
@@ -1000,10 +1036,13 @@ void* certo_host_start(CertoHost* host) {
         CERTO_ATOMIC_STORE(&host->state, CERTO_HOST_FAILED);
         __certo_host_join_workers(host);
         __certo_host_stop_started(host);
+        __certo_host_wake_waiters(host);
         return certo_err((intptr_t)readiness_error);
     }
     CERTO_ATOMIC_STORE(&host->startup_complete, 1);
-    CERTO_ATOMIC_STORE(&host->state, CERTO_HOST_HEALTHY);
+    __sync_bool_compare_and_swap(
+        &host->state, CERTO_HOST_STARTING, CERTO_HOST_HEALTHY);
+    __certo_host_wake_waiters(host);
     return certo_ok(0);
 }
 
@@ -1021,8 +1060,24 @@ void* certo_host_stop(CertoHost* host) {
         return shutdown_error
             ? certo_err((intptr_t)shutdown_error) : certo_ok(0);
     }
-    if (!__sync_bool_compare_and_swap(
-            &host->state, CERTO_HOST_HEALTHY, CERTO_HOST_STOPPING)) {
+    if (CERTO_ATOMIC_LOAD(&host->state) == CERTO_HOST_STARTING &&
+        !CERTO_ATOMIC_LOAD(&host->startup_complete)) {
+        CERTO_ATOMIC_STORE(&host->startup_cancel_requested, 1);
+        CERTO_ATOMIC_STORE(&host->stop_requested, 1);
+        CERTO_ATOMIC_STORE(&host->context->stopping, 1);
+        __certo_host_wake_waiters(host);
+        __certo_host_wait_for_startup(host);
+        if (CERTO_ATOMIC_LOAD(&host->state) == CERTO_HOST_FAILED &&
+            !CERTO_ATOMIC_LOAD(&host->worker_error))
+            return certo_ok(0);
+    }
+    bool owns_shutdown = __sync_bool_compare_and_swap(
+        &host->state, CERTO_HOST_HEALTHY, CERTO_HOST_STOPPING);
+    if (!owns_shutdown && CERTO_ATOMIC_LOAD(&host->startup_complete)) {
+        owns_shutdown = __sync_bool_compare_and_swap(
+            &host->state, CERTO_HOST_STARTING, CERTO_HOST_STOPPING);
+    }
+    if (!owns_shutdown) {
         if (CERTO_ATOMIC_LOAD(&host->state) == CERTO_HOST_STOPPING) {
 #if defined(_WIN32)
             EnterCriticalSection(&host->wait_lock);
