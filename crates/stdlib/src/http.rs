@@ -374,6 +374,12 @@ CertoHttpResponse* certo_host_http_metrics(CertoHost* host) {
     return response;
 }
 
+CertoHttpResponse* certo_host_http_drain(CertoHost* host) {
+    certo_host_request_shutdown(host);
+    return certo_http_respond(202, "{\"accepted\":true}",
+        "application/json; charset=utf-8");
+}
+
 CertoHttpResponse* certo_http_ok        (certo_text_t body, certo_text_t ct)  { return certo_http_respond(200, body, ct); }
 CertoHttpResponse* certo_http_not_found (certo_text_t body)                   { return certo_http_respond(404, body, "text/plain"); }
 CertoHttpResponse* certo_http_bad_req   (certo_text_t body)                   { return certo_http_respond(400, body, "text/plain"); }
@@ -439,6 +445,7 @@ static const char* http_status_text(int64_t code) {
     switch (code) {
         case 200: return "OK";
         case 201: return "Created";
+        case 202: return "Accepted";
         case 204: return "No Content";
         case 301: return "Moved Permanently";
         case 302: return "Found";
@@ -893,4 +900,170 @@ int64_t certo_http_serve(int64_t port, certo_fn_t raw_handler) {
     return 0;
 }
 #endif
+
+typedef struct CertoHostHttpListener {
+    __certo_task_hdr_t hdr;
+    CertoHost* host;
+    certo_text_t name;
+    int64_t port;
+    int64_t drain_timeout_ms;
+    certo_fn_t handler;
+    certo_socket_t socket;
+    volatile int accepting;
+    volatile int64_t active;
+    bool started;
+} CertoHostHttpListener;
+
+typedef struct {
+    CertoHostHttpListener* listener;
+    certo_socket_t client;
+} __certo_host_http_conn_t;
+
+static void* __certo_host_http_connection(void* arg) {
+    __certo_host_http_conn_t* ctx = (__certo_host_http_conn_t*)arg;
+    CertoHostHttpListener* listener = ctx->listener;
+    certo_socket_t client = ctx->client;
+    free(ctx);
+    char* raw = http_srv_read_request(client);
+    CertoHttpRequest* req = http_srv_parse(raw, client);
+    free(raw);
+    CertoHttpHandler handler = (CertoHttpHandler)listener->handler.fn;
+    CertoHttpResponse* response = handler(listener->handler.env, req);
+    http_srv_send(client, response);
+    certo_closesocket(client);
+    __sync_sub_and_fetch(&listener->active, 1);
+    return NULL;
+}
+
+static void* __certo_host_http_accept(void* arg) {
+    CertoHostHttpListener* listener = (CertoHostHttpListener*)arg;
+    while (CERTO_ATOMIC_LOAD(&listener->accepting)) {
+        struct sockaddr_in address;
+#ifdef _WIN32
+        int address_length = sizeof(address);
+#else
+        socklen_t address_length = sizeof(address);
+#endif
+        certo_socket_t client = accept(listener->socket,
+            (struct sockaddr*)&address, &address_length);
+        if (client == CERTO_INVALID_SOCKET) continue;
+        if (!CERTO_ATOMIC_LOAD(&listener->accepting)) {
+            certo_closesocket(client);
+            break;
+        }
+        __sync_add_and_fetch(&listener->active, 1);
+        __certo_host_http_conn_t* ctx =
+            (__certo_host_http_conn_t*)malloc(sizeof(__certo_host_http_conn_t));
+        if (!ctx) certo_panic("out of memory");
+        ctx->listener = listener;
+        ctx->client = client;
+        __certo_thread_t thread = __certo_thread_spawn(__certo_host_http_connection, ctx);
+#ifdef _WIN32
+        CloseHandle(thread);
+#else
+        pthread_detach(thread);
+#endif
+    }
+    __certo_task_signal_done(&listener->hdr);
+    return NULL;
+}
+
+CertoHost* certo_host_http_serve(CertoHost* host, certo_text_t name,
+        int64_t port, certo_fn_t handler, int64_t drain_timeout_ms) {
+    if (!host) certo_panic("HostHttp.serve called with a null host");
+    if (CERTO_ATOMIC_LOAD(&host->state) != CERTO_HOST_NEW)
+        certo_panic("HTTP listeners cannot be registered after startup");
+    if (!name || !name[0]) certo_panic("HTTP listener name cannot be empty");
+    if (port <= 0 || port > 65535) certo_panic("HTTP listener port must be between 1 and 65535");
+    if (!handler.fn) certo_panic("HTTP listener handler cannot be empty");
+    if (drain_timeout_ms < 0) certo_panic("HTTP listener drain timeout cannot be negative");
+    for (int64_t i = 0; i < host->http_listeners->len; i++) {
+        CertoHostHttpListener* existing =
+            (CertoHostHttpListener*)host->http_listeners->data[i];
+        if (strcmp(existing->name, name) == 0)
+            certo_panic("duplicate HTTP listener name");
+        if (existing->port == port) certo_panic("duplicate HTTP listener port");
+    }
+    CertoHostHttpListener* listener =
+        (CertoHostHttpListener*)calloc(1, sizeof(CertoHostHttpListener));
+    if (!listener) certo_panic("out of memory");
+    __certo_task_hdr_init(&listener->hdr);
+    listener->host = host;
+    listener->name = name;
+    listener->port = port;
+    listener->handler = handler;
+    listener->drain_timeout_ms = drain_timeout_ms;
+    listener->socket = CERTO_INVALID_SOCKET;
+    host->http_listeners = certo_list_push_mut(host->http_listeners, listener);
+    return host;
+}
+
+certo_text_t __certo_host_http_start_listeners(CertoHost* host) {
+    for (int64_t i = 0; i < host->http_listeners->len; i++) {
+        CertoHostHttpListener* listener =
+            (CertoHostHttpListener*)host->http_listeners->data[i];
+#ifdef _WIN32
+        WSADATA wsa;
+        if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) return "HTTP socket startup failed";
+#endif
+        listener->socket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+        if (listener->socket == CERTO_INVALID_SOCKET) return "HTTP socket creation failed";
+        int reuse = 1;
+        setsockopt(listener->socket, SOL_SOCKET, SO_REUSEADDR,
+            (char*)&reuse, sizeof(reuse));
+        struct sockaddr_in address;
+        memset(&address, 0, sizeof(address));
+        address.sin_family = AF_INET;
+        address.sin_addr.s_addr = INADDR_ANY;
+        address.sin_port = htons((uint16_t)listener->port);
+        if (bind(listener->socket, (struct sockaddr*)&address, sizeof(address)) != 0) {
+            certo_closesocket(listener->socket);
+            __certo_host_http_close_listeners(host);
+            return "HTTP listener bind failed";
+        }
+        if (listen(listener->socket, SOMAXCONN) != 0) {
+            certo_closesocket(listener->socket);
+            __certo_host_http_close_listeners(host);
+            return "HTTP listener listen failed";
+        }
+        CERTO_ATOMIC_STORE(&listener->accepting, 1);
+        listener->started = true;
+        listener->hdr.thread = __certo_thread_spawn(__certo_host_http_accept, listener);
+    }
+    return NULL;
+}
+
+void __certo_host_http_close_listeners(CertoHost* host) {
+    for (int64_t i = 0; i < host->http_listeners->len; i++) {
+        CertoHostHttpListener* listener =
+            (CertoHostHttpListener*)host->http_listeners->data[i];
+        if (!listener->started) continue;
+        CERTO_ATOMIC_STORE(&listener->accepting, 0);
+#ifdef _WIN32
+        shutdown(listener->socket, SD_BOTH);
+#else
+        shutdown(listener->socket, SHUT_RDWR);
+#endif
+        certo_closesocket(listener->socket);
+    }
+}
+
+certo_text_t __certo_host_http_drain_listeners(CertoHost* host) {
+    for (int64_t i = 0; i < host->http_listeners->len; i++) {
+        CertoHostHttpListener* listener =
+            (CertoHostHttpListener*)host->http_listeners->data[i];
+        if (!listener->started) continue;
+        int64_t deadline = certo_monotonic_millis() + listener->drain_timeout_ms;
+        if (!__certo_thread_join_timed(&listener->hdr, listener->drain_timeout_ms))
+            return "HTTP listener did not stop accepting";
+        while (CERTO_ATOMIC_LOAD(&listener->active) > 0 &&
+               certo_monotonic_millis() < deadline) certo_sleep(1);
+        if (CERTO_ATOMIC_LOAD(&listener->active) > 0) {
+            __certo_host_record_failure(host, "Timeout", "http-drain",
+                                        listener->name, "timeout elapsed", true);
+            return "HTTP request drain timed out";
+        }
+    }
+    return NULL;
+}
 "#;

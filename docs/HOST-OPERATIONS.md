@@ -64,3 +64,13 @@ includes the stable `failure_kind`; raw failure messages are excluded.
 snapshot with content type `text/plain; version=0.0.4; charset=utf-8`.
 Applications retain control of paths, routing, authentication, and whether any
 adapter is exposed. The adapters perform no socket I/O themselves.
+
+`HostHttp.serve` registers a named listener owned by the host. Binding occurs
+during startup. Shutdown closes its listening socket before plugin quiesce,
+joins the accept loop, and waits for active request callbacks only until the
+listener's declared drain timeout. A timeout becomes a typed shutdown failure
+with phase `http-drain`.
+
+`HostHttp.drain` requests graceful shutdown and returns 202 immediately.
+Applications must authenticate and authorize the request before calling it;
+the standard library never publishes an administrative route automatically.
