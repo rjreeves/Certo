@@ -1433,6 +1433,7 @@ pub fn seed_stdlib(env: &mut TypeEnv, counter: &mut u32) {
             ret: Box::new(Ty::Unit),
         });
         def!("Host.metricSnapshot", fn1(host.clone(), Ty::Text));
+        def!("Host.metricsPrometheus", fn1(host.clone(), Ty::Text));
         def!("Host.health", fn1(host.clone(), Ty::Text));
         def!("Host.metrics", fn1(host.clone(), Ty::Text));
         def!("Host.workerHealth", fn2(
@@ -2203,6 +2204,7 @@ pub fn seed_stdlib(env: &mut TypeEnv, counter: &mut u32) {
     pm!("HostMetric.gaugeSet", "metric", "labels", "value");
     pm!("HostMetric.histogramObserve", "metric", "labels", "value");
     pm!("Host.metricSnapshot", "host");
+    pm!("Host.metricsPrometheus", "host");
     pm!("Host.health",             "host");
     pm!("Host.metrics",            "host");
     pm!("Host.workerHealth",       "host", "name");

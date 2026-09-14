@@ -141,6 +141,82 @@ fn main(): Unit [io] = {
 }
 
 #[test]
+fn prometheus_metrics_are_normalized_escaped_and_deterministic() {
+    let output = run_certo(r#"module HostPrometheusMetricsTest
+
+fn main(): Unit [io] = {
+    val host = Host.new()
+    val requests = Host.counterMetric(host, "http.requests", "Requests\\total\nnow", "requests", ["route-name"], 4)
+    val latency = Host.histogramMetric(host, "http-latency", "Latency", "ms", ["route"], [10, 50], 4)
+    HostMetric.counterAdd(requests, ["""GET "/x"
+"""], 3)
+    HostMetric.histogramObserve(latency, ["/x"], 12)
+    println(Host.metricsPrometheus(host))
+}
+"#);
+    let stdout = assert_success(&output).replace("\r\n", "\n");
+    assert_eq!(stdout, concat!(
+        "# HELP http_requests_total Requests\\\\total\\nnow\n",
+        "# TYPE http_requests_total counter\n",
+        "http_requests_total{route_name=\"GET \\\"/x\\\"\\n\"} 3\n",
+        "# HELP http_latency Latency\n",
+        "# TYPE http_latency histogram\n",
+        "http_latency_bucket{route=\"/x\",le=\"10\"} 0\n",
+        "http_latency_bucket{route=\"/x\",le=\"50\"} 1\n",
+        "http_latency_bucket{route=\"/x\",le=\"+Inf\"} 1\n",
+        "http_latency_sum{route=\"/x\"} 12\n",
+        "http_latency_count{route=\"/x\"} 1\n",
+        "\n",
+    ));
+}
+
+#[test]
+fn prometheus_normalization_collisions_are_rejected() {
+    let output = run_certo(r#"module HostPrometheusCollisionTest
+fn main(): Unit = {
+    val host = Host.new()
+    val first = Host.gaugeMetric(host, "queue-depth", "one", "items", [], 1)
+    val second = Host.gaugeMetric(host, "queue.depth", "two", "items", [], 1)
+}
+"#);
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("metric names collide after Prometheus normalization"), "{stderr}");
+}
+
+#[test]
+fn prometheus_derived_and_label_collisions_are_rejected() {
+    let derived = run_certo(r#"module HostPrometheusDerivedCollisionTest
+fn main(): Unit = {
+    val host = Host.new()
+    val histogram = Host.histogramMetric(host, "request", "latency", "ms", [], [10], 1)
+    val gauge = Host.gaugeMetric(host, "request_sum", "sum", "ms", [], 1)
+}
+"#);
+    assert!(!derived.status.success());
+    assert!(
+        String::from_utf8_lossy(&derived.stderr)
+            .contains("metric names collide after Prometheus normalization"),
+        "{}",
+        String::from_utf8_lossy(&derived.stderr),
+    );
+
+    let labels = run_certo(r#"module HostPrometheusLabelCollisionTest
+fn main(): Unit = {
+    val host = Host.new()
+    val gauge = Host.gaugeMetric(host, "queue", "depth", "items", ["route-name", "route.name"], 1)
+}
+"#);
+    assert!(!labels.status.success());
+    assert!(
+        String::from_utf8_lossy(&labels.stderr)
+            .contains("label names collide after Prometheus normalization"),
+        "{}",
+        String::from_utf8_lossy(&labels.stderr),
+    );
+}
+
+#[test]
 fn concurrent_worker_events_have_one_total_sequence_order() {
     let output = run_certo(r#"module HostConcurrentEventTest
 fn start(c: HostContext): Result<Unit, Text> = Ok(())

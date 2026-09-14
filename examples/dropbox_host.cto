@@ -1,0 +1,194 @@
+module DropboxHost
+
+import Stdlib.Bytes
+import Stdlib.File
+import Stdlib.Host
+import Stdlib.Http
+import Stdlib.Json
+
+// A host-managed Dropbox client. The token parser never includes its input in
+// diagnostics, and no lifecycle event includes the credential.
+type DropboxClient = { accessToken: Text }
+
+fn parseAccessToken(value: Text): Result<Text, Text> =
+    if Text.eq(value, "") then Err("Dropbox access token must not be empty")
+    else Ok(value)
+
+fn accessTokenKey(): ConfigKey<Text> =
+    Host.configKey("dropbox.access_token", parseAccessToken)
+
+fn parseRequiredPath(value: Text): Result<Text, Text> =
+    if Text.eq(value, "") then Err("path must not be empty") else Ok(value)
+
+fn sourcePathKey(): ConfigKey<Text> =
+    Host.configKey("dropbox.source_path", parseRequiredPath)
+
+fn destinationPathKey(): ConfigKey<Text> =
+    Host.configKey("dropbox.destination_path", parseRequiredPath)
+
+fn clientKey(): ServiceKey<DropboxClient> =
+    Host.serviceKey("dropbox.client")
+
+fn createClient(ctx: HostContext): Result<DropboxClient, Text> =
+    Ok(DropboxClient { accessToken: HostContext.configValue(ctx, accessTokenKey()) })
+
+fn disposeClient(ctx: HostContext): Result<Unit, Text> = Ok(())
+
+fn startDropbox(ctx: HostContext): Result<Unit, Text> [io] =
+    match HostContext.service(ctx, clientKey()) {
+        Some(_) => {
+            HostContext.log(ctx, "info", "dropbox.started", "Dropbox client is ready")
+            HostContext.gauge(ctx, "dropbox.client.ready", 1)
+            Ok(())
+        }
+        None => Err("Dropbox client service is unavailable")
+    }
+
+fn stopDropbox(ctx: HostContext): Result<Unit, Text> [io] = {
+    HostContext.gauge(ctx, "dropbox.client.ready", 0)
+    HostContext.log(ctx, "info", "dropbox.stopped", "Dropbox client stopped")
+    Ok(())
+}
+
+fn copyFile(ctx: HostContext): Result<Unit, Text> [io] = {
+    HostContext.ready(ctx)
+    val source = HostContext.configValue(ctx, sourcePathKey())
+    val destination = HostContext.configValue(ctx, destinationPathKey())
+    match HostContext.service(ctx, clientKey()) {
+        None => Err("Dropbox client service is unavailable")
+        Some(client) => match readFileBytes(source) {
+            None => Err("could not read source file: " ++ source)
+            Some(content) => {
+                HostContext.log(ctx, "info", "dropbox.upload.started", "Uploading " ++ source)
+                match DropboxClient.upload(client, destination, content) {
+                    Ok(_) => {
+                        HostContext.counter(ctx, "dropbox.upload.succeeded", 1)
+                        HostContext.log(
+                            ctx,
+                            "info",
+                            "dropbox.upload.completed",
+                            "Uploaded file to " ++ destination)
+                        Host.requestStop(ctx)
+                        Ok(())
+                    }
+                    Err(message) => {
+                        HostContext.counter(ctx, "dropbox.upload.failed", 1)
+                        Err(message)
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn jsonPath(path: Text): Text = {
+    val body = Json.object()
+    JsonValue.set(body, "path", Json.string(path))
+    Json.stringify(body)
+}
+
+fn api(client: DropboxClient, endpoint: Text, body: Text): HttpResponse [io] =
+    Http.request(
+        "POST",
+        "https://api.dropboxapi.com/2/" ++ endpoint,
+        [
+            ["Authorization", "Bearer " ++ client.accessToken],
+            ["Content-Type", "application/json"]
+        ],
+        body)
+
+fn apiResult(response: HttpResponse): Result<JsonValue, Text> =
+    if HttpResponse.ok(response) then Ok(Json.parse(HttpResponse.body(response)))
+    else Err(
+        "Dropbox API returned HTTP " ++ intToText(HttpResponse.status(response)) ++
+        ": " ++ HttpResponse.body(response))
+
+pub fn dropboxPlugin(): HostPlugin =
+    Host.plugin("dropbox", startDropbox, stopDropbox)
+        .provideFactory(clientKey(), createClient, disposeClient)
+        .worker("copy-file", copyFile)
+
+pub fn configureDropbox(host: Host): Host =
+    host.requireConfig(accessTokenKey())
+        .requireConfig(sourcePathKey())
+        .requireConfig(destinationPathKey())
+        .add(dropboxPlugin())
+
+pub fn resolveDropboxClient(ctx: HostContext): Result<DropboxClient, Text> =
+    match HostContext.service(ctx, clientKey()) {
+        Some(client) => Ok(client)
+        None => Err("Dropbox client service is unavailable")
+    }
+
+impl DropboxClient {
+pub fn metadata(client: DropboxClient, path: Text): Result<JsonValue, Text> [io] =
+    apiResult(api(client, "files/get_metadata", jsonPath(path)))
+
+pub fn listFolder(client: DropboxClient, path: Text): Result<JsonValue, Text> [io] =
+    apiResult(api(client, "files/list_folder", jsonPath(path)))
+
+pub fn listFolderContinue(client: DropboxClient, cursor: Text): Result<JsonValue, Text> [io] = {
+    val body = Json.object()
+    JsonValue.set(body, "cursor", Json.string(cursor))
+    apiResult(api(client, "files/list_folder/continue", Json.stringify(body)))
+}
+
+pub fn createFolder(client: DropboxClient, path: Text): Result<JsonValue, Text> [io] = {
+    val body = Json.object()
+    JsonValue.set(body, "path", Json.string(path))
+    JsonValue.set(body, "autorename", Json.bool(false))
+    apiResult(api(client, "files/create_folder_v2", Json.stringify(body)))
+}
+
+pub fn delete(client: DropboxClient, path: Text): Result<JsonValue, Text> [io] =
+    apiResult(api(client, "files/delete_v2", jsonPath(path)))
+
+pub fn upload(client: DropboxClient, path: Text, content: Bytes): Result<JsonValue, Text> [io] = {
+    val argument = Json.object()
+    JsonValue.set(argument, "path", Json.string(path))
+    JsonValue.set(argument, "mode", Json.string("overwrite"))
+    JsonValue.set(argument, "autorename", Json.bool(false))
+    JsonValue.set(argument, "mute", Json.bool(false))
+    val response = Http.requestBytes(
+        "POST",
+        "https://content.dropboxapi.com/2/files/upload",
+        [
+            ["Authorization", "Bearer " ++ client.accessToken],
+            ["Dropbox-API-Arg", Json.stringify(argument)],
+            ["Content-Type", "application/octet-stream"]
+        ],
+        content)
+    apiResult(response)
+}
+
+pub fn uploadText(client: DropboxClient, path: Text, content: Text): Result<JsonValue, Text> [io] =
+    DropboxClient.upload(client, path, Bytes.fromText(content))
+
+pub fn download(client: DropboxClient, path: Text): Result<Bytes, Text> [io] = {
+    val response = Http.requestBytes(
+        "POST",
+        "https://content.dropboxapi.com/2/files/download",
+        [
+            ["Authorization", "Bearer " ++ client.accessToken],
+            ["Dropbox-API-Arg", jsonPath(path)]
+        ],
+        Bytes.empty())
+    if HttpResponse.ok(response) then Ok(HttpResponse.bodyBytes(response))
+    else Err(
+        "Dropbox API returned HTTP " ++ intToText(HttpResponse.status(response)) ++
+        ": " ++ HttpResponse.body(response))
+}
+}
+
+// Required environment configuration:
+//   CERTO__DROPBOX__ACCESS_TOKEN
+//   CERTO__DROPBOX__SOURCE_PATH
+//   CERTO__DROPBOX__DESTINATION_PATH
+// The worker uploads one file and requests graceful host shutdown on success.
+fn main(): Unit [io] = {
+    val host = configureDropbox(Host.new())
+    match Host.runTyped(host) {
+        Ok(_) => println("Dropbox host stopped")
+        Err(error) => eprintln(HostLifecycleError.message(error))
+    }
+}
