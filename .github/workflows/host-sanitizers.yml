@@ -45,6 +45,7 @@ jobs:
           CERTO_HOST_STRESS_SEED: ${{ github.event.inputs.seed || github.run_id }}
           CERTO_HOST_STRESS_ITERATIONS: ${{ github.event.inputs.iterations || '500' }}
           CERTO_HOST_STRESS_ARTIFACT_DIR: artifacts/address-sanitizer
+          CERTO_HOST_STRESS_SECRET_CANARY: certo-sanitizer-secret-canary
         run: cargo test -p certo --test host_integration randomized_lifecycle_stress -- --ignored --nocapture
       - name: Upload AddressSanitizer failure artifacts
         if: failure() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
@@ -73,6 +74,7 @@ jobs:
           CERTO_HOST_STRESS_SEED: ${{ github.event.inputs.seed || github.run_id }}
           CERTO_HOST_STRESS_ITERATIONS: ${{ github.event.inputs.iterations || '500' }}
           CERTO_HOST_STRESS_ARTIFACT_DIR: artifacts/thread-sanitizer
+          CERTO_HOST_STRESS_SECRET_CANARY: certo-sanitizer-secret-canary
         run: cargo test -p certo --test host_integration randomized_lifecycle_stress -- --ignored --nocapture
       - name: Upload ThreadSanitizer failure artifacts
         if: failure() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')

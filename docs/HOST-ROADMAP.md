@@ -192,7 +192,11 @@ defined in [`HOST-OBSERVABILITY.md`](HOST-OBSERVABILITY.md).
 - ✅ Prometheus text export with deterministic ordering, escaping, and
   normalization collision validation.
 - OpenTelemetry-compatible traces and metrics after a separate design review.
-- Correlation context propagated through plugin and worker callbacks.
+- ✅ Correlation context propagated through plugin and worker callbacks,
+  structured events, and explicit bounded metric labels.
+- ✅ Structural secret sink checks plus runtime redaction/rejection for exposed
+  secret configuration across events, metrics, status, failures, and sanitizer
+  artifacts.
 
 ### Exit criteria
 
@@ -285,5 +289,5 @@ Every Host milestone must satisfy the following gates:
 
 ## Recommended next implementation item
 
-Implement H4 correlation context derivation and propagation through plugin and
-worker callbacks and structured events.
+Add reproducible high-contention logging and metrics benchmarks with explicit
+regression thresholds to finish H4's remaining performance exit criterion.

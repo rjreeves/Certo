@@ -184,6 +184,21 @@ worker contexts inherit it automatically. An application may derive a context
 with a new correlation identity for downstream work; derivation does not mutate
 the parent context.
 
+```certo
+Host.correlation(host: Host, correlationId: Text): Host
+HostContext.withCorrelation(context: HostContext, correlationId: Text): HostContext
+HostContext.hostId(context: HostContext): Text
+HostContext.plugin(context: HostContext): Text?
+HostContext.worker(context: HostContext): Text?
+HostContext.correlationId(context: HostContext): Text?
+```
+
+The root identity is configured before startup and is copied into host-service,
+plugin-scoped, plugin, and worker callback contexts. Deriving a context changes
+only the correlation identity; host, plugin, worker, configuration, services,
+shutdown state, and readiness ownership remain the same. Worker restarts reuse
+their inherited root identity.
+
 Correlation identity flows into structured events and may be selected as an
 explicit metric label, but it is never added to metrics automatically because
 that would create unbounded cardinality. Propagation across HTTP or other
@@ -201,6 +216,19 @@ Explicitly exposing a secret converts it back to its underlying type and is an
 application-level trust decision; exporters cannot reconstruct its provenance.
 Sink implementations must treat accepted events as sensitive operational data
 and must not echo an event payload in their own error text.
+
+As a defense in depth measure, the host retains the winning raw values for
+registered secret-bearing configuration keys. If an explicitly exposed value
+reaches a human-readable event or callback failure message, every occurrence is
+replaced with `[REDACTED]`. Secret values used as event identities, correlation
+identities, metric names, metadata, or label values are rejected with a stable
+diagnostic that does not echo the value. Consequently status snapshots,
+compatibility errors, typed lifecycle failures, JSON metrics, and Prometheus
+output cannot reproduce a registered secret value.
+
+Sanitizer stress artifact generation applies the same canary-redaction policy
+through `CERTO_HOST_STRESS_SECRET_CANARY` before writing captured source,
+stdout, stderr, metadata, or reproduction instructions.
 
 ## Acceptance tests
 

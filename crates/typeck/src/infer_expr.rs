@@ -578,6 +578,11 @@ pub fn infer(expr: &S<Expr>, ctx: &mut Ctx<'_>) -> Ty {
                 "println", "print", "eprint", "Json.stringify",
                 "HostContext.log", "HostContext.logEvent",
                 "HostLogField.text", "HostLogEvent.create",
+                "Host.correlation", "HostContext.withCorrelation",
+                "HostContext.fail", "Host.counterMetric", "Host.gaugeMetric",
+                "Host.histogramMetric", "HostMetric.counterAdd",
+                "HostMetric.gaugeSet", "HostMetric.histogramObserve",
+                "HostContext.counter", "HostContext.gauge",
             ];
             if let Some(name) = &fn_name {
                 if SENSITIVE_SINKS.contains(&name.as_str()) {

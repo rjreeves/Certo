@@ -3089,6 +3089,28 @@ fn host_logging_rejects_structural_secrets() {
 }
 
 #[test]
+fn host_failures_and_metrics_reject_structural_secrets() {
+    let errors = check_full(
+        "module HostSecretTelemetryTest\n\
+         type Secret<T> = priv Secret(T)\n\
+         impl<T> Secret { fn wrap(v: T): Secret<T> = Secret(v) }\n\
+         fn reject(c: HostContext, h: Host): Unit [io] = {\n\
+           val password: Secret<Text> = Secret.wrap(\"hidden\")\n\
+           HostContext.fail(c, password)\n\
+           val metric = Host.counterMetric(h, \"requests\", \"Requests\", \"requests\", [\"key\"], 2)\n\
+           HostMetric.counterAdd(metric, [password], 1)\n\
+         }"
+    ).expect_err("secret failure and metric values must be rejected");
+    let rejected = errors.iter().filter_map(|item| match &item.kind {
+        certo_typeck::TypeErrorKind::SecretInSensitiveContext { fn_name, .. } =>
+            Some(fn_name.as_str()),
+        _ => None,
+    }).collect::<Vec<_>>();
+    assert!(rejected.contains(&"HostContext.fail"), "got {errors:?}");
+    assert!(rejected.contains(&"HostMetric.counterAdd"), "got {errors:?}");
+}
+
+#[test]
 fn host_worker_supervision_typechecks() {
     check_full(
         "module A\n\
