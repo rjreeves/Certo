@@ -26,6 +26,145 @@ fn assert_success(output: &std::process::Output) -> String {
 }
 
 #[test]
+fn operational_probe_adapters_map_lifecycle_states_and_metrics() {
+    let output = run_certo(r#"module HostOperationalProbeTest
+
+fn start(c: HostContext): Result<Unit, Text> = Ok(())
+fn stop(c: HostContext): Result<Unit, Text> = Ok(())
+fn failStart(c: HostContext): Result<Unit, Text> = Err("startup failed")
+
+fn show(host: Host): Unit [io] = {
+    val status = Host.operationStatus(host)
+    println(HostOperationalCondition.name(HostOperationalStatus.condition(status)))
+    println(HostState.name(HostOperationalStatus.state(status)))
+    println(boolToText(HostOperationalStatus.isLive(status)))
+    println(boolToText(HostOperationalStatus.isReady(status)))
+    val live = HostHttp.liveness(host)
+    val ready = HostHttp.readiness(host)
+    println(intToText(HttpResponse.status(live)))
+    println(HttpResponse.body(live))
+    println(intToText(HttpResponse.status(ready)))
+    println(HttpResponse.body(ready))
+}
+
+fn main(): Unit [io] = {
+    val host = Host.new().add(Host.plugin("probe", start, stop))
+    val requests = Host.counterMetric(host, "probe.requests", "Probe requests", "requests", [], 1)
+    show(host)
+    val started = Host.start(host)
+    show(host)
+    HostMetric.counterAdd(requests, [], 2)
+    val metrics = HostHttp.metrics(host)
+    println(intToText(HttpResponse.status(metrics)))
+    println(HttpResponse.contentType(metrics))
+    println(HttpResponse.body(metrics))
+    val stopped = Host.stop(host)
+    show(host)
+
+    val failed = Host.new().add(Host.plugin("failure", failStart, stop))
+    val failedStartResult = Host.start(failed)
+    show(failed)
+    match HostOperationalStatus.failureKind(Host.operationStatus(failed)) {
+        Some(kind) => println(HostFailureKind.name(kind))
+        None => println("missing")
+    }
+}
+"#);
+    let stdout = assert_success(&output).replace("\r\n", "\n");
+    assert!(stdout.contains(concat!(
+        "starting\nNew\ntrue\nfalse\n",
+        "200\n{\"condition\":\"starting\",\"state\":\"New\",\"live\":true,\"ready\":false}\n",
+        "503\n{\"condition\":\"starting\",\"state\":\"New\",\"live\":true,\"ready\":false}\n",
+    )), "{stdout}");
+    assert!(stdout.contains(concat!(
+        "ready\nHealthy\ntrue\ntrue\n",
+        "200\n{\"condition\":\"ready\",\"state\":\"Healthy\",\"live\":true,\"ready\":true}\n",
+        "200\n{\"condition\":\"ready\",\"state\":\"Healthy\",\"live\":true,\"ready\":true}\n",
+    )), "{stdout}");
+    assert!(stdout.contains("200\ntext/plain; version=0.0.4; charset=utf-8\n"), "{stdout}");
+    assert!(stdout.contains("probe_requests_total 2\n"), "{stdout}");
+    assert!(stdout.contains(concat!(
+        "stopped\nStopped\nfalse\nfalse\n",
+        "503\n{\"condition\":\"stopped\",\"state\":\"Stopped\",\"live\":false,\"ready\":false}\n",
+        "503\n{\"condition\":\"stopped\",\"state\":\"Stopped\",\"live\":false,\"ready\":false}\n",
+    )), "{stdout}");
+    assert!(stdout.contains(
+        "{\"condition\":\"failed\",\"state\":\"Failed\",\"live\":false,\"ready\":false,\"failure_kind\":\"StartupFailure\"}"
+    ), "{stdout}");
+    assert!(stdout.ends_with("StartupFailure\n"), "{stdout}");
+}
+
+#[test]
+fn operational_condition_distinguishes_starting_degraded_and_stopping() {
+    let output = run_certo(r#"module HostOperationalTransitionTest
+
+fn signalKey(): ServiceKey<Channel<Int>> = Host.serviceKey("failure-signal")
+fn attemptsKey(): ServiceKey<Channel<Int>> = Host.serviceKey("attempts")
+fn start(c: HostContext): Result<Unit, Text> = Ok(())
+fn slowStart(c: HostContext): Result<Unit, Text> [io] = { sleep(100) Ok(()) }
+fn stop(c: HostContext): Result<Unit, Text> = Ok(())
+fn slowStop(c: HostContext): Result<Unit, Text> [io] = { sleep(100) Ok(()) }
+fn work(c: HostContext): Result<Unit, Text> [io] = {
+    HostContext.ready(c)
+    match HostContext.service(c, attemptsKey()) {
+        Some(attempts) => match Channel.tryReceive(attempts) {
+            Some(_) => match HostContext.service(c, signalKey()) {
+                Some(signal) => match Channel.receive(signal) {
+                    Some(_) => Err("restart")
+                    None => Ok(())
+                }
+                None => Err("signal missing")
+            }
+            None => {
+                while HostContext.sleep(c, Duration.seconds(5)) {}
+                Ok(())
+            }
+        }
+        None => Err("attempts missing")
+    }
+}
+fn printCondition(label: Text, host: Host): Unit [io] = {
+    val status = Host.operationStatus(host)
+    println(f"{label}:{HostOperationalCondition.name(HostOperationalStatus.condition(status))}")
+}
+fn startHost(host: Host): Unit [io] = { val result = Host.start(host) }
+fn stopHost(host: Host): Unit [io] = { val result = Host.stop(host) }
+fn observeStarting(host: Host): Unit [io] = { sleep(20) printCondition("startup", host) }
+fn observeStopping(host: Host): Unit [io] = { sleep(20) printCondition("shutdown", host) }
+
+fn main(): Unit [io, async] = {
+    val startingHost = Host.new().add(Host.plugin("slow", slowStart, stop))
+    val startup = await parallel { startHost(startingHost), observeStarting(startingHost) }
+    val startingCleanup = Host.stop(startingHost)
+
+    val stoppingHost = Host.new().add(Host.plugin("slow", start, slowStop))
+    val stoppingStarted = Host.start(stoppingHost)
+    val shutdown = await parallel { stopHost(stoppingHost), observeStopping(stoppingHost) }
+
+    val signal = Channel.new(capacity: 1)
+    val attempts = Channel.new(capacity: 1)
+    Channel.send(attempts, 1)
+    val degradedHost = Host.new()
+        .provide(signalKey(), signal)
+        .provide(attemptsKey(), attempts)
+        .add(Host.plugin("restart", start, stop)
+            .worker("worker", work)
+            .restart(RestartPolicy.onFailure(
+                2, Duration.milliseconds(200), Duration.milliseconds(200))))
+    val degradedStarted = Host.start(degradedHost)
+    Channel.send(signal, 1)
+    sleep(20)
+    printCondition("restart", degradedHost)
+    val degradedCleanup = Host.stop(degradedHost)
+}
+"#);
+    let stdout = assert_success(&output);
+    assert!(stdout.contains("startup:starting"), "{stdout}");
+    assert!(stdout.contains("shutdown:stopping"), "{stdout}");
+    assert!(stdout.contains("restart:degraded"), "{stdout}");
+}
+
+#[test]
 fn typed_host_events_preserve_schema_fields_context_and_sequence() {
     let output = run_certo(r#"module HostTypedEventTest
 

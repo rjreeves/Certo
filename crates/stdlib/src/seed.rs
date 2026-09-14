@@ -1073,6 +1073,8 @@ pub fn seed_stdlib(env: &mut TypeEnv, counter: &mut u32) {
         let context = Ty::Named { name: "HostContext".into(), args: vec![] };
         let restart = Ty::Named { name: "RestartPolicy".into(), args: vec![] };
         let status = Ty::Named { name: "HostStatusSnapshot".into(), args: vec![] };
+        let operational_status = Ty::Named { name: "HostOperationalStatus".into(), args: vec![] };
+        let operational_condition = Ty::Named { name: "HostOperationalCondition".into(), args: vec![] };
         let worker_status = Ty::Named { name: "HostWorkerStatus".into(), args: vec![] };
         let metric_status = Ty::Named { name: "HostMetricSnapshot".into(), args: vec![] };
         let host_metric = Ty::Named { name: "HostMetric".into(), args: vec![] };
@@ -1329,6 +1331,18 @@ pub fn seed_stdlib(env: &mut TypeEnv, counter: &mut u32) {
             typed_host_result,
         ));
         def!("Host.status", fn1(host.clone(), status.clone()));
+        def!("Host.operationStatus", fn1(host.clone(), operational_status.clone()));
+        def!("HostOperationalStatus.condition", fn1(
+            operational_status.clone(), operational_condition.clone()));
+        def!("HostOperationalStatus.state", fn1(
+            operational_status.clone(), host_state.clone()));
+        def!("HostOperationalStatus.isReady", fn1(operational_status.clone(), Ty::Bool));
+        def!("HostOperationalStatus.isLive", fn1(operational_status.clone(), Ty::Bool));
+        def!("HostOperationalStatus.failureKind", fn1(
+            operational_status,
+            Ty::Option(Box::new(failure_kind.clone())),
+        ));
+        def!("HostOperationalCondition.name", fn1(operational_condition, Ty::Text));
         def!("HostStatusSnapshot.state", fn1(status.clone(), host_state.clone()));
         def!("HostStatusSnapshot.isReady", fn1(status.clone(), Ty::Bool));
         def!("HostStatusSnapshot.isLive", fn1(status.clone(), Ty::Bool));
@@ -1878,6 +1892,10 @@ pub fn seed_stdlib(env: &mut TypeEnv, counter: &mut u32) {
         // needed so a `form`'s `onSuccess: navigate(View)` can actually
         // navigate the client somewhere.
         def!("Http.redirect",    fn1(Ty::Text, hr()));
+        let host = Ty::Named { name: "Host".into(), args: vec![] };
+        def!("HostHttp.liveness", fn1(host.clone(), hr()));
+        def!("HostHttp.readiness", fn1(host.clone(), hr()));
+        def!("HostHttp.metrics", fn1(host, hr()));
 
         // HttpRequest accessors
         def!("HttpRequest.method",  fn1(req(), Ty::Text));
@@ -2153,6 +2171,13 @@ pub fn seed_stdlib(env: &mut TypeEnv, counter: &mut u32) {
     pm!("Host.waitUntilReady",     "host", "timeout");
     pm!("Host.waitUntilReadyTyped", "host", "timeout");
     pm!("Host.status",             "host");
+    pm!("Host.operationStatus", "host");
+    pm!("HostOperationalStatus.condition", "status");
+    pm!("HostOperationalStatus.state", "status");
+    pm!("HostOperationalStatus.isReady", "status");
+    pm!("HostOperationalStatus.isLive", "status");
+    pm!("HostOperationalStatus.failureKind", "status");
+    pm!("HostOperationalCondition.name", "condition");
     pm!("HostStatusSnapshot.state", "snapshot");
     pm!("HostStatusSnapshot.isReady", "snapshot");
     pm!("HostStatusSnapshot.isLive", "snapshot");
@@ -2287,6 +2312,9 @@ pub fn seed_stdlib(env: &mut TypeEnv, counter: &mut u32) {
     pm!("Http.post",    "url", "body", "content_type");
     pm!("Http.put",     "url", "body", "content_type");
     pm!("Http.respond", "status", "content_type", "body");
+    pm!("HostHttp.liveness", "host");
+    pm!("HostHttp.readiness", "host");
+    pm!("HostHttp.metrics", "host");
     pm!("Http.ok",      "content_type", "body");
     pm!("Http.serve",   "port", "handler");
 

@@ -958,6 +958,18 @@ Host.waitUntilReadyTyped(
     timeout: Duration
 ): Result<Unit, HostLifecycleError> [io]
 Host.status(host: Host): HostStatusSnapshot [io]
+Host.operationStatus(host: Host): HostOperationalStatus [io]
+
+HostOperationalStatus.condition(status): HostOperationalCondition
+HostOperationalStatus.state(status): HostState
+HostOperationalStatus.isReady(status): Bool
+HostOperationalStatus.isLive(status): Bool
+HostOperationalStatus.failureKind(status): HostFailureKind?
+HostOperationalCondition.name(condition): Text
+
+HostHttp.liveness(host: Host): HttpResponse [io]
+HostHttp.readiness(host: Host): HttpResponse [io]
+HostHttp.metrics(host: Host): HttpResponse [io]
 
 HostStatusSnapshot.state(snapshot: HostStatusSnapshot): HostState
 HostStatusSnapshot.isReady(snapshot: HostStatusSnapshot): Bool
@@ -1153,6 +1165,15 @@ is live in `New`, `Starting`, `Healthy`, or `Stopping`, and not live after
 their plugin, typed state, readiness, restart count, and last callback error.
 Counters and gauges are copied into typed metric entries. `Host.metrics`,
 `Host.health`, and the individual `worker*` methods remain compatibility views.
+
+`Host.operationStatus` is the transport-neutral probe snapshot. Its stable
+condition is `starting`, `ready`, `degraded`, `stopping`, `stopped`, or
+`failed`; `degraded` identifies a previously started host whose worker is
+restarting. `HostHttp.liveness` and `HostHttp.readiness` encode that snapshot
+as deterministic JSON, returning 200 when their respective predicate is true
+and 503 otherwise. `HostHttp.metrics` returns the H4 Prometheus snapshot with
+the `text/plain; version=0.0.4; charset=utf-8` content type. Probe failures
+expose only the typed failure category, never callback messages or config.
 
 Host lifecycle transitions are deterministic:
 

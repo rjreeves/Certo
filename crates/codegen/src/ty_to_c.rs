@@ -57,12 +57,13 @@ pub fn ty_to_c(ty: &Ty) -> String {
         // Typed Host discriminants remain distinct Certo types while using
         // immutable text constants at the native ABI boundary.
         Ty::Named { name, .. } if matches!(name.as_str(),
-            "HostState" | "HostWorkerState" | "HostFailureKind" | "HostLogSeverity"
+            "HostState" | "HostWorkerState" | "HostFailureKind" | "HostLogSeverity" |
+            "HostOperationalCondition"
         ) => "certo_text_t".into(),
         // Stdlib.Host values are opaque heap handles owned by the runtime.
         Ty::Named { name, .. } if matches!(name.as_str(),
             "Host" | "HostPlugin" | "HostContext" | "ServiceKey" | "ConfigKey" | "RestartPolicy" |
-            "HostStatusSnapshot" | "HostWorkerStatus" | "HostMetricSnapshot" |
+            "HostStatusSnapshot" | "HostOperationalStatus" | "HostWorkerStatus" | "HostMetricSnapshot" |
             "HostLifecycleError" | "HostConfigurationError" | "HostLogEvent" | "HostLogField" |
             "HostLogOverflowPolicy" | "HostLogFailurePolicy" | "HostMetric"
         ) => "void*".into(),

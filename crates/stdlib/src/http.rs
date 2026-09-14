@@ -335,6 +335,45 @@ CertoHttpResponse* certo_http_respond(int64_t status, certo_text_t body, certo_t
     return http_response_new(status, b, body ? (int64_t)strlen(body) : 0, c);
 }
 
+static CertoHttpResponse* __certo_host_http_probe(CertoHost* host, bool liveness) {
+    CertoHostOperationalStatus* status = certo_host_operation_status(host);
+    bool accepted = liveness ? status->live : status->ready;
+    const char* failure = status->failure_kind ? status->failure_kind : "";
+    const char* failure_field = status->failure_kind ? ",\"failure_kind\":\"" : "";
+    const char* failure_end = status->failure_kind ? "\"" : "";
+    int needed = snprintf(NULL, 0,
+        "{\"condition\":\"%s\",\"state\":\"%s\",\"live\":%s,\"ready\":%s%s%s%s}",
+        status->condition, status->state, status->live ? "true" : "false",
+        status->ready ? "true" : "false", failure_field, failure, failure_end);
+    char* body = (char*)malloc((size_t)needed + 1);
+    if (!body) certo_panic("out of memory");
+    snprintf(body, (size_t)needed + 1,
+        "{\"condition\":\"%s\",\"state\":\"%s\",\"live\":%s,\"ready\":%s%s%s%s}",
+        status->condition, status->state, status->live ? "true" : "false",
+        status->ready ? "true" : "false", failure_field, failure, failure_end);
+    CertoHttpResponse* response = certo_http_respond(
+        accepted ? 200 : 503, body, "application/json; charset=utf-8");
+    free(body);
+    free(status);
+    return response;
+}
+
+CertoHttpResponse* certo_host_http_liveness(CertoHost* host) {
+    return __certo_host_http_probe(host, true);
+}
+
+CertoHttpResponse* certo_host_http_readiness(CertoHost* host) {
+    return __certo_host_http_probe(host, false);
+}
+
+CertoHttpResponse* certo_host_http_metrics(CertoHost* host) {
+    certo_text_t metrics = certo_host_metrics_prometheus(host);
+    CertoHttpResponse* response = certo_http_respond(200, metrics,
+        "text/plain; version=0.0.4; charset=utf-8");
+    if (host) free((void*)metrics);
+    return response;
+}
+
 CertoHttpResponse* certo_http_ok        (certo_text_t body, certo_text_t ct)  { return certo_http_respond(200, body, ct); }
 CertoHttpResponse* certo_http_not_found (certo_text_t body)                   { return certo_http_respond(404, body, "text/plain"); }
 CertoHttpResponse* certo_http_bad_req   (certo_text_t body)                   { return certo_http_respond(400, body, "text/plain"); }
