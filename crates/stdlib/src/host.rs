@@ -32,6 +32,7 @@ typedef struct CertoHostContext {
     struct CertoHost* host;
     struct CertoHostWorker* worker;
     certo_text_t plugin_name;
+    certo_text_t correlation_id;
 } CertoHostContext;
 
 typedef struct CertoServiceKey {
@@ -278,6 +279,69 @@ typedef void* (*CertoHostCallback)(void* env, void* context);
 
 static CertoHost* __certo_active_host = NULL;
 static bool __certo_host_valid_metric_name(certo_text_t name);
+
+static char* __certo_host_replace_secret(
+        const char* input, const char* secret) {
+    if (!input) return strdup("");
+    if (!secret || !*secret || !strstr(input, secret)) return strdup(input);
+    const char* replacement = "[REDACTED]";
+    size_t secret_len = strlen(secret), replacement_len = strlen(replacement);
+    size_t count = 0;
+    for (const char* p = input; (p = strstr(p, secret)); p += secret_len) count++;
+    size_t output_len = strlen(input) - count * secret_len +
+        count * replacement_len + 1;
+    char* output = (char*)malloc(output_len);
+    if (!output) certo_panic("out of memory");
+    char* out = output;
+    const char* cursor = input;
+    const char* found;
+    while ((found = strstr(cursor, secret))) {
+        size_t prefix = (size_t)(found - cursor);
+        memcpy(out, cursor, prefix); out += prefix;
+        memcpy(out, replacement, replacement_len); out += replacement_len;
+        cursor = found + secret_len;
+    }
+    strcpy(out, cursor);
+    return output;
+}
+
+static certo_text_t __certo_host_sanitize(CertoHost* host, certo_text_t text) {
+    char* sanitized = strdup(text ? text : "");
+    if (!sanitized) certo_panic("out of memory");
+    if (!host || !host->config_bindings || !host->context || !host->context->config)
+        return sanitized;
+    for (int64_t i = 0; i < host->config_bindings->len; i++) {
+        CertoHostConfigBinding* binding =
+            (CertoHostConfigBinding*)host->config_bindings->data[i];
+        if (!binding->key->secret_bearing) continue;
+        CertoHostConfig* best = NULL;
+        for (int64_t c = 0; c < host->context->config->len; c++) {
+            CertoHostConfig* item =
+                (CertoHostConfig*)host->context->config->data[c];
+            if (strcmp(item->key, binding->key->name) != 0) continue;
+            if (!best || item->precedence > best->precedence ||
+                (item->precedence == best->precedence &&
+                 item->sequence > best->sequence)) best = item;
+        }
+        if (!best || !best->value || !*best->value) continue;
+        char* next = __certo_host_replace_secret(sanitized, best->value);
+        free(sanitized);
+        sanitized = next;
+    }
+    return sanitized;
+}
+
+static void __certo_host_reject_secret_identity(
+        CertoHost* host, certo_text_t value, const char* category) {
+    certo_text_t sanitized = __certo_host_sanitize(host, value);
+    bool changed = strcmp(value ? value : "", sanitized) != 0;
+    free((void*)sanitized);
+    if (changed) {
+        char message[128];
+        snprintf(message, sizeof(message), "secret configuration cannot be used as %s", category);
+        certo_panic(message);
+    }
+}
 static void __certo_host_metric_add(CertoHost* host, certo_text_t name,
                                     int64_t amount);
 
@@ -385,7 +449,8 @@ static CertoHostLifecycleError* __certo_host_record_failure(
     error->kind = kind ? kind : "StartupFailure";
     error->phase = phase ? phase : "host";
     error->subject = subject ? subject : "host";
-    error->message = message ? message : "unknown error";
+    error->message = __certo_host_sanitize(
+        host, message ? message : "unknown error");
     error->timed_out = timed_out;
     error->configuration_errors =
         host && strcmp(error->kind, "ConfigurationFailure") == 0
@@ -440,6 +505,53 @@ CertoHost* certo_host_new(void) {
     snprintf(host_id, 48, "host-%p", (void*)host);
     host->host_id = host_id;
     return host;
+}
+
+CertoHost* certo_host_correlation(CertoHost* host, certo_text_t correlation_id) {
+    if (!host) certo_panic("Host.correlation called with a null host");
+    if (host->running || host->started_count > 0)
+        certo_panic("host correlation cannot be changed after startup");
+    if (!correlation_id || !*correlation_id)
+        certo_panic("host correlation must not be empty");
+    host->context->correlation_id = correlation_id;
+    for (int64_t i = 0; i < host->plugins->len; i++) {
+        CertoHostPlugin* plugin = (CertoHostPlugin*)host->plugins->data[i];
+        if (plugin->context) plugin->context->correlation_id = correlation_id;
+    }
+    return host;
+}
+
+CertoHostContext* certo_host_context_with_correlation(
+        CertoHostContext* context, certo_text_t correlation_id) {
+    if (!context) certo_panic("HostContext.withCorrelation called with a null context");
+    if (!correlation_id || !*correlation_id)
+        certo_panic("correlation identity must not be empty");
+    CertoHostContext* derived =
+        (CertoHostContext*)malloc(sizeof(CertoHostContext));
+    if (!derived) certo_panic("out of memory");
+    *derived = *context;
+    derived->correlation_id = correlation_id;
+    return derived;
+}
+
+certo_text_t certo_host_context_host_id(CertoHostContext* context) {
+    return context && context->host ? context->host->host_id : "";
+}
+
+void* certo_host_context_plugin(CertoHostContext* context) {
+    certo_text_t plugin = context && context->worker
+        ? context->worker->plugin_name : (context ? context->plugin_name : NULL);
+    return plugin ? __certo_opt_box((int64_t)(intptr_t)plugin) : NULL;
+}
+
+void* certo_host_context_worker(CertoHostContext* context) {
+    certo_text_t worker = context && context->worker ? context->worker->name : NULL;
+    return worker ? __certo_opt_box((int64_t)(intptr_t)worker) : NULL;
+}
+
+void* certo_host_context_correlation_id(CertoHostContext* context) {
+    return context && context->correlation_id
+        ? __certo_opt_box((int64_t)(intptr_t)context->correlation_id) : NULL;
 }
 
 CertoHostLogOverflowPolicy* certo_host_log_overflow_policy_drop_newest(void) {
@@ -1194,6 +1306,7 @@ CertoHost* certo_host_add(CertoHost* host, CertoHostPlugin* plugin) {
     plugin->context->config = host->context->config;
     plugin->context->host = host;
     plugin->context->plugin_name = plugin->name;
+    plugin->context->correlation_id = host->context->correlation_id;
     return host;
 }
 
@@ -1366,6 +1479,7 @@ static void __certo_host_unlock(CertoHost* host) {
 static CertoHostMetric* __certo_host_metric(CertoHost* host,
                                             certo_text_t name,
                                             bool gauge) {
+    __certo_host_reject_secret_identity(host, name, "a metric name");
     for (int64_t i = 0; i < host->metrics->len; i++) {
         CertoHostMetric* metric = (CertoHostMetric*)host->metrics->data[i];
         if (metric->gauge == gauge && strcmp(metric->name, name) == 0) return metric;
@@ -1482,8 +1596,12 @@ static CertoHostMetricDescriptor* __certo_host_metric_descriptor(
     if (max_series <= 0) certo_panic("metric series limit must be positive");
     label_names = label_names ? label_names : certo_list_new_empty();
     buckets = buckets ? buckets : certo_list_new_empty();
+    __certo_host_reject_secret_identity(host, name, "a metric name");
+    __certo_host_reject_secret_identity(host, help, "metric help text");
+    __certo_host_reject_secret_identity(host, unit, "a metric unit");
     for (int64_t i = 0; i < label_names->len; i++) {
         certo_text_t label = (certo_text_t)label_names->data[i];
+        __certo_host_reject_secret_identity(host, label, "a metric label name");
         if (!__certo_host_valid_metric_name(label)) certo_panic("invalid metric label name");
         for (int64_t j = 0; j < i; j++)
             if (strcmp(label, (certo_text_t)label_names->data[j]) == 0)
@@ -1570,6 +1688,9 @@ static CertoHostMetricSeries* __certo_host_metric_series(
         CertoHostMetricDescriptor* descriptor, CertoList* labels) {
     if (!descriptor || !labels || labels->len != descriptor->label_names->len)
         certo_panic("metric label values must exactly match the descriptor labels");
+    for (int64_t i = 0; i < labels->len; i++)
+        __certo_host_reject_secret_identity(
+            descriptor->host, (certo_text_t)labels->data[i], "a metric label value");
     for (int64_t i = 0; i < descriptor->series->len; i++) {
         CertoHostMetricSeries* series =
             (CertoHostMetricSeries*)descriptor->series->data[i];
@@ -1927,12 +2048,33 @@ static int64_t __certo_host_emit_log_event(CertoHostContext* context,
     certo_text_t plugin = context->worker
         ? context->worker->plugin_name : context->plugin_name;
     certo_text_t worker = context->worker ? context->worker->name : NULL;
+    __certo_host_reject_secret_identity(host, accepted->event, "an event name");
+    __certo_host_reject_secret_identity(host, plugin, "a plugin identity");
+    __certo_host_reject_secret_identity(host, worker, "a worker identity");
+    __certo_host_reject_secret_identity(
+        host, context->correlation_id, "a correlation identity");
+    accepted->message = __certo_host_sanitize(host, accepted->message);
+    CertoList* safe_fields = certo_list_new_empty();
+    for (int64_t i = 0; i < accepted->fields->len; i++) {
+        CertoHostLogField* source =
+            (CertoHostLogField*)accepted->fields->data[i];
+        __certo_host_reject_secret_identity(host, source->name, "an event field name");
+        CertoHostLogField* field =
+            (CertoHostLogField*)malloc(sizeof(CertoHostLogField));
+        if (!field) certo_panic("out of memory");
+        *field = *source;
+        if (field->kind == 0)
+            field->text_value = __certo_host_sanitize(host, field->text_value);
+        safe_fields = certo_list_push_mut(safe_fields, field);
+    }
+    accepted->fields = safe_fields;
     __certo_host_lock(host);
     accepted->sequence = ++host->event_sequence;
     accepted->timestamp_unix_ms = (int64_t)time(NULL) * 1000;
     accepted->host_id = host->host_id;
     accepted->plugin = plugin;
     accepted->worker = worker;
+    accepted->correlation_id = context->correlation_id;
     bool stderrEnabled = host->stderr_log_enabled;
     if (stderrEnabled) {
     fputs("{\"schema\":", stderr); __certo_host_write_json_string(stderr, accepted->schema);
@@ -2037,8 +2179,8 @@ static void* __certo_host_worker_main(void* raw) {
         worker->result = __certo_host_call(worker->callback, worker->context);
         bool failed = !__result_is_ok(worker->result) || !CERTO_ATOMIC_LOAD(&worker->ready);
         if (!__result_is_ok(worker->result)) {
-            CERTO_ATOMIC_STORE(&worker->last_error,
-                (certo_text_t)__result_unwrap(worker->result));
+            CERTO_ATOMIC_STORE(&worker->last_error, __certo_host_sanitize(
+                worker->host, (certo_text_t)__result_unwrap(worker->result)));
             __certo_host_metric_add(worker->host, "host.worker.failures", 1);
         } else if (!CERTO_ATOMIC_LOAD(&worker->ready)) {
             CERTO_ATOMIC_STORE(&worker->last_error,
@@ -2126,6 +2268,7 @@ static void __certo_host_launch_workers(CertoHost* host) {
             worker->context->host = host;
             worker->context->worker = worker;
             worker->context->plugin_name = plugin->name;
+            worker->context->correlation_id = plugin->context->correlation_id;
             worker->host = host;
             worker->result = NULL;
             worker->joined = false;
@@ -2405,7 +2548,8 @@ static certo_text_t __certo_host_dispose_service_order(
                 CERTO_ATOMIC_STORE(&host->retain_host_services, 1);
             break;
         } else if (!__result_is_ok(result)) {
-            certo_text_t detail = (certo_text_t)__result_unwrap(result);
+            certo_text_t detail = __certo_host_sanitize(
+                host, (certo_text_t)__result_unwrap(result));
             __certo_host_record_failure(host, "ShutdownFailure", "dispose",
                                         service->key->name, detail, false);
             errors = __certo_host_append_error(errors,
@@ -2437,7 +2581,8 @@ static certo_text_t __certo_host_construct_scoped_services(
             (CertoHostService*)plugin->scoped_services->data[order[position]];
         void* result = __certo_host_call(service->factory, plugin->context);
         if (!__result_is_ok(result)) {
-            certo_text_t detail = (certo_text_t)__result_unwrap(result);
+            certo_text_t detail = __certo_host_sanitize(
+                host, (certo_text_t)__result_unwrap(result));
             certo_text_t error = __certo_host_error(
                 "failed to construct scoped service", service->key->name, detail);
             certo_text_t rollback_error = __certo_host_dispose_service_order(
@@ -2521,7 +2666,8 @@ static certo_text_t __certo_host_construct_services(CertoHost* host) {
         host->context->plugin_name = "host";
         void* result = __certo_host_call(service->factory, host->context);
         if (!__result_is_ok(result)) {
-            certo_text_t detail = (certo_text_t)__result_unwrap(result);
+            certo_text_t detail = __certo_host_sanitize(
+                host, (certo_text_t)__result_unwrap(result));
             certo_text_t error = __certo_host_error(
                 "failed to construct service", service->key->name, detail);
             certo_text_t rollback_error = __certo_host_dispose_services(host);
@@ -2553,12 +2699,12 @@ static certo_text_t __certo_host_quiesce_started(CertoHost* host) {
             errors = __certo_host_append_error(errors,
                 __certo_host_error("failed to quiesce", plugin->name, "timeout elapsed"));
         } else if (!__result_is_ok(result)) {
+            certo_text_t detail = __certo_host_sanitize(
+                host, (certo_text_t)__result_unwrap(result));
             __certo_host_record_failure(host, "ShutdownFailure", "quiesce",
-                                        plugin->name,
-                                        (certo_text_t)__result_unwrap(result), false);
+                                        plugin->name, detail, false);
             errors = __certo_host_append_error(errors,
-                __certo_host_error("failed to quiesce", plugin->name,
-                    (certo_text_t)__result_unwrap(result)));
+                __certo_host_error("failed to quiesce", plugin->name, detail));
         }
     }
     return errors;
@@ -2578,12 +2724,12 @@ static certo_text_t __certo_host_stop_started(CertoHost* host) {
             errors = __certo_host_append_error(errors,
                 __certo_host_error("failed to stop", plugin->name, "timeout elapsed"));
         } else if (!__result_is_ok(result)) {
+            certo_text_t detail = __certo_host_sanitize(
+                host, (certo_text_t)__result_unwrap(result));
             __certo_host_record_failure(host, "ShutdownFailure", "stop",
-                                        plugin->name,
-                                        (certo_text_t)__result_unwrap(result), false);
+                                        plugin->name, detail, false);
             errors = __certo_host_append_error(errors,
-                __certo_host_error("failed to stop", plugin->name,
-                    (certo_text_t)__result_unwrap(result)));
+                __certo_host_error("failed to stop", plugin->name, detail));
         }
         if (!timed_out) {
             certo_text_t scoped_error = __certo_host_dispose_service_order(
@@ -2729,7 +2875,8 @@ void* certo_host_start(CertoHost* host) {
         }
         void* result = __certo_host_call(plugin->start, plugin->context);
         if (!__result_is_ok(result)) {
-            certo_text_t detail = (certo_text_t)__result_unwrap(result);
+            certo_text_t detail = __certo_host_sanitize(
+                host, (certo_text_t)__result_unwrap(result));
             certo_text_t error = __certo_host_error(
                 "failed to start", plugin->name,
                 detail);
@@ -2919,9 +3066,10 @@ int64_t certo_host_context_ready(CertoHostContext* context) {
 int64_t certo_host_context_fail(CertoHostContext* context, certo_text_t error) {
     if (!context || !context->host) return 0;
     certo_text_t name = context->worker ? context->worker->name : "host";
-    certo_text_t detail = __certo_host_error("worker failed", name, error);
+    certo_text_t safe_error = __certo_host_sanitize(context->host, error);
+    certo_text_t detail = __certo_host_error("worker failed", name, safe_error);
     __certo_host_record_failure(context->host, "WorkerFailure", "worker",
-                                name, error, false);
+                                name, safe_error, false);
     __sync_bool_compare_and_swap(&context->host->worker_error, NULL, detail);
     CERTO_ATOMIC_STORE(&context->host->state, CERTO_HOST_FAILED);
     CERTO_ATOMIC_STORE(&context->host->stop_requested, 1);

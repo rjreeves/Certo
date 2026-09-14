@@ -43,6 +43,7 @@ fn start(c: HostContext): Result<Unit, Text> [io] = {
     HostContext.log(c, "wArN", "job.waiting", "waiting")
     Ok(())
 }
+
 fn stop(c: HostContext): Result<Unit, Text> = Ok(())
 fn main(): Unit [io] = {
     val host = Host.new().add(Host.plugin("typed", start, stop))
@@ -65,6 +66,141 @@ fn main(): Unit [io] = {
     assert!(lines[0].contains("\"fields\":{\"queue\":\"critical\",\"attempt\":2,\"ratio\":0.5,\"retrying\":true}"), "{stderr}");
     assert!(lines[1].contains("\"sequence\":2"), "{stderr}");
     assert!(lines[1].contains("\"severity\":\"Warn\""), "{stderr}");
+}
+
+#[test]
+fn correlation_context_is_inherited_derived_isolated_and_explicit_for_metrics() {
+    let output = run_certo(r#"module HostCorrelationContextTest
+
+fn metricKey(): ServiceKey<HostMetric> = Host.serviceKey("correlation-metric")
+
+fn start(c: HostContext): Result<Unit, Text> [io] = {
+    HostContext.log(c, "info", "correlation.root", "root")
+    val derived = HostContext.withCorrelation(c, "operation-7")
+    HostContext.log(derived, "info", "correlation.derived", "derived")
+    HostContext.log(c, "info", "correlation.parent", "parent")
+    match HostContext.service(c, metricKey()) {
+        Some(metric) => HostMetric.counterAdd(
+            metric, [HostContext.correlationId(derived) ?? "missing"], 1)
+        None => ()
+    }
+    Ok(())
+}
+
+fn work(c: HostContext): Result<Unit, Text> [io] = {
+    HostContext.ready(c)
+    HostContext.log(c, "info", "correlation.worker", "worker")
+    Ok(())
+}
+
+fn stop(c: HostContext): Result<Unit, Text> = Ok(())
+
+fn main(): Unit [io] = {
+    val host = Host.new()
+    val metric = Host.counterMetric(
+        host, "operations", "Correlated operations", "operations",
+        ["correlation_id"], 4)
+    host.provide(metricKey(), metric)
+        .add(Host.plugin("correlated", start, stop).worker("worker", work))
+        .correlation("request-42")
+    val started = Host.start(host)
+    val stopped = Host.stop(host)
+    println(Host.metricSnapshot(host))
+}
+"#);
+    let stdout = assert_success(&output);
+    assert!(stdout.contains("\"labels\":[\"operation-7\"]"), "{stdout}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let lines = stderr.lines().collect::<Vec<_>>();
+    assert_eq!(lines.len(), 4, "{stderr}");
+    assert!(lines[0].contains("\"correlation_id\":\"request-42\""), "{stderr}");
+    assert!(lines[1].contains("\"correlation_id\":\"operation-7\""), "{stderr}");
+    assert!(lines[2].contains("\"correlation_id\":\"request-42\""), "{stderr}");
+    assert!(lines[3].contains("\"correlation_id\":\"request-42\""), "{stderr}");
+    assert!(lines[3].contains("\"plugin\":\"correlated\""), "{stderr}");
+    assert!(lines[3].contains("\"worker\":\"worker\""), "{stderr}");
+}
+
+#[test]
+fn exposed_secret_configuration_is_redacted_from_events_and_failures() {
+    const CANARY: &str = "h4-secret-canary-91f6";
+    let output = run_certo(r#"module HostSecretObservabilityTest
+
+type Secret<T> = | Hidden
+fn parseSecret(value: Text): Result<Secret<Text>, Text> = Ok(Hidden)
+fn secretKey(): ConfigKey<Secret<Text>> = Host.configKey("secret.token", parseSecret)
+
+fn start(c: HostContext): Result<Unit, Text> [io] = {
+    HostContext.log(c, "info", "secret.event", "message h4-secret-canary-91f6")
+    HostContext.logEvent(c, HostLogEvent.create(
+        HostLogSeverity.info(), "secret.field", "field",
+        [HostLogField.text("value", "h4-secret-canary-91f6")]))
+    Err("startup h4-secret-canary-91f6")
+}
+fn stop(c: HostContext): Result<Unit, Text> = Ok(())
+
+fn main(): Unit [io] = {
+    val host = Host.new()
+        .configure("secret.token", "h4-secret-canary-91f6")
+        .requireConfig(secretKey())
+        .add(Host.plugin("secret", start, stop))
+    match Host.startTyped(host) {
+        Ok(_) => println("unexpected")
+        Err(error) => {
+            println(HostLifecycleError.message(error))
+            match HostStatusSnapshot.lastFailure(Host.status(host)) {
+                Some(last) => println(HostLifecycleError.message(last))
+                None => println("missing")
+            }
+            println(Host.metrics(host))
+            println(Host.metricSnapshot(host))
+            println(Host.metricsPrometheus(host))
+        }
+    }
+}
+"#);
+    assert!(!String::from_utf8_lossy(&output.stdout).contains(CANARY));
+    assert!(!String::from_utf8_lossy(&output.stderr).contains(CANARY));
+    let stdout = assert_success(&output);
+    assert!(stdout.contains("[REDACTED]"), "{stdout}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("message [REDACTED]"), "{stderr}");
+    assert!(stderr.contains("\"value\":\"[REDACTED]\""), "{stderr}");
+}
+
+#[test]
+fn exposed_secret_configuration_is_rejected_from_metric_labels() {
+    const CANARY: &str = "h4-metric-secret-canary-44a2";
+    let output = run_certo(r#"module HostSecretMetricTest
+
+type Secret<T> = | Hidden
+fn parseSecret(value: Text): Result<Secret<Text>, Text> = Ok(Hidden)
+fn secretKey(): ConfigKey<Secret<Text>> = Host.configKey("secret.token", parseSecret)
+fn metricKey(): ServiceKey<HostMetric> = Host.serviceKey("metric")
+
+fn start(c: HostContext): Result<Unit, Text> [io] = {
+    match HostContext.service(c, metricKey()) {
+        Some(metric) => HostMetric.counterAdd(metric, ["h4-metric-secret-canary-44a2"], 1)
+        None => ()
+    }
+    Ok(())
+}
+fn stop(c: HostContext): Result<Unit, Text> = Ok(())
+
+fn main(): Unit [io] = {
+    val host = Host.new().configure("secret.token", "h4-metric-secret-canary-44a2")
+    val metric = Host.counterMetric(host, "requests", "Requests", "requests", ["key"], 2)
+    host.requireConfig(secretKey()).provide(metricKey(), metric)
+        .add(Host.plugin("secret", start, stop))
+    val started = Host.start(host)
+}
+"#);
+    assert!(!output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!stdout.contains(CANARY), "{stdout}");
+    assert!(!stderr.contains(CANARY), "{stderr}");
+    assert!(stderr.contains("secret configuration cannot be used as a metric label value"), "{stderr}");
 }
 
 #[test]
@@ -266,6 +402,15 @@ fn main(): Unit [io] = {
     assert!(!stderr.contains("certo.host.event/v1"), "invalid event was emitted: {stderr}");
 }
 
+fn redact_stress_artifact(bytes: &[u8], canary: Option<&str>) -> Vec<u8> {
+    let Some(canary) = canary.filter(|value| !value.is_empty()) else {
+        return bytes.to_vec();
+    };
+    String::from_utf8_lossy(bytes)
+        .replace(canary, "[REDACTED]")
+        .into_bytes()
+}
+
 fn write_stress_artifacts(
     path: &Path,
     source: &str,
@@ -276,21 +421,23 @@ fn write_stress_artifacts(
     stdout: &[u8],
     stderr: &[u8],
 ) -> std::io::Result<()> {
+    let canary = env::var("CERTO_HOST_STRESS_SECRET_CANARY").ok();
+    let safe = |bytes: &[u8]| redact_stress_artifact(bytes, canary.as_deref());
     fs::create_dir_all(path)?;
-    fs::write(path.join("host_randomized_lifecycle_stress.cto"), source)?;
-    fs::write(path.join("stdout.log"), stdout)?;
-    fs::write(path.join("stderr.log"), stderr)?;
+    fs::write(path.join("host_randomized_lifecycle_stress.cto"), safe(source.as_bytes()))?;
+    fs::write(path.join("stdout.log"), safe(stdout))?;
+    fs::write(path.join("stderr.log"), safe(stderr))?;
     fs::write(
         path.join("metadata.txt"),
-        format!(
+        safe(format!(
             "seed={seed}\niterations={iterations}\nsanitizer={sanitizer}\nexit_status={exit_status}\n"
-        ),
+        ).as_bytes()),
     )?;
     fs::write(
         path.join("reproduce.sh"),
-        format!(
+        safe(format!(
             "#!/usr/bin/env bash\nset -euo pipefail\nCERTO_HOST_STRESS_SEED={seed} CERTO_HOST_STRESS_ITERATIONS={iterations} CERTO_HOST_STRESS_SANITIZER={sanitizer} cargo test -p certo --test host_integration randomized_lifecycle_stress -- --ignored --nocapture\n"
-        ),
+        ).as_bytes()),
     )?;
     Ok(())
 }
@@ -648,6 +795,15 @@ fn randomized_stress_artifacts_capture_reproduction_context() {
 }
 
 #[test]
+fn sanitizer_artifact_redaction_removes_configured_canaries() {
+    let secret = "sanitizer-secret-canary-7751";
+    let artifact = redact_stress_artifact(
+        format!("before {secret} after\n").as_bytes(), Some(secret));
+    assert_eq!(artifact, b"before [REDACTED] after\n");
+    assert!(!String::from_utf8_lossy(&artifact).contains(secret));
+}
+
+#[test]
 #[ignore = "scheduled sanitizer stress"]
 fn randomized_lifecycle_stress_is_reproducible() {
     let raw_seed = env::var("CERTO_HOST_STRESS_SEED").unwrap_or_else(|_| "1".to_owned());
@@ -671,11 +827,6 @@ fn randomized_lifecycle_stress_is_reproducible() {
         .replace("__SEED__", &seed.to_string())
         .replace("__ITERATIONS__", &iterations.to_string());
     let artifact_dir = env::var_os("CERTO_HOST_STRESS_ARTIFACT_DIR").map(PathBuf::from);
-    if let Some(path) = &artifact_dir {
-        fs::create_dir_all(path).expect("create randomized stress artifact directory");
-        fs::write(path.join("host_randomized_lifecycle_stress.cto"), &source)
-            .expect("write generated stress source artifact");
-    }
     let dir = tempfile::tempdir().expect("temporary test directory");
     let source_path = dir.path().join("host_randomized_lifecycle_stress.cto");
     fs::write(&source_path, &source).expect("write Certo source");

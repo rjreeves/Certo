@@ -1093,6 +1093,7 @@ pub fn seed_stdlib(env: &mut TypeEnv, counter: &mut u32) {
         let host_result = Ty::Result(Box::new(Ty::Unit), Box::new(Ty::Text));
         let typed_host_result = Ty::Result(Box::new(Ty::Unit), Box::new(lifecycle_error.clone()));
         def!("Host.new", Ty::Fn { params: vec![], ret: Box::new(host.clone()) });
+        def!("Host.correlation", fn2(host.clone(), Ty::Text, host.clone()));
         def!("Host.plugin", Ty::Fn {
             params: vec![Ty::Text, lifecycle.clone(), lifecycle.clone()],
             ret: Box::new(plugin.clone()),
@@ -1266,6 +1267,15 @@ pub fn seed_stdlib(env: &mut TypeEnv, counter: &mut u32) {
             params: vec![context.clone(), Ty::Text, Ty::Text],
             ret: Box::new(Ty::Text),
         });
+        def!("HostContext.withCorrelation", fn2(
+            context.clone(), Ty::Text, context.clone()));
+        def!("HostContext.hostId", fn1(context.clone(), Ty::Text));
+        def!("HostContext.plugin", fn1(
+            context.clone(), Ty::Option(Box::new(Ty::Text))));
+        def!("HostContext.worker", fn1(
+            context.clone(), Ty::Option(Box::new(Ty::Text))));
+        def!("HostContext.correlationId", fn1(
+            context.clone(), Ty::Option(Box::new(Ty::Text))));
         {
             let t = fresh();
             let key = Ty::Named { name: "ConfigKey".into(), args: vec![Ty::Var(t)] };
@@ -2108,6 +2118,7 @@ pub fn seed_stdlib(env: &mut TypeEnv, counter: &mut u32) {
 
     // Host
     pm!("Host.plugin",             "name", "start", "stop");
+    pm!("Host.correlation",        "host", "correlationId");
     pm!("HostPlugin.provides",     "plugin", "key");
     pm!("HostPlugin.requires",     "plugin", "key");
     pm!("HostPlugin.worker",       "plugin", "name", "run");
@@ -2225,6 +2236,11 @@ pub fn seed_stdlib(env: &mut TypeEnv, counter: &mut u32) {
     pm!("HostContext.config",      "context", "key");
     pm!("HostContext.configOr",    "context", "key", "fallback");
     pm!("HostContext.configValue", "context", "key");
+    pm!("HostContext.withCorrelation", "context", "correlationId");
+    pm!("HostContext.hostId",      "context");
+    pm!("HostContext.plugin",      "context");
+    pm!("HostContext.worker",      "context");
+    pm!("HostContext.correlationId", "context");
 
     // Cli
     pm!("Cli.command",     "name", "about", "version");

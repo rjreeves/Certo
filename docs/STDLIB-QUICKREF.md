@@ -1057,6 +1057,12 @@ HostMetric.gaugeSet(metric: HostMetric, labels: List<Text>, value: Int): Unit [i
 HostMetric.histogramObserve(metric: HostMetric, labels: List<Text>, value: Int): Unit [io]
 Host.metricSnapshot(host: Host): Text [io]
 Host.metricsPrometheus(host: Host): Text [io]
+Host.correlation(host: Host, correlationId: Text): Host
+HostContext.withCorrelation(context: HostContext, correlationId: Text): HostContext
+HostContext.hostId(context: HostContext): Text
+HostContext.plugin(context: HostContext): Text?
+HostContext.worker(context: HostContext): Text?
+HostContext.correlationId(context: HostContext): Text?
 HostContext.counter(context: HostContext, name: Text, amount: Int): Unit [io]
 HostContext.gauge(context: HostContext, name: Text, value: Int): Unit [io]
 HostContext.isStopping(context: HostContext): Bool
@@ -1096,6 +1102,14 @@ or a plugin calls `Host.requestStop`. Configure it with the
 `CERTO__DROPBOX__DESTINATION_PATH` environment variables. Its worker reads the
 source as binary data, uploads it once, then requests graceful shutdown.
 
+`Host.correlation` establishes an immutable root correlation identity before
+startup. Service factories and plugin callbacks inherit it, worker callbacks
+retain it across restarts, and every structured event emitted from those
+contexts receives it automatically. `HostContext.withCorrelation` creates an
+isolated derived context without mutating its parent. Metrics never receive a
+correlation label implicitly; applications may use `correlationId` explicitly
+with a bounded typed metric descriptor when that cardinality is appropriate.
+
 Typed host configuration is merged at startup in this order: typed defaults,
 the `[host]` subtree of `certo.toml`, `CERTO__...` environment variables,
 repeatable `--config key=value` arguments, then `Host.configure` overrides.
@@ -1106,6 +1120,10 @@ winning source and location without including its raw value.
 Keys whose parsed type structurally contains `Secret<_>` redact parser and
 validator messages. Their source and location remain visible, but raw access
 through `HostContext.config` or `configOr` is rejected; use `configValue`.
+Structural secrets are also rejected at host event, failure, correlation, and
+metric sinks. As defense in depth after an explicit unwrap, registered secret
+configuration values are redacted from messages and callback failures and are
+rejected from telemetry identities and metric labels without echoing the value.
 
 Configuration is snapshotted once during startup and is not reloaded. Restart
 the process to apply changes to files, environment variables, or arguments.
