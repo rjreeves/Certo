@@ -18,15 +18,25 @@ on:
       - "crates/stdlib/src/host.rs"
       - "crates/cli/src/main.rs"
       - "crates/cli/tests/host_integration.rs"
+      - "crates/cli/tests/host_benchmarks.rs"
       - ".github/workflows/host-sanitizers.yml"
   pull_request:
     paths:
       - "crates/stdlib/src/host.rs"
       - "crates/cli/src/main.rs"
       - "crates/cli/tests/host_integration.rs"
+      - "crates/cli/tests/host_benchmarks.rs"
       - ".github/workflows/host-sanitizers.yml"
 
 jobs:
+  observability-benchmarks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Run high-contention observability regression gate
+        run: cargo test -p certo --test host_benchmarks --release -- --ignored --nocapture
+
   address-sanitizer:
     runs-on: ubuntu-latest
     env:

@@ -248,3 +248,12 @@ H4 implementation is complete when automated tests demonstrate:
 ASan, TSan, and Windows stress jobs cover the queue, registry, and shutdown
 paths. Benchmarks track event admission, dispatch throughput, metric update,
 snapshot, and exporter-formatting costs under low and high contention.
+
+The scheduled release benchmark uses four concurrent producers to admit
+100,000 events into a bounded sink and four concurrent metric producers to
+perform 120,000 counter, gauge, and histogram mutations. It also repeats typed
+snapshot and Prometheus formatting 1,000 times. The default regression ceilings
+are 3 seconds for admission, 5 seconds through final dispatch, 3 seconds for
+metric updates, and 1 second each for snapshots and Prometheus export. Dedicated
+performance environments may override these with
+`CERTO_HOST_BENCH_<PHASE>_MAX_MS`; a result above the selected ceiling fails CI.
