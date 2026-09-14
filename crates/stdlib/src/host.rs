@@ -16,6 +16,10 @@ struct CertoHost;
 struct CertoHostWorker;
 struct CertoHostLifecycleError;
 struct CertoConfigKey;
+struct CertoHost;
+certo_text_t __certo_host_http_start_listeners(struct CertoHost* host);
+void __certo_host_http_close_listeners(struct CertoHost* host);
+certo_text_t __certo_host_http_drain_listeners(struct CertoHost* host);
 
 typedef struct CertoRestartPolicy {
     int mode;
@@ -274,6 +278,7 @@ typedef struct CertoHost {
     int64_t event_sequence;
     bool stderr_log_enabled;
     CertoList* log_sinks;
+    CertoList* http_listeners;
 #if defined(_WIN32)
     CRITICAL_SECTION wait_lock;
     CONDITION_VARIABLE wait_changed;
@@ -508,6 +513,7 @@ CertoHost* certo_host_new(void) {
     host->config_bindings = certo_list_new_empty();
     host->configuration_errors = certo_list_new_empty();
     host->log_sinks = certo_list_new_empty();
+    host->http_listeners = certo_list_new_empty();
     char* host_id = (char*)malloc(48);
     if (!host_id) certo_panic("out of memory");
     snprintf(host_id, 48, "host-%p", (void*)host);
@@ -2936,6 +2942,19 @@ void* certo_host_start(CertoHost* host) {
         __certo_host_wake_waiters(host);
         return certo_err((intptr_t)readiness_error);
     }
+    certo_text_t listener_error = __certo_host_http_start_listeners(host);
+    if (listener_error) {
+        CERTO_ATOMIC_STORE(&host->context->stopping, 1);
+        CERTO_ATOMIC_STORE(&host->state, CERTO_HOST_FAILED);
+        __certo_host_join_workers(host);
+        __certo_host_stop_started(host);
+        __certo_host_dispose_services(host);
+        __certo_host_stop_log_sinks(host);
+        __certo_host_record_failure(host, "StartupFailure", "http", "listener",
+                                    listener_error, false);
+        __certo_host_wake_waiters(host);
+        return certo_err((intptr_t)listener_error);
+    }
     CERTO_ATOMIC_STORE(&host->startup_complete, 1);
     __sync_bool_compare_and_swap(
         &host->state, CERTO_HOST_STARTING, CERTO_HOST_HEALTHY);
@@ -2995,7 +3014,9 @@ void* certo_host_stop(CertoHost* host) {
             ? certo_err((intptr_t)shutdown_error) : certo_ok(0);
     }
     CERTO_ATOMIC_STORE(&host->state, CERTO_HOST_STOPPING);
+    __certo_host_http_close_listeners(host);
     certo_text_t errors = __certo_host_quiesce_started(host);
+    certo_text_t http_error = __certo_host_http_drain_listeners(host);
     CERTO_ATOMIC_STORE(&host->context->stopping, 1);
     __certo_host_wake_waiters(host);
     certo_text_t worker_error = __certo_host_join_workers(host);
@@ -3003,6 +3024,7 @@ void* certo_host_stop(CertoHost* host) {
     certo_text_t dispose_error = __certo_host_dispose_services(host);
     certo_text_t telemetry_error = __certo_host_stop_log_sinks(host);
     errors = __certo_host_append_error(errors, worker_error);
+    errors = __certo_host_append_error(errors, http_error);
     errors = __certo_host_append_error(errors, stop_error);
     errors = __certo_host_append_error(errors, telemetry_error);
     errors = __certo_host_append_error(errors, dispose_error);
@@ -3047,6 +3069,13 @@ int64_t certo_host_request_stop(CertoHostContext* context) {
         CERTO_ATOMIC_STORE(&context->host->stop_requested, 1);
         __certo_host_wake_waiters(context->host);
     }
+    return 0;
+}
+
+int64_t certo_host_request_shutdown(CertoHost* host) {
+    if (!host) return 0;
+    CERTO_ATOMIC_STORE(&host->stop_requested, 1);
+    __certo_host_wake_waiters(host);
     return 0;
 }
 

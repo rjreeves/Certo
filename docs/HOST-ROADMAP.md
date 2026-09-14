@@ -217,7 +217,8 @@ container platforms.
 
 - ✅ Standard typed liveness, readiness, and metrics response adapters for
   `Stdlib.Http`.
-- Coordinated drain triggered by signals or an administrative endpoint.
+- ✅ Coordinated drain triggered by signals or an application-authenticated
+  administrative endpoint, with host-owned listener admission and draining.
 - Startup and shutdown reason reporting.
 - Optional worker enable/disable controls for maintenance.
 - Platform integration guidance for systemd, Windows Service Control Manager,
@@ -292,6 +293,5 @@ Every Host milestone must satisfy the following gates:
 
 ## Recommended next implementation item
 
-Add a host-managed, shutdown-aware HTTP listener so operational probes stop
-accepting traffic before plugin quiesce and cannot delay the host's bounded
-worker drain.
+Add typed startup and shutdown reason reporting to operational snapshots and
+probe responses without exposing raw callback failures.

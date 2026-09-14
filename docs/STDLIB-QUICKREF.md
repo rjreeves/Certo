@@ -970,6 +970,15 @@ HostOperationalCondition.name(condition): Text
 HostHttp.liveness(host: Host): HttpResponse [io]
 HostHttp.readiness(host: Host): HttpResponse [io]
 HostHttp.metrics(host: Host): HttpResponse [io]
+HostHttp.drain(host: Host): HttpResponse [io]
+HostHttp.serve(
+    host: Host,
+    name: Text,
+    port: Int,
+    handler: fn(HttpRequest): HttpResponse,
+    drainTimeout: Duration
+): Host
+Host.requestShutdown(host: Host): Unit [io]
 
 HostStatusSnapshot.state(snapshot: HostStatusSnapshot): HostState
 HostStatusSnapshot.isReady(snapshot: HostStatusSnapshot): Bool
@@ -1174,6 +1183,11 @@ as deterministic JSON, returning 200 when their respective predicate is true
 and 503 otherwise. `HostHttp.metrics` returns the H4 Prometheus snapshot with
 the `text/plain; version=0.0.4; charset=utf-8` content type. Probe failures
 expose only the typed failure category, never callback messages or config.
+`HostHttp.serve` registers a host-owned listener before startup. The host binds
+it during startup, closes admission before plugin quiesce, and drains active
+requests within `drainTimeout`. `HostHttp.drain` requests the same idempotent
+shutdown used by signals and returns 202; applications must authenticate before
+routing to it. See `examples/host_probes.cto` for the standard endpoint layout.
 
 Host lifecycle transitions are deterministic:
 

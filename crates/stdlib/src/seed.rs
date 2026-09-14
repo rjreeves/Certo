@@ -1331,6 +1331,7 @@ pub fn seed_stdlib(env: &mut TypeEnv, counter: &mut u32) {
             typed_host_result,
         ));
         def!("Host.status", fn1(host.clone(), status.clone()));
+        def!("Host.requestShutdown", fn1(host.clone(), Ty::Unit));
         def!("Host.operationStatus", fn1(host.clone(), operational_status.clone()));
         def!("HostOperationalStatus.condition", fn1(
             operational_status.clone(), operational_condition.clone()));
@@ -1895,7 +1896,15 @@ pub fn seed_stdlib(env: &mut TypeEnv, counter: &mut u32) {
         let host = Ty::Named { name: "Host".into(), args: vec![] };
         def!("HostHttp.liveness", fn1(host.clone(), hr()));
         def!("HostHttp.readiness", fn1(host.clone(), hr()));
-        def!("HostHttp.metrics", fn1(host, hr()));
+        def!("HostHttp.metrics", fn1(host.clone(), hr()));
+        def!("HostHttp.drain", fn1(host.clone(), hr()));
+        def!("HostHttp.serve", Ty::Fn {
+            params: vec![
+                host.clone(), Ty::Text, Ty::Int, fn1(req(), hr()),
+                Ty::Named { name: "Duration".into(), args: vec![] },
+            ],
+            ret: Box::new(host),
+        });
 
         // HttpRequest accessors
         def!("HttpRequest.method",  fn1(req(), Ty::Text));
@@ -2171,6 +2180,7 @@ pub fn seed_stdlib(env: &mut TypeEnv, counter: &mut u32) {
     pm!("Host.waitUntilReady",     "host", "timeout");
     pm!("Host.waitUntilReadyTyped", "host", "timeout");
     pm!("Host.status",             "host");
+    pm!("Host.requestShutdown", "host");
     pm!("Host.operationStatus", "host");
     pm!("HostOperationalStatus.condition", "status");
     pm!("HostOperationalStatus.state", "status");
@@ -2315,6 +2325,8 @@ pub fn seed_stdlib(env: &mut TypeEnv, counter: &mut u32) {
     pm!("HostHttp.liveness", "host");
     pm!("HostHttp.readiness", "host");
     pm!("HostHttp.metrics", "host");
+    pm!("HostHttp.drain", "host");
+    pm!("HostHttp.serve", "host", "name", "port", "handler", "drain_timeout");
     pm!("Http.ok",      "content_type", "body");
     pm!("Http.serve",   "port", "handler");
 

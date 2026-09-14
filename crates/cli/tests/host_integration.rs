@@ -1,5 +1,6 @@
 use std::{
     env, fs,
+    net::TcpListener,
     path::{Path, PathBuf},
     process::Command,
 };
@@ -123,6 +124,7 @@ fn work(c: HostContext): Result<Unit, Text> [io] = {
         None => Err("attempts missing")
     }
 }
+
 fn printCondition(label: Text, host: Host): Unit [io] = {
     val status = Host.operationStatus(host)
     println(f"{label}:{HostOperationalCondition.name(HostOperationalStatus.condition(status))}")
@@ -162,6 +164,31 @@ fn main(): Unit [io, async] = {
     assert!(stdout.contains("startup:starting"), "{stdout}");
     assert!(stdout.contains("shutdown:stopping"), "{stdout}");
     assert!(stdout.contains("restart:degraded"), "{stdout}");
+}
+
+#[test]
+fn host_managed_http_listener_starts_and_stops_with_the_host() {
+    let reservation = TcpListener::bind("127.0.0.1:0").expect("reserve test port");
+    let port = reservation.local_addr().unwrap().port();
+    drop(reservation);
+    let source = format!(r#"module HostManagedHttpListenerTest
+fn handler(request: HttpRequest): HttpResponse = Http.ok("ok", "text/plain")
+fn start(c: HostContext): Result<Unit, Text> = Ok(())
+fn stop(c: HostContext): Result<Unit, Text> = Ok(())
+fn main(): Unit [io] = {{
+    val host = HostHttp.serve(
+        Host.new().add(Host.plugin("app", start, stop)),
+        "operations", {port}, handler, Duration.seconds(1))
+    val started = Host.start(host)
+    println(HostOperationalCondition.name(
+        HostOperationalStatus.condition(Host.operationStatus(host))))
+    val stopped = Host.stop(host)
+    println(HostOperationalCondition.name(
+        HostOperationalStatus.condition(Host.operationStatus(host))))
+}}
+"#);
+    let stdout = assert_success(&run_certo(&source));
+    assert_eq!(stdout.lines().collect::<Vec<_>>(), ["ready", "stopped"]);
 }
 
 #[test]

@@ -2864,6 +2864,8 @@ fn host_api_is_registered() {
         "HostOperationalStatus.isLive", "HostOperationalStatus.failureKind",
         "HostOperationalCondition.name", "HostHttp.liveness",
         "HostHttp.readiness", "HostHttp.metrics",
+        "HostHttp.serve",
+        "HostHttp.drain", "Host.requestShutdown",
         "Host.runTyped", "Host.waitUntilReadyTyped", "HostStatusSnapshot.state",
         "HostStatusSnapshot.isReady", "HostStatusSnapshot.isLive",
         "HostStatusSnapshot.workers", "HostStatusSnapshot.counters",

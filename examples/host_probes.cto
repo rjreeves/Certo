@@ -1,0 +1,31 @@
+module HostProbes
+
+import Stdlib.Http
+import Stdlib.Env
+
+fn start(c: HostContext): Result<Unit, Text> = Ok(())
+fn stop(c: HostContext): Result<Unit, Text> = Ok(())
+
+val host = Host.new().add(Host.plugin("application", start, stop))
+
+fn handler(request: HttpRequest): HttpResponse [io] = {
+    val path = HttpRequest.path(request)
+    if path == "/live" then HostHttp.liveness(host)
+    else if path == "/ready" then HostHttp.readiness(host)
+    else if path == "/metrics" then HostHttp.metrics(host)
+    else if path == "/admin/drain" then {
+        val expected = "Bearer " ++ (getEnv("CERTO_ADMIN_TOKEN") ?? "")
+        val supplied = HttpRequest.header(request, "authorization")
+        if expected != "Bearer " and supplied == expected then HostHttp.drain(host)
+        else Http.respond(403, "forbidden", "text/plain")
+    }
+    else Http.notFound("not found")
+}
+
+fn main(): Unit [io] = {
+    HostHttp.serve(host, "operations", 8080, handler, Duration.seconds(5))
+    match Host.runTyped(host) {
+        Ok(_) => ()
+        Err(error) => eprintln(HostLifecycleError.message(error))
+    }
+}
