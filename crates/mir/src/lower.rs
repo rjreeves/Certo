@@ -1269,7 +1269,7 @@ fn needs_result_box(ty: &Ty) -> bool {
                 "RestartPolicy" | "HostStatusSnapshot" | "HostWorkerStatus" |
                 "HostMetricSnapshot" | "HostState" | "HostWorkerState" |
                 "HostLifecycleError" | "HostFailureKind" | "HostLogEvent" | "HostLogField" |
-                "HostLogOverflowPolicy" | "HostLogFailurePolicy"))
+                "HostLogOverflowPolicy" | "HostLogFailurePolicy" | "HostMetric"))
         // BACKLOG item 251 — a generic `Ok(v)`/`Err(e)` construction always
         // heap-boxes `v`/`e` (it's a bare, opaque type-param value at that
         // construction site — item 119/120's own established convention),

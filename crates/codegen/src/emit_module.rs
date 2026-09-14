@@ -864,7 +864,7 @@ fn ast_ty_to_c_str(te: &certo_ast::types::TypeExpr) -> String {
                 "Host" | "HostPlugin" | "HostContext" | "ServiceKey" | "ConfigKey" | "RestartPolicy" |
                 "HostStatusSnapshot" | "HostWorkerStatus" | "HostMetricSnapshot" |
                 "HostLifecycleError" | "HostConfigurationError" | "HostLogEvent" | "HostLogField" |
-                "HostLogOverflowPolicy" | "HostLogFailurePolicy" =>
+                "HostLogOverflowPolicy" | "HostLogFailurePolicy" | "HostMetric" =>
                     "void*".to_string(),
                 other     => c_ident(other),
             }

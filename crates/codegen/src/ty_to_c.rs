@@ -64,7 +64,7 @@ pub fn ty_to_c(ty: &Ty) -> String {
             "Host" | "HostPlugin" | "HostContext" | "ServiceKey" | "ConfigKey" | "RestartPolicy" |
             "HostStatusSnapshot" | "HostWorkerStatus" | "HostMetricSnapshot" |
             "HostLifecycleError" | "HostConfigurationError" | "HostLogEvent" | "HostLogField" |
-            "HostLogOverflowPolicy" | "HostLogFailurePolicy"
+            "HostLogOverflowPolicy" | "HostLogFailurePolicy" | "HostMetric"
         ) => "void*".into(),
         // These stdlib scalar types have a C-side typedef prefixed `Certo`
         // (`CertoDateTime`, etc. — see crates/stdlib/src/datetime.rs) rather

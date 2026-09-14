@@ -117,6 +117,26 @@ typedef struct CertoHostMetric {
     bool gauge;
 } CertoHostMetric;
 
+typedef struct CertoHostMetricSeries {
+    CertoList* labels;
+    int64_t value;
+    int64_t count;
+    int64_t sum;
+    int64_t* bucket_counts;
+} CertoHostMetricSeries;
+
+typedef struct CertoHostMetricDescriptor {
+    struct CertoHost* host;
+    certo_text_t name;
+    certo_text_t help;
+    certo_text_t unit;
+    int kind;
+    CertoList* label_names;
+    CertoList* buckets;
+    int64_t max_series;
+    CertoList* series;
+} CertoHostMetricDescriptor;
+
 typedef struct CertoHostLifecycleError {
     certo_text_t kind;
     certo_text_t phase;
@@ -235,6 +255,7 @@ typedef struct CertoHost {
     certo_text_t worker_error;
     CertoHostLifecycleError* last_failure;
     CertoList* metrics;
+    CertoList* metric_descriptors;
     CertoList* service_construction_order;
     CertoList* config_bindings;
     CertoList* configuration_errors;
@@ -256,6 +277,8 @@ typedef void* (*CertoHostCallback)(void* env, void* context);
 
 static CertoHost* __certo_active_host = NULL;
 static bool __certo_host_valid_metric_name(certo_text_t name);
+static void __certo_host_metric_add(CertoHost* host, certo_text_t name,
+                                    int64_t amount);
 
 enum {
     CERTO_HOST_NEW = 0,
@@ -290,6 +313,12 @@ enum {
     CERTO_LOG_FAILURE_IGNORE = 0,
     CERTO_LOG_FAILURE_DISABLE = 1,
     CERTO_LOG_FAILURE_FAIL_HOST = 2
+};
+
+enum {
+    CERTO_METRIC_COUNTER = 0,
+    CERTO_METRIC_GAUGE = 1,
+    CERTO_METRIC_HISTOGRAM = 2
 };
 
 #define CERTO_ATOMIC_LOAD(p) __atomic_load_n((p), __ATOMIC_ACQUIRE)
@@ -400,6 +429,7 @@ CertoHost* certo_host_new(void) {
     context->services = certo_list_new_empty();
     context->config = certo_list_new_empty();
     host->metrics = certo_list_new_empty();
+    host->metric_descriptors = certo_list_new_empty();
     host->service_construction_order = certo_list_new_empty();
     host->config_bindings = certo_list_new_empty();
     host->configuration_errors = certo_list_new_empty();
@@ -1338,6 +1368,14 @@ static CertoHostMetric* __certo_host_metric(CertoHost* host,
     for (int64_t i = 0; i < host->metrics->len; i++) {
         CertoHostMetric* metric = (CertoHostMetric*)host->metrics->data[i];
         if (metric->gauge == gauge && strcmp(metric->name, name) == 0) return metric;
+        if (metric->gauge != gauge && strcmp(metric->name, name) == 0)
+            certo_panic("metric name is already registered with another kind");
+    }
+    for (int64_t i = 0; i < host->metric_descriptors->len; i++) {
+        CertoHostMetricDescriptor* descriptor =
+            (CertoHostMetricDescriptor*)host->metric_descriptors->data[i];
+        if (strcmp(descriptor->name, name) == 0)
+            certo_panic("metric name is already registered as a typed descriptor");
     }
     CertoHostMetric* metric = (CertoHostMetric*)calloc(1, sizeof(CertoHostMetric));
     if (!metric) certo_panic("out of memory");
@@ -1356,6 +1394,173 @@ static bool __certo_host_valid_metric_name(certo_text_t name) {
             return false;
     }
     return true;
+}
+
+static bool __certo_host_text_list_equal(CertoList* left, CertoList* right) {
+    if (!left || !right || left->len != right->len) return false;
+    for (int64_t i = 0; i < left->len; i++)
+        if (strcmp((certo_text_t)left->data[i], (certo_text_t)right->data[i]) != 0)
+            return false;
+    return true;
+}
+
+static bool __certo_host_int_list_equal(CertoList* left, CertoList* right) {
+    if (!left || !right || left->len != right->len) return false;
+    for (int64_t i = 0; i < left->len; i++)
+        if ((int64_t)(intptr_t)left->data[i] !=
+            (int64_t)(intptr_t)right->data[i]) return false;
+    return true;
+}
+
+static CertoHostMetricDescriptor* __certo_host_metric_descriptor(
+        CertoHost* host, certo_text_t name, certo_text_t help, certo_text_t unit,
+        int kind, CertoList* label_names, CertoList* buckets, int64_t max_series) {
+    if (!host || !__certo_host_valid_metric_name(name))
+        certo_panic("invalid metric descriptor name");
+    if (CERTO_ATOMIC_LOAD(&host->state) != CERTO_HOST_NEW)
+        certo_panic("metric descriptors cannot be registered after startup begins");
+    if (max_series <= 0) certo_panic("metric series limit must be positive");
+    label_names = label_names ? label_names : certo_list_new_empty();
+    buckets = buckets ? buckets : certo_list_new_empty();
+    for (int64_t i = 0; i < label_names->len; i++) {
+        certo_text_t label = (certo_text_t)label_names->data[i];
+        if (!__certo_host_valid_metric_name(label)) certo_panic("invalid metric label name");
+        for (int64_t j = 0; j < i; j++)
+            if (strcmp(label, (certo_text_t)label_names->data[j]) == 0)
+                certo_panic("duplicate metric label name");
+    }
+    int64_t previous = -1;
+    for (int64_t i = 0; i < buckets->len; i++) {
+        int64_t boundary = (int64_t)(intptr_t)buckets->data[i];
+        if (boundary < 0 || (i > 0 && boundary <= previous))
+            certo_panic("histogram buckets must be non-negative and strictly increasing");
+        previous = boundary;
+    }
+    for (int64_t i = 0; i < host->metrics->len; i++)
+        if (strcmp(((CertoHostMetric*)host->metrics->data[i])->name, name) == 0)
+            certo_panic("metric name is already used by a compatibility metric");
+    for (int64_t i = 0; i < host->metric_descriptors->len; i++) {
+        CertoHostMetricDescriptor* existing =
+            (CertoHostMetricDescriptor*)host->metric_descriptors->data[i];
+        if (strcmp(existing->name, name) != 0) continue;
+        if (existing->kind == kind && strcmp(existing->help, help ? help : "") == 0 &&
+            strcmp(existing->unit, unit ? unit : "") == 0 &&
+            existing->max_series == max_series &&
+            __certo_host_text_list_equal(existing->label_names, label_names) &&
+            __certo_host_int_list_equal(existing->buckets, buckets)) return existing;
+        certo_panic("metric descriptor conflicts with an existing registration");
+    }
+    if (kind != CERTO_METRIC_HISTOGRAM && buckets->len != 0)
+        certo_panic("only histograms may declare buckets");
+    CertoHostMetricDescriptor* descriptor =
+        (CertoHostMetricDescriptor*)calloc(1, sizeof(CertoHostMetricDescriptor));
+    if (!descriptor) certo_panic("out of memory");
+    descriptor->host = host; descriptor->name = name;
+    descriptor->help = help ? help : ""; descriptor->unit = unit ? unit : "";
+    descriptor->kind = kind; descriptor->label_names = label_names;
+    descriptor->buckets = buckets; descriptor->max_series = max_series;
+    descriptor->series = certo_list_new_empty();
+    host->metric_descriptors = certo_list_push_mut(host->metric_descriptors, descriptor);
+    return descriptor;
+}
+
+CertoHostMetricDescriptor* certo_host_counter_metric(CertoHost* host,
+        certo_text_t name, certo_text_t help, certo_text_t unit,
+        CertoList* labels, int64_t max_series) {
+    return __certo_host_metric_descriptor(host, name, help, unit,
+        CERTO_METRIC_COUNTER, labels, certo_list_new_empty(), max_series);
+}
+CertoHostMetricDescriptor* certo_host_gauge_metric(CertoHost* host,
+        certo_text_t name, certo_text_t help, certo_text_t unit,
+        CertoList* labels, int64_t max_series) {
+    return __certo_host_metric_descriptor(host, name, help, unit,
+        CERTO_METRIC_GAUGE, labels, certo_list_new_empty(), max_series);
+}
+CertoHostMetricDescriptor* certo_host_histogram_metric(CertoHost* host,
+        certo_text_t name, certo_text_t help, certo_text_t unit,
+        CertoList* labels, CertoList* buckets, int64_t max_series) {
+    return __certo_host_metric_descriptor(host, name, help, unit,
+        CERTO_METRIC_HISTOGRAM, labels, buckets, max_series);
+}
+
+static int __certo_host_compare_label_values(CertoList* left, CertoList* right) {
+    for (int64_t i = 0; i < left->len; i++) {
+        int compared = strcmp((certo_text_t)left->data[i], (certo_text_t)right->data[i]);
+        if (compared) return compared;
+    }
+    return 0;
+}
+
+static CertoHostMetricSeries* __certo_host_metric_series(
+        CertoHostMetricDescriptor* descriptor, CertoList* labels) {
+    if (!descriptor || !labels || labels->len != descriptor->label_names->len)
+        certo_panic("metric label values must exactly match the descriptor labels");
+    for (int64_t i = 0; i < descriptor->series->len; i++) {
+        CertoHostMetricSeries* series =
+            (CertoHostMetricSeries*)descriptor->series->data[i];
+        if (__certo_host_text_list_equal(series->labels, labels)) return series;
+    }
+    if (descriptor->series->len >= descriptor->max_series) return NULL;
+    CertoHostMetricSeries* series =
+        (CertoHostMetricSeries*)calloc(1, sizeof(CertoHostMetricSeries));
+    if (!series) certo_panic("out of memory");
+    series->labels = labels;
+    if (descriptor->kind == CERTO_METRIC_HISTOGRAM) {
+        series->bucket_counts = (int64_t*)calloc(
+            (size_t)descriptor->buckets->len, sizeof(int64_t));
+        if (descriptor->buckets->len && !series->bucket_counts) certo_panic("out of memory");
+    }
+    descriptor->series = certo_list_push_mut(descriptor->series, series);
+    for (int64_t i = descriptor->series->len - 1; i > 0; i--) {
+        CertoHostMetricSeries* before =
+            (CertoHostMetricSeries*)descriptor->series->data[i - 1];
+        if (__certo_host_compare_label_values(before->labels, labels) <= 0) break;
+        descriptor->series->data[i] = descriptor->series->data[i - 1];
+        descriptor->series->data[i - 1] = series;
+    }
+    return series;
+}
+
+static int64_t __certo_host_metric_update(CertoHostMetricDescriptor* descriptor,
+        CertoList* labels, int64_t value, int operation) {
+    if (!descriptor) certo_panic("metric descriptor is null");
+    if ((operation == CERTO_METRIC_COUNTER || operation == CERTO_METRIC_HISTOGRAM) && value < 0)
+        certo_panic("counter increments and histogram observations cannot be negative");
+    CertoHost* host = descriptor->host;
+    __certo_host_lock(host);
+    if (descriptor->kind != operation) {
+        __certo_host_unlock(host);
+        certo_panic("metric operation does not match descriptor kind");
+    }
+    CertoHostMetricSeries* series = __certo_host_metric_series(descriptor, labels);
+    if (!series) {
+        __certo_host_unlock(host);
+        __certo_host_metric_add(host, "host.telemetry.metric_series_dropped_total", 1);
+        return 0;
+    }
+    if (operation == CERTO_METRIC_COUNTER) series->value += value;
+    else if (operation == CERTO_METRIC_GAUGE) series->value = value;
+    else {
+        series->count++; series->sum += value;
+        for (int64_t i = 0; i < descriptor->buckets->len; i++)
+            if (value <= (int64_t)(intptr_t)descriptor->buckets->data[i])
+                series->bucket_counts[i]++;
+    }
+    __certo_host_unlock(host);
+    return 0;
+}
+
+int64_t certo_host_metric_counter_add(CertoHostMetricDescriptor* descriptor,
+                                      CertoList* labels, int64_t amount) {
+    return __certo_host_metric_update(descriptor, labels, amount, CERTO_METRIC_COUNTER);
+}
+int64_t certo_host_metric_gauge_set(CertoHostMetricDescriptor* descriptor,
+                                    CertoList* labels, int64_t value) {
+    return __certo_host_metric_update(descriptor, labels, value, CERTO_METRIC_GAUGE);
+}
+int64_t certo_host_metric_histogram_observe(CertoHostMetricDescriptor* descriptor,
+                                            CertoList* labels, int64_t value) {
+    return __certo_host_metric_update(descriptor, labels, value, CERTO_METRIC_HISTOGRAM);
 }
 
 static void __certo_host_metric_add(CertoHost* host,
@@ -2939,6 +3144,76 @@ static char* __certo_host_json_quote(certo_text_t text) {
         else out[n++] = (char)*p;
     }
     out[n++] = '"'; out[n] = '\0';
+    return out;
+}
+
+certo_text_t certo_host_metric_snapshot(CertoHost* host) {
+    if (!host) return "{\"instruments\":[]}";
+    __certo_host_lock(host);
+    size_t cap = 256;
+    for (int64_t i = 0; i < host->metric_descriptors->len; i++) {
+        CertoHostMetricDescriptor* d =
+            (CertoHostMetricDescriptor*)host->metric_descriptors->data[i];
+        cap += (strlen(d->name) + strlen(d->help) + strlen(d->unit)) * 6 + 256;
+        for (int64_t l = 0; l < d->label_names->len; l++)
+            cap += strlen((certo_text_t)d->label_names->data[l]) * 6 + 8;
+        for (int64_t s = 0; s < d->series->len; s++) {
+            CertoHostMetricSeries* series =
+                (CertoHostMetricSeries*)d->series->data[s];
+            cap += 256 + (size_t)d->buckets->len * 64;
+            for (int64_t l = 0; l < series->labels->len; l++)
+                cap += strlen((certo_text_t)series->labels->data[l]) * 6 + 8;
+        }
+    }
+    char* out = (char*)malloc(cap);
+    if (!out) certo_panic("out of memory");
+    size_t n = (size_t)snprintf(out, cap, "{\"instruments\":[");
+    for (int64_t i = 0; i < host->metric_descriptors->len; i++) {
+        CertoHostMetricDescriptor* d =
+            (CertoHostMetricDescriptor*)host->metric_descriptors->data[i];
+        char* name = __certo_host_json_quote(d->name);
+        char* help = __certo_host_json_quote(d->help);
+        char* unit = __certo_host_json_quote(d->unit);
+        const char* kind = d->kind == CERTO_METRIC_COUNTER ? "Counter" :
+            (d->kind == CERTO_METRIC_GAUGE ? "Gauge" : "Histogram");
+        n += (size_t)snprintf(out + n, cap - n,
+            "%s{\"name\":%s,\"kind\":\"%s\",\"help\":%s,\"unit\":%s,\"labels\":[",
+            i ? "," : "", name, kind, help, unit);
+        free(name); free(help); free(unit);
+        for (int64_t l = 0; l < d->label_names->len; l++) {
+            char* label = __certo_host_json_quote((certo_text_t)d->label_names->data[l]);
+            n += (size_t)snprintf(out + n, cap - n, "%s%s", l ? "," : "", label);
+            free(label);
+        }
+        n += (size_t)snprintf(out + n, cap - n, "],\"series\":[");
+        for (int64_t s = 0; s < d->series->len; s++) {
+            CertoHostMetricSeries* series =
+                (CertoHostMetricSeries*)d->series->data[s];
+            n += (size_t)snprintf(out + n, cap - n, "%s{\"labels\":[", s ? "," : "");
+            for (int64_t l = 0; l < series->labels->len; l++) {
+                char* value = __certo_host_json_quote((certo_text_t)series->labels->data[l]);
+                n += (size_t)snprintf(out + n, cap - n, "%s%s", l ? "," : "", value);
+                free(value);
+            }
+            if (d->kind != CERTO_METRIC_HISTOGRAM) {
+                n += (size_t)snprintf(out + n, cap - n,
+                    "],\"value\":%" PRId64 "}", series->value);
+            } else {
+                n += (size_t)snprintf(out + n, cap - n,
+                    "],\"count\":%" PRId64 ",\"sum\":%" PRId64 ",\"buckets\":[",
+                    series->count, series->sum);
+                for (int64_t b = 0; b < d->buckets->len; b++)
+                    n += (size_t)snprintf(out + n, cap - n,
+                        "%s{\"le\":%" PRId64 ",\"count\":%" PRId64 "}",
+                        b ? "," : "", (int64_t)(intptr_t)d->buckets->data[b],
+                        series->bucket_counts[b]);
+                n += (size_t)snprintf(out + n, cap - n, "]}");
+            }
+        }
+        n += (size_t)snprintf(out + n, cap - n, "]}");
+    }
+    snprintf(out + n, cap - n, "]}");
+    __certo_host_unlock(host);
     return out;
 }
 

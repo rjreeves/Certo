@@ -75,6 +75,7 @@ fn writeEvent(event: HostLogEvent): Result<Unit, Text> [io] = {
     println(f"event:{HostLogEvent.sequence(event)}:{HostLogEvent.event(event)}")
     Ok(())
 }
+
 fn flushSink(): Result<Unit, Text> [io] = {
     println("flush")
     Ok(())
@@ -107,6 +108,36 @@ fn main(): Unit [io] = {
         "flush", "dispose",
     ]);
     assert!(String::from_utf8_lossy(&output.stderr).trim().is_empty());
+}
+
+#[test]
+fn typed_metric_registry_is_labeled_bounded_and_deterministic() {
+    let output = run_certo(r#"module HostTypedMetricsTest
+
+fn main(): Unit [io] = {
+    val host = Host.new()
+    val requests = Host.counterMetric(host, "requests", "Accepted requests", "requests", ["route"], 2)
+    val active = Host.gaugeMetric(host, "active", "Active jobs", "jobs", [], 1)
+    val latency = Host.histogramMetric(host, "latency", "Request latency", "ms", ["route"], [10, 50, 100], 2)
+    HostMetric.counterAdd(requests, ["/b"], 2)
+    HostMetric.counterAdd(requests, ["/a"], 1)
+    HostMetric.counterAdd(requests, ["/c"], 9)
+    HostMetric.gaugeSet(active, [], -3)
+    HostMetric.histogramObserve(latency, ["/a"], 7)
+    HostMetric.histogramObserve(latency, ["/a"], 60)
+    println(Host.metricSnapshot(host))
+}
+"#);
+    let stdout = assert_success(&output);
+    assert_eq!(stdout.trim(), concat!(
+        "{\"instruments\":[",
+        "{\"name\":\"requests\",\"kind\":\"Counter\",\"help\":\"Accepted requests\",\"unit\":\"requests\",\"labels\":[\"route\"],\"series\":[",
+        "{\"labels\":[\"/a\"],\"value\":1},{\"labels\":[\"/b\"],\"value\":2}]},",
+        "{\"name\":\"active\",\"kind\":\"Gauge\",\"help\":\"Active jobs\",\"unit\":\"jobs\",\"labels\":[],\"series\":[{\"labels\":[],\"value\":-3}]},",
+        "{\"name\":\"latency\",\"kind\":\"Histogram\",\"help\":\"Request latency\",\"unit\":\"ms\",\"labels\":[\"route\"],\"series\":[",
+        "{\"labels\":[\"/a\"],\"count\":2,\"sum\":67,\"buckets\":[{\"le\":10,\"count\":1},{\"le\":50,\"count\":1},{\"le\":100,\"count\":2}]}]}",
+        "]}"
+    ));
 }
 
 #[test]
