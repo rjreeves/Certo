@@ -219,8 +219,10 @@ container platforms.
   `Stdlib.Http`.
 - ✅ Coordinated drain triggered by signals or an application-authenticated
   administrative endpoint, with host-owned listener admission and draining.
-- Startup and shutdown reason reporting.
-- Optional worker enable/disable controls for maintenance.
+- ✅ Typed startup and shutdown reason reporting with deterministic first-cause
+  retention in operational snapshots and probe responses.
+- ✅ Optional typed worker enable/disable controls for maintenance with
+  cooperative cancellation, bounded disable, and readiness-safe re-enabling.
 - Platform integration guidance for systemd, Windows Service Control Manager,
   and containers.
 
@@ -293,5 +295,5 @@ Every Host milestone must satisfy the following gates:
 
 ## Recommended next implementation item
 
-Add typed startup and shutdown reason reporting to operational snapshots and
-probe responses without exposing raw callback failures.
+Add platform integration guidance and tested service-manager examples for
+systemd, Windows Service Control Manager, and containers.

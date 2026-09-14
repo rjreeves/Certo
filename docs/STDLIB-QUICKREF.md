@@ -949,6 +949,9 @@ Host.metrics(host: Host): Text [io]
 Host.workerHealth(host: Host, name: Text): Text?
 Host.workerRestarts(host: Host, name: Text): Int?
 Host.workerLastError(host: Host, name: Text): Text?
+Host.disableWorker(host: Host, name: Text): HostWorkerControlStatus [io]
+Host.enableWorker(host: Host, name: Text): HostWorkerControlStatus [io]
+HostWorkerControlStatus.name(status: HostWorkerControlStatus): Text
 
 Host.startTyped(host: Host): Result<Unit, HostLifecycleError> [io]
 Host.stopTyped(host: Host): Result<Unit, HostLifecycleError> [io]
@@ -959,11 +962,21 @@ Host.waitUntilReadyTyped(
 ): Result<Unit, HostLifecycleError> [io]
 Host.status(host: Host): HostStatusSnapshot [io]
 Host.operationStatus(host: Host): HostOperationalStatus [io]
+Host.startReason(host: Host, reason: HostStartReason): Host
+
+HostStartReason.application(): HostStartReason
+HostStartReason.serviceManager(): HostStartReason
+HostStartReason.restart(): HostStartReason
+HostStartReason.testRun(): HostStartReason
+HostStartReason.name(reason: HostStartReason): Text
+HostStopReason.name(reason: HostStopReason): Text
 
 HostOperationalStatus.condition(status): HostOperationalCondition
 HostOperationalStatus.state(status): HostState
 HostOperationalStatus.isReady(status): Bool
 HostOperationalStatus.isLive(status): Bool
+HostOperationalStatus.startReason(status): HostStartReason
+HostOperationalStatus.stopReason(status): HostStopReason?
 HostOperationalStatus.failureKind(status): HostFailureKind?
 HostOperationalCondition.name(condition): Text
 
@@ -997,6 +1010,7 @@ HostWorkerStatus.isReady(worker: HostWorkerStatus): Bool
 HostWorkerStatus.isLive(worker: HostWorkerStatus): Bool
 HostWorkerStatus.restarts(worker: HostWorkerStatus): Int
 HostWorkerStatus.lastError(worker: HostWorkerStatus): Text?
+HostWorkerStatus.isEnabled(worker: HostWorkerStatus): Bool
 HostMetricSnapshot.name(metric: HostMetricSnapshot): Text
 HostMetricSnapshot.value(metric: HostMetricSnapshot): Int
 
@@ -1178,7 +1192,11 @@ Counters and gauges are copied into typed metric entries. `Host.metrics`,
 `Host.operationStatus` is the transport-neutral probe snapshot. Its stable
 condition is `starting`, `ready`, `degraded`, `stopping`, `stopped`, or
 `failed`; `degraded` identifies a previously started host whose worker is
-restarting. `HostHttp.liveness` and `HostHttp.readiness` encode that snapshot
+restarting. Its start reason defaults to `Application` and may be set before
+startup to `ServiceManager`, `Restart`, or `Test`. Its optional stop reason is
+the first accepted cause: `ApplicationRequest`, `AdministrativeDrain`,
+`Signal`, `StartupFailure`, or `WorkerFailure`; later concurrent causes do not
+replace it. `HostHttp.liveness` and `HostHttp.readiness` encode that snapshot
 as deterministic JSON, returning 200 when their respective predicate is true
 and 503 otherwise. `HostHttp.metrics` returns the H4 Prometheus snapshot with
 the `text/plain; version=0.0.4; charset=utf-8` content type. Probe failures
@@ -1325,6 +1343,15 @@ disabled during quiescing, and exhausting `maxRetries` fails the host and begins
 graceful shutdown. Restart events are logged and counted automatically.
 `workerHealth`, `workerRestarts`, and `workerLastError` expose supervisor state by
 worker name.
+
+`Host.disableWorker` cooperatively cancels one worker and waits up to the host's
+shutdown timeout for its callback to yield. A disabled worker reports
+`Disabled`, is excluded from required and ready worker counts, and therefore
+does not close host readiness. `Host.enableWorker` resumes the parked supervisor
+and temporarily closes readiness until that worker calls `HostContext.ready`.
+Both operations return a typed `HostWorkerControlStatus`: `Disabled`, `Enabled`,
+`AlreadyDisabled`, `AlreadyEnabled`, `UnknownWorker`, `InvalidHostState`,
+`ControlInProgress`, or `Timeout`.
 
 Plugin names and worker names must be non-empty and unique within a host.
 Service-key names cannot be empty. Restart counts and delays cannot be negative,

@@ -67,6 +67,7 @@ const IO_FUNCTIONS: &[&str] = &[
     "Host.status", "Host.operationStatus",
     "HostHttp.liveness", "HostHttp.readiness", "HostHttp.metrics", "HostHttp.drain",
     "Host.requestShutdown",
+    "Host.disableWorker", "Host.enableWorker",
     "Host.requestStop", "HostContext.ready", "HostContext.fail",
     "HostContext.sleep", "HostContext.waitUntil",
     "Host.metrics", "Host.metricSnapshot", "Host.metricsPrometheus",
