@@ -173,7 +173,7 @@ contract is defined in [`HOST-CONFIGURATION.md`](HOST-CONFIGURATION.md).
 
 ## Milestone H4 — Production observability
 
-**Status: In progress**
+**Status: Shipped**
 
 Keep the current zero-dependency local telemetry while adding export interfaces
 for production systems.
@@ -191,7 +191,8 @@ defined in [`HOST-OBSERVABILITY.md`](HOST-OBSERVABILITY.md).
   label cardinality, and deterministic snapshots.
 - ✅ Prometheus text export with deterministic ordering, escaping, and
   normalization collision validation.
-- OpenTelemetry-compatible traces and metrics after a separate design review.
+- Deferred: OpenTelemetry-compatible traces and metrics require a separate
+  design review and are not part of the H4 completion boundary.
 - ✅ Correlation context propagated through plugin and worker callbacks,
   structured events, and explicit bounded metric labels.
 - ✅ Structural secret sink checks plus runtime redaction/rejection for exposed
@@ -202,11 +203,12 @@ defined in [`HOST-OBSERVABILITY.md`](HOST-OBSERVABILITY.md).
 
 - Exporters cannot block host shutdown indefinitely.
 - Telemetry failures have an explicit drop, buffer, or fail policy.
-- High-contention logging and metrics paths have stress and benchmark coverage.
+- ✅ High-contention logging and metrics paths have stress and benchmark
+  coverage with explicit, overrideable regression thresholds.
 
 ## Milestone H5 — Operational endpoints and control
 
-**Status: Planned**
+**Status: Next**
 
 Make hosted applications straightforward to operate in service managers and
 container platforms.
@@ -289,5 +291,6 @@ Every Host milestone must satisfy the following gates:
 
 ## Recommended next implementation item
 
-Add reproducible high-contention logging and metrics benchmarks with explicit
-regression thresholds to finish H4's remaining performance exit criterion.
+Define H5's normative operational endpoint and coordinated-drain contract,
+including exact liveness/readiness/degraded/stopping mappings, before adding
+the `Stdlib.Http` adapters.
