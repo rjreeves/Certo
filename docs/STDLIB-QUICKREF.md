@@ -1056,6 +1056,7 @@ HostMetric.counterAdd(metric: HostMetric, labels: List<Text>, amount: Int): Unit
 HostMetric.gaugeSet(metric: HostMetric, labels: List<Text>, value: Int): Unit [io]
 HostMetric.histogramObserve(metric: HostMetric, labels: List<Text>, value: Int): Unit [io]
 Host.metricSnapshot(host: Host): Text [io]
+Host.metricsPrometheus(host: Host): Text [io]
 HostContext.counter(context: HostContext, name: Text, amount: Int): Unit [io]
 HostContext.gauge(context: HostContext, name: Text, value: Int): Unit [io]
 HostContext.isStopping(context: HostContext): Bool
@@ -1081,6 +1082,19 @@ negative increments, gauges accept signed values, and histograms accept
 non-negative observations into fixed cumulative buckets. `maxSeries` bounds
 label cardinality without evicting existing series. `Host.metricSnapshot`
 returns descriptors in registration order and series in canonical label order.
+`Host.metricsPrometheus` exports the same typed registry as deterministic
+Prometheus text, including `HELP`/`TYPE` metadata, escaped label values,
+counter `_total` suffixes, and cumulative histogram buckets.
+
+Provider integrations should remain host-managed application plugins rather
+than expanding the provider-neutral standard library. See
+`examples/dropbox_host.cto` for a credential-configured scoped Dropbox client with
+typed metadata, folder, upload, download, and delete operations. Its `main`
+uses `Host.runTyped`, so the process remains available until Ctrl+C, SIGTERM,
+or a plugin calls `Host.requestStop`. Configure it with the
+`CERTO__DROPBOX__ACCESS_TOKEN`, `CERTO__DROPBOX__SOURCE_PATH`, and
+`CERTO__DROPBOX__DESTINATION_PATH` environment variables. Its worker reads the
+source as binary data, uploads it once, then requests graceful shutdown.
 
 Typed host configuration is merged at startup in this order: typed defaults,
 the `[host]` subtree of `certo.toml`, `CERTO__...` environment variables,

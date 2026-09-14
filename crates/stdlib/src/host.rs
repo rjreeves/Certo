@@ -3,13 +3,14 @@
 /// This is intentionally a small, in-process application host. Plugins are
 /// ordinary Certo function values linked into the program; dynamic libraries
 /// and dependency injection belong to later layers.
-pub const HOST_C: &str = r#"
+pub const HOST_C: &str = r##"
 /* ================================================================
    Stdlib.Host — ordered in-process plugin lifecycle
    ================================================================ */
 
 #include <signal.h>
 #include <ctype.h>
+#include <stdarg.h>
 
 struct CertoHost;
 struct CertoHostWorker;
@@ -1412,6 +1413,65 @@ static bool __certo_host_int_list_equal(CertoList* left, CertoList* right) {
     return true;
 }
 
+static char* __certo_host_prometheus_name(certo_text_t name, int kind) {
+    size_t len = strlen(name ? name : "");
+    bool add_total = kind == CERTO_METRIC_COUNTER &&
+        (len < 6 || strcmp(name + len - 6, "_total") != 0);
+    char* normalized = (char*)malloc(len + (add_total ? 7 : 1));
+    if (!normalized) certo_panic("out of memory");
+    for (size_t i = 0; i < len; i++) {
+        unsigned char c = (unsigned char)name[i];
+        bool valid = i == 0 ? (isalpha(c) || c == '_' || c == ':')
+                            : (isalnum(c) || c == '_' || c == ':');
+        normalized[i] = valid ? (char)c : '_';
+    }
+    normalized[len] = '\0';
+    if (add_total) strcat(normalized, "_total");
+    return normalized;
+}
+
+static bool __certo_host_prometheus_histogram_component(
+        const char* histogram_name, const char* candidate) {
+    size_t len = strlen(histogram_name);
+    if (strncmp(histogram_name, candidate, len) != 0) return false;
+    const char* suffix = candidate + len;
+    return strcmp(suffix, "_bucket") == 0 || strcmp(suffix, "_sum") == 0 ||
+           strcmp(suffix, "_count") == 0;
+}
+
+static bool __certo_host_prometheus_family_collision(
+        const char* left, int left_kind, const char* right, int right_kind) {
+    if (strcmp(left, right) == 0) return true;
+    if (left_kind == CERTO_METRIC_HISTOGRAM &&
+        __certo_host_prometheus_histogram_component(left, right)) return true;
+    if (right_kind == CERTO_METRIC_HISTOGRAM &&
+        __certo_host_prometheus_histogram_component(right, left)) return true;
+    return false;
+}
+
+static void __certo_host_validate_prometheus_labels(
+        CertoList* label_names, int kind) {
+    for (int64_t i = 0; i < label_names->len; i++) {
+        char* current = __certo_host_prometheus_name(
+            (certo_text_t)label_names->data[i], CERTO_METRIC_GAUGE);
+        if (kind == CERTO_METRIC_HISTOGRAM && strcmp(current, "le") == 0) {
+            free(current);
+            certo_panic("histogram label name collides with Prometheus le label");
+        }
+        for (int64_t j = 0; j < i; j++) {
+            char* previous = __certo_host_prometheus_name(
+                (certo_text_t)label_names->data[j], CERTO_METRIC_GAUGE);
+            bool collision = strcmp(current, previous) == 0;
+            free(previous);
+            if (collision) {
+                free(current);
+                certo_panic("label names collide after Prometheus normalization");
+            }
+        }
+        free(current);
+    }
+}
+
 static CertoHostMetricDescriptor* __certo_host_metric_descriptor(
         CertoHost* host, certo_text_t name, certo_text_t help, certo_text_t unit,
         int kind, CertoList* label_names, CertoList* buckets, int64_t max_series) {
@@ -1450,6 +1510,21 @@ static CertoHostMetricDescriptor* __certo_host_metric_descriptor(
             __certo_host_int_list_equal(existing->buckets, buckets)) return existing;
         certo_panic("metric descriptor conflicts with an existing registration");
     }
+    char* exported_name = __certo_host_prometheus_name(name, kind);
+    for (int64_t i = 0; i < host->metric_descriptors->len; i++) {
+        CertoHostMetricDescriptor* existing =
+            (CertoHostMetricDescriptor*)host->metric_descriptors->data[i];
+        char* existing_name = __certo_host_prometheus_name(existing->name, existing->kind);
+        bool collision = __certo_host_prometheus_family_collision(
+            exported_name, kind, existing_name, existing->kind);
+        free(existing_name);
+        if (collision) {
+            free(exported_name);
+            certo_panic("metric names collide after Prometheus normalization");
+        }
+    }
+    free(exported_name);
+    __certo_host_validate_prometheus_labels(label_names, kind);
     if (kind != CERTO_METRIC_HISTOGRAM && buckets->len != 0)
         certo_panic("only histograms may declare buckets");
     CertoHostMetricDescriptor* descriptor =
@@ -3217,6 +3292,114 @@ certo_text_t certo_host_metric_snapshot(CertoHost* host) {
     return out;
 }
 
+static void __certo_host_prom_append(char** out, size_t* len, size_t* cap,
+                                     const char* format, ...) {
+    for (;;) {
+        va_list args;
+        va_start(args, format);
+        int needed = vsnprintf(*out + *len, *cap - *len, format, args);
+        va_end(args);
+        if (needed < 0) certo_panic("failed to format Prometheus metrics");
+        if ((size_t)needed < *cap - *len) {
+            *len += (size_t)needed;
+            return;
+        }
+        *cap = (*cap * 2) + (size_t)needed + 1;
+        char* grown = (char*)realloc(*out, *cap);
+        if (!grown) certo_panic("out of memory");
+        *out = grown;
+    }
+}
+
+static void __certo_host_prom_escape(char** out, size_t* len, size_t* cap,
+                                     certo_text_t text, bool label) {
+    for (const unsigned char* p = (const unsigned char*)(text ? text : ""); *p; p++) {
+        if (*p == '\\') __certo_host_prom_append(out, len, cap, "\\\\");
+        else if (*p == '\n') __certo_host_prom_append(out, len, cap, "\\n");
+        else if (label && *p == '"') __certo_host_prom_append(out, len, cap, "\\\"");
+        else __certo_host_prom_append(out, len, cap, "%c", *p);
+    }
+}
+
+static void __certo_host_prom_labels(char** out, size_t* len, size_t* cap,
+        CertoHostMetricDescriptor* descriptor, CertoHostMetricSeries* series,
+        bool histogram, certo_text_t boundary) {
+    if (descriptor->label_names->len == 0 && !histogram) return;
+    __certo_host_prom_append(out, len, cap, "{");
+    for (int64_t i = 0; i < descriptor->label_names->len; i++) {
+        char* label_name = __certo_host_prometheus_name(
+            (certo_text_t)descriptor->label_names->data[i], CERTO_METRIC_GAUGE);
+        __certo_host_prom_append(out, len, cap, "%s%s=\"", i ? "," : "", label_name);
+        free(label_name);
+        __certo_host_prom_escape(out, len, cap,
+            (certo_text_t)series->labels->data[i], true);
+        __certo_host_prom_append(out, len, cap, "\"");
+    }
+    if (histogram) {
+        __certo_host_prom_append(out, len, cap, "%sle=\"%s\"",
+            descriptor->label_names->len ? "," : "", boundary);
+    }
+    __certo_host_prom_append(out, len, cap, "}");
+}
+
+certo_text_t certo_host_metrics_prometheus(CertoHost* host) {
+    if (!host) return "";
+    size_t cap = 1024, len = 0;
+    char* out = (char*)malloc(cap);
+    if (!out) certo_panic("out of memory");
+    out[0] = '\0';
+    __certo_host_lock(host);
+    for (int64_t i = 0; i < host->metrics->len; i++) {
+        CertoHostMetric* metric = (CertoHostMetric*)host->metrics->data[i];
+        char* name = __certo_host_prometheus_name(metric->name,
+            metric->gauge ? CERTO_METRIC_GAUGE : CERTO_METRIC_COUNTER);
+        __certo_host_prom_append(&out, &len, &cap, "# TYPE %s %s\n%s %" PRId64 "\n",
+            name, metric->gauge ? "gauge" : "counter", name, metric->value);
+        free(name);
+    }
+    for (int64_t i = 0; i < host->metric_descriptors->len; i++) {
+        CertoHostMetricDescriptor* descriptor =
+            (CertoHostMetricDescriptor*)host->metric_descriptors->data[i];
+        char* name = __certo_host_prometheus_name(descriptor->name, descriptor->kind);
+        __certo_host_prom_append(&out, &len, &cap, "# HELP %s ", name);
+        __certo_host_prom_escape(&out, &len, &cap, descriptor->help, false);
+        const char* kind = descriptor->kind == CERTO_METRIC_COUNTER ? "counter" :
+            (descriptor->kind == CERTO_METRIC_GAUGE ? "gauge" : "histogram");
+        __certo_host_prom_append(&out, &len, &cap, "\n# TYPE %s %s\n", name, kind);
+        for (int64_t s = 0; s < descriptor->series->len; s++) {
+            CertoHostMetricSeries* series =
+                (CertoHostMetricSeries*)descriptor->series->data[s];
+            if (descriptor->kind != CERTO_METRIC_HISTOGRAM) {
+                __certo_host_prom_append(&out, &len, &cap, "%s", name);
+                __certo_host_prom_labels(&out, &len, &cap, descriptor, series, false, NULL);
+                __certo_host_prom_append(&out, &len, &cap, " %" PRId64 "\n", series->value);
+                continue;
+            }
+            for (int64_t b = 0; b < descriptor->buckets->len; b++) {
+                char boundary[32];
+                snprintf(boundary, sizeof(boundary), "%" PRId64,
+                    (int64_t)(intptr_t)descriptor->buckets->data[b]);
+                __certo_host_prom_append(&out, &len, &cap, "%s_bucket", name);
+                __certo_host_prom_labels(&out, &len, &cap, descriptor, series, true, boundary);
+                __certo_host_prom_append(&out, &len, &cap, " %" PRId64 "\n",
+                    series->bucket_counts[b]);
+            }
+            __certo_host_prom_append(&out, &len, &cap, "%s_bucket", name);
+            __certo_host_prom_labels(&out, &len, &cap, descriptor, series, true, "+Inf");
+            __certo_host_prom_append(&out, &len, &cap, " %" PRId64 "\n", series->count);
+            __certo_host_prom_append(&out, &len, &cap, "%s_sum", name);
+            __certo_host_prom_labels(&out, &len, &cap, descriptor, series, false, NULL);
+            __certo_host_prom_append(&out, &len, &cap, " %" PRId64 "\n", series->sum);
+            __certo_host_prom_append(&out, &len, &cap, "%s_count", name);
+            __certo_host_prom_labels(&out, &len, &cap, descriptor, series, false, NULL);
+            __certo_host_prom_append(&out, &len, &cap, " %" PRId64 "\n", series->count);
+        }
+        free(name);
+    }
+    __certo_host_unlock(host);
+    return out;
+}
+
 certo_text_t certo_host_metrics(CertoHost* host) {
     if (!host) return "{\"health\":\"Failed\",\"counters\":{},\"gauges\":{}}";
     __certo_host_lock(host);
@@ -3257,4 +3440,4 @@ certo_text_t certo_host_metrics(CertoHost* host) {
 int64_t certo_host_context_plugin_count(CertoHostContext* context) {
     return context ? context->plugin_count : 0;
 }
-"#;
+"##;

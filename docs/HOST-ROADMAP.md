@@ -189,7 +189,8 @@ defined in [`HOST-OBSERVABILITY.md`](HOST-OBSERVABILITY.md).
   and deadline-bound finalization.
 - ✅ Metrics registry with counter, gauge, and histogram instruments, bounded
   label cardinality, and deterministic snapshots.
-- Prometheus text export.
+- ✅ Prometheus text export with deterministic ordering, escaping, and
+  normalization collision validation.
 - OpenTelemetry-compatible traces and metrics after a separate design review.
 - Correlation context propagated through plugin and worker callbacks.
 
@@ -284,5 +285,5 @@ Every Host milestone must satisfy the following gates:
 
 ## Recommended next implementation item
 
-Implement H4's deterministic Prometheus text export from the typed metrics
-registry, including normalization collision checks and escaping.
+Implement H4 correlation context derivation and propagation through plugin and
+worker callbacks and structured events.
