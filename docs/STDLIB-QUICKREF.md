@@ -1025,6 +1025,21 @@ HostContext.logEvent(context: HostContext, event: HostLogEvent): Unit [io]
 HostLogEvent.schema/sequence/timestampUnixMs/severity/event/message/hostId(...)
 HostLogEvent.plugin/worker/correlationId(...)
 HostLogEvent.fields(event: HostLogEvent): List<HostLogField>
+HostLogOverflowPolicy.dropNewest/dropOldest(): HostLogOverflowPolicy
+HostLogOverflowPolicy.wait(duration: Duration): HostLogOverflowPolicy
+HostLogFailurePolicy.ignore/disable/failHost(): HostLogFailurePolicy
+Host.logSink(
+    host: Host,
+    name: Text,
+    capacity: Int,
+    overflow: HostLogOverflowPolicy,
+    failure: HostLogFailurePolicy,
+    write: fn(HostLogEvent): Result<Unit, Text>,
+    flush: fn(): Result<Unit, Text>,
+    dispose: fn(): Result<Unit, Text>
+): Host
+Host.disableStderrLog(host: Host): Host
+Host.telemetryTimeout(host: Host, timeout: Duration): Host
 HostContext.counter(context: HostContext, name: Text, amount: Int): Unit [io]
 HostContext.gauge(context: HostContext, name: Text, value: Int): Unit [io]
 HostContext.isStopping(context: HostContext): Bool
@@ -1034,6 +1049,14 @@ HostContext.config(context: HostContext, key: Text): Text?
 HostContext.configOr(context: HostContext, key: Text, fallback: Text): Text
 HostContext.configValue<T>(context: HostContext, key: ConfigKey<T>): T
 ```
+
+Log sinks must be registered while the host is new. Each sink owns an
+independent bounded queue and serial callback worker. Overflow can drop the
+newest event, replace the oldest queued event, or wait for a bounded duration.
+Callback failures can be ignored, disable only that sink, or request orderly
+host shutdown. Shutdown closes admission, drains accepted events, then flushes
+and disposes sinks in reverse registration order within the per-sink telemetry
+timeout. Supply a callback returning `Ok(())` when no flush work is needed.
 
 Typed host configuration is merged at startup in this order: typed defaults,
 the `[host]` subtree of `certo.toml`, `CERTO__...` environment variables,

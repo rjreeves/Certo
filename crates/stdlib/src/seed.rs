@@ -1083,6 +1083,8 @@ pub fn seed_stdlib(env: &mut TypeEnv, counter: &mut u32) {
         let log_severity = Ty::Named { name: "HostLogSeverity".into(), args: vec![] };
         let log_field = Ty::Named { name: "HostLogField".into(), args: vec![] };
         let log_event = Ty::Named { name: "HostLogEvent".into(), args: vec![] };
+        let log_overflow = Ty::Named { name: "HostLogOverflowPolicy".into(), args: vec![] };
+        let log_failure = Ty::Named { name: "HostLogFailurePolicy".into(), args: vec![] };
         let lifecycle = fn1(
             context.clone(),
             Ty::Result(Box::new(Ty::Unit), Box::new(Ty::Text)),
@@ -1382,6 +1384,26 @@ pub fn seed_stdlib(env: &mut TypeEnv, counter: &mut u32) {
         def!("HostLogEvent.worker", fn1(log_event.clone(), Ty::Option(Box::new(Ty::Text))));
         def!("HostLogEvent.correlationId", fn1(log_event.clone(), Ty::Option(Box::new(Ty::Text))));
         def!("HostLogEvent.fields", fn1(log_event.clone(), Ty::List(Box::new(log_field))));
+        def!("HostLogOverflowPolicy.dropNewest", Ty::Fn { params: vec![], ret: Box::new(log_overflow.clone()) });
+        def!("HostLogOverflowPolicy.dropOldest", Ty::Fn { params: vec![], ret: Box::new(log_overflow.clone()) });
+        def!("HostLogOverflowPolicy.wait", fn1(
+            Ty::Named { name: "Duration".into(), args: vec![] }, log_overflow.clone()));
+        def!("HostLogFailurePolicy.ignore", Ty::Fn { params: vec![], ret: Box::new(log_failure.clone()) });
+        def!("HostLogFailurePolicy.disable", Ty::Fn { params: vec![], ret: Box::new(log_failure.clone()) });
+        def!("HostLogFailurePolicy.failHost", Ty::Fn { params: vec![], ret: Box::new(log_failure.clone()) });
+        {
+            let callback_result = Ty::Result(Box::new(Ty::Unit), Box::new(Ty::Text));
+            let finalizer = Ty::Fn { params: vec![], ret: Box::new(callback_result.clone()) };
+            def!("Host.logSink", Ty::Fn {
+                params: vec![host.clone(), Ty::Text, Ty::Int, log_overflow,
+                    log_failure, fn1(log_event.clone(), callback_result),
+                    finalizer.clone(), finalizer],
+                ret: Box::new(host.clone()),
+            });
+        }
+        def!("Host.disableStderrLog", fn1(host.clone(), host.clone()));
+        def!("Host.telemetryTimeout", fn2(host.clone(),
+            Ty::Named { name: "Duration".into(), args: vec![] }, host.clone()));
         def!("Host.health", fn1(host.clone(), Ty::Text));
         def!("Host.metrics", fn1(host.clone(), Ty::Text));
         def!("Host.workerHealth", fn2(
@@ -2141,6 +2163,10 @@ pub fn seed_stdlib(env: &mut TypeEnv, counter: &mut u32) {
     pm!("HostLogEvent.worker",      "event");
     pm!("HostLogEvent.correlationId", "event");
     pm!("HostLogEvent.fields",      "event");
+    pm!("HostLogOverflowPolicy.wait", "duration");
+    pm!("Host.logSink", "host", "name", "capacity", "overflow", "failure", "write", "flush", "dispose");
+    pm!("Host.disableStderrLog", "host");
+    pm!("Host.telemetryTimeout", "host", "timeout");
     pm!("Host.health",             "host");
     pm!("Host.metrics",            "host");
     pm!("Host.workerHealth",       "host", "name");

@@ -3057,6 +3057,21 @@ fn host_logging_and_metrics_typecheck() {
 }
 
 #[test]
+fn host_pluggable_log_sinks_typecheck() {
+    check_full(
+        "module HostSinkTypes\n\
+         fn write(event: HostLogEvent): Result<Unit, Text> = Ok(())\n\
+         fn flushSink(): Result<Unit, Text> = Ok(())\n\
+         fn disposeSink(): Result<Unit, Text> = Ok(())\n\
+         fn build(): Host = Host.new()\n\
+           .disableStderrLog()\n\
+           .telemetryTimeout(Duration.seconds(2))\n\
+           .logSink(\"capture\", 32, HostLogOverflowPolicy.dropOldest(),\n\
+             HostLogFailurePolicy.disable(), write, flushSink, disposeSink)"
+    ).unwrap();
+}
+
+#[test]
 fn host_logging_rejects_structural_secrets() {
     let error = check_full(
         "module HostSecretLogTest\n\
