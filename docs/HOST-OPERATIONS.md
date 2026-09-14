@@ -53,6 +53,14 @@ contain host state, live/ready flags, operational condition, and a sanitized
 failure category when present. They never contain configuration values, raw
 callback errors, metric label values, or plugin-owned payloads.
 
-The future HTTP adapter will define status codes, content type, cache policy,
-and routing in a separate `Stdlib.Http` integration section without changing
-these lifecycle semantics.
+## Standard HTTP response adapters
+
+`HostHttp.liveness(host)` and `HostHttp.readiness(host)` return deterministic
+JSON containing `condition`, `state`, `live`, and `ready`. They return status
+200 when the selected predicate is true and 503 otherwise. A failed host also
+includes the stable `failure_kind`; raw failure messages are excluded.
+
+`HostHttp.metrics(host)` returns status 200 and the current Prometheus text
+snapshot with content type `text/plain; version=0.0.4; charset=utf-8`.
+Applications retain control of paths, routing, authentication, and whether any
+adapter is exposed. The adapters perform no socket I/O themselves.

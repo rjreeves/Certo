@@ -208,14 +208,15 @@ defined in [`HOST-OBSERVABILITY.md`](HOST-OBSERVABILITY.md).
 
 ## Milestone H5 — Operational endpoints and control
 
-**Status: Next**
+**Status: In progress**
 
 Make hosted applications straightforward to operate in service managers and
 container platforms.
 
 ### Scope
 
-- Standard liveness, readiness, and metrics adapters for `Stdlib.Http`.
+- ✅ Standard typed liveness, readiness, and metrics response adapters for
+  `Stdlib.Http`.
 - Coordinated drain triggered by signals or an administrative endpoint.
 - Startup and shutdown reason reporting.
 - Optional worker enable/disable controls for maintenance.
@@ -291,6 +292,6 @@ Every Host milestone must satisfy the following gates:
 
 ## Recommended next implementation item
 
-Define H5's normative operational endpoint and coordinated-drain contract,
-including exact liveness/readiness/degraded/stopping mappings, before adding
-the `Stdlib.Http` adapters.
+Add a host-managed, shutdown-aware HTTP listener so operational probes stop
+accepting traffic before plugin quiesce and cannot delay the host's bounded
+worker drain.

@@ -64,7 +64,8 @@ const IO_FUNCTIONS: &[&str] = &[
     // Host lifecycle invokes plugin callbacks and may wait for shutdown.
     "Host.start", "Host.stop", "Host.run", "Host.waitUntilReady",
     "Host.startTyped", "Host.stopTyped", "Host.runTyped", "Host.waitUntilReadyTyped",
-    "Host.status",
+    "Host.status", "Host.operationStatus",
+    "HostHttp.liveness", "HostHttp.readiness", "HostHttp.metrics",
     "Host.requestStop", "HostContext.ready", "HostContext.fail",
     "HostContext.sleep", "HostContext.waitUntil",
     "Host.metrics", "Host.metricSnapshot", "Host.metricsPrometheus",

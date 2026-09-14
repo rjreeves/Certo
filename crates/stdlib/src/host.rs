@@ -233,6 +233,14 @@ typedef struct CertoHostStatusSnapshot {
     CertoHostLifecycleError* last_failure;
 } CertoHostStatusSnapshot;
 
+typedef struct CertoHostOperationalStatus {
+    certo_text_t condition;
+    certo_text_t state;
+    bool ready;
+    bool live;
+    certo_text_t failure_kind;
+} CertoHostOperationalStatus;
+
 typedef struct CertoHost {
     CertoList* plugins;
     CertoHostContext* context;
@@ -3300,6 +3308,68 @@ CertoList* certo_host_status_snapshot_gauges(CertoHostStatusSnapshot* s) {
 void* certo_host_status_snapshot_last_failure(CertoHostStatusSnapshot* s) {
     return s && s->last_failure
         ? __certo_opt_box((int64_t)(intptr_t)s->last_failure) : NULL;
+}
+
+CertoHostOperationalStatus* certo_host_operation_status(CertoHost* host) {
+    CertoHostOperationalStatus* status =
+        (CertoHostOperationalStatus*)calloc(1, sizeof(CertoHostOperationalStatus));
+    if (!status) certo_panic("out of memory");
+    if (!host) {
+        status->condition = "failed";
+        status->state = "Failed";
+        status->failure_kind = "StartupFailure";
+        return status;
+    }
+    int state = CERTO_ATOMIC_LOAD(&host->state);
+    int64_t workers = CERTO_ATOMIC_LOAD(&host->worker_count);
+    int64_t ready_workers = CERTO_ATOMIC_LOAD(&host->ready_workers);
+    status->state = __certo_host_state_text(state);
+    status->ready = state == CERTO_HOST_HEALTHY && ready_workers >= workers;
+    status->live = state != CERTO_HOST_FAILED && state != CERTO_HOST_STOPPED;
+    CertoHostLifecycleError* failure = CERTO_ATOMIC_LOAD(&host->last_failure);
+    status->failure_kind = failure ? failure->kind : NULL;
+    switch (state) {
+        case CERTO_HOST_NEW:
+            status->condition = "starting";
+            break;
+        case CERTO_HOST_STARTING:
+            status->condition = CERTO_ATOMIC_LOAD(&host->startup_complete)
+                ? "degraded" : "starting";
+            break;
+        case CERTO_HOST_HEALTHY:
+            status->condition = "ready";
+            break;
+        case CERTO_HOST_STOPPING:
+            status->condition = "stopping";
+            break;
+        case CERTO_HOST_STOPPED:
+            status->condition = "stopped";
+            break;
+        default:
+            status->condition = "failed";
+            break;
+    }
+    return status;
+}
+
+certo_text_t certo_host_operational_status_condition(CertoHostOperationalStatus* s) {
+    return s ? s->condition : "failed";
+}
+certo_text_t certo_host_operational_status_state(CertoHostOperationalStatus* s) {
+    return s ? s->state : "Failed";
+}
+bool certo_host_operational_status_is_ready(CertoHostOperationalStatus* s) {
+    return s && s->ready;
+}
+bool certo_host_operational_status_is_live(CertoHostOperationalStatus* s) {
+    return s && s->live;
+}
+void* certo_host_operational_status_failure_kind(CertoHostOperationalStatus* s) {
+    return s && s->failure_kind
+        ? __certo_opt_box((int64_t)(intptr_t)s->failure_kind) : NULL;
+}
+certo_text_t certo_host_operational_condition_name(certo_text_t condition) {
+    return condition ? condition : "failed";
 }
 
 certo_text_t certo_host_worker_status_name(CertoHostWorkerStatus* s) {
