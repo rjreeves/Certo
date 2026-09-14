@@ -68,6 +68,48 @@ fn main(): Unit [io] = {
 }
 
 #[test]
+fn pluggable_log_sink_drains_in_order_and_finalizes() {
+    let output = run_certo(r#"module HostLogSinkTest
+
+fn writeEvent(event: HostLogEvent): Result<Unit, Text> [io] = {
+    println(f"event:{HostLogEvent.sequence(event)}:{HostLogEvent.event(event)}")
+    Ok(())
+}
+fn flushSink(): Result<Unit, Text> [io] = {
+    println("flush")
+    Ok(())
+}
+fn disposeSink(): Result<Unit, Text> [io] = {
+    println("dispose")
+    Ok(())
+}
+fn start(c: HostContext): Result<Unit, Text> [io] = {
+    HostContext.log(c, "info", "test.one", "one")
+    HostContext.log(c, "warn", "test.two", "two")
+    HostContext.log(c, "error", "test.three", "three")
+    Ok(())
+}
+fn stop(c: HostContext): Result<Unit, Text> = Ok(())
+fn main(): Unit [io] = {
+    val host = Host.new()
+        .disableStderrLog()
+        .telemetryTimeout(Duration.seconds(2))
+        .logSink("capture", 8, HostLogOverflowPolicy.dropNewest(),
+            HostLogFailurePolicy.ignore(), writeEvent, flushSink, disposeSink)
+        .add(Host.plugin("producer", start, stop))
+    val started = Host.start(host)
+    val stopped = Host.stop(host)
+}
+"#);
+    let stdout = assert_success(&output);
+    assert_eq!(stdout.lines().collect::<Vec<_>>(), [
+        "event:1:test.one", "event:2:test.two", "event:3:test.three",
+        "flush", "dispose",
+    ]);
+    assert!(String::from_utf8_lossy(&output.stderr).trim().is_empty());
+}
+
+#[test]
 fn concurrent_worker_events_have_one_total_sequence_order() {
     let output = run_certo(r#"module HostConcurrentEventTest
 fn start(c: HostContext): Result<Unit, Text> = Ok(())

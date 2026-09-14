@@ -863,7 +863,8 @@ fn ast_ty_to_c_str(te: &certo_ast::types::TypeExpr) -> String {
                     "certo_text_t".to_string(),
                 "Host" | "HostPlugin" | "HostContext" | "ServiceKey" | "ConfigKey" | "RestartPolicy" |
                 "HostStatusSnapshot" | "HostWorkerStatus" | "HostMetricSnapshot" |
-                "HostLifecycleError" | "HostConfigurationError" | "HostLogEvent" | "HostLogField" =>
+                "HostLifecycleError" | "HostConfigurationError" | "HostLogEvent" | "HostLogField" |
+                "HostLogOverflowPolicy" | "HostLogFailurePolicy" =>
                     "void*".to_string(),
                 other     => c_ident(other),
             }

@@ -173,7 +173,7 @@ contract is defined in [`HOST-CONFIGURATION.md`](HOST-CONFIGURATION.md).
 
 ## Milestone H4 — Production observability
 
-**Status: Next**
+**Status: In progress**
 
 Keep the current zero-dependency local telemetry while adding export interfaces
 for production systems.
@@ -185,7 +185,8 @@ defined in [`HOST-OBSERVABILITY.md`](HOST-OBSERVABILITY.md).
 
 - ✅ Define the production observability contract before implementation.
 - ✅ Structured event schema with stable field names and severity levels.
-- Pluggable log sinks with backpressure and failure policy.
+- ✅ Pluggable log sinks with bounded queues, backpressure, failure policy,
+  and deadline-bound finalization.
 - Metrics registry with counter, gauge, and histogram instruments.
 - Prometheus text export.
 - OpenTelemetry-compatible traces and metrics after a separate design review.
@@ -282,5 +283,5 @@ Every Host milestone must satisfy the following gates:
 
 ## Recommended next implementation item
 
-Implement H4's pluggable log sinks with bounded per-sink queues, explicit
-overflow and callback-failure policies, and deadline-bound shutdown.
+Implement H4's typed metrics registry with counter, gauge, and histogram
+descriptors, bounded label cardinality, and deterministic snapshots.

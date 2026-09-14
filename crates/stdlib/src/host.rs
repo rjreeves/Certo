@@ -162,7 +162,42 @@ typedef struct CertoHostLogEvent {
     certo_text_t worker;
     certo_text_t correlation_id;
     CertoList* fields;
+    volatile int references;
 } CertoHostLogEvent;
+
+typedef struct CertoHostLogOverflowPolicy {
+    int mode;
+    int64_t wait_ms;
+} CertoHostLogOverflowPolicy;
+
+typedef struct CertoHostLogFailurePolicy {
+    int mode;
+} CertoHostLogFailurePolicy;
+
+typedef struct CertoHostLogSink {
+    __certo_task_hdr_t hdr;
+    struct CertoHost* host;
+    certo_text_t name;
+    int64_t capacity;
+    CertoHostLogOverflowPolicy overflow;
+    CertoHostLogFailurePolicy failure;
+    certo_fn_t write;
+    certo_fn_t flush;
+    certo_fn_t dispose;
+    CertoHostLogEvent** queue;
+    int64_t head;
+    int64_t length;
+    bool accepting;
+    bool disabled;
+    bool started;
+#if defined(_WIN32)
+    CRITICAL_SECTION lock;
+    CONDITION_VARIABLE changed;
+#else
+    pthread_mutex_t lock;
+    pthread_cond_t changed;
+#endif
+} CertoHostLogSink;
 
 typedef struct CertoHostStatusSnapshot {
     certo_text_t state;
@@ -193,6 +228,7 @@ typedef struct CertoHost {
     int64_t quiesce_timeout_ms;
     int64_t stop_timeout_ms;
     int64_t disposal_timeout_ms;
+    int64_t telemetry_timeout_ms;
     volatile int retain_host_services;
     volatile int64_t ready_workers;
     int64_t worker_count;
@@ -205,6 +241,8 @@ typedef struct CertoHost {
     int64_t config_sequence;
     certo_text_t host_id;
     int64_t event_sequence;
+    bool stderr_log_enabled;
+    CertoList* log_sinks;
 #if defined(_WIN32)
     CRITICAL_SECTION wait_lock;
     CONDITION_VARIABLE wait_changed;
@@ -217,6 +255,7 @@ typedef struct CertoHost {
 typedef void* (*CertoHostCallback)(void* env, void* context);
 
 static CertoHost* __certo_active_host = NULL;
+static bool __certo_host_valid_metric_name(certo_text_t name);
 
 enum {
     CERTO_HOST_NEW = 0,
@@ -239,6 +278,18 @@ enum {
     CERTO_RESTART_NEVER = 0,
     CERTO_RESTART_ON_FAILURE = 1,
     CERTO_RESTART_ALWAYS = 2
+};
+
+enum {
+    CERTO_LOG_DROP_NEWEST = 0,
+    CERTO_LOG_DROP_OLDEST = 1,
+    CERTO_LOG_WAIT = 2
+};
+
+enum {
+    CERTO_LOG_FAILURE_IGNORE = 0,
+    CERTO_LOG_FAILURE_DISABLE = 1,
+    CERTO_LOG_FAILURE_FAIL_HOST = 2
 };
 
 #define CERTO_ATOMIC_LOAD(p) __atomic_load_n((p), __ATOMIC_ACQUIRE)
@@ -333,6 +384,8 @@ CertoHost* certo_host_new(void) {
     host->quiesce_timeout_ms = 10000;
     host->stop_timeout_ms = 10000;
     host->disposal_timeout_ms = 10000;
+    host->telemetry_timeout_ms = 10000;
+    host->stderr_log_enabled = true;
     CERTO_ATOMIC_STORE(&host->state, CERTO_HOST_NEW);
     CERTO_ATOMIC_STORE(&host->startup_complete, 0);
     CERTO_ATOMIC_STORE(&host->startup_cancel_requested, 0);
@@ -350,10 +403,109 @@ CertoHost* certo_host_new(void) {
     host->service_construction_order = certo_list_new_empty();
     host->config_bindings = certo_list_new_empty();
     host->configuration_errors = certo_list_new_empty();
+    host->log_sinks = certo_list_new_empty();
     char* host_id = (char*)malloc(48);
     if (!host_id) certo_panic("out of memory");
     snprintf(host_id, 48, "host-%p", (void*)host);
     host->host_id = host_id;
+    return host;
+}
+
+CertoHostLogOverflowPolicy* certo_host_log_overflow_policy_drop_newest(void) {
+    CertoHostLogOverflowPolicy* policy =
+        (CertoHostLogOverflowPolicy*)calloc(1, sizeof(CertoHostLogOverflowPolicy));
+    if (!policy) certo_panic("out of memory");
+    policy->mode = CERTO_LOG_DROP_NEWEST;
+    return policy;
+}
+
+CertoHostLogOverflowPolicy* certo_host_log_overflow_policy_drop_oldest(void) {
+    CertoHostLogOverflowPolicy* policy = certo_host_log_overflow_policy_drop_newest();
+    policy->mode = CERTO_LOG_DROP_OLDEST;
+    return policy;
+}
+
+CertoHostLogOverflowPolicy* certo_host_log_overflow_policy_wait(int64_t wait_ms) {
+    if (wait_ms < 0) certo_panic("log sink overflow wait cannot be negative");
+    CertoHostLogOverflowPolicy* policy = certo_host_log_overflow_policy_drop_newest();
+    policy->mode = CERTO_LOG_WAIT;
+    policy->wait_ms = wait_ms;
+    return policy;
+}
+
+static CertoHostLogFailurePolicy* __certo_host_log_failure(int mode) {
+    CertoHostLogFailurePolicy* policy =
+        (CertoHostLogFailurePolicy*)malloc(sizeof(CertoHostLogFailurePolicy));
+    if (!policy) certo_panic("out of memory");
+    policy->mode = mode;
+    return policy;
+}
+
+CertoHostLogFailurePolicy* certo_host_log_failure_policy_ignore(void) {
+    return __certo_host_log_failure(CERTO_LOG_FAILURE_IGNORE);
+}
+CertoHostLogFailurePolicy* certo_host_log_failure_policy_disable(void) {
+    return __certo_host_log_failure(CERTO_LOG_FAILURE_DISABLE);
+}
+CertoHostLogFailurePolicy* certo_host_log_failure_policy_fail_host(void) {
+    return __certo_host_log_failure(CERTO_LOG_FAILURE_FAIL_HOST);
+}
+
+CertoHost* certo_host_log_sink(CertoHost* host, certo_text_t name,
+        int64_t capacity, CertoHostLogOverflowPolicy* overflow,
+        CertoHostLogFailurePolicy* failure, certo_fn_t write,
+        certo_fn_t flush, certo_fn_t dispose) {
+    if (!host || !name || !*name || !overflow || !failure ||
+        !write.fn || !dispose.fn)
+        certo_panic("Host.logSink requires a host, name, policies, writer, and disposer");
+    if (!__certo_host_valid_metric_name(name))
+        certo_panic("invalid host log sink name");
+    if (capacity <= 0) certo_panic("host log sink capacity must be positive");
+    if (CERTO_ATOMIC_LOAD(&host->state) != CERTO_HOST_NEW)
+        certo_panic("log sinks cannot be registered after startup begins");
+    for (int64_t i = 0; i < host->log_sinks->len; i++) {
+        CertoHostLogSink* existing = (CertoHostLogSink*)host->log_sinks->data[i];
+        if (strcmp(existing->name, name) == 0)
+            certo_panic("a log sink with this name is already registered");
+    }
+    CertoHostLogSink* sink = (CertoHostLogSink*)calloc(1, sizeof(CertoHostLogSink));
+    if (!sink) certo_panic("out of memory");
+    sink->queue = (CertoHostLogEvent**)calloc((size_t)capacity, sizeof(CertoHostLogEvent*));
+    if (!sink->queue) certo_panic("out of memory");
+    sink->host = host;
+    sink->name = name;
+    sink->capacity = capacity;
+    sink->overflow = *overflow;
+    sink->failure = *failure;
+    sink->write = write;
+    sink->flush = flush;
+    sink->dispose = dispose;
+    sink->accepting = true;
+#if defined(_WIN32)
+    InitializeCriticalSection(&sink->lock);
+    InitializeConditionVariable(&sink->changed);
+#else
+    pthread_mutex_init(&sink->lock, NULL);
+    pthread_cond_init(&sink->changed, NULL);
+#endif
+    host->log_sinks = certo_list_push_mut(host->log_sinks, sink);
+    return host;
+}
+
+CertoHost* certo_host_disable_stderr_log(CertoHost* host) {
+    if (!host) certo_panic("Host.disableStderrLog called with a null host");
+    if (CERTO_ATOMIC_LOAD(&host->state) != CERTO_HOST_NEW)
+        certo_panic("stderr logging cannot be changed after startup begins");
+    host->stderr_log_enabled = false;
+    return host;
+}
+
+CertoHost* certo_host_telemetry_timeout(CertoHost* host, int64_t timeout_ms) {
+    if (!host) certo_panic("Host.telemetryTimeout called with a null host");
+    if (timeout_ms < 0) certo_panic("telemetry timeout cannot be negative");
+    if (CERTO_ATOMIC_LOAD(&host->state) != CERTO_HOST_NEW)
+        certo_panic("telemetry timeout cannot be changed after startup begins");
+    host->telemetry_timeout_ms = timeout_ms;
     return host;
 }
 
@@ -1340,6 +1492,149 @@ static void __certo_host_write_log_field(CertoHostLogField* field) {
     }
 }
 
+typedef void* (*CertoHostLogWriteCallback)(void* env, void* event);
+typedef void* (*CertoHostLogFinalizerCallback)(void* env);
+
+static void __certo_host_log_event_retain(CertoHostLogEvent* event) {
+    __sync_add_and_fetch(&event->references, 1);
+}
+
+static void __certo_host_log_event_release(CertoHostLogEvent* event) {
+    if (__sync_sub_and_fetch(&event->references, 1) == 0) free(event);
+}
+
+static void __certo_host_sink_lock(CertoHostLogSink* sink) {
+#if defined(_WIN32)
+    EnterCriticalSection(&sink->lock);
+#else
+    pthread_mutex_lock(&sink->lock);
+#endif
+}
+
+static void __certo_host_sink_unlock(CertoHostLogSink* sink) {
+#if defined(_WIN32)
+    LeaveCriticalSection(&sink->lock);
+#else
+    pthread_mutex_unlock(&sink->lock);
+#endif
+}
+
+static void __certo_host_sink_wake(CertoHostLogSink* sink) {
+#if defined(_WIN32)
+    WakeAllConditionVariable(&sink->changed);
+#else
+    pthread_cond_broadcast(&sink->changed);
+#endif
+}
+
+static bool __certo_host_sink_wait(CertoHostLogSink* sink, int64_t timeout_ms) {
+#if defined(_WIN32)
+    return SleepConditionVariableCS(&sink->changed, &sink->lock,
+        timeout_ms < 0 ? INFINITE : (DWORD)timeout_ms) != 0;
+#else
+    if (timeout_ms < 0) return pthread_cond_wait(&sink->changed, &sink->lock) == 0;
+    struct timespec deadline;
+    clock_gettime(CLOCK_REALTIME, &deadline);
+    deadline.tv_sec += timeout_ms / 1000;
+    deadline.tv_nsec += (timeout_ms % 1000) * 1000000L;
+    if (deadline.tv_nsec >= 1000000000L) {
+        deadline.tv_sec++;
+        deadline.tv_nsec -= 1000000000L;
+    }
+    return pthread_cond_timedwait(&sink->changed, &sink->lock, &deadline) == 0;
+#endif
+}
+
+static void __certo_host_sink_failure(CertoHostLogSink* sink) {
+    CertoHost* host = sink->host;
+    __certo_host_metric_add(host, "host.telemetry.sink_failures_total", 1);
+    if (sink->failure.mode == CERTO_LOG_FAILURE_DISABLE) {
+        __certo_host_sink_lock(sink);
+        sink->disabled = true;
+        while (sink->length > 0) {
+            CertoHostLogEvent* event = sink->queue[sink->head];
+            sink->head = (sink->head + 1) % sink->capacity;
+            sink->length--;
+            __certo_host_log_event_release(event);
+        }
+        __certo_host_sink_wake(sink);
+        __certo_host_sink_unlock(sink);
+    } else if (sink->failure.mode == CERTO_LOG_FAILURE_FAIL_HOST) {
+        __certo_host_record_failure(host, "TelemetryFailure", "telemetry",
+            sink->name, "sink callback failed", false);
+        CERTO_ATOMIC_STORE(&host->stop_requested, 1);
+        __certo_host_wake_waiters(host);
+    }
+}
+
+static void* __certo_host_log_sink_main(void* raw) {
+    CertoHostLogSink* sink = (CertoHostLogSink*)raw;
+    for (;;) {
+        __certo_host_sink_lock(sink);
+        while (sink->length == 0 && sink->accepting)
+            __certo_host_sink_wait(sink, -1);
+        if (sink->length == 0 && !sink->accepting) {
+            __certo_host_sink_unlock(sink);
+            break;
+        }
+        CertoHostLogEvent* event = sink->queue[sink->head];
+        sink->head = (sink->head + 1) % sink->capacity;
+        sink->length--;
+        __certo_host_sink_wake(sink);
+        bool disabled = sink->disabled;
+        __certo_host_sink_unlock(sink);
+        if (!disabled) {
+            CertoHostLogWriteCallback write = (CertoHostLogWriteCallback)sink->write.fn;
+            void* result = write(sink->write.env, event);
+            if (!__result_is_ok(result)) __certo_host_sink_failure(sink);
+        }
+        __certo_host_log_event_release(event);
+    }
+    CertoHostLogFinalizerCallback finalizer;
+    if (sink->flush.fn) {
+        finalizer = (CertoHostLogFinalizerCallback)sink->flush.fn;
+        if (!__result_is_ok(finalizer(sink->flush.env))) __certo_host_sink_failure(sink);
+    }
+    finalizer = (CertoHostLogFinalizerCallback)sink->dispose.fn;
+    if (!__result_is_ok(finalizer(sink->dispose.env))) __certo_host_sink_failure(sink);
+    __certo_task_signal_done(&sink->hdr);
+    return NULL;
+}
+
+static bool __certo_host_sink_admit(CertoHostLogSink* sink,
+                                    CertoHostLogEvent* event) {
+    __certo_host_sink_lock(sink);
+    if (!sink->accepting || sink->disabled) {
+        __certo_host_sink_unlock(sink);
+        return false;
+    }
+    while (sink->length == sink->capacity) {
+        if (sink->overflow.mode == CERTO_LOG_DROP_NEWEST) {
+            __certo_host_sink_unlock(sink);
+            return false;
+        }
+        if (sink->overflow.mode == CERTO_LOG_DROP_OLDEST) {
+            CertoHostLogEvent* oldest = sink->queue[sink->head];
+            sink->head = (sink->head + 1) % sink->capacity;
+            sink->length--;
+            __certo_host_log_event_release(oldest);
+            break;
+        }
+        if (!__certo_host_sink_wait(sink, sink->overflow.wait_ms) ||
+            !sink->accepting) {
+            __certo_host_sink_unlock(sink);
+            return false;
+        }
+    }
+    int64_t tail = (sink->head + sink->length) % sink->capacity;
+    __certo_host_log_event_retain(event);
+    sink->queue[tail] = event;
+    sink->length++;
+    __certo_host_sink_wake(sink);
+    __certo_host_sink_unlock(sink);
+    return true;
+}
+
 static int64_t __certo_host_emit_log_event(CertoHostContext* context,
                                            CertoHostLogEvent* event) {
     if (!context || !context->host || !event) return 0;
@@ -1348,6 +1643,7 @@ static int64_t __certo_host_emit_log_event(CertoHostContext* context,
         (CertoHostLogEvent*)malloc(sizeof(CertoHostLogEvent));
     if (!accepted) certo_panic("out of memory");
     *accepted = *event;
+    accepted->references = 1;
     certo_text_t plugin = context->worker
         ? context->worker->plugin_name : context->plugin_name;
     certo_text_t worker = context->worker ? context->worker->name : NULL;
@@ -1357,6 +1653,8 @@ static int64_t __certo_host_emit_log_event(CertoHostContext* context,
     accepted->host_id = host->host_id;
     accepted->plugin = plugin;
     accepted->worker = worker;
+    bool stderrEnabled = host->stderr_log_enabled;
+    if (stderrEnabled) {
     fputs("{\"schema\":", stderr); __certo_host_write_json_string(stderr, accepted->schema);
     fprintf(stderr, ",\"sequence\":%" PRId64, accepted->sequence);
     fprintf(stderr, ",\"timestamp_unix_ms\":%" PRId64, accepted->timestamp_unix_ms);
@@ -1377,8 +1675,17 @@ static int64_t __certo_host_emit_log_event(CertoHostContext* context,
     }
     fputs("}}\n", stderr);
     fflush(stderr);
+    }
+    int64_t dropped = 0;
+    for (int64_t i = 0; i < host->log_sinks->len; i++) {
+        CertoHostLogSink* sink = (CertoHostLogSink*)host->log_sinks->data[i];
+        if (!__certo_host_sink_admit(sink, accepted))
+            dropped++;
+    }
     __certo_host_unlock(host);
-    free(accepted);
+    if (dropped) __certo_host_metric_add(
+        host, "host.telemetry.events_dropped_total", dropped);
+    __certo_host_log_event_release(accepted);
     return 0;
 }
 
@@ -2009,6 +2316,38 @@ static certo_text_t __certo_host_stop_started(CertoHost* host) {
     return errors;
 }
 
+static void __certo_host_start_log_sinks(CertoHost* host) {
+    for (int64_t i = 0; i < host->log_sinks->len; i++) {
+        CertoHostLogSink* sink = (CertoHostLogSink*)host->log_sinks->data[i];
+        __certo_task_hdr_init(&sink->hdr);
+        sink->started = true;
+        sink->hdr.thread = __certo_thread_spawn(__certo_host_log_sink_main, sink);
+    }
+}
+
+static certo_text_t __certo_host_stop_log_sinks(CertoHost* host) {
+    certo_text_t errors = NULL;
+    for (int64_t i = 0; i < host->log_sinks->len; i++) {
+        CertoHostLogSink* sink = (CertoHostLogSink*)host->log_sinks->data[i];
+        __certo_host_sink_lock(sink);
+        sink->accepting = false;
+        __certo_host_sink_wake(sink);
+        __certo_host_sink_unlock(sink);
+    }
+    for (int64_t i = host->log_sinks->len; i > 0; i--) {
+        CertoHostLogSink* sink = (CertoHostLogSink*)host->log_sinks->data[i - 1];
+        if (!sink->started) continue;
+        if (!__certo_thread_join_timed(&sink->hdr, host->telemetry_timeout_ms)) {
+            __certo_host_record_failure(host, "Timeout", "telemetry",
+                                        sink->name, "timeout elapsed", true);
+            errors = __certo_host_append_error(errors,
+                __certo_host_error("failed to finalize telemetry sink",
+                                   sink->name, "timeout elapsed"));
+        }
+    }
+    return errors;
+}
+
 void* certo_host_start(CertoHost* host) {
     if (!host) return certo_err((intptr_t)"host is null");
     if (!__sync_bool_compare_and_swap(
@@ -2076,6 +2415,7 @@ void* certo_host_start(CertoHost* host) {
         __certo_host_wake_waiters(host);
         return certo_err((intptr_t)"host startup cancelled");
     }
+    __certo_host_start_log_sinks(host);
     host->running = true;
     for (int64_t i = 0; i < host->plugins->len; i++) {
         CertoHostPlugin* plugin = (CertoHostPlugin*)host->plugins->data[i];
@@ -2089,6 +2429,7 @@ void* certo_host_start(CertoHost* host) {
             CERTO_ATOMIC_STORE(&host->state, CERTO_HOST_FAILED);
             __certo_host_stop_started(host);
             __certo_host_dispose_services(host);
+            __certo_host_stop_log_sinks(host);
             __certo_host_wake_waiters(host);
             return certo_err((intptr_t)scoped_error);
         }
@@ -2102,6 +2443,7 @@ void* certo_host_start(CertoHost* host) {
             CERTO_ATOMIC_STORE(&host->state, CERTO_HOST_FAILED);
             __certo_host_stop_started(host);
             __certo_host_dispose_services(host);
+            __certo_host_stop_log_sinks(host);
             __certo_host_wake_waiters(host);
             return certo_err((intptr_t)"host startup cancelled");
         }
@@ -2121,6 +2463,7 @@ void* certo_host_start(CertoHost* host) {
                     plugin->name);
             __certo_host_stop_started(host);
             __certo_host_dispose_services(host);
+            __certo_host_stop_log_sinks(host);
             __certo_host_wake_waiters(host);
             return certo_err((intptr_t)__certo_host_append_error(
                 error, scoped_dispose_error));
@@ -2133,6 +2476,7 @@ void* certo_host_start(CertoHost* host) {
             CERTO_ATOMIC_STORE(&host->state, CERTO_HOST_FAILED);
             __certo_host_stop_started(host);
             __certo_host_dispose_services(host);
+            __certo_host_stop_log_sinks(host);
             __certo_host_wake_waiters(host);
             return certo_err((intptr_t)"host startup cancelled");
         }
@@ -2153,6 +2497,7 @@ void* certo_host_start(CertoHost* host) {
         __certo_host_join_workers(host);
         __certo_host_stop_started(host);
         __certo_host_dispose_services(host);
+        __certo_host_stop_log_sinks(host);
         __certo_host_wake_waiters(host);
         return certo_err((intptr_t)readiness_error);
     }
@@ -2221,8 +2566,10 @@ void* certo_host_stop(CertoHost* host) {
     certo_text_t worker_error = __certo_host_join_workers(host);
     certo_text_t stop_error = __certo_host_stop_started(host);
     certo_text_t dispose_error = __certo_host_dispose_services(host);
+    certo_text_t telemetry_error = __certo_host_stop_log_sinks(host);
     errors = __certo_host_append_error(errors, worker_error);
     errors = __certo_host_append_error(errors, stop_error);
+    errors = __certo_host_append_error(errors, telemetry_error);
     errors = __certo_host_append_error(errors, dispose_error);
     if (errors) __certo_host_metric_add(host, "host.shutdown.failures", 1);
     CERTO_ATOMIC_STORE(&host->shutdown_error, errors);
