@@ -1075,6 +1075,7 @@ pub fn seed_stdlib(env: &mut TypeEnv, counter: &mut u32) {
         let status = Ty::Named { name: "HostStatusSnapshot".into(), args: vec![] };
         let worker_status = Ty::Named { name: "HostWorkerStatus".into(), args: vec![] };
         let metric_status = Ty::Named { name: "HostMetricSnapshot".into(), args: vec![] };
+        let host_metric = Ty::Named { name: "HostMetric".into(), args: vec![] };
         let host_state = Ty::Named { name: "HostState".into(), args: vec![] };
         let worker_state = Ty::Named { name: "HostWorkerState".into(), args: vec![] };
         let lifecycle_error = Ty::Named { name: "HostLifecycleError".into(), args: vec![] };
@@ -1404,6 +1405,34 @@ pub fn seed_stdlib(env: &mut TypeEnv, counter: &mut u32) {
         def!("Host.disableStderrLog", fn1(host.clone(), host.clone()));
         def!("Host.telemetryTimeout", fn2(host.clone(),
             Ty::Named { name: "Duration".into(), args: vec![] }, host.clone()));
+        def!("Host.counterMetric", Ty::Fn {
+            params: vec![host.clone(), Ty::Text, Ty::Text, Ty::Text,
+                Ty::List(Box::new(Ty::Text)), Ty::Int],
+            ret: Box::new(host_metric.clone()),
+        });
+        def!("Host.gaugeMetric", Ty::Fn {
+            params: vec![host.clone(), Ty::Text, Ty::Text, Ty::Text,
+                Ty::List(Box::new(Ty::Text)), Ty::Int],
+            ret: Box::new(host_metric.clone()),
+        });
+        def!("Host.histogramMetric", Ty::Fn {
+            params: vec![host.clone(), Ty::Text, Ty::Text, Ty::Text,
+                Ty::List(Box::new(Ty::Text)), Ty::List(Box::new(Ty::Int)), Ty::Int],
+            ret: Box::new(host_metric.clone()),
+        });
+        def!("HostMetric.counterAdd", Ty::Fn {
+            params: vec![host_metric.clone(), Ty::List(Box::new(Ty::Text)), Ty::Int],
+            ret: Box::new(Ty::Unit),
+        });
+        def!("HostMetric.gaugeSet", Ty::Fn {
+            params: vec![host_metric.clone(), Ty::List(Box::new(Ty::Text)), Ty::Int],
+            ret: Box::new(Ty::Unit),
+        });
+        def!("HostMetric.histogramObserve", Ty::Fn {
+            params: vec![host_metric, Ty::List(Box::new(Ty::Text)), Ty::Int],
+            ret: Box::new(Ty::Unit),
+        });
+        def!("Host.metricSnapshot", fn1(host.clone(), Ty::Text));
         def!("Host.health", fn1(host.clone(), Ty::Text));
         def!("Host.metrics", fn1(host.clone(), Ty::Text));
         def!("Host.workerHealth", fn2(
@@ -2167,6 +2196,13 @@ pub fn seed_stdlib(env: &mut TypeEnv, counter: &mut u32) {
     pm!("Host.logSink", "host", "name", "capacity", "overflow", "failure", "write", "flush", "dispose");
     pm!("Host.disableStderrLog", "host");
     pm!("Host.telemetryTimeout", "host", "timeout");
+    pm!("Host.counterMetric", "host", "name", "help", "unit", "labels", "maxSeries");
+    pm!("Host.gaugeMetric", "host", "name", "help", "unit", "labels", "maxSeries");
+    pm!("Host.histogramMetric", "host", "name", "help", "unit", "labels", "buckets", "maxSeries");
+    pm!("HostMetric.counterAdd", "metric", "labels", "amount");
+    pm!("HostMetric.gaugeSet", "metric", "labels", "value");
+    pm!("HostMetric.histogramObserve", "metric", "labels", "value");
+    pm!("Host.metricSnapshot", "host");
     pm!("Host.health",             "host");
     pm!("Host.metrics",            "host");
     pm!("Host.workerHealth",       "host", "name");

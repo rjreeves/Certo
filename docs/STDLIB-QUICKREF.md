@@ -1040,6 +1040,22 @@ Host.logSink(
 ): Host
 Host.disableStderrLog(host: Host): Host
 Host.telemetryTimeout(host: Host, timeout: Duration): Host
+Host.counterMetric(
+    host: Host, name: Text, help: Text, unit: Text,
+    labels: List<Text>, maxSeries: Int
+): HostMetric
+Host.gaugeMetric(
+    host: Host, name: Text, help: Text, unit: Text,
+    labels: List<Text>, maxSeries: Int
+): HostMetric
+Host.histogramMetric(
+    host: Host, name: Text, help: Text, unit: Text,
+    labels: List<Text>, buckets: List<Int>, maxSeries: Int
+): HostMetric
+HostMetric.counterAdd(metric: HostMetric, labels: List<Text>, amount: Int): Unit [io]
+HostMetric.gaugeSet(metric: HostMetric, labels: List<Text>, value: Int): Unit [io]
+HostMetric.histogramObserve(metric: HostMetric, labels: List<Text>, value: Int): Unit [io]
+Host.metricSnapshot(host: Host): Text [io]
 HostContext.counter(context: HostContext, name: Text, amount: Int): Unit [io]
 HostContext.gauge(context: HostContext, name: Text, value: Int): Unit [io]
 HostContext.isStopping(context: HostContext): Bool
@@ -1057,6 +1073,14 @@ Callback failures can be ignored, disable only that sink, or request orderly
 host shutdown. Shutdown closes admission, drains accepted events, then flushes
 and disposes sinks in reverse registration order within the per-sink telemetry
 timeout. Supply a callback returning `Ok(())` when no flush work is needed.
+
+Typed metric descriptors are registered before startup. Identical repeated
+registration is idempotent; conflicting kinds or metadata are rejected. Label
+values must exactly match the descriptor's ordered label names. Counters reject
+negative increments, gauges accept signed values, and histograms accept
+non-negative observations into fixed cumulative buckets. `maxSeries` bounds
+label cardinality without evicting existing series. `Host.metricSnapshot`
+returns descriptors in registration order and series in canonical label order.
 
 Typed host configuration is merged at startup in this order: typed defaults,
 the `[host]` subtree of `certo.toml`, `CERTO__...` environment variables,

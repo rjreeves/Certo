@@ -187,7 +187,8 @@ defined in [`HOST-OBSERVABILITY.md`](HOST-OBSERVABILITY.md).
 - ✅ Structured event schema with stable field names and severity levels.
 - ✅ Pluggable log sinks with bounded queues, backpressure, failure policy,
   and deadline-bound finalization.
-- Metrics registry with counter, gauge, and histogram instruments.
+- ✅ Metrics registry with counter, gauge, and histogram instruments, bounded
+  label cardinality, and deterministic snapshots.
 - Prometheus text export.
 - OpenTelemetry-compatible traces and metrics after a separate design review.
 - Correlation context propagated through plugin and worker callbacks.
@@ -283,5 +284,5 @@ Every Host milestone must satisfy the following gates:
 
 ## Recommended next implementation item
 
-Implement H4's typed metrics registry with counter, gauge, and histogram
-descriptors, bounded label cardinality, and deterministic snapshots.
+Implement H4's deterministic Prometheus text export from the typed metrics
+registry, including normalization collision checks and escaping.

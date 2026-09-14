@@ -67,7 +67,9 @@ const IO_FUNCTIONS: &[&str] = &[
     "Host.status",
     "Host.requestStop", "HostContext.ready", "HostContext.fail",
     "HostContext.sleep", "HostContext.waitUntil",
-    "Host.metrics", "HostContext.log", "HostContext.logEvent", "HostContext.counter", "HostContext.gauge",
+    "Host.metrics", "Host.metricSnapshot", "HostMetric.counterAdd", "HostMetric.gaugeSet",
+    "HostMetric.histogramObserve", "HostContext.log", "HostContext.logEvent",
+    "HostContext.counter", "HostContext.gauge",
     // Cli.parse reads the process argument vector.
     "Cli.parse",
     // DateTime
