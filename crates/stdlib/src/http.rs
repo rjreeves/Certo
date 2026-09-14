@@ -341,16 +341,21 @@ static CertoHttpResponse* __certo_host_http_probe(CertoHost* host, bool liveness
     const char* failure = status->failure_kind ? status->failure_kind : "";
     const char* failure_field = status->failure_kind ? ",\"failure_kind\":\"" : "";
     const char* failure_end = status->failure_kind ? "\"" : "";
+    const char* stop = status->stop_reason ? status->stop_reason : "";
+    const char* stop_field = status->stop_reason ? ",\"stop_reason\":\"" : "";
+    const char* stop_end = status->stop_reason ? "\"" : "";
     int needed = snprintf(NULL, 0,
-        "{\"condition\":\"%s\",\"state\":\"%s\",\"live\":%s,\"ready\":%s%s%s%s}",
+        "{\"condition\":\"%s\",\"state\":\"%s\",\"live\":%s,\"ready\":%s,\"start_reason\":\"%s\"%s%s%s%s%s%s}",
         status->condition, status->state, status->live ? "true" : "false",
-        status->ready ? "true" : "false", failure_field, failure, failure_end);
+        status->ready ? "true" : "false", status->start_reason,
+        stop_field, stop, stop_end, failure_field, failure, failure_end);
     char* body = (char*)malloc((size_t)needed + 1);
     if (!body) certo_panic("out of memory");
     snprintf(body, (size_t)needed + 1,
-        "{\"condition\":\"%s\",\"state\":\"%s\",\"live\":%s,\"ready\":%s%s%s%s}",
+        "{\"condition\":\"%s\",\"state\":\"%s\",\"live\":%s,\"ready\":%s,\"start_reason\":\"%s\"%s%s%s%s%s%s}",
         status->condition, status->state, status->live ? "true" : "false",
-        status->ready ? "true" : "false", failure_field, failure, failure_end);
+        status->ready ? "true" : "false", status->start_reason,
+        stop_field, stop, stop_end, failure_field, failure, failure_end);
     CertoHttpResponse* response = certo_http_respond(
         accepted ? 200 : 503, body, "application/json; charset=utf-8");
     free(body);
@@ -375,7 +380,7 @@ CertoHttpResponse* certo_host_http_metrics(CertoHost* host) {
 }
 
 CertoHttpResponse* certo_host_http_drain(CertoHost* host) {
-    certo_host_request_shutdown(host);
+    __certo_host_request_shutdown_reason(host, "AdministrativeDrain");
     return certo_http_respond(202, "{\"accepted\":true}",
         "application/json; charset=utf-8");
 }

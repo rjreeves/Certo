@@ -1075,6 +1075,9 @@ pub fn seed_stdlib(env: &mut TypeEnv, counter: &mut u32) {
         let status = Ty::Named { name: "HostStatusSnapshot".into(), args: vec![] };
         let operational_status = Ty::Named { name: "HostOperationalStatus".into(), args: vec![] };
         let operational_condition = Ty::Named { name: "HostOperationalCondition".into(), args: vec![] };
+        let start_reason = Ty::Named { name: "HostStartReason".into(), args: vec![] };
+        let stop_reason = Ty::Named { name: "HostStopReason".into(), args: vec![] };
+        let worker_control_status = Ty::Named { name: "HostWorkerControlStatus".into(), args: vec![] };
         let worker_status = Ty::Named { name: "HostWorkerStatus".into(), args: vec![] };
         let metric_status = Ty::Named { name: "HostMetricSnapshot".into(), args: vec![] };
         let host_metric = Ty::Named { name: "HostMetric".into(), args: vec![] };
@@ -1096,6 +1099,18 @@ pub fn seed_stdlib(env: &mut TypeEnv, counter: &mut u32) {
         let typed_host_result = Ty::Result(Box::new(Ty::Unit), Box::new(lifecycle_error.clone()));
         def!("Host.new", Ty::Fn { params: vec![], ret: Box::new(host.clone()) });
         def!("Host.correlation", fn2(host.clone(), Ty::Text, host.clone()));
+        def!("Host.startReason", fn2(host.clone(), start_reason.clone(), host.clone()));
+        def!("HostStartReason.application", Ty::Fn { params: vec![], ret: Box::new(start_reason.clone()) });
+        def!("HostStartReason.serviceManager", Ty::Fn { params: vec![], ret: Box::new(start_reason.clone()) });
+        def!("HostStartReason.restart", Ty::Fn { params: vec![], ret: Box::new(start_reason.clone()) });
+        def!("HostStartReason.testRun", Ty::Fn { params: vec![], ret: Box::new(start_reason.clone()) });
+        def!("HostStartReason.name", fn1(start_reason.clone(), Ty::Text));
+        def!("HostStopReason.name", fn1(stop_reason.clone(), Ty::Text));
+        def!("Host.disableWorker", fn2(
+            host.clone(), Ty::Text, worker_control_status.clone()));
+        def!("Host.enableWorker", fn2(
+            host.clone(), Ty::Text, worker_control_status.clone()));
+        def!("HostWorkerControlStatus.name", fn1(worker_control_status, Ty::Text));
         def!("Host.plugin", Ty::Fn {
             params: vec![Ty::Text, lifecycle.clone(), lifecycle.clone()],
             ret: Box::new(plugin.clone()),
@@ -1343,6 +1358,11 @@ pub fn seed_stdlib(env: &mut TypeEnv, counter: &mut u32) {
             operational_status,
             Ty::Option(Box::new(failure_kind.clone())),
         ));
+        def!("HostOperationalStatus.startReason", fn1(
+            Ty::Named { name: "HostOperationalStatus".into(), args: vec![] }, start_reason));
+        def!("HostOperationalStatus.stopReason", fn1(
+            Ty::Named { name: "HostOperationalStatus".into(), args: vec![] },
+            Ty::Option(Box::new(stop_reason))));
         def!("HostOperationalCondition.name", fn1(operational_condition, Ty::Text));
         def!("HostStatusSnapshot.state", fn1(status.clone(), host_state.clone()));
         def!("HostStatusSnapshot.isReady", fn1(status.clone(), Ty::Bool));
@@ -1360,6 +1380,8 @@ pub fn seed_stdlib(env: &mut TypeEnv, counter: &mut u32) {
         def!("HostWorkerStatus.isLive", fn1(worker_status.clone(), Ty::Bool));
         def!("HostWorkerStatus.restarts", fn1(worker_status.clone(), Ty::Int));
         def!("HostWorkerStatus.lastError", fn1(worker_status, Ty::Option(Box::new(Ty::Text))));
+        def!("HostWorkerStatus.isEnabled", fn1(
+            Ty::Named { name: "HostWorkerStatus".into(), args: vec![] }, Ty::Bool));
         def!("HostMetricSnapshot.name", fn1(metric_status.clone(), Ty::Text));
         def!("HostMetricSnapshot.value", fn1(metric_status, Ty::Int));
         def!("HostState.name", fn1(host_state, Ty::Text));
@@ -2182,11 +2204,19 @@ pub fn seed_stdlib(env: &mut TypeEnv, counter: &mut u32) {
     pm!("Host.status",             "host");
     pm!("Host.requestShutdown", "host");
     pm!("Host.operationStatus", "host");
+    pm!("Host.startReason", "host", "reason");
+    pm!("HostStartReason.name", "reason");
+    pm!("HostStopReason.name", "reason");
+    pm!("Host.disableWorker", "host", "name");
+    pm!("Host.enableWorker", "host", "name");
+    pm!("HostWorkerControlStatus.name", "status");
     pm!("HostOperationalStatus.condition", "status");
     pm!("HostOperationalStatus.state", "status");
     pm!("HostOperationalStatus.isReady", "status");
     pm!("HostOperationalStatus.isLive", "status");
     pm!("HostOperationalStatus.failureKind", "status");
+    pm!("HostOperationalStatus.startReason", "status");
+    pm!("HostOperationalStatus.stopReason", "status");
     pm!("HostOperationalCondition.name", "condition");
     pm!("HostStatusSnapshot.state", "snapshot");
     pm!("HostStatusSnapshot.isReady", "snapshot");
@@ -2204,6 +2234,7 @@ pub fn seed_stdlib(env: &mut TypeEnv, counter: &mut u32) {
     pm!("HostWorkerStatus.isLive",  "worker");
     pm!("HostWorkerStatus.restarts", "worker");
     pm!("HostWorkerStatus.lastError", "worker");
+    pm!("HostWorkerStatus.isEnabled", "worker");
     pm!("HostMetricSnapshot.name",  "metric");
     pm!("HostMetricSnapshot.value", "metric");
     pm!("HostState.name",           "state");

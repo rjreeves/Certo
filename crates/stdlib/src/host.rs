@@ -115,6 +115,9 @@ typedef struct CertoHostWorker {
     int64_t restart_count;
     certo_text_t last_error;
     volatile int health;
+    volatile int enabled;
+    volatile int inactive;
+    volatile int control_busy;
 } CertoHostWorker;
 
 typedef struct CertoHostMetric {
@@ -160,6 +163,7 @@ typedef struct CertoHostWorkerStatus {
     bool live;
     int64_t restarts;
     certo_text_t last_error;
+    bool enabled;
 } CertoHostWorkerStatus;
 
 typedef struct CertoHostMetricSnapshot {
@@ -243,6 +247,8 @@ typedef struct CertoHostOperationalStatus {
     bool ready;
     bool live;
     certo_text_t failure_kind;
+    certo_text_t start_reason;
+    certo_text_t stop_reason;
 } CertoHostOperationalStatus;
 
 typedef struct CertoHost {
@@ -279,6 +285,8 @@ typedef struct CertoHost {
     bool stderr_log_enabled;
     CertoList* log_sinks;
     CertoList* http_listeners;
+    certo_text_t start_reason;
+    certo_text_t stop_reason;
 #if defined(_WIN32)
     CRITICAL_SECTION wait_lock;
     CONDITION_VARIABLE wait_changed;
@@ -372,7 +380,8 @@ enum {
     CERTO_WORKER_HEALTHY = 1,
     CERTO_WORKER_RESTARTING = 2,
     CERTO_WORKER_STOPPED = 3,
-    CERTO_WORKER_FAILED = 4
+    CERTO_WORKER_FAILED = 4,
+    CERTO_WORKER_DISABLED = 5
 };
 
 enum {
@@ -406,6 +415,8 @@ static void __certo_host_signal(int sig) {
     (void)sig;
     if (__certo_active_host && __certo_active_host->context) {
         CERTO_ATOMIC_STORE(&__certo_active_host->stop_requested, 1);
+        __sync_bool_compare_and_swap(
+            &__certo_active_host->stop_reason, NULL, "Signal");
     }
 }
 
@@ -449,6 +460,7 @@ static certo_text_t __certo_worker_state_text(int state) {
         case CERTO_WORKER_RESTARTING: return "Restarting";
         case CERTO_WORKER_STOPPED: return "Stopped";
         case CERTO_WORKER_FAILED: return "Failed";
+        case CERTO_WORKER_DISABLED: return "Disabled";
         default: return "Starting";
     }
 }
@@ -469,6 +481,12 @@ static CertoHostLifecycleError* __certo_host_record_failure(
         host && strcmp(error->kind, "ConfigurationFailure") == 0
             ? host->configuration_errors : certo_list_new_empty();
     if (host) CERTO_ATOMIC_STORE(&host->last_failure, error);
+    if (host && (strcmp(kind, "StartupFailure") == 0 ||
+                 strcmp(kind, "ConfigurationFailure") == 0 ||
+                 strcmp(kind, "StartupCancelled") == 0))
+        __sync_bool_compare_and_swap(&host->stop_reason, NULL, "StartupFailure");
+    if (host && strcmp(kind, "WorkerFailure") == 0)
+        __sync_bool_compare_and_swap(&host->stop_reason, NULL, "WorkerFailure");
     return error;
 }
 
@@ -514,6 +532,8 @@ CertoHost* certo_host_new(void) {
     host->configuration_errors = certo_list_new_empty();
     host->log_sinks = certo_list_new_empty();
     host->http_listeners = certo_list_new_empty();
+    host->start_reason = "Application";
+    host->stop_reason = NULL;
     char* host_id = (char*)malloc(48);
     if (!host_id) certo_panic("out of memory");
     snprintf(host_id, 48, "host-%p", (void*)host);
@@ -532,6 +552,24 @@ CertoHost* certo_host_correlation(CertoHost* host, certo_text_t correlation_id) 
         CertoHostPlugin* plugin = (CertoHostPlugin*)host->plugins->data[i];
         if (plugin->context) plugin->context->correlation_id = correlation_id;
     }
+    return host;
+}
+
+certo_text_t certo_host_start_reason_application(void) { return "Application"; }
+certo_text_t certo_host_start_reason_service_manager(void) { return "ServiceManager"; }
+certo_text_t certo_host_start_reason_restart(void) { return "Restart"; }
+certo_text_t certo_host_start_reason_test_run(void) { return "Test"; }
+certo_text_t certo_host_start_reason_name(certo_text_t reason) {
+    return reason ? reason : "Application";
+}
+certo_text_t certo_host_stop_reason_name(certo_text_t reason) {
+    return reason ? reason : "ApplicationRequest";
+}
+CertoHost* certo_host_start_reason(CertoHost* host, certo_text_t reason) {
+    if (!host) certo_panic("Host.startReason called with a null host");
+    if (CERTO_ATOMIC_LOAD(&host->state) != CERTO_HOST_NEW)
+        certo_panic("start reason cannot be changed after startup");
+    host->start_reason = reason ? reason : "Application";
     return host;
 }
 
@@ -1225,6 +1263,7 @@ CertoHostPlugin* certo_host_plugin_worker(CertoHostPlugin* plugin,
     worker->name = name;
     worker->plugin_name = plugin->name;
     worker->callback = callback;
+    CERTO_ATOMIC_STORE(&worker->enabled, 1);
     plugin->workers = certo_list_push_mut(plugin->workers, worker);
     return plugin;
 }
@@ -2189,8 +2228,22 @@ static void* __certo_host_worker_main(void* raw) {
     CertoRestartPolicy fallback = { CERTO_RESTART_NEVER, 0, 0, 0 };
     CertoRestartPolicy* policy = worker->restart ? worker->restart : &fallback;
     while (!CERTO_ATOMIC_LOAD(&worker->host->context->stopping)) {
+        if (!CERTO_ATOMIC_LOAD(&worker->enabled)) {
+            CERTO_ATOMIC_STORE(&worker->health, CERTO_WORKER_DISABLED);
+            CERTO_ATOMIC_STORE(&worker->inactive, 1);
+            while (!CERTO_ATOMIC_LOAD(&worker->host->context->stopping) &&
+                   !CERTO_ATOMIC_LOAD(&worker->enabled))
+                __certo_host_interruptible_sleep(worker->host, 25);
+            CERTO_ATOMIC_STORE(&worker->inactive, 0);
+            continue;
+        }
         CERTO_ATOMIC_STORE(&worker->health, CERTO_WORKER_STARTING);
         worker->result = __certo_host_call(worker->callback, worker->context);
+        if (!CERTO_ATOMIC_LOAD(&worker->enabled)) {
+            __certo_host_worker_clear_ready(worker);
+            CERTO_ATOMIC_STORE(&worker->health, CERTO_WORKER_DISABLED);
+            continue;
+        }
         bool failed = !__result_is_ok(worker->result) || !CERTO_ATOMIC_LOAD(&worker->ready);
         if (!__result_is_ok(worker->result)) {
             CERTO_ATOMIC_STORE(&worker->last_error, __certo_host_sanitize(
@@ -2286,6 +2339,9 @@ static void __certo_host_launch_workers(CertoHost* host) {
             worker->host = host;
             worker->result = NULL;
             worker->joined = false;
+            CERTO_ATOMIC_STORE(&worker->enabled, 1);
+            CERTO_ATOMIC_STORE(&worker->inactive, 0);
+            CERTO_ATOMIC_STORE(&worker->control_busy, 0);
             CERTO_ATOMIC_STORE(&worker->ready, 0);
             CERTO_ATOMIC_STORE(&worker->restart_count, 0);
             CERTO_ATOMIC_STORE(&worker->last_error, NULL);
@@ -2978,6 +3034,8 @@ void* certo_host_stop(CertoHost* host) {
     }
     if (CERTO_ATOMIC_LOAD(&host->state) == CERTO_HOST_STARTING &&
         !CERTO_ATOMIC_LOAD(&host->startup_complete)) {
+        __sync_bool_compare_and_swap(
+            &host->stop_reason, NULL, "ApplicationRequest");
         CERTO_ATOMIC_STORE(&host->startup_cancel_requested, 1);
         CERTO_ATOMIC_STORE(&host->stop_requested, 1);
         CERTO_ATOMIC_STORE(&host->context->stopping, 1);
@@ -2994,6 +3052,10 @@ void* certo_host_stop(CertoHost* host) {
         (state == CERTO_HOST_FAILED && CERTO_ATOMIC_LOAD(&host->worker_error));
     if (!can_shutdown && !CERTO_ATOMIC_LOAD(&host->shutdown_started))
         return certo_err((intptr_t)"host is not running");
+
+    if (can_shutdown)
+        __sync_bool_compare_and_swap(
+            &host->stop_reason, NULL, "ApplicationRequest");
 
     bool owns_shutdown = can_shutdown && __sync_bool_compare_and_swap(
         &host->shutdown_started, 0, 1);
@@ -3066,6 +3128,8 @@ void* certo_host_run(CertoHost* host) {
 
 int64_t certo_host_request_stop(CertoHostContext* context) {
     if (context && context->host) {
+        __sync_bool_compare_and_swap(
+            &context->host->stop_reason, NULL, "ApplicationRequest");
         CERTO_ATOMIC_STORE(&context->host->stop_requested, 1);
         __certo_host_wake_waiters(context->host);
     }
@@ -3074,6 +3138,15 @@ int64_t certo_host_request_stop(CertoHostContext* context) {
 
 int64_t certo_host_request_shutdown(CertoHost* host) {
     if (!host) return 0;
+    __sync_bool_compare_and_swap(&host->stop_reason, NULL, "ApplicationRequest");
+    CERTO_ATOMIC_STORE(&host->stop_requested, 1);
+    __certo_host_wake_waiters(host);
+    return 0;
+}
+
+int64_t __certo_host_request_shutdown_reason(CertoHost* host, certo_text_t reason) {
+    if (!host) return 0;
+    __sync_bool_compare_and_swap(&host->stop_reason, NULL, reason);
     CERTO_ATOMIC_STORE(&host->stop_requested, 1);
     __certo_host_wake_waiters(host);
     return 0;
@@ -3081,11 +3154,13 @@ int64_t certo_host_request_shutdown(CertoHost* host) {
 
 bool certo_host_context_is_stopping(CertoHostContext* context) {
     return context && context->host &&
-        CERTO_ATOMIC_LOAD(&context->host->context->stopping);
+        (CERTO_ATOMIC_LOAD(&context->host->context->stopping) ||
+         (context->worker && !CERTO_ATOMIC_LOAD(&context->worker->enabled)));
 }
 
 int64_t certo_host_context_ready(CertoHostContext* context) {
     if (!context || !context->host || !context->worker) return 0;
+    if (!CERTO_ATOMIC_LOAD(&context->worker->enabled)) return 0;
     if (__sync_bool_compare_and_swap(&context->worker->ready, 0, 1)) {
         __sync_add_and_fetch(&context->host->ready_workers, 1);
         int64_t ready_workers = CERTO_ATOMIC_LOAD(&context->host->ready_workers);
@@ -3116,8 +3191,17 @@ int64_t certo_host_context_fail(CertoHostContext* context, certo_text_t error) {
 }
 
 bool certo_host_context_sleep(CertoHostContext* context, int64_t duration_ms) {
-    return context && context->host &&
-        __certo_host_interruptible_sleep(context->host, duration_ms);
+    if (!context || !context->host || certo_host_context_is_stopping(context))
+        return false;
+    int64_t deadline = certo_monotonic_millis() + (duration_ms < 0 ? 0 : duration_ms);
+    while (!certo_host_context_is_stopping(context)) {
+        int64_t remaining = deadline - certo_monotonic_millis();
+        if (remaining <= 0) return true;
+        if (!__certo_host_interruptible_sleep(
+                context->host, remaining > 25 ? 25 : remaining))
+            return false;
+    }
+    return false;
 }
 
 typedef bool (*CertoHostPredicate)(void* env, void* context);
@@ -3127,9 +3211,9 @@ bool certo_host_context_wait_until(CertoHostContext* context,
                                     int64_t interval_ms) {
     if (!context || !context->host || !predicate.fn) return false;
     CertoHostPredicate test = (CertoHostPredicate)predicate.fn;
-    while (!CERTO_ATOMIC_LOAD(&context->host->context->stopping)) {
+    while (!certo_host_context_is_stopping(context)) {
         if (test(predicate.env, context)) return true;
-        if (!__certo_host_interruptible_sleep(context->host, interval_ms)) return false;
+        if (!certo_host_context_sleep(context, interval_ms)) return false;
     }
     return false;
 }
@@ -3253,6 +3337,74 @@ static CertoHostWorker* __certo_host_find_worker(CertoHost* host,
     return NULL;
 }
 
+certo_text_t certo_host_disable_worker(CertoHost* host, certo_text_t name) {
+    CertoHostWorker* worker = __certo_host_find_worker(host, name);
+    if (!worker) return (void*)"UnknownWorker";
+    int state = CERTO_ATOMIC_LOAD(&host->state);
+    if (state != CERTO_HOST_HEALTHY && state != CERTO_HOST_STARTING)
+        return (void*)"InvalidHostState";
+    if (!__sync_bool_compare_and_swap(&worker->control_busy, 0, 1))
+        return (void*)"ControlInProgress";
+    if (!__sync_bool_compare_and_swap(&worker->enabled, 1, 0)) {
+        CERTO_ATOMIC_STORE(&worker->control_busy, 0);
+        return (void*)"AlreadyDisabled";
+    }
+    __certo_host_worker_clear_ready(worker);
+    __sync_sub_and_fetch(&host->worker_count, 1);
+    __certo_host_wake_waiters(host);
+    int64_t deadline = certo_monotonic_millis() + host->shutdown_timeout_ms;
+    while (!CERTO_ATOMIC_LOAD(&worker->inactive) &&
+           certo_monotonic_millis() < deadline) {
+#if defined(_WIN32)
+        Sleep(1);
+#else
+        struct timespec delay = { 0, 1000000L };
+        nanosleep(&delay, NULL);
+#endif
+    }
+    if (!CERTO_ATOMIC_LOAD(&worker->inactive)) {
+        CERTO_ATOMIC_STORE(&worker->control_busy, 0);
+        return (void*)"Timeout";
+    }
+    CERTO_ATOMIC_STORE(&worker->health, CERTO_WORKER_DISABLED);
+    CERTO_ATOMIC_STORE(&worker->control_busy, 0);
+    __certo_host_metric_add(host, "host.worker.disables", 1);
+    return (void*)"Disabled";
+}
+
+certo_text_t certo_host_enable_worker(CertoHost* host, certo_text_t name) {
+    CertoHostWorker* worker = __certo_host_find_worker(host, name);
+    if (!worker) return (void*)"UnknownWorker";
+    int state = CERTO_ATOMIC_LOAD(&host->state);
+    if (CERTO_ATOMIC_LOAD(&worker->enabled) &&
+        (state == CERTO_HOST_HEALTHY || state == CERTO_HOST_STARTING))
+        return (void*)"AlreadyEnabled";
+    if (state != CERTO_HOST_HEALTHY)
+        return (void*)"InvalidHostState";
+    if (!__sync_bool_compare_and_swap(&worker->control_busy, 0, 1))
+        return (void*)"ControlInProgress";
+    if (!CERTO_ATOMIC_LOAD(&worker->inactive)) {
+        CERTO_ATOMIC_STORE(&worker->control_busy, 0);
+        return (void*)"ControlInProgress";
+    }
+    worker->result = NULL;
+    CERTO_ATOMIC_STORE(&worker->ready, 0);
+    CERTO_ATOMIC_STORE(&worker->last_error, NULL);
+    CERTO_ATOMIC_STORE(&worker->health, CERTO_WORKER_STARTING);
+    CERTO_ATOMIC_STORE(&worker->enabled, 1);
+    __sync_add_and_fetch(&host->worker_count, 1);
+    CERTO_ATOMIC_STORE(&host->state, CERTO_HOST_STARTING);
+    __certo_host_wake_waiters(host);
+    CERTO_ATOMIC_STORE(&worker->control_busy, 0);
+    __certo_host_metric_add(host, "host.worker.enables", 1);
+    __certo_host_metric_add(host, "host.worker.starts", 1);
+    return (void*)"Enabled";
+}
+
+certo_text_t certo_host_worker_control_status_name(certo_text_t status) {
+    return status ? status : "InvalidHostState";
+}
+
 CertoHostStatusSnapshot* certo_host_status(CertoHost* host) {
     CertoHostStatusSnapshot* snapshot =
         (CertoHostStatusSnapshot*)calloc(1, sizeof(CertoHostStatusSnapshot));
@@ -3290,6 +3442,7 @@ CertoHostStatusSnapshot* certo_host_status(CertoHost* host) {
                          worker_state != CERTO_WORKER_STOPPED;
             item->restarts = CERTO_ATOMIC_LOAD(&worker->restart_count);
             item->last_error = CERTO_ATOMIC_LOAD(&worker->last_error);
+            item->enabled = CERTO_ATOMIC_LOAD(&worker->enabled) != 0;
             snapshot->workers = certo_list_push_mut(snapshot->workers, item);
         }
     }
@@ -3347,6 +3500,8 @@ CertoHostOperationalStatus* certo_host_operation_status(CertoHost* host) {
         status->condition = "failed";
         status->state = "Failed";
         status->failure_kind = "StartupFailure";
+        status->start_reason = "Application";
+        status->stop_reason = "StartupFailure";
         return status;
     }
     int state = CERTO_ATOMIC_LOAD(&host->state);
@@ -3357,6 +3512,8 @@ CertoHostOperationalStatus* certo_host_operation_status(CertoHost* host) {
     status->live = state != CERTO_HOST_FAILED && state != CERTO_HOST_STOPPED;
     CertoHostLifecycleError* failure = CERTO_ATOMIC_LOAD(&host->last_failure);
     status->failure_kind = failure ? failure->kind : NULL;
+    status->start_reason = host->start_reason;
+    status->stop_reason = CERTO_ATOMIC_LOAD(&host->stop_reason);
     switch (state) {
         case CERTO_HOST_NEW:
             status->condition = "starting";
@@ -3400,6 +3557,13 @@ void* certo_host_operational_status_failure_kind(CertoHostOperationalStatus* s) 
 certo_text_t certo_host_operational_condition_name(certo_text_t condition) {
     return condition ? condition : "failed";
 }
+certo_text_t certo_host_operational_status_start_reason(CertoHostOperationalStatus* s) {
+    return s && s->start_reason ? s->start_reason : "Application";
+}
+void* certo_host_operational_status_stop_reason(CertoHostOperationalStatus* s) {
+    return s && s->stop_reason
+        ? __certo_opt_box((int64_t)(intptr_t)s->stop_reason) : NULL;
+}
 
 certo_text_t certo_host_worker_status_name(CertoHostWorkerStatus* s) {
     return s ? s->name : "";
@@ -3422,6 +3586,9 @@ int64_t certo_host_worker_status_restarts(CertoHostWorkerStatus* s) {
 void* certo_host_worker_status_last_error(CertoHostWorkerStatus* s) {
     return s && s->last_error
         ? __certo_opt_box((int64_t)(intptr_t)s->last_error) : NULL;
+}
+bool certo_host_worker_status_is_enabled(CertoHostWorkerStatus* s) {
+    return s && s->enabled;
 }
 certo_text_t certo_host_metric_snapshot_name(CertoHostMetricSnapshot* s) {
     return s ? s->name : "";

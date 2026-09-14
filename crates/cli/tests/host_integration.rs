@@ -19,7 +19,8 @@ fn run_certo(source: &str) -> std::process::Output {
 fn assert_success(output: &std::process::Output) -> String {
     assert!(
         output.status.success(),
-        "certo failed\nstdout:\n{}\nstderr:\n{}",
+        "certo failed ({})\nstdout:\n{}\nstderr:\n{}",
+        output.status,
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr),
     );
@@ -74,23 +75,23 @@ fn main(): Unit [io] = {
     let stdout = assert_success(&output).replace("\r\n", "\n");
     assert!(stdout.contains(concat!(
         "starting\nNew\ntrue\nfalse\n",
-        "200\n{\"condition\":\"starting\",\"state\":\"New\",\"live\":true,\"ready\":false}\n",
-        "503\n{\"condition\":\"starting\",\"state\":\"New\",\"live\":true,\"ready\":false}\n",
+        "200\n{\"condition\":\"starting\",\"state\":\"New\",\"live\":true,\"ready\":false,\"start_reason\":\"Application\"}\n",
+        "503\n{\"condition\":\"starting\",\"state\":\"New\",\"live\":true,\"ready\":false,\"start_reason\":\"Application\"}\n",
     )), "{stdout}");
     assert!(stdout.contains(concat!(
         "ready\nHealthy\ntrue\ntrue\n",
-        "200\n{\"condition\":\"ready\",\"state\":\"Healthy\",\"live\":true,\"ready\":true}\n",
-        "200\n{\"condition\":\"ready\",\"state\":\"Healthy\",\"live\":true,\"ready\":true}\n",
+        "200\n{\"condition\":\"ready\",\"state\":\"Healthy\",\"live\":true,\"ready\":true,\"start_reason\":\"Application\"}\n",
+        "200\n{\"condition\":\"ready\",\"state\":\"Healthy\",\"live\":true,\"ready\":true,\"start_reason\":\"Application\"}\n",
     )), "{stdout}");
     assert!(stdout.contains("200\ntext/plain; version=0.0.4; charset=utf-8\n"), "{stdout}");
     assert!(stdout.contains("probe_requests_total 2\n"), "{stdout}");
     assert!(stdout.contains(concat!(
         "stopped\nStopped\nfalse\nfalse\n",
-        "503\n{\"condition\":\"stopped\",\"state\":\"Stopped\",\"live\":false,\"ready\":false}\n",
-        "503\n{\"condition\":\"stopped\",\"state\":\"Stopped\",\"live\":false,\"ready\":false}\n",
+        "503\n{\"condition\":\"stopped\",\"state\":\"Stopped\",\"live\":false,\"ready\":false,\"start_reason\":\"Application\",\"stop_reason\":\"ApplicationRequest\"}\n",
+        "503\n{\"condition\":\"stopped\",\"state\":\"Stopped\",\"live\":false,\"ready\":false,\"start_reason\":\"Application\",\"stop_reason\":\"ApplicationRequest\"}\n",
     )), "{stdout}");
     assert!(stdout.contains(
-        "{\"condition\":\"failed\",\"state\":\"Failed\",\"live\":false,\"ready\":false,\"failure_kind\":\"StartupFailure\"}"
+        "{\"condition\":\"failed\",\"state\":\"Failed\",\"live\":false,\"ready\":false,\"start_reason\":\"Application\",\"stop_reason\":\"StartupFailure\",\"failure_kind\":\"StartupFailure\"}"
     ), "{stdout}");
     assert!(stdout.ends_with("StartupFailure\n"), "{stdout}");
 }
@@ -189,6 +190,96 @@ fn main(): Unit [io] = {{
 "#);
     let stdout = assert_success(&run_certo(&source));
     assert_eq!(stdout.lines().collect::<Vec<_>>(), ["ready", "stopped"]);
+}
+
+#[test]
+fn operational_reasons_are_typed_and_first_stop_reason_wins() {
+    let output = run_certo(r#"module HostOperationalReasonTest
+fn start(c: HostContext): Result<Unit, Text> = Ok(())
+fn stop(c: HostContext): Result<Unit, Text> = Ok(())
+fn printReasons(host: Host): Unit [io] = {
+    val status = Host.operationStatus(host)
+    println(HostStartReason.name(HostOperationalStatus.startReason(status)))
+    match HostOperationalStatus.stopReason(status) {
+        Some(reason) => println(HostStopReason.name(reason))
+        None => println("none")
+    }
+}
+fn main(): Unit [io] = {
+    val idle = Host.new()
+    val rejected = Host.stop(idle)
+    printReasons(idle)
+
+    val application = Host.new().startReason(HostStartReason.testRun())
+        .add(Host.plugin("application", start, stop))
+    val applicationStarted = Host.start(application)
+    printReasons(application)
+    Host.requestShutdown(application)
+    val ignoredAdmin = HostHttp.drain(application)
+    val applicationStopped = Host.stop(application)
+    printReasons(application)
+
+    val admin = Host.new().startReason(HostStartReason.serviceManager())
+        .add(Host.plugin("admin", start, stop))
+    val adminStarted = Host.start(admin)
+    val accepted = HostHttp.drain(admin)
+    Host.requestShutdown(admin)
+    val adminStopped = Host.stop(admin)
+    printReasons(admin)
+}
+"#);
+    let stdout = assert_success(&output);
+    assert_eq!(stdout.lines().collect::<Vec<_>>(), [
+        "Application", "none",
+        "Test", "none", "Test", "ApplicationRequest",
+        "ServiceManager", "AdministrativeDrain",
+    ]);
+}
+
+#[test]
+fn worker_maintenance_controls_are_typed_and_preserve_readiness() {
+    let output = run_certo(r#"module HostWorkerMaintenanceTest
+fn start(c: HostContext): Result<Unit, Text> = Ok(())
+fn stop(c: HostContext): Result<Unit, Text> = Ok(())
+fn work(c: HostContext): Result<Unit, Text> [io] = {
+    HostContext.ready(c)
+    while HostContext.sleep(c, Duration.milliseconds(5)) {}
+    Ok(())
+}
+fn printWorker(host: Host): Unit [io] = {
+    val status = Host.status(host)
+    println(boolToText(HostStatusSnapshot.isReady(status)))
+    println(intToText(HostStatusSnapshot.workerCount(status)))
+    println(intToText(HostStatusSnapshot.readyWorkers(status)))
+    match List.first(HostStatusSnapshot.workers(status)) {
+        Some(worker) => {
+            println(HostWorkerState.name(HostWorkerStatus.state(worker)))
+            println(boolToText(HostWorkerStatus.isEnabled(worker)))
+            println(boolToText(HostWorkerStatus.isReady(worker)))
+        }
+        None => println("missing")
+    }
+}
+fn main(): Unit [io] = {
+    val host = Host.new().add(Host.plugin("plugin", start, stop).worker("worker", work))
+    val started = Host.start(host)
+    println(HostWorkerControlStatus.name(Host.disableWorker(host, "worker")))
+    println(HostWorkerControlStatus.name(Host.disableWorker(host, "worker")))
+    printWorker(host)
+    println(HostWorkerControlStatus.name(Host.enableWorker(host, "worker")))
+    println(HostWorkerControlStatus.name(Host.enableWorker(host, "worker")))
+    val ready = Host.waitUntilReady(host, Duration.seconds(1))
+    printWorker(host)
+    println(HostWorkerControlStatus.name(Host.disableWorker(host, "missing")))
+    val stopped = Host.stop(host)
+}
+"#);
+    let stdout = assert_success(&output);
+    assert_eq!(stdout.lines().collect::<Vec<_>>(), [
+        "Disabled", "AlreadyDisabled", "true", "0", "0", "Disabled", "false", "false",
+        "Enabled", "AlreadyEnabled", "true", "1", "1", "Healthy", "true", "true",
+        "UnknownWorker",
+    ]);
 }
 
 #[test]
@@ -1619,12 +1710,16 @@ fn main(): Unit [io] = {
             println(HostLifecycleError.message(error))
         }
     }
+    match HostOperationalStatus.stopReason(Host.operationStatus(host)) {
+        Some(reason) => println(HostStopReason.name(reason))
+        None => println("none")
+    }
 }
 "#,
     ));
     assert_eq!(
         worker.lines().collect::<Vec<_>>(),
-        ["WorkerFailure", "worker", "worker crashed"]
+        ["WorkerFailure", "worker", "worker crashed", "WorkerFailure"]
     );
 
     let shutdown = assert_success(&run_certo(

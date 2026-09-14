@@ -59,6 +59,7 @@ pub fn ty_to_c(ty: &Ty) -> String {
         Ty::Named { name, .. } if matches!(name.as_str(),
             "HostState" | "HostWorkerState" | "HostFailureKind" | "HostLogSeverity" |
             "HostOperationalCondition"
+            | "HostStartReason" | "HostStopReason" | "HostWorkerControlStatus"
         ) => "certo_text_t".into(),
         // Stdlib.Host values are opaque heap handles owned by the runtime.
         Ty::Named { name, .. } if matches!(name.as_str(),
