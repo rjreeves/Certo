@@ -300,5 +300,5 @@ Every Host milestone must satisfy the following gates:
 
 ## Recommended next implementation item
 
-Compile discovered plugin entry sources with the application, verify each public
-factory has type `fn(): HostPlugin`, and compose factories in resolved order.
+Generate deterministic application composition that invokes each verified
+plugin factory in resolved order without changing ordinary `Host.new()` calls.

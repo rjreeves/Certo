@@ -843,7 +843,10 @@ network access or package installation occurs. The compiler validates manifest
 schema versions, SemVer intervals, host compatibility, plugin and capability
 uniqueness, required/optional dependencies, and cycles before parsing the
 application. Providers are ordered before consumers with plugin-ID lexical tie
-breaking. See `HOST-PLUGIN-COMPATIBILITY.md` for the normative contract.
+breaking. Every discovered entry source is compiled with the application after
+its declared module is verified and its factory is checked as an exact public
+`fn(): HostPlugin`. See `HOST-PLUGIN-COMPATIBILITY.md` for the normative
+contract.
 
 ---
 

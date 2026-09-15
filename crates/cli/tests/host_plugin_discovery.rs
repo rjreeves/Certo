@@ -57,3 +57,35 @@ fn build_rejects_incompatible_manifest_before_codegen() {
     assert!(stderr.contains("HostPluginManifest/IncompatibleHostApi"), "{stderr}");
     assert!(!root.path().join("out.c").exists());
 }
+
+#[test]
+fn build_rejects_invalid_factory_signature_before_codegen() {
+    let root = tempfile::tempdir().unwrap();
+    write_project(root.path(), "1.0.0", "2.0.0");
+    fs::write(
+        root.path().join("plugins/example/plugin.cto"),
+        "module Example\npub fn plugin(name: Text): HostPlugin = panic(name)\n",
+    ).unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_certo"))
+        .arg("build").arg("--emit-c").arg("-o").arg(root.path().join("out.c"))
+        .current_dir(root.path()).output().unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success());
+    assert!(stderr.contains("HostPluginManifest/InvalidFactorySignature"), "{stderr}");
+}
+
+#[test]
+fn build_rejects_entry_module_mismatch() {
+    let root = tempfile::tempdir().unwrap();
+    write_project(root.path(), "1.0.0", "2.0.0");
+    fs::write(
+        root.path().join("plugins/example/plugin.cto"),
+        "module Different\npub fn plugin(): HostPlugin = panic(\"unused\")\n",
+    ).unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_certo"))
+        .arg("build").arg("--emit-c").arg("-o").arg(root.path().join("out.c"))
+        .current_dir(root.path()).output().unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success());
+    assert!(stderr.contains("HostPluginManifest/EntryModuleMismatch"), "{stderr}");
+}
