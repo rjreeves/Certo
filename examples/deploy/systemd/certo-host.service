@@ -1,0 +1,21 @@
+[Unit]
+Description=Certo hosted application
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/opt/certo-host/certo-host
+WorkingDirectory=/opt/certo-host
+EnvironmentFile=-/etc/certo-host/environment
+Restart=on-failure
+RestartSec=2s
+KillSignal=SIGTERM
+TimeoutStopSec=90s
+User=certo-host
+Group=certo-host
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

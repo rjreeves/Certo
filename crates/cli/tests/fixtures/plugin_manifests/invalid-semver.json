@@ -1,0 +1,8 @@
+{
+  "schema_version": 1,
+  "id": "dev.certo.invalid-semver",
+  "version": "1.0",
+  "host_api": { "min": "1.0.0", "max_exclusive": "2.0.0" },
+  "entry": { "source": "plugin.cto", "module": "Plugin", "factory": "plugin" },
+  "capabilities": []
+}

@@ -6,7 +6,9 @@ import Stdlib.Env
 fn start(c: HostContext): Result<Unit, Text> = Ok(())
 fn stop(c: HostContext): Result<Unit, Text> = Ok(())
 
-val host = Host.new().add(Host.plugin("application", start, stop))
+val host = Host.new()
+    .startReason(HostStartReason.serviceManager())
+    .add(Host.plugin("application", start, stop))
 
 fn handler(request: HttpRequest): HttpResponse [io] = {
     val path = HttpRequest.path(request)

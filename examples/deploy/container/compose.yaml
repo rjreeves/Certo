@@ -1,0 +1,15 @@
+services:
+  certo-host:
+    build: .
+    environment:
+      CERTO_ADMIN_TOKEN: ${CERTO_ADMIN_TOKEN:?set CERTO_ADMIN_TOKEN}
+    init: true
+    stop_grace_period: 90s
+    ports:
+      - "127.0.0.1:8080:8080"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1:8080/ready"]
+      interval: 10s
+      timeout: 2s
+      retries: 3
+      start_period: 10s

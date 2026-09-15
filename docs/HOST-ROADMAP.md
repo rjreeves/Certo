@@ -208,7 +208,7 @@ defined in [`HOST-OBSERVABILITY.md`](HOST-OBSERVABILITY.md).
 
 ## Milestone H5 — Operational endpoints and control
 
-**Status: In progress**
+**Status: Shipped**
 
 Make hosted applications straightforward to operate in service managers and
 container platforms.
@@ -223,26 +223,30 @@ container platforms.
   retention in operational snapshots and probe responses.
 - ✅ Optional typed worker enable/disable controls for maintenance with
   cooperative cancellation, bounded disable, and readiness-safe re-enabling.
-- Platform integration guidance for systemd, Windows Service Control Manager,
-  and containers.
+- ✅ Platform integration guidance and validated templates for systemd,
+  Windows Service Control Manager adapters, Docker Compose, and Kubernetes.
 
 ### Exit criteria
 
-- Kubernetes-style probes can distinguish alive, ready, degraded, and stopping.
-- A deployment can drain traffic before worker cancellation.
-- Service-manager stop deadlines map predictably to host timeouts.
+- ✅ Kubernetes-style probes can distinguish alive, ready, degraded, and stopping.
+- ✅ A deployment can drain traffic before worker cancellation.
+- ✅ Service-manager stop deadlines map predictably to host timeouts.
 
 ## Milestone H6 — Plugin packaging and compatibility
 
-**Status: Exploratory**
+**Status: In progress**
 
 Define a versioned plugin contract before supporting separately distributed
 components.
 
+The manifest and compatibility contract is defined in
+[`HOST-PLUGIN-COMPATIBILITY.md`](HOST-PLUGIN-COMPATIBILITY.md), with its
+machine-readable v1 schema in `schemas/host-plugin.schema.json`.
+
 ### Scope
 
-- Plugin manifest containing identity, version, capabilities, and dependencies.
-- Host and plugin API compatibility policy.
+- ✅ Plugin manifest containing identity, version, capabilities, and dependencies.
+- ✅ Host and plugin API compatibility policy.
 - Compile-time discovery for packages included in the application build.
 - Duplicate capability and incompatible version diagnostics.
 - Deterministic activation and isolation boundaries.
@@ -295,5 +299,5 @@ Every Host milestone must satisfy the following gates:
 
 ## Recommended next implementation item
 
-Add platform integration guidance and tested service-manager examples for
-systemd, Windows Service Control Manager, and containers.
+Implement compile-time discovery and semantic validation for explicitly listed
+local `certo-plugin.json` manifests, without package fetching or lockfiles.
