@@ -300,5 +300,5 @@ Every Host milestone must satisfy the following gates:
 
 ## Recommended next implementation item
 
-Generate deterministic application composition that invokes each verified
-plugin factory in resolved order without changing ordinary `Host.new()` calls.
+Extend static plugin namespace isolation from functions to plugin-defined
+types and top-level values, including references in type annotations.

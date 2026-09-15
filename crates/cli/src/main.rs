@@ -604,7 +604,7 @@ fn cmd_build(args: &[String], quiet: bool) {
                     #include <stdint.h>\n#include <stdbool.h>\n#include <stddef.h>\n#include <stdio.h>\n\
                     #include <inttypes.h>\n#include <stdarg.h>\n\
                     #define _CRT_SECURE_NO_WARNINGS\n\
-                    {}{}",
+                    {}{}{}",
                     if uses_db { "#define CERTO_DB_ENABLED 1\n" } else { "" },
                     // [features] query-logging (spec §11.4, BACKLOG item
                     // 301) — compile-time gated the same way CERTO_DB_ENABLED
@@ -613,7 +613,8 @@ fn cmd_build(args: &[String], quiet: bool) {
                     // dbQuery/Query.*/Mutation.* call funnels through, so
                     // gating logging there (not at every Certo-level call
                     // site) covers all of them for free.
-                    if read_query_logging_flag(&project_root) { "#define CERTO_QUERY_LOGGING 1\n" } else { "" });
+                    if read_query_logging_flag(&project_root) { "#define CERTO_QUERY_LOGGING 1\n" } else { "" },
+                    if resolved_plugins.is_empty() { "" } else { "#define CERTO_HOST_DISCOVERED_DEFINED 1\n" });
     let runtime_header = certo_codegen::RUNTIME_HEADER;
     let stdlib_c  = certo_stdlib::full_c_runtime_with_db(uses_db);
     let module_c  = certo_codegen::emit_module(
@@ -635,7 +636,8 @@ fn cmd_build(args: &[String], quiet: bool) {
         })
         .collect::<Vec<_>>()
         .join("\n");
-    let full_c = format!("{}{}\n{}\n{}", preamble, runtime_header, stdlib_c, module_c);
+    let plugin_composition = emit_discovered_plugin_composition(&resolved_plugins);
+    let full_c = format!("{}{}\n{}\n{}\n{}", preamble, runtime_header, stdlib_c, module_c, plugin_composition);
 
     let stem = input.file_stem()
         .and_then(|s| s.to_str())
@@ -855,12 +857,62 @@ fn merge_discovered_plugin_sources(
                 plugin.manifest_path.display(), plugin.factory, plugin.factory), 1);
         }
         resolve_local_imports(&mut entry, &plugin.source_path, colour, verbose);
+        isolate_plugin_functions(&mut entry.decls, plugin);
         if verbose {
             eprintln!("host plugin {} {} from {}", plugin.id, plugin.version, plugin.source_path.display());
         }
         module.imports.extend(entry.imports);
         module.decls.extend(entry.decls);
     }
+}
+
+fn scoped_plugin_function(plugin_id: &str, function: &str) -> String {
+    let encoded_id = plugin_id.replace('-', "_h_").replace('.', "_d_");
+    format!("host_plugin_{encoded_id}__{function}")
+}
+
+fn isolate_plugin_functions(
+    declarations: &mut [S<Decl>],
+    plugin: &host_plugin_manifest::ResolvedPlugin,
+) {
+    let renames = declarations.iter().filter_map(|declaration| match &declaration.node {
+        Decl::Fn(function) => Some((
+            function.name.node.clone(),
+            RenameTo::Bare(scoped_plugin_function(&plugin.id, &function.name.node)),
+        )),
+        _ => None,
+    }).collect::<HashMap<_, _>>();
+    rewrite_decls_free_refs(declarations, &renames);
+    for declaration in declarations {
+        if let Decl::Fn(function) = &mut declaration.node {
+            if let Some(RenameTo::Bare(name)) = renames.get(&function.name.node) {
+                function.name.node = name.clone();
+            }
+        }
+    }
+}
+
+fn certo_factory_symbol(name: &str) -> String {
+    let mut snake = String::with_capacity(name.len() + 8);
+    for (index, character) in name.char_indices() {
+        if character.is_uppercase() && index > 0 { snake.push('_'); }
+        snake.extend(character.to_lowercase());
+    }
+    format!("certo_{}", snake.replace('.', "_").replace('-', "_"))
+}
+
+fn emit_discovered_plugin_composition(
+    plugins: &[host_plugin_manifest::ResolvedPlugin],
+) -> String {
+    if plugins.is_empty() { return String::new(); }
+    let mut out = String::from("CertoHost* certo_host_discovered(CertoHost* host) {\n");
+    for plugin in plugins {
+        out.push_str("    host = certo_host_add(host, ");
+        out.push_str(&certo_factory_symbol(&scoped_plugin_function(&plugin.id, &plugin.factory)));
+        out.push_str("());\n");
+    }
+    out.push_str("    return host;\n}\n");
+    out
 }
 
 // ------------------------------------------------------------------ //

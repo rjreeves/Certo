@@ -845,8 +845,17 @@ uniqueness, required/optional dependencies, and cycles before parsing the
 application. Providers are ordered before consumers with plugin-ID lexical tie
 breaking. Every discovered entry source is compiled with the application after
 its declared module is verified and its factory is checked as an exact public
-`fn(): HostPlugin`. See `HOST-PLUGIN-COMPATIBILITY.md` for the normative
-contract.
+`fn(): HostPlugin`. Calling `Host.discovered(Host.new())` invokes those verified
+factories in that resolved order and adds their plugins to the host. Discovery
+is explicit: plain `Host.new()` remains empty, and `Host.discovered` is an
+identity operation when no manifests are configured. See
+`HOST-PLUGIN-COMPATIBILITY.md` for the normative contract.
+
+Plugin function names are isolated by a deterministic prefix derived from the
+plugin ID before modules are merged. Separate plugins may therefore reuse the
+same factory and private helper function names without source or C-symbol
+collisions. Isolation of plugin-defined types and top-level values is not yet
+provided; those names must remain unique across the statically linked set.
 
 ---
 

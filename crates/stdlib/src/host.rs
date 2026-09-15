@@ -541,6 +541,15 @@ CertoHost* certo_host_new(void) {
     return host;
 }
 
+/* The compiler replaces this identity operation when [host-plugins] is configured. */
+CertoHost* certo_host_discovered(CertoHost* host);
+
+#ifndef CERTO_HOST_DISCOVERED_DEFINED
+CertoHost* certo_host_discovered(CertoHost* host) {
+    return host;
+}
+#endif
+
 CertoHost* certo_host_correlation(CertoHost* host, certo_text_t correlation_id) {
     if (!host) certo_panic("Host.correlation called with a null host");
     if (host->running || host->started_count > 0)
