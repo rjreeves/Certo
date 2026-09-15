@@ -496,10 +496,11 @@ fn cmd_build(args: &[String], quiet: bool) {
     } else {
         load_certo_toml_or_die(&project_root)
     };
-    if let Some(plugin_config) = project_toml.as_ref().and_then(|c| c.host_plugins.as_ref()) {
-        host_plugin_manifest::discover(&project_root, &plugin_config.manifests)
-            .unwrap_or_else(|error| die(&error, 1));
-    }
+    let resolved_plugins = project_toml.as_ref()
+        .and_then(|c| c.host_plugins.as_ref())
+        .map(|plugin_config| host_plugin_manifest::discover(
+            &project_root, &plugin_config.manifests).unwrap_or_else(|error| die(&error, 1)))
+        .unwrap_or_default();
     if let Some(cfg) = &project_toml {
         if let Some(build) = &cfg.build {
             if !emit_dll && build.ty.as_deref() == Some("lib") {
@@ -537,6 +538,7 @@ fn cmd_build(args: &[String], quiet: bool) {
     let (mut module, src) = parse_file_or_exit(&input, colour);
 
     resolve_local_imports(&mut module, &input, colour, verbose);
+    merge_discovered_plugin_sources(&mut module, &resolved_plugins, colour, verbose);
 
     // ── Expand state machines and validators into executable functions ─
     // `combined_src` starts as an exact copy of the real file's own source
@@ -812,6 +814,52 @@ fn cmd_build(args: &[String], quiet: bool) {
 
     if !quiet {
         eprintln!("wrote {}", out_path.display());
+    }
+}
+
+fn merge_discovered_plugin_sources(
+    module: &mut Module,
+    plugins: &[host_plugin_manifest::ResolvedPlugin],
+    colour: bool,
+    verbose: bool,
+) {
+    use certo_ast::types::TypeExpr;
+
+    for plugin in plugins {
+        let (mut entry, _) = parse_file_or_exit(&plugin.source_path, colour);
+        let declared_module = entry.path.segments.iter()
+            .map(|segment| segment.node.as_str())
+            .collect::<Vec<_>>()
+            .join(".");
+        if declared_module != plugin.module {
+            die(&format!(
+                "[HostPluginManifest/EntryModuleMismatch] {}: entry.module: expected `{}`, found `{declared_module}`",
+                plugin.manifest_path.display(), plugin.module), 1);
+        }
+        let factory = entry.decls.iter().find_map(|declaration| match &declaration.node {
+            Decl::Fn(function) if function.name.node == plugin.factory => Some(function),
+            _ => None,
+        }).unwrap_or_else(|| die(&format!(
+            "[HostPluginManifest/MissingFactory] {}: entry.factory: public function `{}` was not found",
+            plugin.manifest_path.display(), plugin.factory), 1));
+        let returns_host_plugin = matches!(factory.ret_ty.as_ref().map(|ty| &ty.node),
+            Some(TypeExpr::Named { path, args, .. })
+                if args.is_empty()
+                    && path.segments.len() == 1
+                    && path.segments[0].node == "HostPlugin");
+        if !factory.is_pub || factory.is_async || !factory.type_params.is_empty()
+            || !factory.params.is_empty() || !returns_host_plugin
+        {
+            die(&format!(
+                "[HostPluginManifest/InvalidFactorySignature] {}: entry.factory: `{}` must be `pub fn {}(): HostPlugin`",
+                plugin.manifest_path.display(), plugin.factory, plugin.factory), 1);
+        }
+        resolve_local_imports(&mut entry, &plugin.source_path, colour, verbose);
+        if verbose {
+            eprintln!("host plugin {} {} from {}", plugin.id, plugin.version, plugin.source_path.display());
+        }
+        module.imports.extend(entry.imports);
+        module.decls.extend(entry.decls);
     }
 }
 

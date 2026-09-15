@@ -406,6 +406,16 @@ Seventh audit pass (2026-09-03, items 305-320) — see that pass's own method no
 | # | Task | Notes |
 |---|------|-------|
 
+### Performance
+
+_Not a spec-vs-reality audit item like the sections below — a compile-time performance regression found and filed
+by an external project (Lume, a scripting language whose bootstrap compiler is a single large `.cto` file),
+same provenance as item 325 (`Text.slice`'s unconditional `strlen`)._
+
+| # | Task | Notes |
+|---|------|-------|
+| 327 | `certo check` scales worse than quadratically — cubic-to-quartic — in the number of top-level declarations in a real, internally-cross-referencing program, though **not** in raw declaration count alone | Found while investigating why building Lume's own bootstrap compiler (`src/lume.cto`, a single ~5,450-line, 244-top-level-declaration `.cto` file) took 10+ minutes end-to-end. Isolated with `certo check` alone (type-checking only — no codegen, no C compiler, no linker involved) against real prefixes of the actual file (each prefix a complete, syntactically valid subset ending exactly at a declaration boundary): 60 decls → 0.71s, 120 → 11.79s, 180 → 66.64s, 220 → 151.71s, 244 (full file) → 181.12s. Fitting each step's time-ratio to its size-ratio (e.g. 1.5x more declarations → 5.65x more time, close to 1.5⁴) indicates cubic-to-quartic scaling, clearly worse than the quadratic mechanisms this same external project already found and had fixed in Certo (items 325, 326, and the Certo-side fix bundled into Lume's own "protocol-scan" investigation). **Ruled out, with real microbenchmarks, not assumption**: plain declaration *count* is not the driver — a synthetic file with 800 trivial, mutually-independent functions (`fn fN(): Int = N`) checks in ~12-16ms regardless of N (50→800 tested, flat); a second synthetic file with 800 functions each taking/using `List<Int>` (to test whether pervasive generic-container usage was the trigger) was also flat (~11-16ms, 50→800). So the superlinear cost is specifically about how a large set of *real, interconnected* declarations interact during type-checking (shared types, cross-calls, or something re-scanning an ever-growing "seen so far" set once per new declaration) — not about volume alone, and not specifically about generics. Not yet root-caused to a specific function/line in `crates/typeck` (or wherever the actual mechanism lives) — that's the open part of this item, unlike item 325 which pinpointed the exact call site before filing. **Repro**: checkout the Lume repo (`https://github.com/rjreeves/lume`, commit `6c2167021c1ab74b9b603c4cfc9a8a2aa667f1f9` or later) and time `certo check src/lume.cto`, or reproduce the scaling curve directly by truncating that same file at successive top-level-declaration boundaries (e.g. `head -n <N>` at a line returned by `grep -n "^fn \|^type \|^enum " src/lume.cto`) and timing `certo check` on each prefix — no Lume-specific tooling needed, `certo check` is the entire repro. |
+
 ### Domain modeling (spec §8)
 
 _Fourth audit pass (2026-08-24, items 231-246) — see that pass's own method note at the bottom of the "Language core" section above.
