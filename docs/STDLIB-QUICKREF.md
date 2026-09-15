@@ -874,6 +874,7 @@ that already started before returning the original startup error.
 
 ```
 Host.new(): Host
+Host.discovered(host: Host): Host
 Host.plugin(
     name: Text,
     start: fn(HostContext): Result<Unit, Text>,
@@ -1107,6 +1108,11 @@ HostContext.config(context: HostContext, key: Text): Text?
 HostContext.configOr(context: HostContext, key: Text, fallback: Text): Text
 HostContext.configValue<T>(context: HostContext, key: ConfigKey<T>): T
 ```
+
+`Host.discovered(host)` explicitly adds every plugin listed in the project's
+`[host-plugins]` configuration. Factories run once in deterministic dependency
+order. It is an identity operation when no manifests are listed; `Host.new()`
+itself never performs discovery or changes behavior.
 
 Log sinks must be registered while the host is new. Each sink owns an
 independent bounded queue and serial callback worker. Overflow can drop the

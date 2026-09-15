@@ -2841,7 +2841,7 @@ fn seed_stdlib_effects_leaves_pure_functions_unregistered() {
 fn host_api_is_registered() {
     let env = seeded_env();
     for name in [
-        "Host.new", "Host.plugin", "Host.add", "Host.start", "Host.stop",
+        "Host.new", "Host.discovered", "Host.plugin", "Host.add", "Host.start", "Host.stop",
         "Host.run", "Host.requestStop", "HostContext.isStopping",
         "HostContext.pluginCount", "Host.configure", "Host.serviceKey",
         "Host.provide", "Host.provideFactory", "Host.factoryDependsOn",
@@ -2894,6 +2894,7 @@ fn host_api_is_registered() {
 
 #[test]
 fn host_runtime_contains_ordered_lifecycle() {
+    assert!(crate::HOST_C.contains("CertoHost* certo_host_discovered(CertoHost* host)"), "manifest composition must have an identity runtime fallback");
     assert!(crate::HOST_C.contains("host->plugins->data[i]"), "startup must iterate forward");
     assert!(crate::HOST_C.contains("int64_t index = --host->started_count"), "shutdown must iterate in reverse");
     assert!(crate::HOST_C.contains("__certo_host_stop_started(host)"), "failed startup must roll back started plugins");

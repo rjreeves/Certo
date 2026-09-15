@@ -1098,6 +1098,7 @@ pub fn seed_stdlib(env: &mut TypeEnv, counter: &mut u32) {
         let host_result = Ty::Result(Box::new(Ty::Unit), Box::new(Ty::Text));
         let typed_host_result = Ty::Result(Box::new(Ty::Unit), Box::new(lifecycle_error.clone()));
         def!("Host.new", Ty::Fn { params: vec![], ret: Box::new(host.clone()) });
+        def!("Host.discovered", fn1(host.clone(), host.clone()));
         def!("Host.correlation", fn2(host.clone(), Ty::Text, host.clone()));
         def!("Host.startReason", fn2(host.clone(), start_reason.clone(), host.clone()));
         def!("HostStartReason.application", Ty::Fn { params: vec![], ret: Box::new(start_reason.clone()) });
@@ -2176,6 +2177,7 @@ pub fn seed_stdlib(env: &mut TypeEnv, counter: &mut u32) {
     pm!("RestartPolicy.onFailure",  "maxRetries", "initialDelay", "maxDelay");
     pm!("RestartPolicy.always",     "maxRetries", "initialDelay", "maxDelay");
     pm!("Host.add",                "host", "plugin");
+    pm!("Host.discovered",         "host");
     pm!("Host.configure",          "host", "key", "value");
     pm!("Host.configKey",          "name", "parse");
     pm!("Host.requireConfig",      "host", "key");
