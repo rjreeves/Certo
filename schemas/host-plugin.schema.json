@@ -1,0 +1,64 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://certo.dev/schemas/host-plugin-v1.json",
+  "title": "Certo static host plugin manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "id", "version", "host_api", "entry", "capabilities"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "id": { "$ref": "#/$defs/id" },
+    "version": { "$ref": "#/$defs/semver" },
+    "description": { "type": "string", "maxLength": 500 },
+    "host_api": { "$ref": "#/$defs/range" },
+    "entry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source", "module", "factory"],
+      "properties": {
+        "source": { "type": "string", "pattern": "^(?![/\\\\])(?!.*(?:^|[/\\\\])\\.\\.(?:[/\\\\]|$)).+\\.cto$" },
+        "module": { "type": "string", "pattern": "^[A-Z][A-Za-z0-9]*(?:\\.[A-Z][A-Za-z0-9]*)*$" },
+        "factory": { "type": "string", "pattern": "^[a-z][A-Za-z0-9]*$" }
+      }
+    },
+    "capabilities": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "version"],
+        "properties": {
+          "id": { "$ref": "#/$defs/id" },
+          "version": { "$ref": "#/$defs/semver" }
+        }
+      }
+    },
+    "dependencies": {
+      "type": "array",
+      "default": [],
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "version"],
+        "properties": {
+          "id": { "$ref": "#/$defs/id" },
+          "version": { "$ref": "#/$defs/range" },
+          "optional": { "type": "boolean", "default": false }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "id": { "type": "string", "pattern": "^[a-z][a-z0-9]*(?:[.-][a-z0-9]+)+$", "maxLength": 128 },
+    "semver": { "type": "string", "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z.-]+)?(?:\\+[0-9A-Za-z.-]+)?$" },
+    "range": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["min", "max_exclusive"],
+      "properties": {
+        "min": { "$ref": "#/$defs/semver" },
+        "max_exclusive": { "$ref": "#/$defs/semver" }
+      }
+    }
+  }
+}

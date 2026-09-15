@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "id": "dev.certo.dropbox",
+  "version": "1.0.0",
+  "description": "Statically linked Dropbox client and copy worker",
+  "host_api": {
+    "min": "1.0.0",
+    "max_exclusive": "2.0.0"
+  },
+  "entry": {
+    "source": "dropbox_host.cto",
+    "module": "DropboxHost",
+    "factory": "dropboxPlugin"
+  },
+  "capabilities": [
+    { "id": "storage.dropbox", "version": "1.0.0" }
+  ],
+  "dependencies": []
+}

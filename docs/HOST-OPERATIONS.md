@@ -1,9 +1,9 @@
 # Host operational endpoints and control contract
 
-This document begins the H5 design for operational endpoints and coordinated
-control. It is intentionally a contract first: no networking dependency is
-added to `Stdlib.Host`, and `Stdlib.Http` adapters will translate these typed
-host facts into transport-specific responses.
+This document defines the H5 operational endpoint, coordinated-control, and
+deployment contract. `Stdlib.Http` adapters translate typed host facts into
+transport-specific responses, while applications retain control of exposure
+and authentication.
 
 ## Endpoint model
 
