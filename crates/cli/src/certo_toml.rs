@@ -37,6 +37,14 @@ pub struct CertoToml {
     /// Application-host configuration. Values are interpreted by Stdlib.Host;
     /// the CLI validates TOML syntax but deliberately preserves this subtree.
     pub host: Option<toml::Table>,
+    #[serde(rename = "host-plugins")]
+    pub host_plugins: Option<HostPluginsSection>,
+}
+
+#[derive(Debug, Default, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HostPluginsSection {
+    pub manifests: Vec<String>,
 }
 
 #[derive(Debug, Default, Clone, Deserialize)]
@@ -203,6 +211,13 @@ schema      = "${DATABASE_URL}"
         assert!(cfg.build.is_none());
         assert!(cfg.features.is_none());
         assert!(cfg.targets.is_none());
+    }
+
+    #[test]
+    fn explicit_host_plugin_manifests_parse() {
+        let src = "[host-plugins]\nmanifests = [\"plugins/a/certo-plugin.json\"]\n";
+        let cfg: CertoToml = toml::from_str(src).expect("host plugin config must parse");
+        assert_eq!(cfg.host_plugins.unwrap().manifests, ["plugins/a/certo-plugin.json"]);
     }
 
     #[test]

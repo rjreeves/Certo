@@ -247,7 +247,8 @@ machine-readable v1 schema in `schemas/host-plugin.schema.json`.
 
 - ✅ Plugin manifest containing identity, version, capabilities, and dependencies.
 - ✅ Host and plugin API compatibility policy.
-- Compile-time discovery for packages included in the application build.
+- ✅ Explicit compile-time discovery and semantic validation for local plugin
+  manifests, including deterministic dependency ordering.
 - Duplicate capability and incompatible version diagnostics.
 - Deterministic activation and isolation boundaries.
 
@@ -299,5 +300,5 @@ Every Host milestone must satisfy the following gates:
 
 ## Recommended next implementation item
 
-Implement compile-time discovery and semantic validation for explicitly listed
-local `certo-plugin.json` manifests, without package fetching or lockfiles.
+Compile discovered plugin entry sources with the application, verify each public
+factory has type `fn(): HostPlugin`, and compose factories in resolved order.

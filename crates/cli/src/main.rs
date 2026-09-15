@@ -4,6 +4,7 @@ mod cmd_repl;
 mod cmd_lint;
 mod cmd_generate;
 mod certo_toml;
+mod host_plugin_manifest;
 mod diff;
 mod static_serve;
 
@@ -495,6 +496,10 @@ fn cmd_build(args: &[String], quiet: bool) {
     } else {
         load_certo_toml_or_die(&project_root)
     };
+    if let Some(plugin_config) = project_toml.as_ref().and_then(|c| c.host_plugins.as_ref()) {
+        host_plugin_manifest::discover(&project_root, &plugin_config.manifests)
+            .unwrap_or_else(|error| die(&error, 1));
+    }
     if let Some(cfg) = &project_toml {
         if let Some(build) = &cfg.build {
             if !emit_dll && build.ty.as_deref() == Some("lib") {

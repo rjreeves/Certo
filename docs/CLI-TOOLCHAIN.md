@@ -825,6 +825,25 @@ example in the language spec.
 | `port`, `host` | `[server]` | Parsed, not consumed anywhere yet — no `certo run --port` today; a program reads flags/env itself |
 | (any key) | `[dependencies]` | Read by `certo add`/`certo audit` — see [§16](#16-certo-add--certo-audit--dependency-bookkeeping) |
 | (any key) | `[dev-dependencies]` | Parsed, not consumed anywhere yet |
+| `manifests` | `[host-plugins]` | Explicit project-relative paths to local `certo-plugin.json` files; validated before source parsing and code generation |
+
+### `[host-plugins]` — local static plugin discovery
+
+```toml
+[host-plugins]
+manifests = [
+    "plugins/database/certo-plugin.json",
+    "plugins/jobs/certo-plugin.json",
+]
+```
+
+Only explicitly listed local manifests are discovered. Paths are constrained to
+the project root, plugin entry sources are constrained to their package, and no
+network access or package installation occurs. The compiler validates manifest
+schema versions, SemVer intervals, host compatibility, plugin and capability
+uniqueness, required/optional dependencies, and cycles before parsing the
+application. Providers are ordered before consumers with plugin-ID lexical tie
+breaking. See `HOST-PLUGIN-COMPATIBILITY.md` for the normative contract.
 
 ---
 
