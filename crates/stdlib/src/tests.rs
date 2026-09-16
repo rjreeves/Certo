@@ -1264,6 +1264,35 @@ fn argv_functions_registered() {
     assert!(env.lookup("arg").is_some(),      "missing arg");
     assert!(env.lookup("readLine").is_some(), "missing readLine");
     assert!(env.lookup("readAll").is_some(),  "missing readAll");
+    assert!(env.lookup("readBytes").is_some(), "missing readBytes");
+}
+
+// BACKLOG item 332 — readBytes(n) blocks until exactly n bytes are read from
+// stdin (or EOF), for byte-count-framed protocols like LSP's Content-Length
+// headers that have no delimiter of their own inside the body.
+#[test]
+fn read_bytes_takes_int_returns_text() {
+    let env = seeded_env();
+    match env.lookup("readBytes").unwrap() {
+        Ty::Fn { params, ret } => {
+            assert_eq!(params, &[Ty::Int]);
+            assert_eq!(**ret, Ty::Text);
+        }
+        other => panic!("expected Fn, got {:?}", other),
+    }
+}
+
+#[test]
+fn core_c_contains_read_bytes_with_fread_loop() {
+    assert!(CORE_C.contains("certo_read_bytes"), "missing certo_read_bytes in CORE_C");
+    let idx = CORE_C.find("certo_text_t certo_read_bytes(int64_t n)").unwrap();
+    let end = CORE_C[idx..].find("\n}").map(|i| idx + i).unwrap_or(CORE_C.len());
+    let body = &CORE_C[idx..end];
+    // The whole point of this function is looping fread until `n` bytes are
+    // in hand (a single fread can short-read on a pipe) rather than trusting
+    // one call — confirm the loop is really there, not just the symbol.
+    assert!(body.contains("while"), "certo_read_bytes must loop fread until n bytes or EOF");
+    assert!(body.contains("fread"), "certo_read_bytes must use fread");
 }
 
 #[test]
@@ -1893,9 +1922,30 @@ fn env_c_contains_key_functions() {
 fn file_functions_registered() {
     let env = seeded_env();
     for name in &["readFile", "writeFile", "appendFile",
-                  "fileExists", "deleteFile", "listDir"] {
+                  "fileExists", "isDirectory", "deleteFile", "listDir"] {
         assert!(env.lookup(name).is_some(), "missing: {}", name);
     }
+}
+
+// BACKLOG item 329 — isDirectory tells a directory entry apart from a file;
+// the underlying stat/S_ISDIR (POSIX) and GetFileAttributes (Windows) checks
+// already existed inside certo_remove_dir_all_impl, just weren't exposed.
+#[test]
+fn is_directory_has_same_signature_as_file_exists() {
+    let env = seeded_env();
+    assert_eq!(env.lookup("isDirectory"), env.lookup("fileExists"),
+        "isDirectory should have the identical (Text) -> Bool signature as fileExists");
+}
+
+#[test]
+fn file_c_contains_is_directory_with_both_platform_branches() {
+    assert!(FILE_C.contains("bool certo_is_directory(certo_text_t path)"),
+        "missing certo_is_directory in FILE_C");
+    let idx = FILE_C.find("bool certo_is_directory(certo_text_t path)").unwrap();
+    let end = FILE_C[idx..].find("\n}").map(|i| idx + i).unwrap_or(FILE_C.len());
+    let body = &FILE_C[idx..end];
+    assert!(body.contains("GetFileAttributesA"), "missing Windows GetFileAttributesA branch");
+    assert!(body.contains("S_ISDIR"), "missing POSIX stat/S_ISDIR branch");
 }
 
 #[test]

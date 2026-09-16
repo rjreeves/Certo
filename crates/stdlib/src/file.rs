@@ -157,6 +157,24 @@ bool certo_file_exists(certo_text_t path) {
     return true;
 }
 
+/* BACKLOG item 329 — tells a directory entry apart from a file. The
+   underlying check already existed internally (certo_remove_dir_all_impl
+   above uses the identical stat/S_ISDIR and GetFileAttributes checks to
+   decide whether to recurse into a child entry or remove() it directly);
+   this just exposes that same classification as a public builtin. Returns
+   false (not an error signal) for a path that doesn't exist at all, same
+   convention as certo_file_exists just above. */
+bool certo_is_directory(certo_text_t path) {
+    if (!path || !*path) return false;
+#ifdef _WIN32
+    DWORD attrs = GetFileAttributesA(path);
+    return attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_DIRECTORY) != 0;
+#else
+    struct stat st;
+    return stat(path, &st) == 0 && S_ISDIR(st.st_mode);
+#endif
+}
+
 /* Delete a file; returns true on success. */
 bool certo_delete_file(certo_text_t path) {
     if (!path) return false;
