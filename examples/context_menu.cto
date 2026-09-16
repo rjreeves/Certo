@@ -1,0 +1,55 @@
+module ContextMenu
+
+// A minimal desktop app demonstrating Certo's C FFI against the real Win32
+// API: builds a native popup (context) menu and drives it entirely through
+// user32.dll/kernel32.dll message-based APIs, no third-party GUI toolkit.
+//
+// These declarations bind to `win32_menu_shim.c` (linked via `--link`), not
+// directly to the real WinAPI names — Certo's runtime C output always
+// `#include`s <windows.h> itself (for its own threading/process/http/file
+// stdlib support), so an `extern "C"` block naming a real WinAPI function
+// directly (e.g. `CreatePopupMenu`) collides with that header's own,
+// differently-typed prototype (HWND/UINT/LPCSTR vs. Certo's Int/Text) and
+// fails to compile — see the shim file's own header comment, and the note
+// added to BACKLOG.md.
+extern "C" {
+    fn certo_win32_get_host_window(): Int
+    fn certo_win32_set_foreground_window(hwnd: Int): Int
+    fn certo_win32_create_popup_menu(): Int
+    fn certo_win32_append_menu(hMenu: Int, uFlags: Int, uId: Int, text: Text): Int
+    fn certo_win32_track_popup_menu(hMenu: Int, uFlags: Int, x: Int, y: Int, hwnd: Int): Int
+    fn certo_win32_destroy_menu(hMenu: Int): Int
+}
+
+// MF_STRING = 0x0, MF_SEPARATOR = 0x800
+val menuSeparator: Int = 2048
+
+// TPM_LEFTBUTTON (0x0) | TPM_RETURNCMD (0x0100) | TPM_NONOTIFY (0x0080):
+// track the popup and hand the selected item's id straight back as the
+// call's return value, instead of routing a WM_COMMAND through a window
+// procedure.
+val trackFlags: Int = 384
+
+fn main(): Unit [io, unsafe] = {
+    val hwnd = unsafe { certo_win32_get_host_window() }
+    unsafe { certo_win32_set_foreground_window(hwnd) }
+
+    val hMenu = unsafe { certo_win32_create_popup_menu() }
+    unsafe { certo_win32_append_menu(hMenu, 0, 1, "Open") }
+    unsafe { certo_win32_append_menu(hMenu, 0, 2, "Rename") }
+    unsafe { certo_win32_append_menu(hMenu, 0, 3, "Delete") }
+    unsafe { certo_win32_append_menu(hMenu, menuSeparator, 0, "") }
+    unsafe { certo_win32_append_menu(hMenu, 0, 4, "Properties") }
+
+    println("Opening a native context menu (Win32 TrackPopupMenu)...")
+    val cmd = unsafe { certo_win32_track_popup_menu(hMenu, trackFlags, 400, 300, hwnd) }
+    unsafe { certo_win32_destroy_menu(hMenu) }
+
+    match cmd {
+        1 => println("You chose: Open")
+        2 => println("You chose: Rename")
+        3 => println("You chose: Delete")
+        4 => println("You chose: Properties")
+        _ => println("Menu dismissed with no selection")
+    }
+}
