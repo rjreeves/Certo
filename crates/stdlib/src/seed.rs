@@ -272,6 +272,10 @@ pub fn seed_stdlib(env: &mut TypeEnv, counter: &mut u32) {
     def!("rangeInclusive",fn2(Ty::Int, Ty::Int, Ty::List(Box::new(Ty::Int))));
     def!("readLine",  Ty::Fn { params: vec![], ret: Box::new(Ty::Option(Box::new(Ty::Text))) });
     def!("readAll",   Ty::Fn { params: vec![], ret: Box::new(Ty::Text) });
+    // BACKLOG item 332 — reads exactly n bytes (blocking until n bytes or
+    // EOF), for byte-count-framed protocols like LSP's Content-Length
+    // headers where the body has no delimiter of its own.
+    def!("readBytes", fn1(Ty::Int, Ty::Text));
     def!("argCount",  Ty::Fn { params: vec![], ret: Box::new(Ty::Int) });
     def!("arg",       fn1(Ty::Int, Ty::Option(Box::new(Ty::Text))));
     def!("monotonicMillis", Ty::Fn { params: vec![], ret: Box::new(Ty::Int) });
@@ -1024,6 +1028,10 @@ pub fn seed_stdlib(env: &mut TypeEnv, counter: &mut u32) {
     }
     def!("appendFile", fn2(Ty::Text, Ty::Text, Ty::Bool));
     def!("fileExists", fn1(Ty::Text, Ty::Bool));
+    // BACKLOG item 329 — tells a directory entry apart from a file; the
+    // classification already existed internally (removeDir's own recursive
+    // helper), just wasn't exposed as a callable builtin before this.
+    def!("isDirectory", fn1(Ty::Text, Ty::Bool));
     def!("deleteFile", fn1(Ty::Text, Ty::Bool));
     def!("renameFile", fn2(Ty::Text, Ty::Text, Ty::Bool));
     def!("makeDir",    fn1(Ty::Text, Ty::Bool));

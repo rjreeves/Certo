@@ -279,6 +279,38 @@ certo_text_t certo_read_all(void) {
     return buf;
 }
 
+/* BACKLOG item 332 — reads exactly `n` bytes from stdin, blocking until
+   either that many bytes have been read or EOF is hit (e.g. for a
+   Content-Length-framed protocol like LSP, where the body has no delimiter
+   of its own and must be read by an exact byte count instead). A single
+   `fread` can legitimately return fewer bytes than requested on a pipe even
+   when more data is still coming, so this loops rather than trusting one
+   call — same "keep going until really done" contract `certo_read_all`
+   above already has for its own EOF case. Returns whatever was actually
+   read if stdin closes early (shorter than `n`, not an error/Option) —
+   same pragmatic no-Option convention as `certo_read_all`, which a caller
+   can detect via `Text.byteLength` if it cares. A non-positive `n` returns
+   an empty string without touching stdin at all. */
+certo_text_t certo_read_bytes(int64_t n) {
+    if (n <= 0) {
+        char* buf = (char*)malloc(1);
+        if (!buf) certo_panic("out of memory");
+        buf[0] = '\0';
+        return buf;
+    }
+    size_t want = (size_t)n;
+    char* buf = (char*)malloc(want + 1);
+    if (!buf) certo_panic("out of memory");
+    size_t got = 0;
+    while (got < want) {
+        size_t n_read = fread(buf + got, 1, want - got, stdin);
+        if (n_read == 0) break;   /* EOF or error */
+        got += n_read;
+    }
+    buf[got] = '\0';
+    return buf;
+}
+
 /* ---- argv ---- */
 
 /* These globals are set by the certo_main_init() bootstrap call that the
