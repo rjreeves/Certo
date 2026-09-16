@@ -20,6 +20,14 @@ typedef struct {
        `body`'s meaning, so every existing constructor/accessor is
        completely unaffected. */
     certo_text_t location;
+    /* BACKLOG item 331 — true only when winhttp_request was given a
+       max_bytes bound and the real response body was cut off there; false
+       (the default) for every ordinary, unbounded request. A dedicated
+       field for the same reason `location` above is: so a caller can tell
+       "the response genuinely was exactly this long" apart from "this is
+       only the first N bytes, there was more" without overloading
+       body_length's own meaning. */
+    bool         truncated;
 } CertoHttpResponse;
 
 static CertoHttpResponse* http_response_new(int64_t status, char* body, int64_t body_length, char* ct) {
@@ -30,6 +38,7 @@ static CertoHttpResponse* http_response_new(int64_t status, char* body, int64_t 
     r->body_length  = body_length;
     r->content_type = ct   ? ct   : (char*)"";
     r->location     = NULL;
+    r->truncated    = false;
     return r;
 }
 
@@ -98,13 +107,21 @@ static bool parse_url(const char* url, ParsedUrl* out) {
     return true;
 }
 
-/* Core request function. */
+/* Core request function.
+   BACKLOG item 331 — max_bytes bounds how much of the response body is
+   actually read off the wire: 0 means unlimited (every existing caller
+   below passes 0, so behavior is completely unchanged for them). When
+   the bound is hit, the read loop stops immediately and the handles are
+   closed right there — real request-time bounding, not a post-download
+   truncation, since nothing further is ever read from the socket once
+   the limit is reached. */
 static CertoHttpResponse* winhttp_request(
     const char* method,
     const char* url,
     const char* extra_headers, /* may be NULL */
     const char* body,          /* may be NULL */
-    size_t body_len
+    size_t body_len,
+    size_t max_bytes           /* 0 = unlimited */
 ) {
     ParsedUrl pu = {0};
     if (!parse_url(url, &pu)) return http_response_new(0, NULL, 0, NULL);
@@ -159,24 +176,30 @@ static CertoHttpResponse* winhttp_request(
     char* ct = wide_to_utf8(ct_buf);
 
     /* Read body */
-    char*  body_out = NULL;
-    size_t body_cap = 0;
-    size_t body_pos = 0;
-    DWORD  avail    = 0;
+    char*  body_out  = NULL;
+    size_t body_cap  = 0;
+    size_t body_pos  = 0;
+    bool   truncated = false;
+    DWORD  avail     = 0;
     while (WinHttpQueryDataAvailable(hreq, &avail) && avail > 0) {
-        if (body_pos + avail + 1 > body_cap) {
-            body_cap = (body_pos + avail + 1) * 2;
+        if (max_bytes > 0 && body_pos >= max_bytes) { truncated = true; break; }
+        DWORD want = avail;
+        if (max_bytes > 0 && body_pos + want > max_bytes) want = (DWORD)(max_bytes - body_pos);
+        if (body_pos + want + 1 > body_cap) {
+            body_cap = (body_pos + want + 1) * 2;
             body_out = (char*)realloc(body_out, body_cap);
             if (!body_out) certo_panic("out of memory");
         }
         DWORD read = 0;
-        WinHttpReadData(hreq, body_out + body_pos, avail, &read);
+        WinHttpReadData(hreq, body_out + body_pos, want, &read);
         body_pos += read;
+        if (max_bytes > 0 && body_pos >= max_bytes && want < avail) { truncated = true; break; }
     }
     if (!body_out) { body_out = (char*)malloc(1); if (!body_out) certo_panic("out of memory"); }
     body_out[body_pos] = '\0';
 
     result = http_response_new((int64_t)status_code, body_out, (int64_t)body_pos, ct);
+    result->truncated = truncated;
 
     WinHttpCloseHandle(hreq);
     WinHttpCloseHandle(hconn);
@@ -190,7 +213,7 @@ cleanup:
 }
 
 CertoHttpResponse* certo_http_get(certo_text_t url) {
-    return winhttp_request("GET", url, NULL, NULL, 0);
+    return winhttp_request("GET", url, NULL, NULL, 0, 0);
 }
 
 CertoHttpResponse* certo_http_post(certo_text_t url, certo_text_t body, certo_text_t content_type) {
@@ -198,7 +221,7 @@ CertoHttpResponse* certo_http_post(certo_text_t url, certo_text_t body, certo_te
     if (content_type && *content_type)
         snprintf(hdr, sizeof(hdr), "Content-Type: %s", content_type);
     size_t blen = body ? strlen(body) : 0;
-    return winhttp_request("POST", url, *hdr ? hdr : NULL, body, blen);
+    return winhttp_request("POST", url, *hdr ? hdr : NULL, body, blen, 0);
 }
 
 CertoHttpResponse* certo_http_put(certo_text_t url, certo_text_t body, certo_text_t content_type) {
@@ -206,11 +229,11 @@ CertoHttpResponse* certo_http_put(certo_text_t url, certo_text_t body, certo_tex
     if (content_type && *content_type)
         snprintf(hdr, sizeof(hdr), "Content-Type: %s", content_type);
     size_t blen = body ? strlen(body) : 0;
-    return winhttp_request("PUT", url, *hdr ? hdr : NULL, body, blen);
+    return winhttp_request("PUT", url, *hdr ? hdr : NULL, body, blen, 0);
 }
 
 CertoHttpResponse* certo_http_delete(certo_text_t url) {
-    return winhttp_request("DELETE", url, NULL, NULL, 0);
+    return winhttp_request("DELETE", url, NULL, NULL, 0, 0);
 }
 
 /* Flatten a List<List<Text>> of [name,value] pairs into WinHTTP's CRLF-joined
@@ -241,7 +264,7 @@ static char* http_flatten_headers(CertoList* headers) {
 CertoHttpResponse* certo_http_request(certo_text_t method, certo_text_t url, CertoList* headers, certo_text_t body) {
     char* hdrs = http_flatten_headers(headers);
     size_t blen = body ? strlen(body) : 0;
-    CertoHttpResponse* r = winhttp_request(method, url, hdrs, body, blen);
+    CertoHttpResponse* r = winhttp_request(method, url, hdrs, body, blen, 0);
     free(hdrs);
     return r;
 }
@@ -251,7 +274,22 @@ CertoHttpResponse* certo_http_request_bytes(certo_text_t method, certo_text_t ur
     char* hdrs = http_flatten_headers(headers);
     const char* data = body ? (const char*)body->data : NULL;
     size_t blen = body ? (size_t)body->len : 0;
-    CertoHttpResponse* r = winhttp_request(method, url, hdrs, data, blen);
+    CertoHttpResponse* r = winhttp_request(method, url, hdrs, data, blen, 0);
+    free(hdrs);
+    return r;
+}
+
+/* BACKLOG item 331 — real request-time response-size bounding: winhttp_request's
+   own read loop stops (and the connection handles are closed) as soon as
+   maxBytes is reached, instead of downloading the full body first and
+   truncating afterward. maxBytes <= 0 means unlimited, same sentinel
+   convention as item 330's Process.run timeoutMs. */
+CertoHttpResponse* certo_http_request_with_limit(certo_text_t method, certo_text_t url, CertoList* headers,
+                                                  certo_text_t body, int64_t max_bytes) {
+    char* hdrs = http_flatten_headers(headers);
+    size_t blen = body ? strlen(body) : 0;
+    CertoHttpResponse* r = winhttp_request(method, url, hdrs, body, blen,
+                                            max_bytes > 0 ? (size_t)max_bytes : 0);
     free(hdrs);
     return r;
 }
@@ -264,6 +302,7 @@ CertoHttpResponse* certo_http_put   (certo_text_t url, certo_text_t body, certo_
 CertoHttpResponse* certo_http_delete(certo_text_t url)                                              { (void)url; certo_panic("Http not supported on this platform."); return NULL; }
 CertoHttpResponse* certo_http_request(certo_text_t method, certo_text_t url, CertoList* headers, certo_text_t body) { (void)method; (void)url; (void)headers; (void)body; certo_panic("Http not supported on this platform."); return NULL; }
 CertoHttpResponse* certo_http_request_bytes(certo_text_t method, certo_text_t url, CertoList* headers, CertoBytes* body) { (void)method; (void)url; (void)headers; (void)body; certo_panic("Http not supported on this platform."); return NULL; }
+CertoHttpResponse* certo_http_request_with_limit(certo_text_t method, certo_text_t url, CertoList* headers, certo_text_t body, int64_t max_bytes) { (void)method; (void)url; (void)headers; (void)body; (void)max_bytes; certo_panic("Http not supported on this platform."); return NULL; }
 #endif
 
 /* Portable case-insensitive string compare — `_stricmp` is MSVC/Windows-only;
@@ -285,6 +324,7 @@ certo_text_t certo_http_response_body        (CertoHttpResponse* r) { return r ?
 int64_t      certo_http_response_body_length (CertoHttpResponse* r) { return r ? r->body_length  : 0; }
 certo_text_t certo_http_response_content_type(CertoHttpResponse* r) { return r ? r->content_type : ""; }
 bool         certo_http_response_ok          (CertoHttpResponse* r) { return r && r->status >= 200 && r->status < 300; }
+bool         certo_http_response_truncated   (CertoHttpResponse* r) { return r && r->truncated; }
 
 /* `.body` is NUL-safe internally (length-tracked, never truncated while
  * being read off the wire) but every other Text function treats it as a
