@@ -1065,6 +1065,12 @@ pub fn seed_stdlib(env: &mut TypeEnv, counter: &mut u32) {
         def!("Process.lines",          Ty::Fn { params: vec![Ty::Text, list_text.clone(), handler], ret: Box::new(Ty::Int) });
         def!("Process.spawnDetached",  Ty::Fn { params: vec![Ty::Text, list_text.clone(), Ty::Text], ret: Box::new(Ty::Int) });
         def!("Process.spawnDetachedHidden",  Ty::Fn { params: vec![Ty::Text, list_text.clone(), Ty::Text], ret: Box::new(Ty::Int) });
+        // BACKLOG item 330 — the one working-directory-aware call
+        // (spawnDetached) has no output capture, and no exec variant has a
+        // timeout/cancellation handle. workingDir "" means "don't change
+        // directory" (spawnDetached's own convention); timeoutMs <= 0 means
+        // "no timeout, block forever" (every other exec's existing behavior).
+        def!("Process.run", Ty::Fn { params: vec![Ty::Text, list_text.clone(), Ty::Text, Ty::Int], ret: Box::new(pr.clone()) });
         def!("Process.quit",           fn1(Ty::Int, Ty::Unit));
         def!("ProcessResult.exitCode", fn1(pr.clone(), Ty::Int));
         def!("ProcessResult.stdout",   fn1(pr.clone(), Ty::Text));
@@ -1892,6 +1898,11 @@ pub fn seed_stdlib(env: &mut TypeEnv, counter: &mut u32) {
         def!("Http.put",    Ty::Fn { params: vec![Ty::Text, Ty::Text, Ty::Text], ret: Box::new(hr()) });
         def!("Http.request", Ty::Fn { params: vec![Ty::Text, Ty::Text, list_hdr.clone(), Ty::Text], ret: Box::new(hr()) });
         def!("Http.requestBytes", Ty::Fn { params: vec![Ty::Text, Ty::Text, list_hdr.clone(), Ty::Named { name: "Bytes".into(), args: vec![] }], ret: Box::new(hr()) });
+        // BACKLOG item 331 — real request-time response-size bounding: the
+        // read loop stops (and the connection is closed) as soon as
+        // maxBytes is reached, instead of downloading the full body and
+        // truncating afterward. maxBytes <= 0 means unlimited.
+        def!("Http.requestWithLimit", Ty::Fn { params: vec![Ty::Text, Ty::Text, list_hdr.clone(), Ty::Text, Ty::Int], ret: Box::new(hr()) });
 
         // HttpResponse accessors
         def!("HttpResponse.status",      fn1(hr(), Ty::Int));
@@ -1900,6 +1911,9 @@ pub fn seed_stdlib(env: &mut TypeEnv, counter: &mut u32) {
         def!("HttpResponse.bodyBytes",   fn1(hr(), Ty::Named { name: "Bytes".into(), args: vec![] }));
         def!("HttpResponse.contentType", fn1(hr(), Ty::Text));
         def!("HttpResponse.ok",          fn1(hr(), Ty::Bool));
+        // BACKLOG item 331 — true only when Http.requestWithLimit actually
+        // cut the body off at maxBytes; false for every ordinary response.
+        def!("HttpResponse.truncated",   fn1(hr(), Ty::Bool));
 
         // Server
         let handler_ty = Ty::Fn { params: vec![req()], ret: Box::new(hr()) };
@@ -2172,6 +2186,7 @@ pub fn seed_stdlib(env: &mut TypeEnv, counter: &mut u32) {
     pm!("Process.lines",         "cmd", "args", "handler");
     pm!("Process.spawnDetached", "cmd", "args", "workingDir");
     pm!("Process.spawnDetachedHidden", "cmd", "args", "workingDir");
+    pm!("Process.run",           "cmd", "args", "workingDir", "timeoutMs");
     pm!("Process.quit",          "code");
 
     // Host
@@ -2351,6 +2366,7 @@ pub fn seed_stdlib(env: &mut TypeEnv, counter: &mut u32) {
     pm!("Credential.set", "target", "secret");
     pm!("Http.request", "method", "url", "headers", "body");
     pm!("Http.requestBytes", "method", "url", "headers", "body");
+    pm!("Http.requestWithLimit", "method", "url", "headers", "body", "maxBytes");
     // Real order is (url, body, content_type) — matches both the actual C
     // implementation (crates/stdlib/src/http.rs's certo_http_post/put take
     // (url, body, content_type)) and docs/STDLIB-QUICKREF.md's documented

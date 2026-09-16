@@ -2222,6 +2222,35 @@ fn process_c_contains_key_functions() {
     assert!(PROCESS_C.contains("certo_process_result_stderr"),     "missing stderr");
 }
 
+// BACKLOG item 330 — Process.run is the missing combination: a captured,
+// cancellable, working-directory-aware exec (spawnDetached has cwd but no
+// capture; every capturing exec variant has neither cwd nor a timeout).
+#[test]
+fn process_run_registered_with_correct_signature() {
+    let env = seeded_env();
+    match env.lookup("Process.run").expect("missing Process.run") {
+        Ty::Fn { params, ret } => {
+            assert_eq!(params, &[Ty::Text, Ty::List(Box::new(Ty::Text)), Ty::Text, Ty::Int]);
+            assert!(matches!(ret.as_ref(), Ty::Named { name, .. } if name == "ProcessResult"));
+        }
+        other => panic!("expected Fn, got {:?}", other),
+    }
+}
+
+#[test]
+fn process_c_contains_run_with_both_platform_branches() {
+    assert!(PROCESS_C.contains("certo_process_run"), "missing certo_process_run in PROCESS_C");
+    // Windows: cwd via CreateProcessA's lpCurrentDirectory, timeout via
+    // WaitForSingleObject, cancellation via TerminateProcess.
+    assert!(PROCESS_C.contains("TerminateProcess"), "missing Windows TerminateProcess (timeout kill)");
+    assert!(PROCESS_C.contains("WAIT_TIMEOUT"), "missing Windows WAIT_TIMEOUT check");
+    // POSIX: cwd via chdir in the child, timeout via a waitpid/WNOHANG poll
+    // loop, cancellation via SIGKILL.
+    assert!(PROCESS_C.contains("chdir(working_dir)"), "missing POSIX chdir for workingDir");
+    assert!(PROCESS_C.contains("WNOHANG"), "missing POSIX waitpid/WNOHANG poll loop");
+    assert!(PROCESS_C.contains("SIGKILL"), "missing POSIX SIGKILL cancellation");
+}
+
 #[test]
 fn process_exec_inherit_registered_and_returns_int() {
     let env = seeded_env();
@@ -2234,6 +2263,44 @@ fn process_exec_inherit_registered_and_returns_int() {
 #[test]
 fn process_c_contains_exec_inherit() {
     assert!(PROCESS_C.contains("certo_process_exec_inherit"), "missing exec_inherit");
+}
+
+// BACKLOG item 333 — spawnDetached's own POSIX branch used to be a stub
+// that discarded every argument and always returned -1 without ever
+// spawning anything, unlike every other Process.* function in this file.
+#[test]
+fn spawn_detached_functions_registered_and_return_int() {
+    let env = seeded_env();
+    for name in &["Process.spawnDetached", "Process.spawnDetachedHidden"] {
+        match env.lookup(name).unwrap_or_else(|| panic!("missing {}", name)) {
+            Ty::Fn { params, ret } => {
+                assert_eq!(params, &[Ty::Text, Ty::List(Box::new(Ty::Text)), Ty::Text]);
+                assert_eq!(ret.as_ref(), &Ty::Int);
+            }
+            other => panic!("expected Fn for {}, got {:?}", name, other),
+        }
+    }
+}
+
+#[test]
+fn process_c_spawn_detached_posix_branch_is_a_real_double_fork_not_a_stub() {
+    let idx = PROCESS_C.find("static int64_t certo_process_spawn_detached_with_flags(")
+        .expect("missing certo_process_spawn_detached_with_flags in PROCESS_C");
+    // Isolate just this function's own body (up to the next top-level
+    // function) so these checks can't accidentally match Process.run's
+    // unrelated fork/chdir/waitpid usage elsewhere in the same file.
+    let after = &PROCESS_C[idx..];
+    let end = after[1..].find("\nstatic ").or_else(|| after[1..].find("\nint64_t"))
+        .map(|i| i + 1).unwrap_or(after.len());
+    let body = &after[..end];
+
+    assert!(!body.contains("return -1;\n#endif"), "POSIX branch is still the old always-fail stub");
+    assert_eq!(body.matches("fork()").count(), 2,
+        "expected the double-fork daemonize idiom (two fork() calls) to avoid a zombie under the caller");
+    assert!(body.contains("setsid()"), "missing setsid() to detach from the controlling terminal");
+    assert!(body.contains("chdir(working_dir)"), "missing chdir for workingDir");
+    assert!(body.contains("execvp(cmd, argv)"), "missing execvp to actually run the command");
+    assert!(body.contains("waitpid(first"), "missing reaping the short-lived first child");
 }
 
 // ------------------------------------------------------------------ //
@@ -2465,6 +2532,50 @@ fn http_request_takes_method_url_headers_body() {
         }
         other => panic!("expected Fn, got {:?}", other),
     }
+}
+
+// BACKLOG item 331 — Http.requestWithLimit stops reading (and closes the
+// connection) as soon as maxBytes is reached, instead of downloading the
+// full body first and truncating afterward; HttpResponse.truncated reports
+// whether that actually happened.
+#[test]
+fn http_request_with_limit_takes_method_url_headers_body_max_bytes() {
+    let env = seeded_env();
+    let list_hdr = Ty::List(Box::new(Ty::List(Box::new(Ty::Text))));
+    match env.lookup("Http.requestWithLimit").expect("missing Http.requestWithLimit") {
+        Ty::Fn { params, ret } => {
+            assert_eq!(params, &[Ty::Text, Ty::Text, list_hdr, Ty::Text, Ty::Int]);
+            assert!(matches!(ret.as_ref(), Ty::Named { name, .. } if name == "HttpResponse"));
+        }
+        other => panic!("expected Fn, got {:?}", other),
+    }
+}
+
+#[test]
+fn http_response_truncated_registered_and_returns_bool() {
+    let env = seeded_env();
+    match env.lookup("HttpResponse.truncated").expect("missing HttpResponse.truncated") {
+        Ty::Fn { params, ret } => {
+            assert_eq!(params.len(), 1);
+            assert_eq!(ret.as_ref(), &Ty::Bool);
+        }
+        other => panic!("expected Fn, got {:?}", other),
+    }
+}
+
+#[test]
+fn http_c_request_with_limit_stops_the_read_loop_early_not_just_truncates_after() {
+    assert!(HTTP_C.contains("certo_http_request_with_limit"), "missing certo_http_request_with_limit");
+    assert!(HTTP_C.contains("certo_http_response_truncated"), "missing certo_http_response_truncated accessor");
+    // The whole point of item 331 is stopping the WinHttpReadData loop
+    // early, not reading everything and truncating the buffer afterward —
+    // confirm the bound is actually checked *inside* winhttp_request's own
+    // read loop, not applied as a post-hoc string truncation somewhere else.
+    let idx = HTTP_C.find("static CertoHttpResponse* winhttp_request(").unwrap();
+    let end = HTTP_C[idx..].find("\ncleanup:").map(|i| idx + i).unwrap_or(HTTP_C.len());
+    let body = &HTTP_C[idx..end];
+    assert!(body.contains("max_bytes"), "winhttp_request must take a max_bytes bound");
+    assert!(body.contains("truncated = true"), "must mark truncated when the bound is actually hit");
 }
 
 #[test]
