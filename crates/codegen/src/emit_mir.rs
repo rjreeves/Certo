@@ -886,7 +886,13 @@ fn camel_to_snake(s: &str) -> String {
 }
 
 fn escape_str(s: &str) -> String {
-    s.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n").replace('\t', "\\t")
+    // BACKLOG item 334 — a literal \r (carriage return, 0x0D) byte landed
+    // unescaped in the emitted C string literal, which clang treats as
+    // ending the physical source line, breaking the CERTO_STR(...) macro
+    // invocation exactly like an unescaped raw \n would. Mirrors
+    // crates/fmt/src/fmt_expr.rs's own escape_str, which already handles
+    // \r correctly.
+    s.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n").replace('\r', "\\r").replace('\t', "\\t")
 }
 
 #[cfg(test)]

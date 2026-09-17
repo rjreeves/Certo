@@ -46,6 +46,28 @@ fn inline_runtime_embeds_types() {
 // panic() — noreturn void, not an assignable call result
 // ------------------------------------------------------------------ //
 
+// ------------------------------------------------------------------ //
+// String literal escaping (BACKLOG item 334)
+// ------------------------------------------------------------------ //
+
+#[test]
+fn text_literal_with_carriage_return_is_escaped_in_generated_c() {
+    // A raw \r byte inside a Text literal used to land unescaped in the
+    // emitted C string literal, which clang treats as ending the physical
+    // source line — breaking the CERTO_STR(...) macro invocation exactly
+    // like an unescaped raw \n would (\n has always been escaped; \r
+    // wasn't). The .cto source below writes the escape sequence \r\n (two
+    // characters, backslash then r) exactly as a real program would. Must
+    // be inside a function body (not a top-level `val`, which takes a
+    // separate constant-folding shortcut in emit_module.rs's own
+    // const_expr_to_c — already correct — that never touches emit_mir's
+    // escape_str at all) to actually exercise the buggy MIR-level path.
+    let c = codegen("module A\nfn f(): Text = \"a\\r\\nb\"\n");
+    assert!(!c.contains('\r'),
+        "generated C must not contain a raw carriage-return byte — it breaks the CERTO_STR(...) macro invocation");
+    assert_contains(&c, "a\\r\\nb"); // correctly re-escaped as backslash-r backslash-n
+}
+
 #[test]
 fn panic_call_in_if_branch_is_a_bare_statement() {
     // `panic(msg)` is `forall a. Text -> a` at the Certo level (usable in any
