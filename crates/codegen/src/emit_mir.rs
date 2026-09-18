@@ -652,6 +652,24 @@ fn emit_call_arg(func_c: &str, idx: usize, arg: &Operand, locals: &[MirLocalDecl
         // treatment, for the identical reason.
         ("certo_list_push", 1) | ("certo_list_push_mut", 1) | ("certo_list_upsert", 1)
         | ("certo_host_provide", 2) => box_value(&expr, &operand_ty(arg, locals)),
+        // BACKLOG item 338 — `Map<K,V>` stores both key and value in a
+        // void* slot, same as `List<T>`'s own item slot above, but none of
+        // its key/value-taking functions ever routed through `box_value`
+        // at all: a struct-typed value was a hard C compile error
+        // (`passing 'PackageDep' to parameter of incompatible type 'void
+        // *'`), and even a plain primitive value (e.g. `Int`) had no
+        // *defined* pointer-sized encoding — it happened to "compile" via
+        // an implicit, unchecked int-to-pointer conversion, with nothing
+        // ensuring that encoding matched what a later `Map.get`/`.values`
+        // read back expects. `certo_map_insert(m, key, value)` takes both
+        // at positions 1/2; `certo_map_get`/`.contains`/`.remove(m, key)`
+        // all take the key alone at position 1 — a struct-typed key wasn't
+        // hit by the original repro, but needs the identical treatment for
+        // the identical reason, so all four get it uniformly here rather
+        // than fixing only the one confirmed case.
+        ("certo_map_insert", 1) | ("certo_map_insert", 2)
+        | ("certo_map_get", 1) | ("certo_map_contains", 1) | ("certo_map_remove", 1)
+            => box_value(&expr, &operand_ty(arg, locals)),
         _ => expr,
     }
 }

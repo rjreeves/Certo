@@ -806,6 +806,31 @@ fn map_get_return_type_is_option_of_value_type() {
     }
 }
 
+// BACKLOG item 338 — `Map.insert`'s own return type used to just blindly
+// copy its first (input-map) argument's type unchanged. For
+// `Map.insert(Map.empty(), key, value)` that input map is itself
+// unresolvable (`Map.empty()` has no arguments to recover K/V from), so the
+// *whole chain* — including a later `Map.get` on the result — could never
+// recover a real K/V either. Confirmed as a real runtime crash, not just a
+// missing type: `Map.get`'s own C implementation correctly extracted the
+// right bits, but downstream code (an f-string interpolation) trusted the
+// wrong (`Ty::Error`) type for the extracted value and skipped a needed
+// Int-to-Text conversion, segfaulting in certo_text_concat.
+#[test]
+fn map_insert_on_a_fresh_empty_map_recovers_key_value_types_from_the_insert_itself() {
+    let m = lower("module A\nimport Stdlib.Collections.{ Map }\n\
+        fn f(): Int? = { val m = Map.insert(Map.empty(), \"k\", 42)\n Map.get(m, \"k\") }");
+    let f = m.items.iter().find_map(|it| if let HirItem::Fn(f) = it { Some(f) } else { None }).unwrap();
+    let init = first_let_init(f);
+    assert_eq!(init.ty, Ty::Map(Box::new(Ty::Text), Box::new(Ty::Int)),
+        "expected Map.insert(Map.empty(), ...) to resolve to Map<Text, Int>, got {:?}", init.ty);
+    // The whole point: the *tail* Map.get call built on top of that `val`
+    // must now also correctly resolve, not just the intermediate `val` itself.
+    let HirExprKind::Block { tail, .. } = &f.body.as_ref().unwrap().kind else { panic!("expected a Block body") };
+    assert_eq!(tail.ty, Ty::Option(Box::new(Ty::Int)),
+        "expected the tail Map.get(...) to resolve to Option<Int>, got {:?}", tail.ty);
+}
+
 #[test]
 fn int_to_float_call_type_is_float_not_error() {
     // BACKLOG item 129: intToFloat/floatToInt were never in the old hand-
