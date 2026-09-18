@@ -133,6 +133,23 @@ struct Cx {
     /// referencing an undefined type name for it (confirmed via a real
     /// compile before this field was added).
     type_aliases: HashMap<String, (Vec<String>, certo_ast::types::TypeExpr)>,
+    /// BACKLOG item 335 (investigation) — the currently-lowering function's
+    /// own declared type-param names (e.g. `["T"]` for `fn f<T>(...)`), set
+    /// right before lowering its body and left in place for the whole body
+    /// (including any nested lambda, since a closure inside a generic
+    /// function's body can still reference the same outer `T`). Needed so a
+    /// `val`/`var` statement's own *explicit* type annotation written inside
+    /// that body (`val item: T = ...`) can resolve a bare `T` back to the
+    /// `Ty::Var(0)` erasure sentinel via `ast_ty_to_ty_with_params`, the same
+    /// way a function's own param/return-type annotations already do — those
+    /// call sites build their own local `tp_names` and pass it directly, but
+    /// `Stmt::Val`/`Stmt::Var`'s handling (deep inside `lower_block`) had no
+    /// access to it and hardcoded `&[]`, so a bare type-param name in a local
+    /// annotation fell through to becoming a literal, undeclared C type name
+    /// instead of the correct opaque `void*` — confirmed via a live repro
+    /// (`fn f<T>(...): T? = { val item: T = ...; Some(item) }` emitted
+    /// `T* _ob = (T*)malloc(sizeof(T));`, a real C compile error for any `T`).
+    current_type_params: Vec<String>,
     errors:        Vec<LowerError>,
 }
 
@@ -162,6 +179,7 @@ impl Cx {
             fn_trait_bounds:     HashMap::new(),
             trait_method_accessors: HashMap::new(),
             type_aliases:        HashMap::new(),
+            current_type_params: Vec::new(),
             errors:              Vec::new(),
         }
     }
@@ -676,7 +694,8 @@ fn lower_lambda_with_param_hints(params: &[certo_ast::expr::LambdaParam], body: 
     cx.push_scope();
     let hir_params: Vec<HirParam> = params.iter().enumerate().map(|(i, p)| {
         let local = cx.define_local(&p.name.node);
-        let ty = p.ty.as_ref().map(|t| ast_ty_to_ty_with_params(&t.node, &[], &cx.type_aliases))
+        let tp_names: Vec<&str> = cx.current_type_params.iter().map(|s| s.as_str()).collect();
+        let ty = p.ty.as_ref().map(|t| ast_ty_to_ty_with_params(&t.node, &tp_names, &cx.type_aliases))
             .unwrap_or_else(|| hints.get(i).cloned().unwrap_or(Ty::Error));
         if !matches!(ty, Ty::Error) { cx.local_types.insert(local, ty.clone()); }
         HirParam { local, name: p.name.node.clone(), ty, span: p.span }
@@ -1100,6 +1119,7 @@ pub fn lower_module(module: &Module) -> Result<HirModule, Vec<LowerError>> {
                 add_row_bound_accessor_params(&f.name.node, &mut params, f.span, &mut cx);
                 add_trait_bound_accessor_params(&f.name.node, &mut params, f.span, &mut cx);
 
+                cx.current_type_params = tp_names.iter().map(|s| s.to_string()).collect();
                 let mut body = f.body.as_ref().map(|b| lower_expr(b, &mut cx));
                 let ret_ty = f.ret_ty.as_ref().map(|t| ast_ty_to_ty_with_params(&t.node, &tp_names, &cx.type_aliases)).unwrap_or(Ty::Error);
                 // BACKLOG item 235 — `fn f(): Int8 = 100`'s bare-literal
@@ -1174,6 +1194,7 @@ pub fn lower_module(module: &Module) -> Result<HirModule, Vec<LowerError>> {
                     }).collect();
                     add_row_bound_accessor_params(&qname, &mut params, m.span, &mut cx);
                     add_trait_bound_accessor_params(&qname, &mut params, m.span, &mut cx);
+                    cx.current_type_params = tp_names.iter().map(|s| s.to_string()).collect();
                     let mut body = Some(lower_expr(body_ast, &mut cx));
                     let ret_ty = m.ret_ty.as_ref().map(|t| ast_ty_to_ty_with_params(&t.node, &tp_names, &cx.type_aliases)).unwrap_or(Ty::Error);
                     // BACKLOG item 235 — same fixed-width literal-body
@@ -2805,7 +2826,17 @@ fn lower_block(stmts: &[Stmt], span: Span, cx: &mut Cx) -> HirExpr {
                 // otherwise this is exactly the case codegen would silently
                 // mis-cast a raw `void*` as a concrete C type, so it's a
                 // hard error instead — BACKLOG item 135.
-                let declared = val_ty_ann.as_ref().map(|t| ast_ty_to_ty_with_params(&t.node, &[], &cx.type_aliases));
+                //
+                // BACKLOG item 335 (investigation) — `&[]` here meant a bare
+                // type-param name in this annotation (e.g. `val item: T = ...`
+                // inside `fn f<T>(...)`) never resolved to the erasure
+                // sentinel `Ty::Var(0)` the enclosing function's own param/
+                // return-type annotations already get, and instead became a
+                // literal, undeclared C type name. `cx.current_type_params`
+                // is set once per function/impl-method right before its body
+                // is lowered (see those call sites) and covers this one too.
+                let tp_names: Vec<&str> = cx.current_type_params.iter().map(|s| s.as_str()).collect();
+                let declared = val_ty_ann.as_ref().map(|t| ast_ty_to_ty_with_params(&t.node, &tp_names, &cx.type_aliases));
                 resolve_bare_generic_return(&mut init, declared.as_ref(), true, cx);
                 if let Some(d) = &declared {
                     if literal_matches_fixed_width(&value.node, d) { init.ty = d.clone(); }
@@ -2957,7 +2988,11 @@ fn lower_block(stmts: &[Stmt], span: Span, cx: &mut Cx) -> HirExpr {
                 // literal override just above (`var`'s declared annotation
                 // was previously discarded entirely here, unlike `Stmt::Val`).
                 if let Some(t) = var_ty_ann {
-                    let declared = ast_ty_to_ty_with_params(&t.node, &[], &cx.type_aliases);
+                    // BACKLOG item 335 (investigation) — same `&[]`-blind-to-
+                    // the-enclosing-generic-function's-own-type-params gap as
+                    // `Stmt::Val` just above; see that arm's own comment.
+                    let tp_names: Vec<&str> = cx.current_type_params.iter().map(|s| s.as_str()).collect();
+                    let declared = ast_ty_to_ty_with_params(&t.node, &tp_names, &cx.type_aliases);
                     if literal_matches_fixed_width(&value.node, &declared) { init.ty = declared.clone(); }
                     resolve_empty_list_ty(&mut init, Some(&declared));
                 }

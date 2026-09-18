@@ -90,6 +90,51 @@ fn try_on_option_resolves_to_the_some_payload_type() {
 }
 
 // ------------------------------------------------------------------ //
+// `val`/`var` explicit annotation resolving a bare type-param name inside
+// a generic function's own body — BACKLOG item 335 (investigation)
+// ------------------------------------------------------------------ //
+
+#[test]
+fn var_annotation_with_bare_type_param_resolves_to_erased_var_not_a_literal_name() {
+    // Before this fix, `Stmt::Var`'s own explicit-annotation conversion
+    // (`ast_ty_to_ty_with_params(&t.node, &[], ...)`) had no knowledge of
+    // the enclosing generic fn's own type params, so a bare `T` fell
+    // through to an opaque `Ty::Named { name: "T", .. }` — codegen then
+    // emitted the literal, undeclared C type name `T` (confirmed via a
+    // live repro: `T* _ob = (T*)malloc(sizeof(T));`). Now it must resolve
+    // to the same `Ty::Var(0)` erasure sentinel a function's own param/
+    // return-type annotations already get.
+    let m = lower("module A\nfn f<T>(): Unit = { var xs: List<T> = [] }");
+    let f = m.items.iter().find_map(|it| if let HirItem::Fn(f) = it { Some(f) } else { None }).unwrap();
+    let HirExprKind::Block { stmts, .. } = &f.body.as_ref().unwrap().kind else { panic!("expected a Block body") };
+    let HirStmt::Let { ty, .. } = &stmts[0] else { panic!("expected first stmt to be a Let") };
+    assert_eq!(*ty, Ty::List(Box::new(Ty::Var(0))),
+        "expected the empty list's element type to resolve to the Var(0) erasure sentinel, got {:?}", ty);
+}
+
+#[test]
+fn val_annotation_with_bare_type_param_is_rejected_not_silently_miscompiled() {
+    // The `Stmt::Val` sibling of the test above: annotating a bare-generic
+    // stdlib return with the *same* still-abstract type parameter can't
+    // actually resolve anything concrete (this compiler never
+    // monomorphizes — `T` stays erased for the whole function). Before
+    // this fix, the identical `&[]`-blind conversion wrongly produced a
+    // *different-looking* type (`Ty::Named("T")` vs the return's own
+    // `Ty::Var(0)` sentinel), which accidentally satisfied
+    // `resolve_bare_generic_return`'s "was this actually resolved?" check
+    // and let broken code (the same literal-`T`-as-a-C-type bug) through
+    // to codegen. Now that both sides correctly agree it's still `Var(0)`,
+    // this is correctly recognized as unresolvable and rejected here
+    // instead — matching this compiler's own established "hard error
+    // instead of silent miscompile" precedent (BACKLOG item 135) for
+    // exactly this situation.
+    let err = try_lower("module A\nfn f<T>(items: List<T>): T? = { val item: T = List.getOrPanic(items, 0)\n Some(item) }")
+        .expect_err("expected this to be rejected, not silently lowered");
+    assert!(err.iter().any(|e| e.message().contains("cannot determine the concrete type")),
+        "expected a 'cannot determine the concrete type' error, got {:?}", err);
+}
+
+// ------------------------------------------------------------------ //
 // `db.transaction {}` / `db.<table>.<method>(...)` — BACKLOG item 226
 // ------------------------------------------------------------------ //
 
