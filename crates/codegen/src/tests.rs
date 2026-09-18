@@ -444,6 +444,19 @@ fn list_upsert_boxes_a_struct_item_like_list_push_does() {
 }
 
 #[test]
+fn map_insert_boxes_a_struct_value_like_list_push_does() {
+    // BACKLOG item 338 — Map.insert's value param is a void* slot at the C
+    // level, same as List.push's own item slot, but had no box_value
+    // routing at all: a struct-typed value was a hard compile error
+    // ("passing 'Item' to parameter of incompatible type 'void *'").
+    let c = codegen(
+        "module A\nimport Stdlib.Collections.{ Map }\ntype Item = { id: Int }\n\
+         fn f(m: Map<Text, Item>, k: Text, it: Item): Map<Text, Item> = Map.insert(m, k, it)");
+    assert_contains(&c, "certo_map_insert(");
+    assert_contains(&c, "malloc(sizeof(Item))");
+}
+
+#[test]
 fn list_get_or_panic_on_float_list_unboxes_return_value() {
     // List.getOrPanic always returns a raw void* at the C level, but HIR now
     // recovers its logical return type as the list's element type (BACKLOG

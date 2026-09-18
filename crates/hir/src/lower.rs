@@ -534,7 +534,35 @@ fn generic_container_ret(full: Option<&str>, args: &[HirExpr]) -> Option<Ty> {
         }
         Some("getOrElse") | Some("Result.getOrElse") => args.get(1).map(|a| a.ty.clone()),
         Some("Map.get") => args.first().and_then(map_kv).map(|(_, v)| Ty::Option(Box::new(v))),
-        Some("Map.remove") | Some("Map.insert") => args.first().map(|a| a.ty.clone()),
+        // BACKLOG item 338 — `Map.insert`'s own return type used to just
+        // blindly copy its first (input-map) argument's type, unchanged.
+        // For `Map.insert(Map.empty(), key, value)` that input map is
+        // itself unresolvable (`Map.empty()` has no arguments at all for
+        // `generic_container_ret` to recover K/V from, so its own `.ty`
+        // stays `Ty::Error`) — meaning the *whole chain* starting from a
+        // fresh map, including every later `Map.get`/`.values`/`.keys` on
+        // it, could never recover a real `V`/`K` either. Confirmed as a
+        // real, live runtime crash, not just a missing type: a match-bound
+        // `Some(v)` read back out still correctly extracted the right
+        // *bits* (`Map.get`'s own C implementation is fine), but
+        // downstream code trusting `v`'s (wrong, `Ty::Error`) type — e.g.
+        // an f-string interpolation — skipped the real Int-to-Text
+        // conversion `v`'s *actual* type would have required, instead
+        // concatenating the raw bit pattern as if it were already a Text
+        // pointer, segfaulting in `certo_text_concat`. Recovering a real
+        // `Map<K,V>` from the key/value being inserted (when the input map
+        // itself doesn't already have one) fixes the whole chain, the same
+        // way a real insert conceptually always produces `Map<K,V>` once
+        // you know what's being inserted.
+        Some("Map.insert") => match args.first().and_then(map_kv) {
+            Some((k, v)) => Some(Ty::Map(Box::new(k), Box::new(v))),
+            None => {
+                let k = args.get(1).map(|a| a.ty.clone())?;
+                let v = args.get(2).map(|a| a.ty.clone())?;
+                Some(Ty::Map(Box::new(k), Box::new(v)))
+            }
+        },
+        Some("Map.remove") => args.first().map(|a| a.ty.clone()),
         Some("Host.provide") | Some("Host.configure") | Some("Host.add")
         | Some("Host.requireConfig") | Some("Host.defaultConfig")
         | Some("Host.validateConfig")
