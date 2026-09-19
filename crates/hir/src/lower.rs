@@ -1366,13 +1366,44 @@ fn lower_expr(expr: &S<Expr>, cx: &mut Cx) -> HirExpr {
                 // `type_params` are threaded through here), but a bare
                 // function reference used as a callback is never generic in
                 // practice.
+                //
+                // `Some`/`Ok`/`Err` are compiler-intrinsic constructors
+                // (typeck's own `env.rs` gives each a `Forall`-quantified
+                // `Ty::Fn`), not real `Decl::Fn` nodes — `fn_params`/
+                // `fn_ret_types` never has an entry for them, so a bare
+                // reference used as a callback value (`List.map(xs, Some)`,
+                // BACKLOG item 339) fell through to `Ty::Error`, skipping
+                // every closure-wrapping path downstream in MIR and landing
+                // as a raw, unwrapped `Operand::Global("Some")` — codegen
+                // then emits a call to a nonexistent `certo_some`. Give them
+                // the same maximally-erased `Ty::Var(0)` shape every other
+                // generic/HKT boundary in this compiler already uses (items
+                // 119/120/251) — the mismatch between this and a call site's
+                // own concrete instantiation is exactly what MIR's
+                // `emit_wrapped_call` (BACKLOG item 339) already accounts
+                // for, mirroring the direct-call intercept in
+                // `HirExprKind::Call`.
                 let ty = cx.global_types.get(name).cloned().unwrap_or_else(|| {
-                    match (cx.fn_params.get(name), cx.fn_ret_types.get(name)) {
-                        (Some(params), Some(ret)) => Ty::Fn {
-                            params: params.iter().map(|p| ast_ty_to_ty_with_params(&p.ty.node, &[], &cx.type_aliases)).collect(),
-                            ret: Box::new(ret.clone()),
+                    match name {
+                        "Some" => Ty::Fn {
+                            params: vec![Ty::Var(0)],
+                            ret: Box::new(Ty::Option(Box::new(Ty::Var(0)))),
                         },
-                        _ => Ty::Error,
+                        "Ok" => Ty::Fn {
+                            params: vec![Ty::Var(0)],
+                            ret: Box::new(Ty::Result(Box::new(Ty::Var(0)), Box::new(Ty::Var(0)))),
+                        },
+                        "Err" => Ty::Fn {
+                            params: vec![Ty::Var(0)],
+                            ret: Box::new(Ty::Result(Box::new(Ty::Var(0)), Box::new(Ty::Var(0)))),
+                        },
+                        _ => match (cx.fn_params.get(name), cx.fn_ret_types.get(name)) {
+                            (Some(params), Some(ret)) => Ty::Fn {
+                                params: params.iter().map(|p| ast_ty_to_ty_with_params(&p.ty.node, &[], &cx.type_aliases)).collect(),
+                                ret: Box::new(ret.clone()),
+                            },
+                            _ => Ty::Error,
+                        },
                     }
                 });
                 HirExpr { kind: HirExprKind::Global(name.to_string()), ty, span }

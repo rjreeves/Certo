@@ -373,6 +373,78 @@ fn lower_value_expr(e: &HirExpr, b: &mut Builder) -> Operand {
 /// receives one argument fewer than the caller passes, corrupting the
 /// stack/registers for every argument after the phantom env. This
 /// generates a tiny env-accepting (and ignoring) wrapper function instead,
+/// Emit the body of a synthesized wrapper's call to `name` (the real
+/// function/constructor a bare named-value reference points at), assigning
+/// the result into the already-declared `dest` local. Used by all three
+/// "wrap a bare named-function reference into a callable closure" builders
+/// below (`wrap_named_fn_as_closure`, `wrap_named_fn_as_erased_closure`,
+/// `lower_named_fn_boxed`) in place of an unconditional `Terminator::Call`
+/// to `Operand::Global(name)`.
+///
+/// `Some`/`Ok`/`Err` are compiler intrinsics: a *direct call* to one of them
+/// is intercepted in the `HirExprKind::Call` arm above, boxing/bit-casting
+/// the payload as needed and (for `Ok`/`Err`) calling the real
+/// `certo_ok`/`certo_err` runtime functions — but there is no real C
+/// function named `certo_some`/`certo_ok`/`certo_err` reachable by a plain
+/// `Terminator::Call { func: Operand::Global(name), .. }` the way an
+/// ordinary named `fn` is. A *bare reference* to one of these (`List.map(xs,
+/// Some)`, BACKLOG item 339) never goes through that direct-call intercept
+/// — it lowers to a `HirExprKind::Global("Some")` value, which these three
+/// wrapper builders turn into a synthesized closure that itself has to call
+/// `Some`/`Ok`/`Err` from scratch. Before this fix that synthesized call
+/// used the ordinary named-function path unconditionally, producing a call
+/// to a nonexistent `certo_some`. This mirrors the direct-call intercept's
+/// own boxing rules exactly, so a wrapped bare reference behaves identically
+/// to the equivalent inline lambda (`|x| Some(x)`), *provided* `param_tys`
+/// is the real, concrete (or genuinely-still-erased) payload type — see the
+/// `elem_ty_hint`-based intercept in the `HirExprKind::Call` arg-lowering
+/// loop below for why a bare `Some`/`Ok`/`Err` reference can't just reuse
+/// its own HIR-reconstructed type the way an ordinary named `fn` does.
+fn emit_wrapped_call(name: &str, arg_locals: &[MirLocal], param_tys: &[Ty], dest: MirLocal, lb: &mut Builder) {
+    match name {
+        "Some" if arg_locals.len() == 1 => {
+            let payload_ty = param_tys[0].clone();
+            let value = Operand::Local(arg_locals[0]);
+            // BACKLOG item 251 — a still-generic payload is already a boxed
+            // pointer at this point; boxing it again would double-box. See
+            // the identical guard on the direct-call intercept above.
+            if matches!(payload_ty, Ty::Var(_)) {
+                lb.assign(dest, Rvalue::Use(value));
+            } else {
+                lb.assign(dest, Rvalue::BoxSome { value, ty: payload_ty });
+            }
+        }
+        "Ok" | "Err" if arg_locals.len() == 1 => {
+            let payload_ty = param_tys[0].clone();
+            let raw = Operand::Local(arg_locals[0]);
+            let arg = if matches!(payload_ty, Ty::Float) {
+                let bits = lb.declare_local("_fbits", Ty::Int);
+                lb.assign(bits, Rvalue::Call { func: Operand::Global("__certo_f2i".into()), args: vec![raw] });
+                Operand::Local(bits)
+            } else if needs_result_box(&payload_ty) {
+                let boxed = lb.declare_local("_boxed", Ty::Error);
+                lb.assign(boxed, Rvalue::BoxSome { value: raw, ty: payload_ty });
+                Operand::Local(boxed)
+            } else {
+                raw
+            };
+            let next = lb.new_block();
+            lb.terminate(Terminator::Call { func: Operand::Global(name.to_string()), args: vec![arg], dest, next });
+            lb.switch_to(next);
+        }
+        _ => {
+            let next = lb.new_block();
+            lb.terminate(Terminator::Call {
+                func: Operand::Global(name.to_string()),
+                args: arg_locals.iter().map(|l| Operand::Local(*l)).collect(),
+                dest,
+                next,
+            });
+            lb.switch_to(next);
+        }
+    }
+}
+
 /// mirroring `lower_named_fn_boxed`'s shape but without its
 /// BOXED_ABI_CALLEES-specific void*-param/return erasure, since this path
 /// keeps the named function's real native parameter/return types.
@@ -390,14 +462,7 @@ fn wrap_named_fn_as_closure(name: &str, real_param_tys: &[Ty], real_ret_ty: &Ty,
         .collect();
 
     let call_dest = lb.declare_local("_inner_call", real_ret_ty.clone());
-    let next = lb.new_block();
-    lb.terminate(Terminator::Call {
-        func: Operand::Global(name.to_string()),
-        args: real_locals.into_iter().map(Operand::Local).collect(),
-        dest: call_dest,
-        next,
-    });
-    lb.switch_to(next);
+    emit_wrapped_call(name, &real_locals, real_param_tys, call_dest, &mut lb);
 
     if !matches!(real_ret_ty, Ty::Unit) {
         lb.assign(ret_slot, Rvalue::Use(Operand::Local(call_dest)));
@@ -453,14 +518,7 @@ fn wrap_named_fn_as_erased_closure(name: &str, real_param_tys: &[Ty], real_ret_t
         .collect();
 
     let call_dest = lb.declare_local("_inner_call", real_ret_ty.clone());
-    let next = lb.new_block();
-    lb.terminate(Terminator::Call {
-        func: Operand::Global(name.to_string()),
-        args: real_locals.into_iter().map(Operand::Local).collect(),
-        dest: call_dest,
-        next,
-    });
-    lb.switch_to(next);
+    emit_wrapped_call(name, &real_locals, real_param_tys, call_dest, &mut lb);
 
     if matches!(real_ret_ty, Ty::Unit) {
         lb.locals[ret_slot as usize].ty = Ty::Var(0);
@@ -1146,14 +1204,7 @@ fn lower_named_fn_boxed(name: &str, real_param_tys: &[Ty], real_ret_ty: &Ty, b: 
         .collect();
 
     let call_dest = lb.declare_local("_inner_call", real_ret_ty.clone());
-    let next = lb.new_block();
-    lb.terminate(Terminator::Call {
-        func: Operand::Global(name.to_string()),
-        args: real_locals.into_iter().map(Operand::Local).collect(),
-        dest: call_dest,
-        next,
-    });
-    lb.switch_to(next);
+    emit_wrapped_call(name, &real_locals, real_param_tys, call_dest, &mut lb);
 
     if matches!(real_ret_ty, Ty::Unit) {
         lb.locals[ret_slot as usize].ty = Ty::Var(0);
@@ -1891,6 +1942,36 @@ fn lower_expr(expr: &HirExpr, b: &mut Builder) -> Operand {
                 if needs_boxed_callback {
                     if let HirExprKind::Lambda { params, body, captures, .. } = &a.kind {
                         return lower_lambda_boxed(params, body, captures, elem_ty_hint.as_ref(), b);
+                    }
+                    // A bare reference to `Some`/`Ok`/`Err` (`List.map(xs,
+                    // Some)`, BACKLOG item 339) — unlike an ordinary named
+                    // `fn`, these compiler intrinsics have no single fixed
+                    // real signature (they're polymorphic constructors: the
+                    // same `Some` reference means `Int -> Option<Int>` for a
+                    // `List<Int>` and `Item -> Option<Item>` for a
+                    // `List<Item>`), so — like an inline lambda, and unlike a
+                    // real named `fn` — this needs the call site's own
+                    // `elem_ty_hint` for the real concrete payload type. HIR
+                    // has no such context at the bare-reference lowering
+                    // site itself, so it only ever produces a uniformly
+                    // erased `Ty::Var(0)` shape for these three names —
+                    // correct for a still-generic list (the payload is
+                    // already a boxed pointer, matching item 251) but wrong
+                    // for a concrete one (a raw bit-packed `Int`, or a
+                    // struct pointer needing `sizeof(Item)`-aware boxing,
+                    // would otherwise be passed straight through as if
+                    // already a valid `Option` pointer and segfault the
+                    // first time something unboxed it).
+                    if let HirExprKind::Global(fn_name) = &a.kind {
+                        if matches!(fn_name.as_str(), "Some" | "Ok" | "Err") {
+                            let payload_ty = elem_ty_hint.clone().unwrap_or(Ty::Var(0));
+                            let ret_ty = match fn_name.as_str() {
+                                "Some" => Ty::Option(Box::new(payload_ty.clone())),
+                                "Ok"   => Ty::Result(Box::new(payload_ty.clone()), Box::new(Ty::Error)),
+                                _      => Ty::Result(Box::new(Ty::Error), Box::new(payload_ty.clone())),
+                            };
+                            return lower_named_fn_boxed(fn_name, std::slice::from_ref(&payload_ty), &ret_ty, b);
+                        }
                     }
                     // A named function reference (`dbQueryTyped(..., widgetsFromRow)`),
                     // as opposed to an inline lambda — its real signature is

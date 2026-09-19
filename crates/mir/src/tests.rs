@@ -392,6 +392,78 @@ fn generic_call_unboxes_resolved_bare_return_via_unbox_some() {
 }
 
 // ------------------------------------------------------------------ //
+// Bare `Some`/`Ok`/`Err` reference passed as a callback value —
+// BACKLOG item 339
+// ------------------------------------------------------------------ //
+
+#[test]
+fn bare_some_reference_passed_to_list_map_does_not_call_nonexistent_some() {
+    // `Some` is a compiler intrinsic with no real backing C function
+    // (`certo_some` is never defined — a *direct call* `Some(v)` is
+    // intercepted specially in `HirExprKind::Call`, never reaching a plain
+    // named-function call at all). A bare reference used as a callback
+    // value (`List.map(items, Some)`) used to fall straight through to the
+    // ordinary named-function wrapper, emitting `Terminator::Call { func:
+    // Operand::Global("Some"), .. }` — codegen then turns that into a call
+    // to nonexistent `certo_some`, a hard C compile error.
+    let (_main, lifted) = mir_fn_and_lifted_named(
+        "module A\nimport Stdlib.Collections.{ List }\nfn f(): List<Int?> = {\n val items: List<Int> = [1, 2, 3]\n List.map(items, Some)\n}",
+        "f");
+    assert!(!lifted.is_empty(), "expected a synthesized wrapper for the bare `Some` reference");
+    for wrapper in &lifted {
+        assert!(!has_global_call(wrapper, "Some"),
+            "the synthesized wrapper must not call a nonexistent `Some`/`certo_some` function directly");
+    }
+}
+
+#[test]
+fn bare_some_reference_passed_to_list_map_boxsomes_the_concrete_int_payload() {
+    // The wrapper must actually box the payload into a real `Option`
+    // (`BoxSome`), using the call site's own concrete element type (`Int`,
+    // recovered from `List<Int>`'s own element type) — not silently pass
+    // the raw bit-packed list element through as if it were already an
+    // `Option` pointer (which segfaults the first time something unboxes
+    // it, since a raw `Int` bit pattern is not a valid heap pointer).
+    let (_main, lifted) = mir_fn_and_lifted_named(
+        "module A\nimport Stdlib.Collections.{ List }\nfn f(): List<Int?> = {\n val items: List<Int> = [1, 2, 3]\n List.map(items, Some)\n}",
+        "f");
+    let has_int_boxsome = lifted.iter().any(|mf| mf.blocks.iter().any(|bb| bb.stmts.iter().any(|s| matches!(s,
+        MirStmt::Assign { rvalue: Rvalue::BoxSome { ty: certo_typeck::Ty::Int, .. }, .. }
+    ))));
+    assert!(has_int_boxsome, "expected a BoxSome{{ ty: Int }} boxing the real concrete payload type");
+}
+
+#[test]
+fn bare_some_reference_passed_to_list_map_boxsomes_a_struct_payload_at_its_real_type() {
+    // Same as above, but for a multi-field record payload — the wrapper
+    // must box using the record's own real type (so codegen mallocs
+    // `sizeof(Item)`, matching the equivalent inline lambda `(x) =>
+    // Some(x)`), not the uniformly-erased `Ty::Var(0)` HIR gives a bare
+    // `Some` reference when it has no call-site context of its own.
+    let (_main, lifted) = mir_fn_and_lifted_named(
+        "module A\nimport Stdlib.Collections.{ List }\ntype Item = { id: Int }\nfn f(): List<Item?> = {\n val items: List<Item> = [Item { id: 1 }]\n List.map(items, Some)\n}",
+        "f");
+    let has_item_boxsome = lifted.iter().any(|mf| mf.blocks.iter().any(|bb| bb.stmts.iter().any(|s| matches!(s,
+        MirStmt::Assign { rvalue: Rvalue::BoxSome { ty: certo_typeck::Ty::Named { name, .. }, .. }, .. } if name == "Item"
+    ))));
+    assert!(has_item_boxsome, "expected a BoxSome{{ ty: Named(\"Item\") }} boxing the real struct type, not an erased Var(0)");
+}
+
+#[test]
+fn bare_ok_reference_passed_to_list_map_calls_the_real_certo_ok() {
+    // Unlike `Some`, `Ok`/`Err` DO have real backing C functions
+    // (`certo_ok`/`certo_err`) — a bare reference's synthesized wrapper
+    // should still call through to them (just with the payload boxed or
+    // bit-cast correctly first, mirroring the direct-call intercept), not
+    // be rerouted into `Some`'s own `BoxSome` handling.
+    let (_main, lifted) = mir_fn_and_lifted_named(
+        "module A\nimport Stdlib.Collections.{ List }\nfn f(): List<Result<Int, Text>> = {\n val items: List<Int> = [1, 2, 3]\n List.map(items, Ok)\n}",
+        "f");
+    assert!(lifted.iter().any(|mf| has_global_call(mf, "Ok")),
+        "expected the wrapper to call the real certo_ok, not fall through unwrapped or misroute to Some's handling");
+}
+
+// ------------------------------------------------------------------ //
 // List rest-pattern `[head, ...tail]` — BACKLOG item 195
 // ------------------------------------------------------------------ //
 
