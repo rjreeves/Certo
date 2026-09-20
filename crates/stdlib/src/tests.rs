@@ -2653,7 +2653,7 @@ fn bytes_functions_registered() {
     for name in &["Bytes.length", "Bytes.empty", "Bytes.slice", "Bytes.concat",
                   "Bytes.concatMany", "Bytes.byteAt", "Bytes.fromInt64LE",
                   "Bytes.readInt64LE", "Bytes.toText", "Bytes.toHex",
-                  "Bytes.fromText", "readFileBytes", "writeFileBytes"] {
+                  "Bytes.fromText", "readFileBytes", "readFileBytesRange", "writeFileBytes"] {
         assert!(env.lookup(name).is_some(), "missing: {}", name);
     }
 }
@@ -2677,6 +2677,19 @@ fn read_file_bytes_returns_option_bytes() {
     let bytes = Ty::Named { name: "Bytes".into(), args: vec![] };
     match env.lookup("readFileBytes").unwrap() {
         Ty::Fn { ret, .. } => {
+            assert_eq!(ret.as_ref(), &Ty::Option(Box::new(bytes)));
+        }
+        other => panic!("expected Fn, got {:?}", other),
+    }
+}
+
+#[test]
+fn read_file_bytes_range_returns_option_bytes() {
+    let env = seeded_env();
+    let bytes = Ty::Named { name: "Bytes".into(), args: vec![] };
+    match env.lookup("readFileBytesRange").unwrap() {
+        Ty::Fn { params, ret } => {
+            assert_eq!(params, &[Ty::Text, Ty::Int, Ty::Int]);
             assert_eq!(ret.as_ref(), &Ty::Option(Box::new(bytes)));
         }
         other => panic!("expected Fn, got {:?}", other),
@@ -2841,6 +2854,7 @@ fn bytes_c_contains_key_functions() {
     assert!(BYTES_C.contains("certo_bytes_concat"),     "missing bytes_concat");
     assert!(BYTES_C.contains("certo_bytes_to_hex"),     "missing bytes_to_hex");
     assert!(BYTES_C.contains("certo_read_file_bytes"),  "missing read_file_bytes");
+    assert!(BYTES_C.contains("certo_read_file_bytes_range"), "missing read_file_bytes_range");
     assert!(BYTES_C.contains("certo_write_file_bytes"), "missing write_file_bytes");
     assert!(BYTES_C.contains("certo_bytes_from_int64_l_e"), "missing int64 encoder");
     assert!(BYTES_C.contains("certo_bytes_read_int64_l_e"), "missing int64 decoder");

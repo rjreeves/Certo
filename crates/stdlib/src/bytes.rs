@@ -115,6 +115,28 @@ void* certo_read_file_bytes(certo_text_t path) {
     return __certo_opt_box((int64_t)b); /* Some(bytes) */
 }
 
+/* Read up to `length` bytes starting at `offset` from a file, without
+   reading anything before or after that range. Returns Option<Bytes>:
+   None only when the path can't be opened or the seek itself fails
+   (offset beyond what the stream can seek to) - a file shorter than
+   `offset + length` is not an error, it just yields fewer bytes than
+   requested (b->len reflects the real count, same "trust bytes
+   actually read" convention certo_read_file_bytes already uses).
+   Lets a caller check a large file's own fixed-size header (e.g. a
+   cache artifact's magic/hash prefix) without paying to read the
+   whole file first just to look at the first few bytes of it. */
+void* certo_read_file_bytes_range(certo_text_t path, int64_t offset, int64_t length) {
+    if (!path || offset < 0 || length < 0) return NULL;
+    FILE* f = fopen(path, "rb");
+    if (!f) return NULL;
+    if (fseek(f, (long)offset, SEEK_SET) != 0) { fclose(f); return NULL; }
+    CertoBytes* b = certo_bytes_alloc(length);
+    size_t got = fread(b->data, 1, (size_t)length, f);
+    fclose(f);
+    b->len = (int64_t)got;
+    return __certo_opt_box((int64_t)b); /* Some(bytes) */
+}
+
 /* Write raw bytes to a file (truncating). Returns true on success. */
 bool certo_write_file_bytes(certo_text_t path, CertoBytes* b) {
     if (!path || !b) return false;
