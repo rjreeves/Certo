@@ -1018,6 +1018,7 @@ pub fn seed_stdlib(env: &mut TypeEnv, counter: &mut u32) {
         def!("Bytes.toHex",   fn1(bytes(), Ty::Text));
         def!("Bytes.fromText", fn1(Ty::Text, bytes()));
         def!("readFileBytes",  fn1(Ty::Text, Ty::Option(Box::new(bytes()))));
+        def!("readFileBytesRange", Ty::Fn { params: vec![Ty::Text, Ty::Int, Ty::Int], ret: Box::new(Ty::Option(Box::new(bytes()))) });
         def!("writeFileBytes", fn2(Ty::Text, bytes(), Ty::Bool));
 
         // Credential — Windows Credential Manager (Generic creds).
