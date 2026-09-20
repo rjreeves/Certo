@@ -3057,6 +3057,25 @@ fn lower_block(stmts: &[Stmt], span: Span, cx: &mut Cx) -> HirExpr {
                 }
                 let ty = init.ty.clone();
                 let local = cx.define_local(&name.node);
+                // Remember the type so later references to this variable carry
+                // it - mirrors Stmt::Val's own identical line just above. This
+                // was missing here entirely: any later field access on a `var`
+                // fell through to `cx.local_types.get(&local).unwrap_or(Ty::Error)`
+                // (this file's own Expr::Path lowering), and resolve_field_ty's
+                // `let Ty::Named { .. } = base_ty else { return (Ty::Error, false) }`
+                // bailed immediately on that `Ty::Error`, so the field access's
+                // own type became `Ty::Error` too - which maps to `int64_t` in
+                // codegen (`ty_to_c.rs`). That's silently "compatible" for a
+                // primitive-typed field (bool/int implicitly convert to int64_t
+                // in C, so `var`-bound primitive fields never surfaced this) but
+                // a hard compile error for a struct-typed field ("assigning to
+                // 'int64_t' from incompatible type 'X'") - confirmed live with
+                // a minimal repro before this fix, and confirmed the bug was
+                // this narrow: a `val`-bound record's struct-typed field access
+                // already worked correctly, only `var` was affected.
+                if !matches!(ty, Ty::Error) {
+                    cx.local_types.insert(local, ty.clone());
+                }
                 hir_stmts.push(HirStmt::Let { local, name: name.node.clone(), ty, init });
             }
             Stmt::Assign { target, value, .. } => {
