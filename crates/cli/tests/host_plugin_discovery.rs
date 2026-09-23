@@ -41,6 +41,7 @@ fn build_discovers_explicit_local_manifest() {
     assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
     let emitted = fs::read_to_string(root.path().join("out.c")).unwrap();
     assert!(emitted.contains("host = certo_host_add(host, certo_host_plugin_dev_d_certo_d_example__plugin());"));
+    assert!(emitted.contains("#define CERTO_HOST_PLUGIN_FINGERPRINT \""));
     let native = Command::new(env!("CARGO_BIN_EXE_certo"))
         .arg("build").arg("-o")
         .arg(root.path().join(if cfg!(windows) { "app.exe" } else { "app" }))
@@ -92,7 +93,7 @@ fn plugins_may_reuse_factory_and_private_function_names() {
     for package in ["alpha", "beta"] {
         fs::create_dir_all(root.path().join(format!("plugins/{package}"))).unwrap();
         fs::write(root.path().join(format!("plugins/{package}/plugin.cto")), format!(
-            "module {package}\nfn start(c: HostContext): Result<Unit, Text> = Ok(())\nfn stop(c: HostContext): Result<Unit, Text> = Ok(())\npub fn plugin(): HostPlugin = Host.plugin(\"{package}\", start, stop)\n"
+            "module {package}\ntype PluginName = Text\nval pluginName: PluginName = \"{package}\"\nfn name(): PluginName = pluginName\nfn start(c: HostContext): Result<Unit, Text> = Ok(())\nfn stop(c: HostContext): Result<Unit, Text> = Ok(())\npub fn plugin(): HostPlugin = Host.plugin(name(), start, stop)\n"
         )).unwrap();
         fs::write(root.path().join(format!("plugins/{package}/certo-plugin.json")), format!(r#"{{
   "schema_version": 1, "id": "dev.certo.{package}", "version": "1.0.0",

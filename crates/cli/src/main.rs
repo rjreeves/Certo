@@ -501,6 +501,11 @@ fn cmd_build(args: &[String], quiet: bool) {
         .map(|plugin_config| host_plugin_manifest::discover(
             &project_root, &plugin_config.manifests).unwrap_or_else(|error| die(&error, 1)))
         .unwrap_or_default();
+    let plugin_fingerprint = host_plugin_manifest::fingerprint(&resolved_plugins)
+        .unwrap_or_else(|error| die(&error, 1));
+    if verbose && !resolved_plugins.is_empty() {
+        eprintln!("host plugin fingerprint: {plugin_fingerprint}");
+    }
     if let Some(cfg) = &project_toml {
         if let Some(build) = &cfg.build {
             if !emit_dll && build.ty.as_deref() == Some("lib") {
@@ -604,7 +609,7 @@ fn cmd_build(args: &[String], quiet: bool) {
                     #include <stdint.h>\n#include <stdbool.h>\n#include <stddef.h>\n#include <stdio.h>\n\
                     #include <inttypes.h>\n#include <stdarg.h>\n\
                     #define _CRT_SECURE_NO_WARNINGS\n\
-                    {}{}{}",
+                    {}{}{}{}",
                     if uses_db { "#define CERTO_DB_ENABLED 1\n" } else { "" },
                     // [features] query-logging (spec §11.4, BACKLOG item
                     // 301) — compile-time gated the same way CERTO_DB_ENABLED
@@ -614,7 +619,8 @@ fn cmd_build(args: &[String], quiet: bool) {
                     // gating logging there (not at every Certo-level call
                     // site) covers all of them for free.
                     if read_query_logging_flag(&project_root) { "#define CERTO_QUERY_LOGGING 1\n" } else { "" },
-                    if resolved_plugins.is_empty() { "" } else { "#define CERTO_HOST_DISCOVERED_DEFINED 1\n" });
+                    if resolved_plugins.is_empty() { "" } else { "#define CERTO_HOST_DISCOVERED_DEFINED 1\n" },
+                    "#define CERTO_HOST_PLUGIN_FINGERPRINT \"".to_string() + &plugin_fingerprint + "\"\n");
     let runtime_header = certo_codegen::RUNTIME_HEADER;
     let stdlib_c  = certo_stdlib::full_c_runtime_with_db(uses_db);
     let module_c  = certo_codegen::emit_module(
@@ -857,7 +863,7 @@ fn merge_discovered_plugin_sources(
                 plugin.manifest_path.display(), plugin.factory, plugin.factory), 1);
         }
         resolve_local_imports(&mut entry, &plugin.source_path, colour, verbose);
-        isolate_plugin_functions(&mut entry.decls, plugin);
+        isolate_plugin_declarations(&mut entry.decls, plugin);
         if verbose {
             eprintln!("host plugin {} {} from {}", plugin.id, plugin.version, plugin.source_path.display());
         }
@@ -871,22 +877,38 @@ fn scoped_plugin_function(plugin_id: &str, function: &str) -> String {
     format!("host_plugin_{encoded_id}__{function}")
 }
 
-fn isolate_plugin_functions(
+fn isolate_plugin_declarations(
     declarations: &mut [S<Decl>],
     plugin: &host_plugin_manifest::ResolvedPlugin,
 ) {
-    let renames = declarations.iter().filter_map(|declaration| match &declaration.node {
-        Decl::Fn(function) => Some((
-            function.name.node.clone(),
-            RenameTo::Bare(scoped_plugin_function(&plugin.id, &function.name.node)),
-        )),
-        _ => None,
+    let mut names = declarations.iter().filter_map(|declaration|
+        decl_own_name(&declaration.node).map(str::to_owned)).collect::<Vec<_>>();
+    for declaration in declarations.iter() {
+        if let Decl::Type(ty) = &declaration.node {
+            if let certo_ast::decl::TypeBody::Sum(variants) = &ty.body {
+                names.extend(variants.iter().map(|variant| variant.name.node.clone()));
+            }
+        }
+    }
+    let renames = names.into_iter().map(|name| {
+        let scoped = scoped_plugin_function(&plugin.id, &name);
+        (name, RenameTo::Bare(scoped))
     }).collect::<HashMap<_, _>>();
     rewrite_decls_free_refs(declarations, &renames);
+    rewrite_decl_type_refs(declarations, &renames);
     for declaration in declarations {
-        if let Decl::Fn(function) = &mut declaration.node {
-            if let Some(RenameTo::Bare(name)) = renames.get(&function.name.node) {
-                function.name.node = name.clone();
+        if let Decl::Type(ty) = &mut declaration.node {
+            if let certo_ast::decl::TypeBody::Sum(variants) = &mut ty.body {
+                for variant in variants {
+                    if let Some(RenameTo::Bare(name)) = renames.get(&variant.name.node) {
+                        variant.name.node = name.clone();
+                    }
+                }
+            }
+        }
+        if let Some(name) = decl_own_name(&declaration.node).map(str::to_owned) {
+            if let Some(RenameTo::Bare(scoped)) = renames.get(&name) {
+                set_decl_own_name(&mut declaration.node, scoped.clone());
             }
         }
     }
@@ -1123,6 +1145,122 @@ fn set_decl_own_name(decl: &mut Decl, new_name: String) {
     }
 }
 
+fn rewrite_bare_path(path: &mut ModulePath, renames: &HashMap<String, RenameTo>) {
+    if path.segments.len() != 1 { return; }
+    if let Some(RenameTo::Bare(name)) = renames.get(&path.segments[0].node) {
+        path.segments[0].node = name.clone();
+    }
+}
+
+fn rewrite_type_expr(ty: &mut S<certo_ast::types::TypeExpr>, renames: &HashMap<String, RenameTo>) {
+    use certo_ast::types::TypeExpr;
+    match &mut ty.node {
+        TypeExpr::Named { path, args, .. } => {
+            rewrite_bare_path(path, renames);
+            for arg in args { rewrite_type_expr(arg, renames); }
+        }
+        TypeExpr::Option { inner, .. } | TypeExpr::Ptr { inner, .. } =>
+            rewrite_type_expr(inner, renames),
+        TypeExpr::Tuple { elements, .. } =>
+            for element in elements { rewrite_type_expr(element, renames); },
+        TypeExpr::Fn { params, ret, .. } => {
+            for param in params { rewrite_type_expr(param, renames); }
+            rewrite_type_expr(ret, renames);
+        }
+        TypeExpr::Record { fields, .. } =>
+            for field in fields { rewrite_type_expr(&mut field.ty, renames); },
+        TypeExpr::Param { .. } | TypeExpr::DecimalParam { .. }
+        | TypeExpr::BoundedTextParam { .. } => {}
+    }
+}
+
+fn rewrite_type_params(params: &mut [certo_ast::types::TypeParam], renames: &HashMap<String, RenameTo>) {
+    use certo_ast::types::Bound;
+    for param in params {
+        for bound in &mut param.bounds {
+            match bound {
+                Bound::Trait(trait_bound) => rewrite_bare_path(&mut trait_bound.name, renames),
+                Bound::Row(row) => for field in &mut row.fields {
+                    rewrite_type_expr(&mut field.ty, renames);
+                },
+            }
+        }
+    }
+}
+
+fn rewrite_fn_type_refs(function: &mut certo_ast::decl::FnDecl, renames: &HashMap<String, RenameTo>) {
+    rewrite_type_params(&mut function.type_params, renames);
+    for param in &mut function.params { rewrite_type_expr(&mut param.ty, renames); }
+    if let Some(ret) = &mut function.ret_ty { rewrite_type_expr(ret, renames); }
+}
+
+fn rewrite_decl_type_refs(declarations: &mut [S<Decl>], renames: &HashMap<String, RenameTo>) {
+    use certo_ast::decl::TypeBody;
+    for declaration in declarations {
+        match &mut declaration.node {
+            Decl::Fn(function) => rewrite_fn_type_refs(function, renames),
+            Decl::Type(ty) => {
+                rewrite_type_params(&mut ty.type_params, renames);
+                match &mut ty.body {
+                    TypeBody::Record(record) => {
+                        for field in &mut record.fields { rewrite_type_expr(&mut field.ty, renames); }
+                        for computed in &mut record.computed { rewrite_type_expr(&mut computed.ty, renames); }
+                        for method in &mut record.methods { rewrite_fn_type_refs(method, renames); }
+                    }
+                    TypeBody::Sum(variants) => for variant in variants {
+                        for field in &mut variant.fields { rewrite_type_expr(&mut field.ty, renames); }
+                    },
+                    TypeBody::Alias(alias) => rewrite_type_expr(alias, renames),
+                }
+            }
+            Decl::Val(value) => if let Some(ty) = &mut value.ty { rewrite_type_expr(ty, renames); },
+            Decl::Var(value) => if let Some(ty) = &mut value.ty { rewrite_type_expr(ty, renames); },
+            Decl::Trait(trait_decl) => {
+                rewrite_type_params(&mut trait_decl.type_params, renames);
+                for method in &mut trait_decl.methods { rewrite_fn_type_refs(method, renames); }
+            }
+            Decl::Impl(implementation) => {
+                if let Some(path) = &mut implementation.trait_path { rewrite_bare_path(path, renames); }
+                rewrite_bare_path(&mut implementation.type_path, renames);
+                rewrite_type_params(&mut implementation.type_params, renames);
+                for method in &mut implementation.methods { rewrite_fn_type_refs(method, renames); }
+            }
+            Decl::Validator(validator) => {
+                rewrite_type_expr(&mut validator.entity, renames);
+                rewrite_type_expr(&mut validator.errors, renames);
+                for field in &mut validator.context { rewrite_type_expr(&mut field.type_ref, renames); }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn rewrite_pattern_refs(pattern: &mut S<Pattern>, renames: &HashMap<String, RenameTo>) {
+    match &mut pattern.node {
+        Pattern::Constructor { path, fields, .. } => {
+            rewrite_bare_path(path, renames);
+            for field in fields { rewrite_pattern_refs(field, renames); }
+        }
+        Pattern::Record { path, fields, .. } => {
+            if let Some(path) = path { rewrite_bare_path(path, renames); }
+            for field in fields {
+                if let Some(pattern) = &mut field.pattern { rewrite_pattern_refs(pattern, renames); }
+            }
+        }
+        Pattern::Tuple { elements, .. } => for element in elements { rewrite_pattern_refs(element, renames); },
+        Pattern::List { head, tail, .. } => {
+            for element in head { rewrite_pattern_refs(element, renames); }
+            if let Some(tail) = tail { rewrite_pattern_refs(tail, renames); }
+        }
+        Pattern::Guard { pattern, .. } | Pattern::As { pattern, .. } => rewrite_pattern_refs(pattern, renames),
+        Pattern::Or { left, right, .. } => {
+            rewrite_pattern_refs(left, renames);
+            rewrite_pattern_refs(right, renames);
+        }
+        Pattern::Wildcard { .. } | Pattern::Ident { .. } | Pattern::Literal { .. } => {}
+    }
+}
+
 /// Every name a pattern binds — used to track which identifiers a nested
 /// scope shadows during `rewrite_expr`'s free-reference rewrite.
 fn pattern_bound_names(pat: &Pattern, out: &mut HashSet<String>) {
@@ -1215,6 +1353,7 @@ fn rewrite_expr(expr: &mut S<Expr>, renames: &HashMap<String, RenameTo>, scope: 
         Expr::Match { scrutinee, arms, .. } => {
             rewrite_expr(scrutinee, renames, scope);
             for arm in arms {
+                rewrite_pattern_refs(&mut arm.pattern, renames);
                 let mut bound = HashSet::new();
                 pattern_bound_names(&arm.pattern.node, &mut bound);
                 scope.push(bound);
