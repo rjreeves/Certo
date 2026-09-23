@@ -1004,6 +1004,50 @@ fn thread_sanitizer_shutdown_race_has_no_data_races() {
     assert!(stdout.contains("shutdown race complete"), "{stdout}");
 }
 
+// Building byte-identical source twice, with identical output filenames in
+// separate directories (so an embedded debug path can't leak the directory
+// name into the binary and produce a false mismatch), must produce a
+// byte-identical executable. Confirmed live before this fix: lld-link
+// embeds a PE COFF TimeDateStamp by default, making every build differ by
+// exactly that one field even from unchanged source - /Brepro replaces it
+// with a deterministic hash-derived value instead.
+#[cfg(windows)]
+#[test]
+fn windows_builds_are_byte_reproducible() {
+    let source = "module ReproTest\nfn main(): Unit [io] = { println(\"hi\") }\n";
+    let dir_a = tempfile::tempdir().expect("temp dir a");
+    let dir_b = tempfile::tempdir().expect("temp dir b");
+    let source_a = dir_a.path().join("repro.cto");
+    let source_b = dir_b.path().join("repro.cto");
+    fs::write(&source_a, source).expect("write source a");
+    fs::write(&source_b, source).expect("write source b");
+    let out_a = dir_a.path().join("repro.exe");
+    let out_b = dir_b.path().join("repro.exe");
+
+    let build_a = Command::new(env!("CARGO_BIN_EXE_certo"))
+        .arg(&source_a)
+        .arg("-o")
+        .arg(&out_a)
+        .output()
+        .expect("build a");
+    assert_success(&build_a);
+
+    let build_b = Command::new(env!("CARGO_BIN_EXE_certo"))
+        .arg(&source_b)
+        .arg("-o")
+        .arg(&out_b)
+        .output()
+        .expect("build b");
+    assert_success(&build_b);
+
+    let bytes_a = fs::read(&out_a).expect("read output a");
+    let bytes_b = fs::read(&out_b).expect("read output b");
+    assert_eq!(
+        bytes_a, bytes_b,
+        "two builds of identical source with identical output filenames should be byte-identical (Windows /Brepro regression)"
+    );
+}
+
 #[test]
 fn randomized_stress_artifacts_capture_reproduction_context() {
     let dir = tempfile::tempdir().expect("temporary artifact directory");

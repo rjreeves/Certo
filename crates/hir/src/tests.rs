@@ -2912,3 +2912,55 @@ fn bare_generic_impl_method_reference_resolves_an_erased_fn_type() {
     assert!(!matches!(arg.ty, Ty::Error), "bare Secret.wrap reference must not resolve to Ty::Error, got {:?}", arg.ty);
     assert!(matches!(&arg.ty, Ty::Fn { .. }), "expected a Ty::Fn, got {:?}", arg.ty);
 }
+
+#[test]
+fn var_bound_struct_field_access_resolves_real_type_not_ty_error() {
+    // Stmt::Var's own lowering (unlike Stmt::Val's identical-shape arm just
+    // above it) never called `cx.local_types.insert` for the new local, so
+    // any later reference to a `var`-bound record fell back to
+    // `cx.local_types.get(&local).unwrap_or(Ty::Error)` for its own type,
+    // and a field access on that `Ty::Error` base bailed out to `Ty::Error`
+    // too (`resolve_field_ty`'s `let Ty::Named { .. } = base_ty else {
+    // return (Ty::Error, false) }`) - which codegen's `ty_to_c.rs` maps to
+    // `int64_t`, a hard compile error for a struct-typed field ("assigning
+    // to 'int64_t' from incompatible type 'X'"), confirmed live with a
+    // minimal repro before this fix. A primitive-typed field (Bool/Int)
+    // never surfaced this, since C silently allows assigning those to
+    // int64_t - only a struct-typed field access exposes the wrong type.
+    // The exact same field access on a `val`-bound record already worked
+    // correctly; this test's `var` is the one case that didn't.
+    let m = lower(
+        "module A\n\
+         type Inner = { line: Int }\n\
+         type Outer = { found: Bool, name: Inner }\n\
+         fn f(): Int = {\n\
+         \x20 var result = Outer { found: false, name: Inner { line: 42 } }\n\
+         \x20 result.name.line\n\
+         }"
+    );
+    let f = m.items.iter().find_map(|it| match it {
+        HirItem::Fn(f) if f.name == "f" => Some(f),
+        _ => None,
+    }).expect("expected fn `f`");
+    let body = f.body.as_ref().unwrap();
+    // (The wrapping Block's own `.ty` is a separate, unrelated quirk -
+    // `lower_block` hardcodes it to `Ty::Error` whenever any statement
+    // precedes the tail, regardless of this fix; nothing downstream reads
+    // it, only `tail.ty` matters, same convention every other multi-
+    // statement test in this file follows.)
+    let HirExprKind::Block { tail, .. } = &body.kind else {
+        panic!("expected a Block, got {:?}", body.kind);
+    };
+    assert_eq!(tail.ty, Ty::Int, "block tail must resolve to Int, not Ty::Error, got {:?}", tail.ty);
+    let HirExprKind::Field { base: inner_base, field, .. } = &tail.kind else {
+        panic!("expected the tail to be a Field access, got {:?}", tail.kind);
+    };
+    assert_eq!(field, "line");
+    // The intermediate `result.name` access (the base of the outer `.line`
+    // read) must resolve to the real `Inner` record type, not `Ty::Error` -
+    // this is the field access that was silently corrupted before the fix.
+    assert!(!matches!(inner_base.ty, Ty::Error),
+        "the intermediate result.name access must not resolve to Ty::Error, got {:?}", inner_base.ty);
+    assert!(matches!(&inner_base.ty, Ty::Named { name, .. } if name == "Inner"),
+        "expected the intermediate result.name access to resolve to Inner, got {:?}", inner_base.ty);
+}
