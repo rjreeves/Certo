@@ -707,6 +707,15 @@ fn cmd_build(args: &[String], quiet: bool) {
        .arg("-Wno-implicit-function-declaration")
        .arg("-Wno-deprecated-declarations")
        .arg("-Wno-incompatible-function-pointer-types");
+    if cfg!(windows) {
+        // lld-link (the MSVC-compatible linker clang invokes here) embeds a
+        // PE COFF TimeDateStamp by default - a Unix build timestamp that
+        // makes byte-identical source produce a different binary on every
+        // build. /Brepro replaces it with a deterministic hash-derived
+        // value instead, so identical source + identical toolchain always
+        // produces a byte-identical executable.
+        cmd.arg("-Xlinker").arg("/Brepro");
+    }
     if sanitize_address {
         cmd.arg("-fsanitize=address")
            .arg("-fno-omit-frame-pointer")

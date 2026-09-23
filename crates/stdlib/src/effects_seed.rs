@@ -41,7 +41,7 @@ const IO_FUNCTIONS: &[&str] = &[
     // Env
     "setEnv", "unsetEnv",
     // File
-    "readFile", "readFileBytes", "writeFile", "writeFileBytes",
+    "readFile", "readFileBytes", "readFileBytesRange", "writeFile", "writeFileBytes",
     "appendFile", "deleteFile", "renameFile", "fileExists", "listDir", "makeDir", "removeDir",
     // Db (connection / raw query / transaction)
     "dbConnect", "dbClose", "dbServerVersion", "dbVersionString",
