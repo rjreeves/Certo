@@ -851,11 +851,18 @@ is explicit: plain `Host.new()` remains empty, and `Host.discovered` is an
 identity operation when no manifests are configured. See
 `HOST-PLUGIN-COMPATIBILITY.md` for the normative contract.
 
-Plugin function names are isolated by a deterministic prefix derived from the
-plugin ID before modules are merged. Separate plugins may therefore reuse the
-same factory and private helper function names without source or C-symbol
-collisions. Isolation of plugin-defined types and top-level values is not yet
-provided; those names must remain unique across the statically linked set.
+Plugin functions, types, traits, sum constructors, and top-level values are
+isolated by a deterministic prefix derived from the plugin ID before modules
+are merged. References in executable bodies, constructor patterns, function
+signatures, aliases, record/sum fields, trait bounds, implementations, and
+validator types are rewritten consistently. Separate plugins may therefore
+reuse private declaration and factory names without source or C-symbol
+collisions.
+
+Each build also emits `CERTO_HOST_PLUGIN_FINGERPRINT` in generated C. The
+fingerprint is a stable 32-hex-digit value over the Host API version, resolved
+plugin IDs and versions, entry module/factory metadata, and source bytes in
+dependency order. Absolute paths and manifest JSON formatting are excluded.
 
 ---
 

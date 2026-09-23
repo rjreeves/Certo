@@ -66,6 +66,32 @@ pub struct ResolvedPlugin {
     pub factory: String,
 }
 
+/// Stable source fingerprint for a resolved static-plugin composition. The
+/// input is deliberately semantic (ordered IDs, versions, entry metadata and
+/// source bytes), never absolute paths or JSON formatting.
+pub fn fingerprint(plugins: &[ResolvedPlugin]) -> Result<String, String> {
+    let mut lanes = [0xcbf29ce484222325u64, 0x84222325cbf29ceu64];
+    fn feed(lanes: &mut [u64; 2], bytes: &[u8]) {
+        for &byte in bytes {
+            lanes[0] = (lanes[0] ^ byte as u64).wrapping_mul(0x100000001b3);
+            lanes[1] = (lanes[1] ^ byte as u64).wrapping_mul(0x100000001b3 ^ 0x9e3779b97f4a7c15);
+        }
+    }
+    feed(&mut lanes, b"certo.host.plugins/v1\0host-api=1.0.0\0");
+    for plugin in plugins {
+        for value in [&plugin.id, &plugin.version.to_string(), &plugin.module, &plugin.factory] {
+            feed(&mut lanes, value.as_bytes());
+            feed(&mut lanes, &[0]);
+        }
+        let source = fs::read(&plugin.source_path).map_err(|error| format!(
+            "[HostPluginManifest/UnreadableEntry] {}: {}", plugin.source_path.display(), error))?;
+        feed(&mut lanes, &(source.len() as u64).to_le_bytes());
+        feed(&mut lanes, &source);
+        feed(&mut lanes, &[0xff]);
+    }
+    Ok(format!("{:016x}{:016x}", lanes[0], lanes[1]))
+}
+
 fn diagnostic(category: &str, path: &Path, field: &str, message: impl AsRef<str>) -> String {
     format!(
         "[HostPluginManifest/{category}] {}: {field}: {}",

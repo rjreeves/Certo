@@ -300,5 +300,5 @@ Every Host milestone must satisfy the following gates:
 
 ## Recommended next implementation item
 
-Extend static plugin namespace isolation from functions to plugin-defined
-types and top-level values, including references in type annotations.
+Add deterministic plugin build fingerprints covering ordered manifests,
+resolved versions, entry sources, and the Host API version.
