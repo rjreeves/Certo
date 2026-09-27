@@ -346,7 +346,14 @@ CertoJsonValue* certo_json_at(CertoJsonValue* v, int64_t i) {
 
 /* Serialized array access for consumers that do not need to retain the
    JsonValue handle. This also avoids an unnecessary parse/stringify bridge in
-   generated tooling code. */
+   generated tooling code.
+
+   BACKLOG item 336 — this returns the element's whole re-encoded JSON text,
+   not an unwrapped value: for an object element that's the same text a
+   nested Json.parse(...) call expects, but for a plain string element it
+   still has its surrounding quotes ("foo", not foo). Unwrap with
+   JsonValue.asText(Json.parse(JsonValue.atText(arr, i))) when the element is
+   itself a string. */
 certo_text_t certo_json_value_at_text(CertoJsonValue* v, int64_t i) {
     return certo_json_stringify(certo_json_at(v, i));
 }
