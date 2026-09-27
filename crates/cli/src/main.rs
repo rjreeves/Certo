@@ -651,6 +651,20 @@ fn cmd_build(args: &[String], quiet: bool) {
 
     // --emit-c: just write the C and stop
     if emit_c {
+        // BACKLOG item 324 — `-o` under `--emit-c` used to be reused
+        // verbatim with no check at all, so `certo build f.cto -o out.exe
+        // --emit-c` silently overwrote a working binary with C source text,
+        // printing the same "wrote out.exe" success message either way.
+        // Reject rather than guess: an explicit `-o` must end in `.c` when
+        // combined with `--emit-c`, or nothing is written at all.
+        if let Some(ref out) = output {
+            let has_c_ext = out.extension().map(|e| e.eq_ignore_ascii_case("c")).unwrap_or(false);
+            if !has_c_ext {
+                eprintln!("error: --emit-c writes C source, but -o {} doesn't end in .c", out.display());
+                eprintln!("       pass an output path ending in .c, or omit -o to write {}.c", stem);
+                process::exit(1);
+            }
+        }
         let c_path = output.unwrap_or_else(|| PathBuf::from(format!("{}.c", stem)));
         std::fs::write(&c_path, &full_c).unwrap_or_else(|e| {
             eprintln!("error writing {}: {}", c_path.display(), e);
