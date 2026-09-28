@@ -1922,7 +1922,7 @@ fn env_c_contains_key_functions() {
 fn file_functions_registered() {
     let env = seeded_env();
     for name in &["readFile", "writeFile", "appendFile",
-                  "fileExists", "isDirectory", "deleteFile", "listDir"] {
+                  "fileExists", "isDirectory", "deleteFile", "listDir", "removeEmptyDir"] {
         assert!(env.lookup(name).is_some(), "missing: {}", name);
     }
 }
@@ -1946,6 +1946,31 @@ fn file_c_contains_is_directory_with_both_platform_branches() {
     let body = &FILE_C[idx..end];
     assert!(body.contains("GetFileAttributesA"), "missing Windows GetFileAttributesA branch");
     assert!(body.contains("S_ISDIR"), "missing POSIX stat/S_ISDIR branch");
+}
+
+// BACKLOG item 341 — `removeDir` always recurses, so a caller wanting
+// atomic "only if empty" removal (Lume's own fs.remove_dir(path, false))
+// had no primitive except listing entries first and calling `removeDir`
+// only when empty — a real TOCTOU race. `removeEmptyDir` wraps the plain,
+// already-atomic OS call directly, no listing involved.
+#[test]
+fn remove_empty_dir_has_same_signature_as_remove_dir() {
+    let env = seeded_env();
+    assert_eq!(env.lookup("removeEmptyDir"), env.lookup("removeDir"),
+        "removeEmptyDir should have the identical (Text) -> Bool signature as removeDir");
+}
+
+#[test]
+fn file_c_remove_empty_dir_calls_the_plain_os_primitive_not_the_recursive_helper() {
+    assert!(FILE_C.contains("bool certo_remove_empty_dir(certo_text_t path)"),
+        "missing certo_remove_empty_dir in FILE_C");
+    let idx = FILE_C.find("bool certo_remove_empty_dir(certo_text_t path)").unwrap();
+    let end = FILE_C[idx..].find("\n}").map(|i| idx + i).unwrap_or(FILE_C.len());
+    let body = &FILE_C[idx..end];
+    assert!(body.contains("RemoveDirectoryA"), "missing Windows RemoveDirectoryA branch");
+    assert!(body.contains("rmdir("), "missing POSIX rmdir branch");
+    assert!(!body.contains("certo_remove_dir_all_impl"),
+        "removeEmptyDir must not go through the recursive helper — no listing, no recursion, just the plain atomic OS call");
 }
 
 #[test]

@@ -247,6 +247,24 @@ bool certo_remove_dir(certo_text_t path) {
     return certo_remove_dir_all_impl(path);
 }
 
+/* Remove a directory only if it's already empty — a single, atomic OS call
+   (rmdir/RemoveDirectoryA both refuse outright on a non-empty directory, no
+   listing required), unlike removeDir's own unconditional recursion. Exists
+   because a caller wanting "only if empty" semantics had no atomic way to
+   ask for that: listing entries first and calling removeDir only when the
+   list comes back empty (Lume's own fs.remove_dir(path, false), the
+   motivating case) is a real TOCTOU race — something else can add a file
+   to the directory between the list and the removeDir call, and since
+   removeDir always recurses, it would then silently delete that file too. */
+bool certo_remove_empty_dir(certo_text_t path) {
+    if (!path || !*path) return false;
+#ifdef _WIN32
+    return RemoveDirectoryA(path) != 0;
+#else
+    return rmdir(path) == 0;
+#endif
+}
+
 /* List directory entries (excluding . and ..).
    Returns a List<Text> or NULL on error. */
 void* certo_list_dir(certo_text_t path) {   /* Option<List<Text>> */

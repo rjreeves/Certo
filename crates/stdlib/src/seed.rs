@@ -1037,6 +1037,12 @@ pub fn seed_stdlib(env: &mut TypeEnv, counter: &mut u32) {
     def!("renameFile", fn2(Ty::Text, Ty::Text, Ty::Bool));
     def!("makeDir",    fn1(Ty::Text, Ty::Bool));
     def!("removeDir",  fn1(Ty::Text, Ty::Bool));
+    // BACKLOG item 341 — `removeDir` always recurses, so a caller wanting
+    // atomic "only if empty" removal had no primitive to reach for except
+    // listing entries first and calling `removeDir` only when empty — a
+    // real TOCTOU race. This wraps the plain, already-atomic OS call
+    // (`rmdir`/`RemoveDirectoryA`) directly, no listing at all.
+    def!("removeEmptyDir", fn1(Ty::Text, Ty::Bool));
     {
         let list_text = Ty::List(Box::new(Ty::Text));
         def!("listDir", fn1(Ty::Text, Ty::Option(Box::new(list_text))));
