@@ -1,0 +1,81 @@
+module SqliteTableUI
+
+import Stdlib.Core
+import Stdlib.Http
+import Stdlib.Text
+
+extern "C" {
+    fn vickiSqliteTableHtml(database: Text, table: Text, search: Text, sort: Text, direction: Text, page: Int, pageSize: Int): Text
+}
+
+fn databasePath(): Text =
+    getEnv("VICKI_DATABASE") ?? "C:\\Users\\robert\\Desktop\\vicki\\master.db"
+
+fn queryField(query: Text, name: Text): Text =
+    queryFieldAt(Text.split(query, "&"), name, 0)
+
+fn queryFieldAt(parts: List<Text>, name: Text, i: Int): Text =
+    if i >= List.len(parts) then
+    ""
+else
+    {
+        val pair = Text.split(List.getOrPanic(parts, i), "=")
+        if List.len(pair) >= 2 and Text.eq(List.getOrPanic(pair, 0), name) then
+            List.getOrPanic(pair, 1)
+        else
+            queryFieldAt(parts, name, i + 1)
+    }
+
+fn positiveInt(value: Text, fallback: Int): Int =
+    {
+    val n = parseInt(value) ?? fallback
+    if n > 0 then n else fallback
+}
+
+fn selectedTable(value: Text): Text =
+    if Text.eq(value, "backups") then "backups" else "backup_files"
+
+fn selectedDirection(value: Text): Text =
+    if Text.eq(value, "asc") then "asc" else "desc"
+
+fn pageCss(): Text =
+    "<style>" ++ ":root{color-scheme:dark;--bg:#0a0d12;--panel:#11151c;--panel2:#171c24;--line:#272e39;--muted:#8e98a7;--text:#edf1f7;--accent:#f4b860}" ++ "*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font-family:Inter,system-ui,-apple-system,Segoe UI,sans-serif;font-size:15px}" ++ ".shell{display:grid;grid-template-columns:248px minmax(0,1fr);min-height:100vh}.side{border-right:1px solid var(--line);background:#0d1016;padding:24px 16px;position:sticky;top:0;height:100vh}" ++ ".brand{display:flex;align-items:center;gap:12px;padding:0 8px 26px}.mark{width:34px;height:34px;border:1px solid #57462e;background:#201b15;display:grid;place-items:center;border-radius:9px;color:var(--accent);font-family:Consolas,monospace;font-weight:700}" ++ ".brand strong,.brand small{display:block}.brand small{color:var(--muted);margin-top:2px}.label{text-transform:uppercase;letter-spacing:.12em;color:#697383;font-size:11px;font-weight:700;padding:0 10px 8px}" ++ ".table-link{color:#aeb6c2;text-decoration:none;padding:11px 12px;border-radius:8px;display:flex;justify-content:space-between;margin-bottom:5px}.table-link:hover{background:#151a22;color:white}.table-link.active{background:#202630;color:white;box-shadow:inset 3px 0 var(--accent)}" ++ ".main{min-width:0;padding:30px 34px 40px}.eyebrow{font:12px Consolas,monospace;color:var(--accent);text-transform:uppercase;letter-spacing:.12em;margin-bottom:7px}h1{font-size:28px;letter-spacing:-.035em;margin:0 0 7px}.meta{color:var(--muted);margin-bottom:22px}" ++ ".toolbar{display:flex;gap:10px;margin-bottom:14px}.search{height:42px;max-width:520px;flex:1;border:1px solid var(--line);background:var(--panel);color:var(--text);border-radius:9px;padding:0 14px;font:inherit;outline:none}.search:focus{border-color:#6d5737}.button{height:42px;border:1px solid #6d5737;background:#2a2218;color:#ffd797;border-radius:9px;padding:0 18px;font:inherit;cursor:pointer}" ++ ".frame{border:1px solid var(--line);background:var(--panel);border-radius:12px;overflow:hidden;box-shadow:0 18px 60px #0003}.scroll{overflow:auto;max-height:calc(100vh - 245px)}table{border-collapse:separate;border-spacing:0;width:100%;min-width:850px}" ++ "th{position:sticky;top:0;background:#181d25;color:#99a4b3;text-transform:uppercase;letter-spacing:.07em;font-size:11px;text-align:left;border-bottom:1px solid var(--line);padding:12px 14px;white-space:nowrap}th a{color:inherit;text-decoration:none}th a:hover{color:#ffcf85}" ++ "td{padding:11px 14px;border-bottom:1px solid #202630;color:#d8dde5;white-space:nowrap;max-width:390px;overflow:hidden;text-overflow:ellipsis}tbody tr:hover td{background:#181d25}.num{text-align:right;font-family:Consolas,monospace}.path,.hash{font-family:Consolas,monospace;font-size:12px}.hash{color:#8996a7}" ++ ".foot{min-height:54px;border-top:1px solid var(--line);display:flex;align-items:center;justify-content:space-between;padding:10px 14px;color:var(--muted);font-size:13px}.pages{display:flex;gap:8px;align-items:center}.pages a{border:1px solid var(--line);background:var(--panel2);color:var(--text);border-radius:7px;padding:8px 12px;text-decoration:none}.empty{text-align:center;color:var(--muted);padding:70px}" ++ "@media(max-width:760px){.shell{display:block}.side{position:static;height:auto;border:0;border-bottom:1px solid var(--line);padding:14px}.brand{padding-bottom:12px}.label{display:none}.main{padding:22px 14px}.scroll{max-height:60vh}}" ++ "</style>"
+
+fn shell(table: Text, content: Text): Text =
+    {
+    val filesClass = if Text.eq(table, "backup_files") then "table-link active" else "table-link"
+    val backupsClass = if Text.eq(table, "backups") then "table-link active" else "table-link"
+    "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">" ++ "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">" ++ "<title>Vicki · Certo SQLite viewer</title>" ++ pageCss() ++ "</head><body>" ++ "<div class=\"shell\"><aside class=\"side\">" ++ "<div class=\"brand\"><div class=\"mark\">C</div><div><strong>Vicki</strong><small>Certo SQLite viewer</small></div></div>" ++ "<div class=\"label\">Tables</div>" ++ "<a class=\"" ++ filesClass ++ "\" href=\"/?table=backup_files\"><span>backup_files</span><span>27,562</span></a>" ++ "<a class=\"" ++ backupsClass ++ "\" href=\"/?table=backups\"><span>backups</span><span>23</span></a>" ++ "</aside><main class=\"main\">" ++ content ++ "</main></div></body></html>"
+}
+
+fn handler(req: HttpRequest): HttpResponse [unsafe] =
+    {
+    val path = HttpRequest.path(req)
+    if not Text.eq(path, "/") then
+        Http.notFound("Not found")
+    else
+        {
+            val query = HttpRequest.query(req)
+            val table = selectedTable(queryField(query, "table"))
+            val search = queryField(query, "q")
+            val sort = queryField(query, "sort")
+            val direction = selectedDirection(queryField(query, "dir"))
+            val page = positiveInt(queryField(query, "page"), 1)
+            val size = positiveInt(queryField(query, "size"), 50)
+            val html = unsafe {
+                {
+                    vickiSqliteTableHtml(databasePath(), table, search, sort, direction, page, size)
+                }
+            }
+            Http.ok(shell(table, html), "text/html; charset=utf-8")
+        }
+}
+
+fn main(): Unit [io, unsafe] =
+    {
+    val port = positiveInt(arg(1) ?? "8766", 8766)
+    println(f"Certo SQLite viewer: http://127.0.0.1:${intToText(port)}")
+    println(f"Database: ${databasePath()}")
+    println("Read-only mode. Press Ctrl+C to stop.")
+    Http.serve(port, handler)
+}
