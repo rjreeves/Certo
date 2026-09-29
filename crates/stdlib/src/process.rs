@@ -58,10 +58,41 @@ static void append_arg(char** buf, size_t* cap, size_t* pos, certo_text_t arg) {
     }
     (*buf)[(*pos)++] = '"';
     if (arg) {
+#ifdef _WIN32
+        size_t slashes = 0;
+        for (size_t i = 0; i < arg_len; i++) {
+            if (arg[i] == '\\') {
+                slashes++;
+            } else if (arg[i] == '"') {
+                while (slashes > 0) {
+                    slashes--;
+                    (*buf)[(*pos)++] = '\\';
+                    (*buf)[(*pos)++] = '\\';
+                }
+                (*buf)[(*pos)++] = '\\';
+                (*buf)[(*pos)++] = '"';
+                slashes = 0;
+            } else {
+                while (slashes > 0) {
+                    slashes--;
+                    (*buf)[(*pos)++] = '\\';
+                }
+                (*buf)[(*pos)++] = arg[i];
+                slashes = 0;
+            }
+        }
+        /* Backslashes before the closing quote must be doubled. */
+        while (slashes > 0) {
+            slashes--;
+            (*buf)[(*pos)++] = '\\';
+            (*buf)[(*pos)++] = '\\';
+        }
+#else
         for (size_t i = 0; i < arg_len; i++) {
             if (arg[i] == '"') (*buf)[(*pos)++] = '\\';
             (*buf)[(*pos)++] = arg[i];
         }
+#endif
     }
     (*buf)[(*pos)++] = '"';
 }
@@ -144,7 +175,7 @@ certo_text_t certo_process_result_stderr(CertoProcessResult* r)    { return r ? 
  * buffering). Built for shims: the child sees a real console, prompts
  * and progress bars work, and the exact exit code comes back.
  * ------------------------------------------------------------------ */
-int64_t certo_process_exec_inherit(certo_text_t cmd, CertoList* args) {
+int64_t certo_process_exec_inherit(certo_text_t cmd, CertoList* args, certo_text_t working_dir) {
 #ifdef _WIN32
     size_t cap = 256, pos = 0;
     char* cbuf = (char*)malloc(cap);
@@ -172,7 +203,7 @@ int64_t certo_process_exec_inherit(certo_text_t cmd, CertoList* args) {
     BOOL ok = CreateProcessA(
         NULL, cbuf, NULL, NULL,
         TRUE  /* inherit handles, incl. stdio set above */,
-        0, NULL, NULL, &si, &pi
+        0, NULL, (working_dir && working_dir[0]) ? working_dir : NULL, &si, &pi
     );
     free(cbuf);
 
@@ -202,6 +233,7 @@ int64_t certo_process_exec_inherit(certo_text_t cmd, CertoList* args) {
         return -1;
     }
     if (pid == 0) {
+        if (working_dir && working_dir[0] && chdir(working_dir) != 0) _exit(127);
         execvp(cmd, argv);
         _exit(127); /* only reached if exec failed */
     }

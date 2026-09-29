@@ -1067,7 +1067,7 @@ pub fn seed_stdlib(env: &mut TypeEnv, counter: &mut u32) {
         let list_text = Ty::List(Box::new(Ty::Text));
         let handler = Ty::Fn { params: vec![Ty::Text], ret: Box::new(Ty::Unit) };
         def!("Process.exec",           fn2(Ty::Text, list_text.clone(), pr.clone()));
-        def!("Process.execInherit",    fn2(Ty::Text, list_text.clone(), Ty::Int));
+        def!("Process.execInherit",    Ty::Fn { params: vec![Ty::Text, list_text.clone(), Ty::Text], ret: Box::new(Ty::Int) });
         def!("Process.execWithInput",  Ty::Fn { params: vec![Ty::Text, list_text.clone(), Ty::Text], ret: Box::new(pr.clone()) });
         def!("Process.lines",          Ty::Fn { params: vec![Ty::Text, list_text.clone(), handler], ret: Box::new(Ty::Int) });
         def!("Process.spawnDetached",  Ty::Fn { params: vec![Ty::Text, list_text.clone(), Ty::Text], ret: Box::new(Ty::Int) });
@@ -2188,7 +2188,7 @@ pub fn seed_stdlib(env: &mut TypeEnv, counter: &mut u32) {
 
     // Process
     pm!("Process.exec",          "cmd", "args");
-    pm!("Process.execInherit",   "cmd", "args");
+    pm!("Process.execInherit",   "cmd", "args", "workingDir");
     pm!("Process.execWithInput", "cmd", "args", "input");
     pm!("Process.lines",         "cmd", "args", "handler");
     pm!("Process.spawnDetached", "cmd", "args", "workingDir");

@@ -2280,7 +2280,10 @@ fn process_c_contains_run_with_both_platform_branches() {
 fn process_exec_inherit_registered_and_returns_int() {
     let env = seeded_env();
     match env.lookup("Process.execInherit").expect("missing Process.execInherit") {
-        Ty::Fn { ret, .. } => assert_eq!(ret.as_ref(), &Ty::Int),
+        Ty::Fn { params, ret } => {
+            assert_eq!(params, &[Ty::Text, Ty::List(Box::new(Ty::Text)), Ty::Text]);
+            assert_eq!(ret.as_ref(), &Ty::Int);
+        }
         other => panic!("expected Fn, got {:?}", other),
     }
 }
@@ -2288,6 +2291,9 @@ fn process_exec_inherit_registered_and_returns_int() {
 #[test]
 fn process_c_contains_exec_inherit() {
     assert!(PROCESS_C.contains("certo_process_exec_inherit"), "missing exec_inherit");
+    assert!(PROCESS_C.contains("(working_dir && working_dir[0]) ? working_dir : NULL"), "missing Windows working directory");
+    assert!(PROCESS_C.contains("working_dir[0] && chdir(working_dir)"), "missing POSIX working directory");
+    assert!(PROCESS_C.contains("Backslashes before the closing quote must be doubled"), "missing trailing-backslash quoting fix");
 }
 
 // BACKLOG item 333 — spawnDetached's own POSIX branch used to be a stub
