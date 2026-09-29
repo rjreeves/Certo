@@ -292,37 +292,68 @@ impl Ty {
     /// Occurs-check (`UnionFind::occurs_check`) already guarantees `subst`
     /// contains no cycles, so this recursion is guaranteed to terminate.
     pub fn apply_subst(&self, subst: &HashMap<TyVar, Ty>) -> Ty {
-        match self {
-            Ty::Var(v) => match subst.get(v) {
-                Some(next) => next.apply_subst(subst),
-                None => Ty::Var(*v),
-            },
+        self.apply_subst_excluding(subst, &[])
+    }
 
-            Ty::Option(t)     => Ty::Option(Box::new(t.apply_subst(subst))),
-            Ty::Result(t, e)  => Ty::Result(Box::new(t.apply_subst(subst)), Box::new(e.apply_subst(subst))),
-            Ty::List(t)       => Ty::List(Box::new(t.apply_subst(subst))),
-            Ty::Map(k, v)     => Ty::Map(Box::new(k.apply_subst(subst)), Box::new(v.apply_subst(subst))),
-            Ty::Tuple(ts)     => Ty::Tuple(ts.iter().map(|t| t.apply_subst(subst)).collect()),
+    /// Real body of `apply_subst` — `excluded` holds the (usually empty,
+    /// almost always tiny) set of quantified vars a surrounding `Forall`
+    /// has already shadowed, so a nested `Ty::Var` lookup can skip them
+    /// without needing its own copy of `subst` to remove them from.
+    ///
+    /// BACKLOG item 328 — the `Forall` arm used to clone the *entire*
+    /// substitution map (`subst.clone()`) on every visit, to get a
+    /// modifiable copy it could remove the newly-bound vars from before
+    /// recursing — the same "clone a whole map just to make one call
+    /// safe" anti-pattern item 327 already fixed one layer up in
+    /// `UnionFind::apply`. For a real, densely cross-referencing program,
+    /// `apply_subst` is already called millions of times against a
+    /// substitution map that only grows over the module (confirmed live:
+    /// 3.58M calls checking a 244-declaration real-world prefix, of which
+    /// 83,002 hit this `Forall` arm — cloning a combined 670 million
+    /// HashMap entries total, since the map had grown to several thousand
+    /// entries by then). Tracking excluded vars in a small side list
+    /// instead — cleared to empty for the overwhelmingly common
+    /// non-Forall case, and never larger than the total number of
+    /// quantified vars actually nested above the current position, always
+    /// far smaller than the substitution map itself — removes those clones
+    /// entirely without changing what gets substituted.
+    fn apply_subst_excluding(&self, subst: &HashMap<TyVar, Ty>, excluded: &[TyVar]) -> Ty {
+        match self {
+            Ty::Var(v) => {
+                if excluded.contains(v) { return Ty::Var(*v); }
+                match subst.get(v) {
+                    Some(next) => next.apply_subst_excluding(subst, excluded),
+                    None => Ty::Var(*v),
+                }
+            }
+
+            Ty::Option(t)     => Ty::Option(Box::new(t.apply_subst_excluding(subst, excluded))),
+            Ty::Result(t, e)  => Ty::Result(Box::new(t.apply_subst_excluding(subst, excluded)), Box::new(e.apply_subst_excluding(subst, excluded))),
+            Ty::List(t)       => Ty::List(Box::new(t.apply_subst_excluding(subst, excluded))),
+            Ty::Map(k, v)     => Ty::Map(Box::new(k.apply_subst_excluding(subst, excluded)), Box::new(v.apply_subst_excluding(subst, excluded))),
+            Ty::Tuple(ts)     => Ty::Tuple(ts.iter().map(|t| t.apply_subst_excluding(subst, excluded)).collect()),
 
             Ty::Named { name, args } => Ty::Named {
                 name: name.clone(),
-                args: args.iter().map(|a| a.apply_subst(subst)).collect(),
+                args: args.iter().map(|a| a.apply_subst_excluding(subst, excluded)).collect(),
             },
 
             Ty::Record(fields) => Ty::Record(
-                fields.iter().map(|(n, t)| (n.clone(), t.apply_subst(subst))).collect()
+                fields.iter().map(|(n, t)| (n.clone(), t.apply_subst_excluding(subst, excluded))).collect()
             ),
 
             Ty::Fn { params, ret } => Ty::Fn {
-                params: params.iter().map(|p| p.apply_subst(subst)).collect(),
-                ret:    Box::new(ret.apply_subst(subst)),
+                params: params.iter().map(|p| p.apply_subst_excluding(subst, excluded)).collect(),
+                ret:    Box::new(ret.apply_subst_excluding(subst, excluded)),
             },
 
             Ty::Forall { vars, body } => {
-                // Don't substitute over bound vars
-                let mut inner = subst.clone();
-                for v in vars { inner.remove(v); }
-                Ty::Forall { vars: vars.clone(), body: Box::new(body.apply_subst(&inner)) }
+                // Don't substitute over bound vars — extend the (small)
+                // excluded list instead of cloning the (potentially huge)
+                // substitution map.
+                let mut inner_excluded = excluded.to_vec();
+                inner_excluded.extend(vars.iter().copied());
+                Ty::Forall { vars: vars.clone(), body: Box::new(body.apply_subst_excluding(subst, &inner_excluded)) }
             }
 
             // Once the constructor position resolves to a concrete `Ctor`,
@@ -330,8 +361,8 @@ impl Ty {
             // point of `App` is to be a transient intermediate, never a
             // final answer (BACKLOG item 76).
             Ty::App(f, a) => {
-                let f = f.apply_subst(subst);
-                let a = a.apply_subst(subst);
+                let f = f.apply_subst_excluding(subst, excluded);
+                let a = a.apply_subst_excluding(subst, excluded);
                 match f {
                     Ty::Ctor(name) => match name.as_str() {
                         "List"   => Ty::List(Box::new(a)),
@@ -602,5 +633,64 @@ mod apply_subst_chain_tests {
         // Var(2) is not in subst — the chain should stop there, not panic
         // or loop.
         assert_eq!(Ty::Var(1).apply_subst(&subst), Ty::Var(2));
+    }
+}
+
+#[cfg(test)]
+mod apply_subst_forall_tests {
+    use super::Ty;
+    use std::collections::HashMap;
+
+    #[test]
+    fn forall_still_does_not_substitute_over_its_own_bound_vars() {
+        // A Forall's own quantified var (1) must stay untouched even
+        // though it also happens to be a key in `subst` — confirms the
+        // excluded-vars mechanism (BACKLOG item 328) still shadows bound
+        // vars correctly, the entire reason the old code cloned `subst`
+        // and removed them in the first place.
+        let mut subst = HashMap::new();
+        subst.insert(1u32, Ty::Int);   // would wrongly resolve var 1 if not excluded
+        subst.insert(2u32, Ty::Text);  // a genuinely free var inside the body
+        let forall = Ty::Forall { vars: vec![1], body: Box::new(Ty::Tuple(vec![Ty::Var(1), Ty::Var(2)])) };
+        assert_eq!(forall.apply_subst(&subst),
+            Ty::Forall { vars: vec![1], body: Box::new(Ty::Tuple(vec![Ty::Var(1), Ty::Text])) });
+    }
+
+    #[test]
+    fn nested_foralls_each_shadow_only_their_own_vars() {
+        let mut subst = HashMap::new();
+        subst.insert(1u32, Ty::Int);
+        subst.insert(2u32, Ty::Bool);
+        subst.insert(3u32, Ty::Text);
+        // Outer binds 1, inner binds 2 — inside the inner body, 1 and 2
+        // both stay shadowed, only 3 resolves.
+        let inner = Ty::Forall { vars: vec![2], body: Box::new(Ty::Tuple(vec![Ty::Var(1), Ty::Var(2), Ty::Var(3)])) };
+        let outer = Ty::Forall { vars: vec![1], body: Box::new(inner) };
+        let expected_inner = Ty::Forall { vars: vec![2], body: Box::new(Ty::Tuple(vec![Ty::Var(1), Ty::Var(2), Ty::Text])) };
+        let expected = Ty::Forall { vars: vec![1], body: Box::new(expected_inner) };
+        assert_eq!(outer.apply_subst(&subst), expected);
+    }
+
+    #[test]
+    fn apply_subst_through_a_forall_does_not_clone_a_large_substitution_map() {
+        // BACKLOG item 328 — the Forall arm used to `subst.clone()` the
+        // *entire* substitution map on every visit; confirmed live against
+        // a real ~250-declaration program that this alone accounted for
+        // 670 million cloned HashMap entries. Mirrors unify.rs's own
+        // identical-shaped regression guard for item 327's own fix.
+        let mut subst: HashMap<u32, Ty> = HashMap::new();
+        for i in 0..20_000u32 {
+            subst.insert(i, Ty::Int);
+        }
+        let forall = Ty::Forall { vars: vec![0], body: Box::new(Ty::Var(1)) };
+        let t0 = std::time::Instant::now();
+        for _ in 0..5_000 {
+            assert_eq!(forall.apply_subst(&subst),
+                Ty::Forall { vars: vec![0], body: Box::new(Ty::Int) });
+        }
+        let elapsed = t0.elapsed();
+        assert!(elapsed.as_secs_f64() < 1.0,
+            "apply_subst() through a Forall took {:?} for 5,000 calls against a 20,000-entry map — \
+             looks like the whole-map-clone regression is back (item 328)", elapsed);
     }
 }
