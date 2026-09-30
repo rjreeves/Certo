@@ -25,7 +25,7 @@ use certo_sdl::{
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 /// SQL dialect names accepted by `sql <dialect> "..."`.
-pub const KNOWN_DIALECTS: &[&str] = &["postgres"];
+pub const KNOWN_DIALECTS: &[&str] = &["postgres", "sqlite"];
 
 /// Parse and apply an MDL source. The plan is `Some` only if there are no
 /// error diagnostics; diagnostics point into `mdl_src`.

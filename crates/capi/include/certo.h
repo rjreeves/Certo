@@ -103,7 +103,7 @@ char *certo_migrate_new(const char *project_dir, const char *options);
  *   -> {migrations:[{seq,name,label,dir,checksum,batches,statements}]} */
 char *certo_migrate_list(const char *project_dir, const char *options);
 
-/* options: {"url":"postgres://..."}                   -> {applied[], pending[]}
+/* options: {"url":"postgres://..." or, for a sqlite project, a database file path}                   -> {applied[], pending[]}
  * Errors include history_drift (a migration was edited/removed/renamed). */
 char *certo_migrate_status(const char *project_dir, const char *options);
 

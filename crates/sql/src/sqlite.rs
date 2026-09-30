@@ -3,9 +3,10 @@
 //! SQLite has dynamic typing and a small `ALTER TABLE`, so this adapter differs
 //! from PostgreSQL in three ways:
 //!
-//! * Types map to SQLite affinities (`uuid`, `date`, `timestamp`, `json` are
-//!   `TEXT`, `bool` is `BOOLEAN`, `bytes` is `BLOB`). An enum is `TEXT` with an
-//!   inline `CHECK (col IN (...))`.
+//! * Types map to SQLite affinities with a distinguishing declared name (`uuid`
+//!   is `UUID TEXT`, `date` is `DATE TEXT`, `bool` is `BOOLEAN`, `bytes` is
+//!   `BLOB`). An enum is `ENUM_<name> TEXT` with an inline
+//!   `CHECK (col IN (...))`.
 //! * Anything `ALTER TABLE` cannot do (change a column, add or drop a foreign
 //!   key or CHECK, add a NOT NULL/UNIQUE/computed column, change an enum's
 //!   values) is done by rebuilding the table: create the new shape, copy the
@@ -35,11 +36,16 @@ pub(crate) fn lit(s: &str) -> String {
     format!("'{}'", s.replace('\'', "''"))
 }
 
-/// The declared type name; SQLite derives the column's affinity from it.
+/// The declared type name. SQLite derives the column's affinity from it (a name
+/// containing `TEXT` has TEXT affinity) and keeps the name as written, so the
+/// extra word (`UUID TEXT`, `DATE TEXT`, `ENUM_Role TEXT`, ...) is what lets
+/// introspection tell the types apart again.
 pub(crate) fn ty(t: &TypeIR) -> String {
     match t {
         TypeIR::Builtin(b) => match b {
-            Builtin::Text | Builtin::Uuid | Builtin::Json => "TEXT".into(),
+            Builtin::Text => "TEXT".into(),
+            Builtin::Uuid => "UUID TEXT".into(),
+            Builtin::Json => "JSON TEXT".into(),
             Builtin::SmallInt => "SMALLINT".into(),
             Builtin::Int => "INTEGER".into(),
             Builtin::BigInt => "BIGINT".into(),
@@ -47,13 +53,16 @@ pub(crate) fn ty(t: &TypeIR) -> String {
             Builtin::Real => "REAL".into(),
             Builtin::Float => "DOUBLE".into(),
             Builtin::Bool => "BOOLEAN".into(),
-            Builtin::Timestamp | Builtin::TimestampNaive | Builtin::Date => "TEXT".into(),
+            Builtin::Timestamp => "TIMESTAMPTZ TEXT".into(),
+            Builtin::TimestampNaive => "TIMESTAMP TEXT".into(),
+            Builtin::Date => "DATE TEXT".into(),
             Builtin::Bytes => "BLOB".into(),
             Builtin::Varchar(n) => format!("VARCHAR({n})"),
             Builtin::Char(n) => format!("CHAR({n})"),
             Builtin::Numeric(p, s) => format!("NUMERIC({p},{s})"),
         },
-        TypeIR::Enum(_) | TypeIR::Composite(_) => "TEXT".into(),
+        TypeIR::Enum(n) => format!("ENUM_{n} TEXT"),
+        TypeIR::Composite(_) => "TEXT".into(),
     }
 }
 

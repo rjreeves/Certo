@@ -40,3 +40,7 @@ without table qualifiers, `LIMIT -1` before a bare `OFFSET`). Differences to kno
 
 `tests/sqlite_live.rs` runs the scripts on a real SQLite, including evolving a
 schema with data and comparing the result with a fresh database.
+
+The runner applies SQLite migrations, reads a SQLite database back into a schema
+(declared type names carry the distinction: `UUID TEXT`, `DATE TEXT`, `ENUM_<name> TEXT`, ...),
+detects drift and adopts existing databases; see `crates/runner/README.md`.

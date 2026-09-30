@@ -15,7 +15,8 @@ use crate::error::{io, RunnerError};
 use crate::exec::Executor;
 use crate::introspect::LiveSchema;
 use crate::migration::{create, list};
-use crate::pgexpr::{translate_check, translate_default_with};
+use crate::pgexpr::{translate_check_for, translate_default_for};
+use certo_sql::Dialect;
 use crate::project::Project;
 use certo_diagnostics::render_all;
 use certo_sdl::{compile, parse, to_sdl, Builtin, ExprIR, SchemaIR, TypeIR};
@@ -230,6 +231,11 @@ fn sanitize(ir: &mut SchemaIR, om: &mut Vec<String>) {
 
 /// Live schema -> adoptable SDL, listing everything that had to be left out.
 pub fn prepare(live: LiveSchema) -> Result<Prepared, RunnerError> {
+    prepare_for(Dialect::Postgres, live)
+}
+
+/// `prepare` for a live database of `dialect`.
+pub fn prepare_for(dialect: Dialect, live: LiveSchema) -> Result<Prepared, RunnerError> {
     let LiveSchema { mut ir, notes } = live;
     let mut om = notes;
     let enums = ir.enums.clone();
@@ -257,7 +263,7 @@ pub fn prepare(live: LiveSchema) -> Result<Prepared, RunnerError> {
         let snapshot = t.columns.clone();
         for c in &mut t.columns {
             if let Some(ExprIR::Raw { sql }) = c.default.clone() {
-                match translate_default_with(&sql, &c.ty, &enums, &sequences) {
+                match translate_default_for(dialect, &sql, &c.ty, &enums, &sequences) {
                     Ok(e) => c.default = Some(e),
                     Err(why) => {
                         c.default = None;
@@ -271,7 +277,7 @@ pub fn prepare(live: LiveSchema) -> Result<Prepared, RunnerError> {
             .into_iter()
             .filter_map(|mut k| {
                 let ExprIR::Raw { sql } = &k.expr else { return Some(k) };
-                match translate_check(sql, &snapshot, &enums) {
+                match translate_check_for(dialect, sql, &snapshot, &enums) {
                     Ok(e) => {
                         k.expr = e;
                         Some(k)
@@ -350,7 +356,7 @@ pub fn adopt(project: &Project, exec: &mut dyn Executor, opts: &AdoptOptions) ->
     }
 
     let live = exec.introspect().map_err(|e| RunnerError::Connection(e.message))?;
-    let prepared = prepare(live)?;
+    let prepared = prepare_for(project.dialect(), live)?;
     if prepared.counts.tables == 0 && prepared.counts.enums == 0 && prepared.counts.types == 0 && prepared.counts.sequences == 0 {
         return Err(RunnerError::Project(
             "nothing to adopt: the database has no tables, enums or types SDL can express (for a new database, write schema.sdl and run `migrate new`)".into(),
