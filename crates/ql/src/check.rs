@@ -12,7 +12,9 @@
 //! Mutations: QL231 (unused), QL232 NULL into a NOT NULL column, QL233
 //! required column missing from an insert, QL234 generated-always column
 //! assigned, QL235 column assigned twice, QL236 conflict target is not a
-//! unique key. QL290 (warning): unused parameter.
+//! unique key. Subqueries: QL240 must return one column, QL241 scalar
+//! subquery may return several rows, QL242 insert row/column count, QL243
+//! (parser) nested too deeply. QL290 (warning): unused parameter.
 
 use crate::ast::*;
 use crate::ir::*;
@@ -37,7 +39,7 @@ pub fn check(schema: &SchemaIR, file: &QlFile, diags: &mut Vec<Diagnostic>) -> V
             );
             continue;
         }
-        let mut cx = Checker { schema, diags, sources: Vec::new(), params: Vec::new(), failed: false };
+        let mut cx = Checker { schema, diags, sources: Vec::new(), scopes: vec![0], params: Vec::new(), failed: false };
         if let Some(ir) = cx.query(q)
             && !cx.failed
         {
@@ -59,7 +61,7 @@ pub fn check_mutations(schema: &SchemaIR, file: &QlFile, diags: &mut Vec<Diagnos
             );
             continue;
         }
-        let mut cx = Checker { schema, diags, sources: Vec::new(), params: Vec::new(), failed: false };
+        let mut cx = Checker { schema, diags, sources: Vec::new(), scopes: vec![0], params: Vec::new(), failed: false };
         if let Some(ir) = cx.mutation(m)
             && !cx.failed
         {
@@ -76,6 +78,7 @@ enum T {
     Null,
 }
 
+#[derive(Clone)]
 struct Typed {
     e: QExpr,
     t: T,
@@ -117,6 +120,32 @@ struct ParamInfo {
     span: Span,
 }
 
+/// A checked `select` body, before it becomes a query or a subquery.
+#[derive(Clone)]
+struct Body {
+    sources: Vec<SourceIR>,
+    filter: Option<QExpr>,
+    group_by: Vec<QExpr>,
+    having: Option<Typed>,
+    outputs: Vec<Output>,
+    order: Vec<(Typed, bool, Span)>,
+    limit: Option<QExpr>,
+    offset: Option<QExpr>,
+    /// Aggregates without `group by`: exactly one row, however many match.
+    single_row: bool,
+}
+
+fn columns_of(outputs: Vec<Output>) -> Vec<ColumnOut> {
+    outputs
+        .into_iter()
+        .filter_map(|o| match o.typed.t {
+            T::Known(ty) => Some(ColumnOut { name: o.name, expr: o.typed.e, ty, nullable: o.typed.nullable }),
+            T::Null => None,
+        })
+        .collect()
+}
+
+#[derive(Clone)]
 struct Output {
     name: String,
     typed: Typed,
@@ -127,6 +156,9 @@ struct Checker<'a> {
     schema: &'a SchemaIR,
     diags: &'a mut Vec<Diagnostic>,
     sources: Vec<SourceInfo<'a>>,
+    /// Where each open query's sources start in `sources`: the outermost query is first, a
+    /// subquery being checked is last. Names resolve innermost scope first.
+    scopes: Vec<usize>,
     params: Vec<ParamInfo>,
     failed: bool,
 }
@@ -162,27 +194,110 @@ fn unify(a: &T, b: &T) -> Option<T> {
     }
 }
 
-/// The first column reference that is not covered by a `group by` expression
-/// or an aggregate, if any.
-fn uncovered(e: &QExpr, groups: &[QExpr]) -> Option<String> {
+/// Column references in `e` (and in any subquery inside it) whose table is not
+/// defined by a subquery that encloses the reference: a subquery's correlation
+/// with the query around it.
+fn refs_expr(e: &QExpr, bound: &HashSet<String>, out: &mut Vec<QExpr>) {
+    match e {
+        QExpr::Column { source, .. } => {
+            if !bound.contains(source) {
+                out.push(e.clone());
+            }
+        }
+        QExpr::Number { .. } | QExpr::Decimal { .. } | QExpr::String { .. } | QExpr::Bool { .. } | QExpr::Null
+        | QExpr::Param { .. } => {}
+        QExpr::Binary { lhs, rhs, .. } => {
+            refs_expr(lhs, bound, out);
+            refs_expr(rhs, bound, out);
+        }
+        QExpr::Not { expr } | QExpr::IsNull { expr, .. } => refs_expr(expr, bound, out),
+        QExpr::In { expr, list, .. } => {
+            refs_expr(expr, bound, out);
+            list.iter().for_each(|i| refs_expr(i, bound, out));
+        }
+        QExpr::Like { expr, pattern, .. } => {
+            refs_expr(expr, bound, out);
+            refs_expr(pattern, bound, out);
+        }
+        QExpr::Call { args, .. } => args.iter().for_each(|a| refs_expr(a, bound, out)),
+        QExpr::Agg { arg, .. } => {
+            if let Some(a) = arg {
+                refs_expr(a, bound, out);
+            }
+        }
+        QExpr::Case { whens, otherwise } => {
+            for w in whens {
+                refs_expr(&w.when, bound, out);
+                refs_expr(&w.then, bound, out);
+            }
+            if let Some(o) = otherwise {
+                refs_expr(o, bound, out);
+            }
+        }
+        QExpr::Exists { query } | QExpr::Scalar { query } => refs_sub(query, bound, out),
+        QExpr::InQuery { expr, query, .. } => {
+            refs_expr(expr, bound, out);
+            refs_sub(query, bound, out);
+        }
+    }
+}
+
+fn refs_sub(sub: &SubqueryIR, bound: &HashSet<String>, out: &mut Vec<QExpr>) {
+    let mut inner = bound.clone();
+    inner.extend(sub.sources.iter().map(|s| s.alias.clone()));
+    for s in &sub.sources {
+        if let Some(on) = &s.on {
+            refs_expr(on, &inner, out);
+        }
+    }
+    let opt = |e: &Option<QExpr>, out: &mut Vec<QExpr>| {
+        if let Some(e) = e {
+            refs_expr(e, &inner, out);
+        }
+    };
+    opt(&sub.filter, out);
+    sub.group_by.iter().for_each(|g| refs_expr(g, &inner, out));
+    opt(&sub.having, out);
+    sub.select.iter().for_each(|c| refs_expr(&c.expr, &inner, out));
+    sub.order_by.iter().for_each(|o| refs_expr(&o.expr, &inner, out));
+    opt(&sub.limit, out);
+    opt(&sub.offset, out);
+}
+
+/// The first column reference of this query (its tables are `scope`) that is not
+/// covered by a `group by` expression or an aggregate, if any. Columns of the
+/// queries around a subquery are constants to it, so they never need grouping.
+fn uncovered(e: &QExpr, groups: &[QExpr], scope: &HashSet<String>) -> Option<String> {
     if groups.contains(e) {
         return None;
     }
+    let via_subquery = |sub: &SubqueryIR| {
+        let mut refs = Vec::new();
+        refs_sub(sub, &HashSet::new(), &mut refs);
+        refs.into_iter().find_map(|r| match &r {
+            QExpr::Column { source, column } if scope.contains(source) && !groups.contains(&r) => {
+                Some(format!("{source}.{column}"))
+            }
+            _ => None,
+        })
+    };
     match e {
         QExpr::Number { .. } | QExpr::Decimal { .. } | QExpr::String { .. } | QExpr::Bool { .. } | QExpr::Null
         | QExpr::Param { .. } | QExpr::Agg { .. } => None,
-        QExpr::Column { source, column } => Some(format!("{source}.{column}")),
-        QExpr::Binary { lhs, rhs, .. } => uncovered(lhs, groups).or_else(|| uncovered(rhs, groups)),
-        QExpr::Not { expr } | QExpr::IsNull { expr, .. } => uncovered(expr, groups),
+        QExpr::Column { source, column } => scope.contains(source).then(|| format!("{source}.{column}")),
+        QExpr::Binary { lhs, rhs, .. } => uncovered(lhs, groups, scope).or_else(|| uncovered(rhs, groups, scope)),
+        QExpr::Not { expr } | QExpr::IsNull { expr, .. } => uncovered(expr, groups, scope),
         QExpr::In { expr, list, .. } => {
-            uncovered(expr, groups).or_else(|| list.iter().find_map(|i| uncovered(i, groups)))
+            uncovered(expr, groups, scope).or_else(|| list.iter().find_map(|i| uncovered(i, groups, scope)))
         }
-        QExpr::Like { expr, pattern, .. } => uncovered(expr, groups).or_else(|| uncovered(pattern, groups)),
-        QExpr::Call { args, .. } => args.iter().find_map(|a| uncovered(a, groups)),
+        QExpr::Like { expr, pattern, .. } => uncovered(expr, groups, scope).or_else(|| uncovered(pattern, groups, scope)),
+        QExpr::Call { args, .. } => args.iter().find_map(|a| uncovered(a, groups, scope)),
         QExpr::Case { whens, otherwise } => whens
             .iter()
-            .find_map(|w| uncovered(&w.when, groups).or_else(|| uncovered(&w.then, groups)))
-            .or_else(|| otherwise.as_ref().and_then(|o| uncovered(o, groups))),
+            .find_map(|w| uncovered(&w.when, groups, scope).or_else(|| uncovered(&w.then, groups, scope)))
+            .or_else(|| otherwise.as_ref().and_then(|o| uncovered(o, groups, scope))),
+        QExpr::Exists { query } | QExpr::Scalar { query } => via_subquery(query),
+        QExpr::InQuery { expr, query, .. } => uncovered(expr, groups, scope).or_else(|| via_subquery(query)),
     }
 }
 
@@ -224,25 +339,33 @@ impl<'a> Checker<'a> {
 
     /// The result columns of a `select` list or `returning` clause: stars
     /// expanded, every column named, names unique, no bare NULL.
-    fn outputs(&mut self, items: &[SelectItem], ctx: Ctx) -> Vec<Output> {
+    fn scope_start(&self) -> usize { self.scopes.last().copied().unwrap_or(0) }
+
+    /// `named`: the columns are the query's result, so each needs a unique name.
+    /// A subquery's columns are used by position, and get placeholder names.
+    fn outputs(&mut self, items: &[SelectItem], ctx: Ctx, named: bool) -> Vec<Output> {
         let mut outputs: Vec<Output> = Vec::new();
+        let base = self.scope_start();
         for item in items {
             match item {
                 SelectItem::Star(span) => {
-                    let all: Vec<_> = (0..self.sources.len()).collect();
+                    let all: Vec<_> = (base..self.sources.len()).collect();
                     for i in all {
                         self.expand(i, *span, &mut outputs);
                     }
                 }
-                SelectItem::SourceStar(alias) => match self.sources.iter().position(|s| s.alias == alias.name) {
-                    Some(i) => self.expand(i, alias.span, &mut outputs),
-                    None => self.fail("QL205", format!("unknown table alias `{}`", alias.name), alias.span),
-                },
+                SelectItem::SourceStar(alias) => {
+                    match self.sources[base..].iter().position(|s| s.alias == alias.name) {
+                        Some(i) => self.expand(base + i, alias.span, &mut outputs),
+                        None => self.fail("QL205", format!("unknown table alias `{}`", alias.name), alias.span),
+                    }
+                }
                 SelectItem::Expr { expr, alias } => {
                     let Some(typed) = self.expr(expr, ctx) else { continue };
                     let name = match (alias, expr) {
                         (Some(a), _) => a.name.clone(),
                         (None, Expr::Column { name, .. }) => name.name.clone(),
+                        (None, _) if !named => format!("column{}", outputs.len() + 1),
                         (None, _) => {
                             self.fail("QL215", "this expression needs a name: add `as <name>`", expr.span());
                             continue;
@@ -253,7 +376,7 @@ impl<'a> Checker<'a> {
             }
         }
         let mut names = HashSet::new();
-        for o in &outputs {
+        for o in outputs.iter().filter(|_| named) {
             if !names.insert(o.name.clone()) {
                 self.fail("QL216", format!("the result has two columns named `{}`; add `as <name>`", o.name), o.span);
             }
@@ -266,11 +389,62 @@ impl<'a> Checker<'a> {
 
     fn query(&mut self, q: &Query) -> Option<QueryIR> {
         self.declare_params(&q.params);
+        let b = self.select_body(q, true)?;
+        self.warn_unused_params();
+        Some(QueryIR {
+            name: q.name.name.clone(),
+            params: self.param_irs(),
+            sources: b.sources,
+            filter: b.filter,
+            group_by: b.group_by,
+            having: b.having.map(|h| h.e),
+            distinct: q.select.distinct,
+            select: columns_of(b.outputs),
+            order_by: b.order.into_iter().map(|(t, desc, _)| OrderIR { expr: t.e, desc }).collect(),
+            limit: b.limit,
+            offset: b.offset,
+        })
+    }
+
+    /// Check a query nested in an expression (or feeding an `insert`): its own
+    /// scope, able to see the tables of the queries around it.
+    fn subquery(&mut self, q: &Query) -> Option<(SubqueryIR, Body)> {
+        let base = self.sources.len();
+        self.scopes.push(base);
+        let body = self.select_body(q, false);
+        self.sources.truncate(base);
+        self.scopes.pop();
+        let b = body?;
+        let ir = SubqueryIR {
+            sources: b.sources.clone(),
+            filter: b.filter.clone(),
+            group_by: b.group_by.clone(),
+            having: b.having.as_ref().map(|h| h.e.clone()),
+            distinct: q.select.distinct,
+            select: b
+                .outputs
+                .iter()
+                .map(|o| match &o.typed.t {
+                    T::Known(ty) => ColumnOut { name: o.name.clone(), expr: o.typed.e.clone(), ty: ty.clone(), nullable: o.typed.nullable },
+                    // only `exists` tolerates this, and it never looks at the columns
+                    T::Null => ColumnOut { name: o.name.clone(), expr: o.typed.e.clone(), ty: builtin(Builtin::Text), nullable: true },
+                })
+                .collect(),
+            order_by: b.order.iter().map(|(t, desc, _)| OrderIR { expr: t.e.clone(), desc: *desc }).collect(),
+            limit: b.limit.clone(),
+            offset: b.offset.clone(),
+        };
+        Some((ir, b))
+    }
+
+    /// The clauses shared by a query and a subquery, checked in the current scope.
+    fn select_body(&mut self, q: &Query, named: bool) -> Option<Body> {
+        let base = self.scope_start();
 
         // sources, each join's ON seeing the sources up to and including itself
         let mut sources_ir = Vec::new();
         self.add_source(&q.from, false)?;
-        sources_ir.push(SourceIR { alias: self.sources[0].alias.clone(), table: q.from.table.name.clone(), join: None, on: None });
+        sources_ir.push(SourceIR { alias: self.sources[base].alias.clone(), table: q.from.table.name.clone(), join: None, on: None });
         for j in &q.joins {
             self.add_source(&j.table, j.kind == JoinKind::Left)?;
             let on = self.expr(&j.on, Ctx::On);
@@ -306,7 +480,7 @@ impl<'a> Checker<'a> {
         }
 
         // select (needed before `having` / `order by`, which may name its outputs)
-        let outputs = self.outputs(&q.select.items, Ctx::Select);
+        let outputs = self.outputs(&q.select.items, Ctx::Select, named);
 
         let having = match &q.having {
             Some(h) => self.expr(h, Ctx::Having).inspect(|t| {
@@ -347,13 +521,14 @@ impl<'a> Checker<'a> {
         let offset = self.limit_expr(&q.offset, "offset").flatten();
 
         // once aggregates or `group by` are involved, every column must be grouped or aggregated
-        let grouped = !group_by.is_empty()
-            || outputs.iter().any(|o| o.typed.agg)
+        let aggregates = outputs.iter().any(|o| o.typed.agg)
             || having.as_ref().is_some_and(|h| h.agg)
             || order.iter().any(|o| o.0.agg);
+        let grouped = !group_by.is_empty() || aggregates;
         if grouped && !self.failed {
+            let scope: HashSet<String> = self.sources[base..].iter().map(|s| s.alias.clone()).collect();
             let check = |cx: &mut Self, e: &QExpr, span: Span| {
-                if let Some(col) = uncovered(e, &group_by) {
+                if let Some(col) = uncovered(e, &group_by, &scope) {
                     cx.fail("QL214", format!("`{col}` must appear in `group by` or be used inside an aggregate"), span);
                 }
             };
@@ -362,24 +537,15 @@ impl<'a> Checker<'a> {
             for (t, _, span) in &order { check(self, &t.e, *span); }
         }
 
-        self.warn_unused_params();
-
-        Some(QueryIR {
-            name: q.name.name.clone(),
-            params: self.param_irs(),
+        Some(Body {
             sources: sources_ir,
             filter,
+            // with aggregates and no `group by` the query always yields exactly one row
+            single_row: group_by.is_empty() && aggregates && having.is_none(),
             group_by,
-            having: having.map(|h| h.e),
-            distinct: q.select.distinct,
-            select: outputs
-                .into_iter()
-                .filter_map(|o| match o.typed.t {
-                    T::Known(ty) => Some(ColumnOut { name: o.name, expr: o.typed.e, ty, nullable: o.typed.nullable }),
-                    T::Null => None,
-                })
-                .collect(),
-            order_by: order.into_iter().map(|(t, desc, _)| OrderIR { expr: t.e, desc }).collect(),
+            having,
+            outputs,
+            order,
             limit,
             offset,
         })
@@ -398,8 +564,13 @@ impl<'a> Checker<'a> {
         // An insert's values cannot read the row being created, so its `set`
         // expressions are checked with no table in scope; an update's can.
         let mut assignments = Vec::new();
+        let (mut insert_columns, mut rows, mut source) = (Vec::new(), Vec::new(), None);
         if m.kind == MutationKind::Insert {
-            assignments = self.assignments(table, &m.assignments);
+            if m.insert_columns.is_empty() {
+                assignments = self.assignments(table, &m.assignments);
+            } else {
+                (insert_columns, rows, source) = self.insert_rows(table, m);
+            }
         }
         self.add_source(&m.table, false)?;
         if m.kind == MutationKind::Update {
@@ -418,7 +589,12 @@ impl<'a> Checker<'a> {
 
         if m.kind == MutationKind::Insert {
             // judged on what was written, so a bad value is not also reported as missing
-            let set: HashSet<&str> = m.assignments.iter().map(|a| a.column.name.as_str()).collect();
+            let set: HashSet<&str> = m
+                .assignments
+                .iter()
+                .map(|a| a.column.name.as_str())
+                .chain(m.insert_columns.iter().map(|c| c.name.as_str()))
+                .collect();
             let missing: Vec<&str> = table
                 .columns
                 .iter()
@@ -440,7 +616,7 @@ impl<'a> Checker<'a> {
         };
 
         let returning: Vec<ColumnOut> = self
-            .outputs(&m.returning, Ctx::Returning)
+            .outputs(&m.returning, Ctx::Returning, true)
             .into_iter()
             .filter_map(|o| match o.typed.t {
                 T::Known(ty) => Some(ColumnOut { name: o.name, expr: o.typed.e, ty, nullable: o.typed.nullable }),
@@ -456,11 +632,82 @@ impl<'a> Checker<'a> {
             table: m.table.table.name.clone(),
             alias,
             assignments,
+            insert_columns,
+            rows,
+            source,
             filter,
             all_rows: m.all_rows,
             conflict,
             returning,
         })
+    }
+
+    /// `into t (a, b) values (..), (..)` or `into t (a, b) from ... select ...`:
+    /// the columns, then the checked rows or the checked feeding query.
+    fn insert_rows(&mut self, table: &TableIR, m: &Mutation) -> (Vec<String>, Vec<Vec<QExpr>>, Option<Box<SubqueryIR>>) {
+        // a `None` keeps a bad column's place so the rest of each row still lines up and is checked
+        let mut cols: Vec<Option<&certo_sdl::ColumnIR>> = Vec::new();
+        let mut seen: Vec<&str> = Vec::new();
+        for id in &m.insert_columns {
+            let Some(col) = table.column(&id.name) else {
+                self.fail("QL206", format!("unknown column `{}` in `{}`", id.name, table.name), id.span);
+                cols.push(None);
+                continue;
+            };
+            if seen.contains(&col.name.as_str()) {
+                self.fail("QL235", format!("column `{}` is listed more than once", col.name), id.span);
+                cols.push(None);
+                continue;
+            }
+            seen.push(&col.name);
+            if col.generated == Some(certo_sdl::Generation::Always) {
+                self.fail("QL234", format!("`{}` is `generated always`; its value cannot be set", col.name), id.span);
+                cols.push(None);
+                continue;
+            }
+            cols.push(Some(col));
+        }
+        let names: Vec<String> = cols.iter().flatten().map(|c| c.name.clone()).collect();
+
+        let mut rows = Vec::new();
+        for row in &m.rows {
+            if row.len() != cols.len() {
+                let span = row[0].span().to(row[row.len() - 1].span());
+                self.fail("QL242", format!("this row has {} value(s) but {} column(s) are listed", row.len(), cols.len()), span);
+                continue;
+            }
+            let mut out = Vec::new();
+            for (col, e) in cols.iter().zip(row) {
+                let Some(v) = self.expr(e, Ctx::Set) else { continue };
+                if let Some(col) = col
+                    && self.assignable(col, &v, e.span())
+                {
+                    out.push(v.e);
+                }
+            }
+            rows.push(out);
+        }
+
+        let mut source = None;
+        if let Some(q) = &m.source
+            && let Some((ir, body)) = self.subquery(q)
+        {
+            if body.outputs.len() != cols.len() {
+                self.fail(
+                    "QL242",
+                    format!("the query returns {} column(s) but {} column(s) are listed", body.outputs.len(), cols.len()),
+                    q.span,
+                );
+            } else {
+                for (col, out) in cols.iter().zip(&body.outputs) {
+                    if let Some(col) = col {
+                        self.assignable(col, &out.typed, out.span);
+                    }
+                }
+                source = Some(Box::new(ir));
+            }
+        }
+        (names, rows, source)
     }
 
     fn conflict(&mut self, table: &'a TableIR, alias: &str, c: &Conflict) -> Option<ConflictIR> {
@@ -587,6 +834,7 @@ impl<'a> Checker<'a> {
             QExpr::Column { source, column } => self
                 .sources
                 .iter()
+                .rev()
                 .find(|s| &s.alias == source)
                 .and_then(|s| s.table.column(column))
                 .and_then(|c| rank(&c.ty))
@@ -622,7 +870,7 @@ impl<'a> Checker<'a> {
             return None;
         };
         let alias = t.alias.as_ref().map_or_else(|| t.table.name.clone(), |a| a.name.clone());
-        if self.sources.iter().any(|s| s.alias == alias) {
+        if self.sources[self.scope_start()..].iter().any(|s| s.alias == alias) {
             let span = t.alias.as_ref().map_or(t.table.span, |a| a.span);
             self.fail("QL204", format!("`{alias}` is already used as a table alias in this query"), span);
             return None;
@@ -678,22 +926,44 @@ impl<'a> Checker<'a> {
 
     // ---- name resolution -------------------------------------------------- //
 
+    /// The `sources` index ranges of the open scopes, innermost first.
+    fn scope_ranges(&self) -> Vec<std::ops::Range<usize>> {
+        let mut out = Vec::new();
+        let mut end = self.sources.len();
+        for &start in self.scopes.iter().rev() {
+            out.push(start..end);
+            end = start;
+        }
+        out
+    }
+
+    /// Resolve `[qualifier.]name`. The innermost query's tables win; a name that
+    /// is not there is looked for in the queries around (a correlated reference).
     fn column(&mut self, qualifier: &Option<certo_sdl::Ident>, name: &certo_sdl::Ident) -> Option<Typed> {
-        let found: Vec<(usize, &certo_sdl::ColumnIR)> = match qualifier {
+        let mut found: Vec<(usize, &certo_sdl::ColumnIR)> = Vec::new();
+        let ranges = self.scope_ranges();
+        match qualifier {
             Some(q) => {
-                let Some(i) = self.sources.iter().position(|s| s.alias == q.name) else {
+                let Some(i) = ranges
+                    .iter()
+                    .find_map(|r| self.sources[r.clone()].iter().position(|s| s.alias == q.name).map(|p| r.start + p))
+                else {
                     self.fail("QL205", format!("unknown table alias `{}`", q.name), q.span);
                     return None;
                 };
-                self.sources[i].table.column(&name.name).map(|c| (i, c)).into_iter().collect()
+                found.extend(self.sources[i].table.column(&name.name).map(|c| (i, c)));
             }
-            None => self
-                .sources
-                .iter()
-                .enumerate()
-                .filter_map(|(i, s)| s.table.column(&name.name).map(|c| (i, c)))
-                .collect(),
-        };
+            None => {
+                for r in ranges {
+                    found = r
+                        .filter_map(|i| self.sources[i].table.column(&name.name).map(|c| (i, c)))
+                        .collect();
+                    if !found.is_empty() {
+                        break;
+                    }
+                }
+            }
+        }
         match found.as_slice() {
             [(i, c)] => {
                 let s = &self.sources[*i];
@@ -854,7 +1124,58 @@ impl<'a> Checker<'a> {
                 Some(Typed { e: QExpr::Case { whens: ws, otherwise: other }, t: result, nullable, agg })
             }
             Expr::Call { func, args, star, distinct, span } => self.call(func, args, *star, *distinct, *span, ctx),
+            Expr::Exists(q, _) => {
+                let (ir, _) = self.subquery(q)?;
+                Some(Typed { e: QExpr::Exists { query: Box::new(ir) }, t: T::Known(builtin(Builtin::Bool)), nullable: false, agg: false })
+            }
+            Expr::InQuery { expr, query, negated, span } => {
+                let l = self.expr(expr, ctx);
+                let sub = self.subquery(query);
+                let (l, (ir, body)) = (l?, sub?);
+                let col = self.one_column(&body, *span, "`in`")?;
+                if !self.comparable(&l, &col, *span) {
+                    if !self.failed {
+                        self.fail("QL211", format!("cannot compare {} with the subquery's {}", describe_t(&l.t), describe_t(&col.t)), *span);
+                    }
+                    return None;
+                }
+                Some(Typed {
+                    nullable: l.nullable || col.nullable,
+                    agg: l.agg,
+                    t: T::Known(builtin(Builtin::Bool)),
+                    e: QExpr::InQuery { expr: Box::new(l.e), query: Box::new(ir), negated: *negated },
+                })
+            }
+            Expr::Scalar(q, span) => {
+                let (ir, body) = self.subquery(q)?;
+                let col = self.one_column(&body, *span, "a subquery used as a value")?;
+                let one_row = body.single_row || matches!(&body.limit, Some(QExpr::Number { value }) if *value <= 1);
+                if !one_row {
+                    self.fail(
+                        "QL241",
+                        "a subquery used as a value must return at most one row: use aggregates without `group by`, or `limit 1`",
+                        *span,
+                    );
+                    return None;
+                }
+                // an aggregate always yields a row; otherwise the row may not exist
+                let nullable = col.nullable || !body.single_row;
+                Some(Typed { e: QExpr::Scalar { query: Box::new(ir) }, t: col.t, nullable, agg: false })
+            }
         }
+    }
+
+    /// The single column a subquery must have, as a typed value.
+    fn one_column(&mut self, body: &Body, span: Span, what: &str) -> Option<Typed> {
+        let [out] = body.outputs.as_slice() else {
+            self.fail("QL240", format!("the subquery for {what} must return exactly one column, not {}", body.outputs.len()), span);
+            return None;
+        };
+        if out.typed.t == T::Null {
+            self.fail("QL220", "cannot tell the type of the subquery's column: it is only NULL", out.span);
+            return None;
+        }
+        Some(out.typed.clone())
     }
 
     /// Can these two be compared? A string literal may stand for an enum

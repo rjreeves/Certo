@@ -535,3 +535,170 @@ fn statements_serialise_with_their_kind() {
     assert_eq!(j[1]["columns"][0]["name"], "id");
     assert_eq!(j[3]["columns"], serde_json::json!([]));
 }
+
+// ---- subqueries ------------------------------------------------------------------ //
+
+fn sql_of(src: &str) -> String { ok(src).remove(0).sql }
+
+#[test]
+fn in_and_exists_subqueries_lower_and_are_typed() {
+    let s = sql_of(
+        "query q() { from customers c where c.id in (from orders o where o.total > 5 select o.customer_id) select c.name }",
+    );
+    assert!(
+        s.contains("(\"c\".\"id\" IN (SELECT \"o\".\"customer_id\" AS \"customer_id\" FROM \"orders\" AS \"o\" WHERE (\"o\".\"total\" > 5)))"),
+        "{s}"
+    );
+    let s = sql_of("query q() { from customers c where c.id not in (from orders o select o.customer_id) select c.id }");
+    assert!(s.contains("NOT IN (SELECT"), "{s}");
+
+    // correlated: the inner query reads the outer `c`
+    let s = sql_of(
+        "query q() { from customers c where exists (from orders o where o.customer_id == c.id select 1) select c.id }",
+    );
+    assert!(s.contains("EXISTS (SELECT 1 AS \"column1\" FROM \"orders\" AS \"o\" WHERE (\"o\".\"customer_id\" = \"c\".\"id\"))"), "{s}");
+    let s = sql_of(
+        "query q() { from customers c where not exists (from orders o where o.customer_id == c.id select o.id) select c.id }",
+    );
+    assert!(s.contains("(NOT EXISTS ("), "{s}");
+    // parameters are shared with the outer query
+    let q = ok("query q(min: decimal(10,2)) { from customers c where exists (from orders o where o.customer_id == c.id and o.total >= :min select 1) select c.id }");
+    assert_eq!(q[0].param_order, ["min"]);
+}
+
+#[test]
+fn scalar_subqueries_are_typed_and_must_yield_one_row() {
+    let q = &ok(
+        "query q() { from customers c select c.name,
+            (from orders o where o.customer_id == c.id select count(*)) as n,
+            (from orders o where o.customer_id == c.id select max(o.total)) as biggest,
+            (from orders o where o.customer_id == c.id select o.status order by o.id limit 1) as first_status }",
+    )[0];
+    let cols = &q.ir.select;
+    assert_eq!((cols[1].ty.clone(), cols[1].nullable), (b(Builtin::BigInt), false), "count is never null");
+    assert_eq!(cols[2].ty, TypeIR::Builtin(Builtin::Numeric(10, 2)));
+    assert!(cols[2].nullable, "max over no rows");
+    assert!(cols[3].nullable, "limit 1 may find no row");
+    // more than one row, or more than one column, is refused
+    assert_eq!(errors("query q() { from customers c select (from orders o select o.id) as x }"), ["QL241"]);
+    assert_eq!(errors("query q() { from customers c select (from orders o select count(*), max(o.id)) as x }"), ["QL240"]);
+    assert_eq!(errors("query q() { from customers c where c.id in (from orders o select o.id, o.total) select c.id }"), ["QL240"]);
+    // the subquery's value is usable like any other
+    let q = ok("query q() { from orders o where o.total > (from orders p select avg(p.total)) select o.id }");
+    assert!(q[0].sql.contains("(\"o\".\"total\" > (SELECT avg(\"p\".\"total\") AS \"column1\" FROM \"orders\" AS \"p\"))"), "{}", q[0].sql);
+}
+
+#[test]
+fn subquery_scopes_resolve_innermost_first() {
+    // `name` exists only in customers, so it means the outer `c`; `id` is in orders, so it means `o`
+    ok("query q() { from customers c where exists (from orders o where o.status == name and id > 0 select 1) select c.id }");
+    // the same alias inside a subquery hides the outer one
+    let s = sql_of("query q() { from customers c where exists (from customers c where c.id == 1 select 1) select c.id }");
+    assert!(s.contains("FROM \"customers\" AS \"c\" WHERE"), "{s}");
+    // an alias that belongs to no open query
+    assert_eq!(errors("query q() { from customers c where exists (from orders o where x.id == 1 select 1) select c.id }"), ["QL205"]);
+    // a subquery's own tables are not visible outside it
+    assert_eq!(errors("query q() { from customers c where exists (from orders o select 1) and o.id == 1 select c.id }"), ["QL205"]);
+    // ambiguity is judged within the innermost scope that has the name
+    assert_eq!(
+        errors("query q() { from customers c where exists (from orders o join items i on i.order_id == o.id where qty > 0 select 1) select c.id }"),
+        ["QL207"]
+    );
+}
+
+#[test]
+fn grouping_rules_see_through_subqueries() {
+    // a grouped query may use its grouped columns inside a subquery...
+    ok("query q() { from customers c group by c.id select c.id, (from orders o where o.customer_id == c.id select count(*)) as n }");
+    // ...but not one it has not grouped
+    assert_eq!(
+        errors("query q() { from customers c group by c.id select c.id, (from orders o where o.status == c.name select count(*)) as n }")
+            .len(),
+        1
+    );
+    // inside a grouped subquery, the outer query's columns are constants
+    ok("query q() { from customers c where exists (from orders o where o.customer_id == c.id group by o.status select o.status, c.id) select c.id }");
+    // a subquery's aggregate does not make the outer query grouped
+    ok("query q() { from customers c select c.id, (from orders o select count(*)) as n }");
+    // aggregates are still refused where the clause forbids them
+    assert_eq!(errors("query q() { from customers c where (from orders o select count(*)) > count(*) select c.id }"), ["QL213"]);
+}
+
+#[test]
+fn mutations_take_subqueries() {
+    let m = mutation("update u() { orders o set paid = true where o.customer_id in (from customers c where c.role == \"admin\" select c.id) }");
+    assert!(m.sql.contains("WHERE (\"o\".\"customer_id\" IN (SELECT \"c\".\"id\" AS \"id\" FROM \"customers\" AS \"c\""), "{}", m.sql);
+    let m = mutation("delete d() { from orders o where not exists (from items i where i.order_id == o.id select 1) }");
+    assert!(m.sql.contains("NOT EXISTS (SELECT 1"), "{}", m.sql);
+    // a value that may be NULL still cannot go into a NOT NULL column, subquery or not
+    assert_eq!(
+        errors("insert i() { into items set order_id = 1, sku = \"x\", qty = 1, price = (from orders o select max(o.total)) }"),
+        ["QL232"]
+    );
+    mutation("insert i() { into items set order_id = 1, sku = \"x\", qty = 1, price = coalesce((from orders o select max(o.total)), 0) }");
+}
+
+// ---- multi-row insert and insert ... select ------------------------------------------ //
+
+#[test]
+fn multi_row_insert() {
+    let m = mutation(
+        "insert many(a: text, b: text) { into customers (name, email) values (:a, \"a@x.com\"), (:b, \"b@x.com\") returning id, name }",
+    );
+    assert_eq!(
+        m.sql,
+        "INSERT INTO \"customers\" AS \"customers\" (\"name\", \"email\")\nVALUES (($1::text), 'a@x.com'), (($2::text), 'b@x.com')\nRETURNING \"customers\".\"id\" AS \"id\", \"customers\".\"name\" AS \"name\""
+    );
+    assert_eq!(m.param_order, ["a", "b"]);
+    assert_eq!(m.ir.rows.len(), 2);
+    assert_eq!(m.ir.insert_columns, ["name", "email"]);
+
+    // one row in the tabular form is fine too, and the same rules apply as for `set`
+    mutation("insert one(a: text) { into customers (name) values (:a) }");
+    assert_eq!(errors("insert i(a: text null) { into customers (name) values (:a) }"), ["QL232"]);
+    assert_eq!(errors("insert i() { into customers (name, email) values (\"a\") }"), ["QL242"]);
+    assert_eq!(errors("insert i() { into customers (name) values (\"a\"), (\"b\", \"c\") }"), ["QL242"]);
+    assert_eq!(errors("insert i() { into customers (name, name) values (\"a\", \"b\") }"), ["QL235"]);
+    assert_eq!(errors("insert i() { into customers (name, nope) values (\"a\", 1) }"), ["QL206"]);
+    assert_eq!(errors("insert i() { into orders (qty) values (1), (2) }"), ["QL233"]);
+    assert_eq!(errors("insert i() { into customers (name) values (5) }"), ["QL211"]);
+    // every row's errors are reported, not just the first
+    assert_eq!(errors("insert i() { into customers (name) values (5), (6) }"), ["QL211", "QL211"]);
+    // the upsert and returning clauses follow either form
+    mutation("insert i(a: text, e: varchar(100)) { into customers (name, email) values (:a, :e) on conflict (email) do nothing }");
+}
+
+#[test]
+fn insert_from_a_query() {
+    let m = mutation("insert copy() { into items (order_id, sku, price, qty) from orders o where o.paid select o.id, \"x\", o.total, 1 returning id }");
+    assert!(
+        m.sql.starts_with("INSERT INTO \"items\" AS \"items\" (\"order_id\", \"sku\", \"price\", \"qty\")\nSELECT \"o\".\"id\" AS \"id\", 'x' AS \"column2\""),
+        "{}",
+        m.sql
+    );
+    assert!(m.sql.contains("WHERE \"o\".\"paid\""), "{}", m.sql);
+    assert!(m.ir.source.is_some() && m.ir.rows.is_empty());
+    // the count must match the column list
+    assert_eq!(errors("insert i() { into items (order_id, sku, price, qty) from orders o select o.id }"), ["QL242"]);
+    assert_eq!(errors("insert i() { into items (order_id, sku, price, qty) from orders o select o.id, o.total }"), ["QL242"]);
+    // types and nullability are checked per column
+    assert_eq!(errors("insert i() { into items (order_id, sku, price, qty) from customers c select c.id, c.note, 1, 1 }"), ["QL232"]);
+    assert_eq!(errors("insert i() { into items (order_id, sku, price, qty) from customers c select c.id, c.id, 1, 1 }"), ["QL211"]);
+    // the source may use subqueries itself
+    mutation("insert i() { into items (order_id, sku, price, qty) from orders o where o.id in (from orders p select p.id) select o.id, \"x\", o.total, 1 }");
+}
+
+#[test]
+fn statements_with_subqueries_serialise() {
+    let (s, _) = compile(
+        &schema(),
+        "query q() { from customers c where exists (from orders o where o.customer_id == c.id select 1) select c.id }",
+        Dialect::Postgres,
+    );
+    let j = to_json(&s.unwrap());
+    let filter = &j[0]["ir"]["filter"];
+    assert_eq!(filter["kind"], "exists");
+    assert_eq!(filter["query"]["sources"][0]["table"], "orders");
+    let back: QueryIR = serde_json::from_value(j[0]["ir"].clone()).unwrap();
+    assert!(matches!(back.filter, Some(QExpr::Exists { .. })));
+}

@@ -182,3 +182,62 @@ fn mutations_run_on_sqlite() {
     let m = db.stmt("delete wipe() { from orders o all rows }");
     assert_eq!(db.exec(&m, &[]), 1);
 }
+
+#[test]
+fn subqueries_and_multi_row_inserts_run_on_sqlite() {
+    let mut db = db();
+
+    // in / not in / exists / not exists, correlated and not
+    let q = db.stmt("query with_orders() { from customers c where c.id in (from orders o select o.customer_id) select c.name order by c.name }");
+    assert_eq!(db.run(&q, &[]), [["Ann"], ["Bob"]]);
+    let q = db.stmt("query without() { from customers c where c.id not in (from orders o select o.customer_id) select c.name }");
+    assert_eq!(db.run(&q, &[]), [["Cy"]]);
+    let q = db.stmt("query big(min: decimal(10,2)) { from customers c
+        where exists (from orders o where o.customer_id == c.id and o.total >= :min select 1) select c.name order by c.name }");
+    assert_eq!(db.run(&q, &[("min", Value::Real(20.0))]), [["Ann"]]);
+    let q = db.stmt("query idle() { from customers c where not exists (from orders o where o.customer_id == c.id select o.id) select c.name }");
+    assert_eq!(db.run(&q, &[]), [["Cy"]]);
+
+    // scalar subqueries: an aggregate is one row even when nothing matches; limit 1 may find nothing
+    let q = db.stmt("query counts() { from customers c select c.name,
+        (from orders o where o.customer_id == c.id select count(*)) as n,
+        (from orders o where o.customer_id == c.id select max(o.total)) as biggest,
+        (from orders o where o.customer_id == c.id select o.status order by o.id limit 1) as first_status
+        order by c.id }");
+    assert_eq!(db.run(&q, &[]), [["Ann", "2", "25.5", "new"], ["Bob", "1", "5", "new"], ["Cy", "0", "NULL", "NULL"]]);
+    let q = db.stmt("query above_avg() { from orders o where o.total > (from orders p select avg(p.total)) select o.id }");
+    assert_eq!(db.run(&q, &[]), [["2"]]);
+
+    // a grouped query using its grouped column inside a subquery
+    let q = db.stmt("query per() { from customers c group by c.id, c.name
+        select c.name, (from orders o where o.customer_id == c.id select count(*)) as n order by c.name }");
+    assert_eq!(db.run(&q, &[]), [["Ann", "2"], ["Bob", "1"], ["Cy", "0"]]);
+
+    // mutations with subqueries
+    let m = db.stmt("update pay_admins() { orders o set paid = true where o.customer_id in (from customers c where c.role == \"admin\" select c.id) }");
+    assert_eq!(db.exec(&m, &[]), 2);
+    let m = db.stmt("delete drop_idle() { from customers c where not exists (from orders o where o.customer_id == c.id select 1) returning c.name }");
+    assert_eq!(db.run(&m, &[]), [["Cy"]]);
+
+    // multi-row insert with returning, and an upsert across rows
+    let m = db.stmt("insert many(a: text, b: text) { into customers (name, email) values (:a, \"a2@x.com\"), (:b, \"b2@x.com\") returning id, name }");
+    let rows = db.run(&m, &[("a", t("Dee")), ("b", t("Eve"))]);
+    assert_eq!(rows.iter().map(|r| r[1].as_str()).collect::<Vec<_>>(), ["Dee", "Eve"]);
+    let m = db.stmt("insert upsert(a: text, b: text) { into customers (name, email) values (:a, \"a2@x.com\"), (:b, \"z@x.com\")
+        on conflict (email) do update set name = excluded.name returning name }");
+    let rows = db.run(&m, &[("a", t("Dee2")), ("b", t("Zed"))]);
+    assert_eq!(rows.len(), 2);
+    assert_eq!(db.c.query_row("SELECT name FROM customers WHERE email = 'a2@x.com'", [], |r| r.get::<_, String>(0)).unwrap(), "Dee2");
+
+    // insert ... select, plain and with an upsert (SQLite needs the WHERE to parse it)
+    db.c.execute_batch("CREATE TABLE archive (id INTEGER PRIMARY KEY, total NUMERIC NOT NULL);").unwrap();
+    let (ir, _) = compile_sdl("table archive { id: int primary key  total: decimal not null }
+table orders { id: serial primary key  customer_id: int not null  total: decimal(10,2) not null  status: text not null  paid: bool not null default false }");
+    let mut db2 = Db { c: db.c, schema: ir.unwrap() };
+    let m = db2.stmt("insert snapshot() { into archive (id, total) from orders o where o.total > 6 select o.id, o.total returning id }");
+    assert_eq!(db2.run(&m, &[]), [["1"], ["2"]]);
+    let m = db2.stmt("insert again() { into archive (id, total) from orders o select o.id, o.total on conflict (id) do nothing }");
+    assert!(m.sql().contains("WHERE TRUE"), "{}", m.sql());
+    db2.exec(&m, &[]);
+    assert_eq!(db2.c.query_row("SELECT count(*) FROM archive", [], |r| r.get::<_, i64>(0)).unwrap(), 3);
+}

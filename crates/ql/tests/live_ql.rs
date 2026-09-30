@@ -364,4 +364,44 @@ fn compiled_queries_run_and_their_declared_contract_is_true() {
     assert_eq!(bad(&db, "insert i(n: text null) { into customers set name = :n }"), ["QL232"]);
     assert_eq!(bad(&db, "update u(q: int) { orders o set qty = :q all rows }"), ["QL211"]);
     assert_eq!(bad(&db, "insert i() { into orders set qty = 1 }"), ["QL233"]);
+
+    // ==== subqueries and multi-row inserts ===========================================
+    let q = db.query("query with_orders() { from customers c where c.id in (from orders o select o.customer_id) select c.name order by c.name }");
+    assert!(!db.rows(&q, &[]).is_empty());
+    let q = db.query("query idle() { from customers c where not exists (from orders o where o.customer_id == c.id select 1) select c.id order by c.id }");
+    db.rows(&q, &[]);
+    let q = db.query("query counts() { from customers c select c.id,
+        (from orders o where o.customer_id == c.id select count(*)) as n,
+        (from orders o where o.customer_id == c.id select max(o.total)) as biggest,
+        (from orders o where o.customer_id == c.id select o.status order by o.id limit 1) as first_status
+        order by c.id }");
+    let rows = db.rows(&q, &[]);
+    assert!(rows.iter().all(|r| !r["n"].is_null()), "a count is never NULL, even with no rows");
+    assert!(rows.iter().any(|r| r["biggest"].is_null()), "max over no rows is NULL (declared nullable)");
+    let q = db.query("query above_avg(min: int) { from orders o
+        where o.total > (from orders p select avg(p.total)) or o.qty > :min select o.id order by o.id }");
+    db.check_contract(&q);
+    let q = db.query("query grouped() { from customers c group by c.id
+        select c.id, (from orders o where o.customer_id == c.id select count(*)) as n order by c.id }");
+    db.rows(&q, &[]);
+
+    let m = db.mutation("update pay(min: int) { orders o set paid = true where o.customer_id in (from customers c where c.id >= :min select c.id) }");
+    db.check_mutation(&m);
+    let m = db.mutation("delete drop_idle() { from customers c where not exists (from orders o where o.customer_id == c.id select 1) returning c.id }");
+    db.run(&m, &[]);
+
+    let m = db.mutation("insert many(a: text, b: text) { into customers (name, email) values (:a, \"m1@x.com\"), (:b, \"m2@x.com\") returning id, name }");
+    let (n, rows) = db.run(&m, &[&"Fay", &"Gus"]);
+    assert_eq!(n, 2);
+    assert_eq!(rows.iter().map(|r| r["name"].as_str().unwrap()).collect::<Vec<_>>(), ["Fay", "Gus"]);
+    let m = db.mutation("insert upsert_many(a: text, b: text) { into customers (name, email) values (:a, \"m1@x.com\"), (:b, \"m3@x.com\")
+        on conflict (email) do update set name = excluded.name returning name }");
+    let (n, _) = db.run(&m, &[&"Fay2", &"Hal"]);
+    assert_eq!(n, 2);
+    assert_eq!(db.count("SELECT count(*) FROM customers WHERE name = 'Fay2'"), 1);
+    let before = db.count("SELECT count(*) FROM items");
+    let m = db.mutation("insert snapshot() { into items (order_id, sku, price, qty) from orders o where o.total > 6 select o.id, \"snap\", o.total, 1 returning id, sku }");
+    let (n, rows) = db.run(&m, &[]);
+    assert!(n >= 1 && rows.iter().all(|r| r["sku"] == "snap"));
+    assert_eq!(db.count("SELECT count(*) FROM items"), before + n as i64);
 }
