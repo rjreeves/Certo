@@ -1,0 +1,166 @@
+//! Syntactic AST for QL. No name resolution or typing happens here.
+
+use certo_ast::span::Span;
+use certo_sdl::{BinaryOp, Ident, TypeRef};
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct QlFile {
+    pub queries: Vec<Query>,
+    pub mutations: Vec<Mutation>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Query {
+    pub name: Ident,
+    pub params: Vec<ParamDecl>,
+    pub from: TableRef,
+    pub joins: Vec<Join>,
+    pub filter: Option<Expr>,
+    pub group_by: Vec<Expr>,
+    pub having: Option<Expr>,
+    pub select: Select,
+    pub order_by: Vec<OrderItem>,
+    pub limit: Option<Expr>,
+    pub offset: Option<Expr>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ParamDecl {
+    pub name: Ident,
+    pub ty: TypeRef,
+    /// `name: type null`
+    pub nullable: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct TableRef {
+    pub table: Ident,
+    /// Defaults to the table name.
+    pub alias: Option<Ident>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum JoinKind {
+    Inner,
+    Left,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Join {
+    pub kind: JoinKind,
+    pub table: TableRef,
+    pub on: Expr,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Select {
+    pub distinct: bool,
+    pub items: Vec<SelectItem>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum SelectItem {
+    /// `*`: every column of every source.
+    Star(Span),
+    /// `alias.*`
+    SourceStar(Ident),
+    Expr { expr: Expr, alias: Option<Ident> },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct OrderItem {
+    pub expr: Expr,
+    pub desc: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum Expr {
+    Number(i64, Span),
+    /// Decimal text as written, sign included.
+    Decimal(String, Span),
+    Str(String, Span),
+    Bool(bool, Span),
+    Null(Span),
+    /// `name` or `qualifier.name`
+    Column { qualifier: Option<Ident>, name: Ident },
+    /// `:name`
+    Param(Ident),
+    Binary { op: BinaryOp, lhs: Box<Expr>, rhs: Box<Expr>, span: Span },
+    Not(Box<Expr>, Span),
+    IsNull { expr: Box<Expr>, negated: bool, span: Span },
+    In { expr: Box<Expr>, list: Vec<Expr>, negated: bool, span: Span },
+    Like { expr: Box<Expr>, pattern: Box<Expr>, negated: bool, span: Span },
+    Between { expr: Box<Expr>, low: Box<Expr>, high: Box<Expr>, negated: bool, span: Span },
+    /// A function or aggregate call. `star` is `count(*)`; `distinct` is `count(distinct x)`.
+    Call { func: Ident, args: Vec<Expr>, star: bool, distinct: bool, span: Span },
+    Case { whens: Vec<(Expr, Expr)>, otherwise: Option<Box<Expr>>, span: Span },
+    Paren(Box<Expr>, Span),
+}
+
+impl Expr {
+    pub fn span(&self) -> Span {
+        match self {
+            Expr::Number(_, s) | Expr::Decimal(_, s) | Expr::Str(_, s) | Expr::Bool(_, s) | Expr::Null(s)
+            | Expr::Not(_, s) | Expr::Paren(_, s) => *s,
+            Expr::Column { qualifier, name } => qualifier.as_ref().map_or(name.span, |q| q.span.to(name.span)),
+            Expr::Param(i) => i.span,
+            Expr::Binary { span, .. } | Expr::IsNull { span, .. } | Expr::In { span, .. } | Expr::Like { span, .. }
+            | Expr::Between { span, .. } | Expr::Call { span, .. } | Expr::Case { span, .. } => *span,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MutationKind {
+    Insert,
+    Update,
+    Delete,
+}
+
+/// `insert` / `update` / `delete`: a named, parameterised write.
+///
+/// ```text
+/// insert add(name: text) { into customers set name = :name returning id }
+/// update rename(id: int, n: text) { customers c set name = :n where c.id == :id }
+/// delete purge(before: timestamp) { from orders o where o.created < :before }
+/// ```
+#[derive(Debug, Clone, PartialEq)]
+pub struct Mutation {
+    pub kind: MutationKind,
+    pub name: Ident,
+    pub params: Vec<ParamDecl>,
+    pub table: TableRef,
+    /// `set col = expr, ...` (insert and update).
+    pub assignments: Vec<Assignment>,
+    /// `where expr` (update and delete).
+    pub filter: Option<Expr>,
+    /// `all rows`: an update or delete that deliberately has no `where`.
+    pub all_rows: bool,
+    /// `on conflict (...) do ...` (insert).
+    pub conflict: Option<Conflict>,
+    pub returning: Vec<SelectItem>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Assignment {
+    pub column: Ident,
+    pub value: Expr,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Conflict {
+    pub columns: Vec<Ident>,
+    pub action: ConflictAction,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum ConflictAction {
+    Nothing,
+    /// `do update set col = expr, ...` (may read the existing row and `excluded`).
+    Update(Vec<Assignment>),
+}

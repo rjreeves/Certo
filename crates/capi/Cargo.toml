@@ -1,0 +1,24 @@
+[package]
+name    = "certo-capi"
+version = "0.1.0"
+edition = "2024"
+description = "C ABI for the Certo database compiler (SDL / migration plan / SQL), for hosts such as the C# CLI"
+
+[lib]
+name       = "certo_capi"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+certo-ast         = { path = "../ast" }
+certo-diagnostics = { path = "../diagnostics" }
+certo-sdl         = { path = "../sdl" }
+certo-mdl         = { path = "../mdl" }
+certo-sql         = { path = "../sql" }
+certo-runner      = { path = "../runner" }
+certo-ql          = { path = "../ql" }
+serde             = { version = "1", features = ["derive"] }
+serde_json        = "1"
+
+[dev-dependencies]
+tempfile = "3"
+postgres = "0.19"

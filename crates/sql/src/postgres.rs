@@ -1,0 +1,495 @@
+//! PostgreSQL lowering. All identifiers are double-quoted, so SDL names like
+//! `user` or `order` need no special handling.
+//!
+//! Naming conventions (so drops can find what creates made):
+//!   primary key  "<table>_pkey"      (PostgreSQL's own default)
+//!   unique       "<table>_<col>_key" (PostgreSQL's own default)
+//!   foreign key  "fk_<table>_<col>"
+//! Index and CHECK constraint names are the SDL names, which SDL already
+//! requires to be unique across the schema.
+
+use crate::{unsupported, LowerError};
+use certo_mdl::{action_sql, EnumColumn, Op};
+use certo_sdl::{BinaryOp, Builtin, ColumnIR, CompositeIR, ExprIR, ForeignKeyIR, Generation, SequenceIR, TableIR, TypeIR};
+
+pub(crate) fn q(ident: &str) -> String {
+    format!("\"{}\"", ident.replace('"', "\"\""))
+}
+
+pub(crate) fn lit(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "''"))
+}
+
+pub(crate) fn ty(t: &TypeIR) -> String {
+    match t {
+        TypeIR::Builtin(b) => match b {
+            Builtin::Text => "text".into(),
+            Builtin::SmallInt => "smallint".into(),
+            Builtin::Int => "integer".into(),
+            Builtin::BigInt => "bigint".into(),
+            Builtin::Decimal => "numeric".into(),
+            Builtin::Real => "real".into(),
+            Builtin::Float => "double precision".into(),
+            Builtin::Bool => "boolean".into(),
+            Builtin::Uuid => "uuid".into(),
+            Builtin::Timestamp => "timestamptz".into(),
+            Builtin::TimestampNaive => "timestamp without time zone".into(),
+            Builtin::Date => "date".into(),
+            Builtin::Json => "jsonb".into(),
+            Builtin::Bytes => "bytea".into(),
+            Builtin::Varchar(n) => format!("character varying({n})"),
+            Builtin::Char(n) => format!("character({n})"),
+            Builtin::Numeric(p, s) => format!("numeric({p},{s})"),
+        },
+        TypeIR::Enum(n) | TypeIR::Composite(n) => q(n),
+    }
+}
+
+pub(crate) fn expr(e: &ExprIR) -> String {
+    match e {
+        ExprIR::Raw { sql } => sql.clone(),
+        // negatives are parenthesised so they are safe next to any operator
+        ExprIR::Number { value } if *value < 0 => format!("({value})"),
+        ExprIR::Number { value } => value.to_string(),
+        ExprIR::Decimal { value } if value.starts_with('-') => format!("({value})"),
+        ExprIR::Decimal { value } => value.clone(),
+        ExprIR::IsNull { expr: inner, negated } => {
+            format!("({} IS {}NULL)", expr(inner), if *negated { "NOT " } else { "" })
+        }
+        ExprIR::Not { expr: inner } => format!("(NOT {})", expr(inner)),
+        ExprIR::In { expr: inner, list, negated } => {
+            let items: Vec<_> = list.iter().map(expr).collect();
+            format!("({} {}IN ({}))", expr(inner), if *negated { "NOT " } else { "" }, items.join(", "))
+        }
+        ExprIR::Call { func, .. } if func == "today" => "CURRENT_DATE".to_string(),
+        ExprIR::String { value } => lit(value),
+        ExprIR::Bool { value } => if *value { "true" } else { "false" }.to_string(),
+        ExprIR::Column { name } => q(name),
+        ExprIR::EnumVariant { variant, .. } => lit(variant),
+        ExprIR::NextVal { sequence } => format!("nextval({})", lit(&q(sequence))),
+        ExprIR::Call { func, args } if func == "is_null" => format!("({} IS NULL)", expr(&args[0])),
+        ExprIR::Call { func, args } => {
+            let name = match func.as_str() {
+                "gen_uuid" => "gen_random_uuid",
+                "trim" => "btrim",
+                other => other,
+            };
+            let args: Vec<_> = args.iter().map(expr).collect();
+            format!("{name}({})", args.join(", "))
+        }
+        ExprIR::Binary { op, lhs, rhs } => {
+            let o = match op {
+                BinaryOp::Eq => "=",
+                BinaryOp::Ne => "<>",
+                BinaryOp::Lt => "<",
+                BinaryOp::Le => "<=",
+                BinaryOp::Gt => ">",
+                BinaryOp::Ge => ">=",
+                BinaryOp::Add => "+",
+                BinaryOp::Sub => "-",
+                BinaryOp::Mul => "*",
+                BinaryOp::Div => "/",
+                BinaryOp::And => "AND",
+                BinaryOp::Or => "OR",
+            };
+            format!("({} {o} {})", expr(lhs), expr(rhs))
+        }
+    }
+}
+
+/// `"col" type [NOT NULL] [DEFAULT ..]`; `inline_unique` adds ` UNIQUE` (ALTER ADD COLUMN).
+/// `serial` family spelling for a serial column, the plain type otherwise.
+fn column_type(c: &ColumnIR) -> String {
+    match (c.generated, &c.ty) {
+        (Some(Generation::Serial), TypeIR::Builtin(Builtin::SmallInt)) => "smallserial".into(),
+        (Some(Generation::Serial), TypeIR::Builtin(Builtin::BigInt)) => "bigserial".into(),
+        (Some(Generation::Serial), _) => "serial".into(),
+        _ => ty(&c.ty),
+    }
+}
+
+fn identity_clause(g: Generation) -> &'static str {
+    match g {
+        Generation::Always => "GENERATED ALWAYS AS IDENTITY",
+        _ => "GENERATED BY DEFAULT AS IDENTITY",
+    }
+}
+
+fn column_def(c: &ColumnIR, inline_unique: bool, inline_pk: bool) -> String {
+    let mut s = format!("{} {}", q(&c.name), column_type(c));
+    if let Some(g @ (Generation::Always | Generation::ByDefault)) = c.generated {
+        s.push(' ');
+        s.push_str(identity_clause(g));
+    }
+    if !c.nullable { s.push_str(" NOT NULL"); }
+    if let Some(d) = &c.default { s.push_str(&format!(" DEFAULT {}", expr(d))); }
+    if inline_pk && c.primary_key { s.push_str(" PRIMARY KEY"); }
+    if inline_unique && c.unique && !c.primary_key { s.push_str(" UNIQUE"); }
+    s
+}
+
+fn unique_name(table: &str, col: &str) -> String { q(&format!("{table}_{col}_key")) }
+fn fk_name(table: &str, col: &str) -> String { q(&format!("fk_{table}_{col}")) }
+
+fn create_table(t: &TableIR) -> String {
+    let mut parts: Vec<String> = t.columns.iter().map(|c| column_def(c, false, false)).collect();
+    let pks: Vec<String> = t.columns.iter().filter(|c| c.primary_key).map(|c| q(&c.name)).collect();
+    if !pks.is_empty() {
+        parts.push(format!("CONSTRAINT {} PRIMARY KEY ({})", q(&format!("{}_pkey", t.name)), pks.join(", ")));
+    }
+    for c in t.columns.iter().filter(|c| c.unique && !c.primary_key) {
+        parts.push(format!("CONSTRAINT {} UNIQUE ({})", unique_name(&t.name, &c.name), q(&c.name)));
+    }
+    let body: Vec<String> = parts.iter().map(|p| format!("    {p}")).collect();
+    format!("CREATE TABLE {} (\n{}\n);", q(&t.name), body.join(",\n"))
+}
+
+fn add_fk(table: &str, col: &str, r: &ForeignKeyIR) -> String {
+    let mut s = format!(
+        "ALTER TABLE {} ADD CONSTRAINT {} FOREIGN KEY ({}) REFERENCES {} ({})",
+        q(table), fk_name(table, col), q(col), q(&r.table), q(&r.column)
+    );
+    for (kw, a) in [("DELETE", r.on_delete), ("UPDATE", r.on_update)] {
+        if a != certo_sdl::ReferentialAction::NoAction {
+            s.push_str(&format!(" ON {kw} {}", action_sql(a)));
+        }
+    }
+    s.push(';');
+    s
+}
+
+fn alter_column(op: &Op, table: &str, before: &ColumnIR, after: &ColumnIR, out: &mut Vec<String>) -> Result<(), LowerError> {
+    if before.primary_key != after.primary_key {
+        return Err(unsupported(op, "changing a primary key needs a hand-written migration"));
+    }
+    let at = format!("ALTER TABLE {} ALTER COLUMN {}", q(table), q(&after.name));
+    let ty_changed = before.ty != after.ty;
+
+    // A default that no longer casts to the new type would make the ALTER fail.
+    let mut dropped_default = false;
+    if ty_changed && before.default.is_some() {
+        out.push(format!("{at} DROP DEFAULT;"));
+        dropped_default = true;
+    }
+    if ty_changed {
+        let cast = if matches!(after.ty, TypeIR::Enum(_)) {
+            format!("{}::text::{}", q(&after.name), ty(&after.ty))
+        } else {
+            format!("{}::{}", q(&after.name), ty(&after.ty))
+        };
+        out.push(format!("{at} TYPE {} USING {cast};", ty(&after.ty)));
+    }
+    if before.nullable != after.nullable {
+        if !after.nullable
+            && let Some(d) = &after.default
+        {
+            // Existing NULLs would make SET NOT NULL fail; the column's own
+            // default is the only sensible fill. Without a default we leave
+            // the failure visible rather than invent data.
+            out.push(format!(
+                "UPDATE {} SET {} = {} WHERE {} IS NULL;",
+                q(table), q(&after.name), expr(d), q(&after.name)
+            ));
+        }
+        out.push(format!("{at} {} NOT NULL;", if after.nullable { "DROP" } else { "SET" }));
+    }
+    if before.default != after.default || (dropped_default && after.default.is_some()) {
+        match &after.default {
+            Some(d) => out.push(format!("{at} SET DEFAULT {};", expr(d))),
+            None if !dropped_default => out.push(format!("{at} DROP DEFAULT;")),
+            None => {}
+        }
+    }
+    if before.unique != after.unique {
+        let name = unique_name(table, &after.name);
+        if after.unique {
+            out.push(format!("ALTER TABLE {} ADD CONSTRAINT {name} UNIQUE ({});", q(table), q(&after.name)));
+        } else {
+            out.push(format!("ALTER TABLE {} DROP CONSTRAINT {name};", q(table)));
+        }
+    }
+    alter_generation(table, before, after, out);
+    Ok(())
+}
+
+/// Type of the sequence behind a serial column.
+fn sequence_type(c: &ColumnIR) -> &'static str {
+    match &c.ty {
+        TypeIR::Builtin(Builtin::SmallInt) => "smallint",
+        TypeIR::Builtin(Builtin::BigInt) => "bigint",
+        _ => "integer",
+    }
+}
+
+/// Bring a sequence's counter past every existing value, so the next id is unused.
+fn catch_up(sequence_expr: &str, table: &str, col: &str) -> String {
+    format!(
+        "SELECT setval({sequence_expr}, COALESCE((SELECT max({}) FROM {}), 0) + 1, false);",
+        q(col), q(table)
+    )
+}
+
+fn serial_sequence(table: &str, col: &str) -> String {
+    format!("pg_get_serial_sequence({}, {})", lit(&q(table)), lit(col))
+}
+
+fn add_serial(table: &str, c: &ColumnIR, out: &mut Vec<String>) {
+    let seq = format!("{table}_{}_seq", c.name);
+    out.push(format!("CREATE SEQUENCE {} AS {} OWNED BY {}.{};", q(&seq), sequence_type(c), q(table), q(&c.name)));
+    out.push(format!(
+        "ALTER TABLE {} ALTER COLUMN {} SET DEFAULT nextval({});",
+        q(table), q(&c.name), lit(&q(&seq))
+    ));
+    out.push(catch_up(&lit(&q(&seq)), table, &c.name));
+}
+
+/// Drop the default and the sequence a serial column owns. The sequence is
+/// looked up through its ownership, so a column or table that was renamed
+/// since (which does not rename the sequence) still works.
+fn drop_serial(table: &str, col: &str, out: &mut Vec<String>) {
+    out.push(format!(
+        "DO $$ DECLARE s text := {}; BEGIN ALTER TABLE {} ALTER COLUMN {} DROP DEFAULT; IF s IS NOT NULL THEN EXECUTE 'DROP SEQUENCE ' || s; END IF; END $$;",
+        serial_sequence(table, col), q(table), q(col)
+    ));
+}
+
+fn add_identity(table: &str, col: &str, g: Generation, out: &mut Vec<String>) {
+    let kind = if g == Generation::Always { "ALWAYS" } else { "BY DEFAULT" };
+    out.push(format!("ALTER TABLE {} ALTER COLUMN {} ADD GENERATED {kind} AS IDENTITY;", q(table), q(col)));
+    out.push(catch_up(&serial_sequence(table, col), table, col));
+}
+
+fn drop_identity(table: &str, col: &str, out: &mut Vec<String>) {
+    out.push(format!("ALTER TABLE {} ALTER COLUMN {} DROP IDENTITY;", q(table), q(col)));
+}
+
+/// serial / identity transitions. Adding a generation catches its counter up
+/// to the rows already there; removing one drops the sequence it owned.
+fn alter_generation(table: &str, before: &ColumnIR, after: &ColumnIR, out: &mut Vec<String>) {
+    use Generation::*;
+    let col = &after.name;
+    match (before.generated, after.generated) {
+        (a, b) if a == b => {}
+        (None, Some(Serial)) => add_serial(table, after, out),
+        (None, Some(g)) => add_identity(table, col, g, out),
+        (Some(Serial), None) => drop_serial(table, col, out),
+        (Some(_), None) => drop_identity(table, col, out),
+        (Some(Always), Some(ByDefault)) => {
+            out.push(format!("ALTER TABLE {} ALTER COLUMN {} SET GENERATED BY DEFAULT;", q(table), q(col)));
+        }
+        (Some(ByDefault), Some(Always)) => {
+            out.push(format!("ALTER TABLE {} ALTER COLUMN {} SET GENERATED ALWAYS;", q(table), q(col)));
+        }
+        (Some(Serial), Some(g)) => {
+            drop_serial(table, col, out);
+            add_identity(table, col, g, out);
+        }
+        (Some(_), Some(Serial)) => {
+            drop_identity(table, col, out);
+            add_serial(table, after, out);
+        }
+        _ => {}
+    }
+}
+
+fn sequence_options(s: &SequenceIR) -> String {
+    format!(
+        "START WITH {} INCREMENT BY {} MINVALUE {} MAXVALUE {} CACHE {} {}CYCLE",
+        s.start, s.increment, s.min, s.max, s.cache, if s.cycle { "" } else { "NO " }
+    )
+}
+
+fn alter_type(before: &CompositeIR, after: &CompositeIR, out: &mut Vec<String>) {
+    let at = format!("ALTER TYPE {}", q(&after.name));
+    for f in &before.fields {
+        if !after.fields.iter().any(|g| g.name == f.name) {
+            out.push(format!("{at} DROP ATTRIBUTE {};", q(&f.name)));
+        }
+    }
+    for f in &after.fields {
+        match before.fields.iter().find(|g| g.name == f.name) {
+            None => out.push(format!("{at} ADD ATTRIBUTE {} {};", q(&f.name), ty(&f.ty))),
+            Some(old) if old.ty != f.ty => {
+                out.push(format!("{at} ALTER ATTRIBUTE {} TYPE {};", q(&f.name), ty(&f.ty)));
+            }
+            Some(_) => {}
+        }
+    }
+}
+
+pub(crate) fn lower_op(op: &Op, out: &mut Vec<String>) -> Result<(), LowerError> {
+    match op {
+        Op::CreateEnum { definition } => {
+            let vs: Vec<_> = definition.variants.iter().map(|v| lit(v)).collect();
+            out.push(format!("CREATE TYPE {} AS ENUM ({});", q(&definition.name), vs.join(", ")));
+        }
+        Op::AddEnumVariant { name, variant } => {
+            out.push(format!("ALTER TYPE {} ADD VALUE IF NOT EXISTS {};", q(name), lit(variant)));
+        }
+        Op::RemoveEnumVariant { .. } => {
+            return Err(unsupported(
+                op,
+                "PostgreSQL cannot remove an enum value; add `remap Enum.variant -> other` to an MDL migration to recreate the type",
+            ));
+        }
+        Op::DropEnum { name } => out.push(format!("DROP TYPE {};", q(name))),
+
+        Op::CreateSequence { definition } => {
+            out.push(format!("CREATE SEQUENCE {} AS bigint {};", q(&definition.name), sequence_options(definition)));
+        }
+        Op::AlterSequence { after, .. } => {
+            out.push(format!("ALTER SEQUENCE {} {};", q(&after.name), sequence_options(after)));
+        }
+        Op::DropSequence { name } => out.push(format!("DROP SEQUENCE {};", q(name))),
+
+        Op::CreateType { definition } => {
+            let fs: Vec<_> = definition.fields.iter().map(|f| format!("{} {}", q(&f.name), ty(&f.ty))).collect();
+            out.push(format!("CREATE TYPE {} AS ({});", q(&definition.name), fs.join(", ")));
+        }
+        Op::AlterType { before, after, .. } => alter_type(before, after, out),
+        Op::DropType { name } => out.push(format!("DROP TYPE {};", q(name))),
+
+        Op::CreateTable { definition } => out.push(create_table(definition)),
+        Op::DropTable { name } => out.push(format!("DROP TABLE {};", q(name))),
+
+        Op::AddColumn { table, column } => {
+            out.push(format!("ALTER TABLE {} ADD COLUMN {};", q(table), column_def(column, true, true)));
+        }
+        Op::AlterColumn { table, before, after } => alter_column(op, table, before, after, out)?,
+        Op::DropColumn { table, name } => {
+            out.push(format!("ALTER TABLE {} DROP COLUMN {};", q(table), q(name)));
+        }
+
+        Op::AddForeignKey { table, column, references } => out.push(add_fk(table, column, references)),
+        Op::DropForeignKey { table, name } => {
+            out.push(format!("ALTER TABLE {} DROP CONSTRAINT {};", q(table), fk_name(table, name)));
+        }
+
+        // Relationships are query-level sugar over foreign keys; no DDL.
+        Op::AddRelationship { .. } | Op::DropRelationship { .. } => {}
+
+        Op::CreateIndex { table, index } => {
+            let cols: Vec<_> = index.columns.iter().map(|c| q(c)).collect();
+            out.push(format!("CREATE INDEX {} ON {} ({});", q(&index.name), q(table), cols.join(", ")));
+        }
+        Op::DropIndex { name, .. } => out.push(format!("DROP INDEX {};", q(name))),
+
+        Op::AddConstraint { table, constraint } => {
+            out.push(format!(
+                "ALTER TABLE {} ADD CONSTRAINT {} CHECK {};",
+                q(table), q(&constraint.name), check_expr(&constraint.expr)
+            ));
+        }
+        Op::DropConstraint { table, name } => {
+            out.push(format!("ALTER TABLE {} DROP CONSTRAINT {};", q(table), q(name)));
+        }
+
+        Op::RenameTable { from, to, columns } => {
+            out.push(format!("ALTER TABLE {} RENAME TO {};", q(from), q(to)));
+            // constraint names are derived from table and column names; keep them in step
+            let rename = |old: String, new: String| {
+                format!("ALTER TABLE {} RENAME CONSTRAINT {} TO {};", q(to), q(&old), q(&new))
+            };
+            if columns.iter().any(|c| c.primary_key) {
+                out.push(rename(format!("{from}_pkey"), format!("{to}_pkey")));
+            }
+            for c in columns {
+                if c.unique && !c.primary_key {
+                    out.push(rename(format!("{from}_{}_key", c.name), format!("{to}_{}_key", c.name)));
+                }
+                if c.references.is_some() {
+                    out.push(rename(format!("fk_{from}_{}", c.name), format!("fk_{to}_{}", c.name)));
+                }
+            }
+        }
+        Op::RenameColumn { table, from, to, column } => {
+            out.push(format!("ALTER TABLE {} RENAME COLUMN {} TO {};", q(table), q(from), q(to)));
+            let rename = |old: String, new: String| {
+                format!("ALTER TABLE {} RENAME CONSTRAINT {} TO {};", q(table), q(&old), q(&new))
+            };
+            if column.unique && !column.primary_key {
+                out.push(rename(format!("{table}_{from}_key"), format!("{table}_{to}_key")));
+            }
+            if column.references.is_some() {
+                out.push(rename(format!("fk_{table}_{from}"), format!("fk_{table}_{to}")));
+            }
+        }
+        Op::RecreateEnum { name, after, mappings, columns, .. } => {
+            recreate_enum(name, &after.variants, mappings, columns, out);
+        }
+        Op::DataUpdate { table, set, filter } => {
+            let assigns: Vec<_> = set.iter().map(|a| format!("{} = {}", q(&a.column), expr(&a.value))).collect();
+            let mut s = format!("UPDATE {} SET {}", q(table), assigns.join(", "));
+            if let Some(f) = filter {
+                s.push_str(&format!(" WHERE {}", expr(f)));
+            }
+            s.push(';');
+            out.push(s);
+        }
+        Op::Backfill { table, column, value } => {
+            out.push(format!(
+                "UPDATE {} SET {} = {} WHERE {} IS NULL;",
+                q(table), q(column), expr(value), q(column)
+            ));
+            out.push(format!("ALTER TABLE {} ALTER COLUMN {} SET NOT NULL;", q(table), q(column)));
+        }
+        Op::RawSql { dialect, sql } => {
+            if dialect.as_deref().is_none_or(|d| d == "postgres") {
+                let s = sql.trim();
+                out.push(if s.ends_with(';') { s.to_string() } else { format!("{s};") });
+            }
+        }
+    }
+    Ok(())
+}
+
+/// PostgreSQL cannot drop an enum value, so build the smaller type beside the
+/// old one, move every column across (rows of removed variants are remapped
+/// first), and swap the names. Defaults are dropped and restored because
+/// they are typed against the old enum.
+fn recreate_enum(
+    name: &str,
+    variants: &[String],
+    mappings: &[certo_mdl::VariantMapping],
+    columns: &[EnumColumn],
+    out: &mut Vec<String>,
+) {
+    let tmp = format!("{name}__new");
+    let alter = |c: &EnumColumn| format!("ALTER TABLE {} ALTER COLUMN {}", q(&c.table), q(&c.column.name));
+
+    for c in columns.iter().filter(|c| c.column.default.is_some()) {
+        out.push(format!("{} DROP DEFAULT;", alter(c)));
+    }
+    for m in mappings {
+        for c in columns {
+            out.push(format!(
+                "UPDATE {} SET {col} = {} WHERE {col} = {};",
+                q(&c.table), lit(&m.to), lit(&m.from), col = q(&c.column.name)
+            ));
+        }
+    }
+    let vs: Vec<_> = variants.iter().map(|v| lit(v)).collect();
+    out.push(format!("CREATE TYPE {} AS ENUM ({});", q(&tmp), vs.join(", ")));
+    for c in columns {
+        out.push(format!(
+            "{} TYPE {t} USING {}::text::{t};",
+            alter(c), q(&c.column.name), t = q(&tmp)
+        ));
+    }
+    for c in columns {
+        if let Some(d) = &c.column.default {
+            out.push(format!("{} SET DEFAULT {};", alter(c), expr(d)));
+        }
+    }
+    out.push(format!("DROP TYPE {};", q(name)));
+    out.push(format!("ALTER TYPE {} RENAME TO {};", q(&tmp), q(name)));
+}
+
+/// CHECK needs parentheses around the whole expression. Binary expressions
+/// are already fully parenthesised by `expr`.
+fn check_expr(e: &ExprIR) -> String {
+    match e {
+        ExprIR::Binary { .. } => expr(e),
+        _ => format!("({})", expr(e)),
+    }
+}

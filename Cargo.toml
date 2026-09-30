@@ -23,6 +23,12 @@ members = [
     "crates/ffi",
     "crates/ui",
     "crates/xeq",
+    "crates/sdl",
+    "crates/mdl",
+    "crates/sql",
+    "crates/capi",
+    "crates/runner",
+    "crates/ql",
 ]
 resolver = "2"
 
