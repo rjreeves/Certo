@@ -50,13 +50,34 @@ impl Lowerer<'_> {
         let mut lines = Vec::new();
         match m.kind {
             MutationKind::Insert => {
-                let cols: Vec<String> = m.assignments.iter().map(|a| self.id(&a.column)).collect();
-                let vals: Vec<String> = m.assignments.iter().map(|a| self.expr(&a.expr)).collect();
-                if cols.is_empty() {
-                    lines.push(format!("INSERT INTO {table} DEFAULT VALUES"));
-                } else {
+                if let Some(src) = &m.source {
+                    let cols: Vec<String> = m.insert_columns.iter().map(|c| self.id(c)).collect();
                     lines.push(format!("INSERT INTO {table} ({})", cols.join(", ")));
-                    lines.push(format!("VALUES ({})", vals.join(", ")));
+                    let mut sql = self.select_lines(&src.sources, &src.select, &src.filter, &src.group_by, &src.having, src.distinct, &src.order_by, &src.limit, &src.offset);
+                    // SQLite cannot tell `ON CONFLICT` from a join's `ON` after a bare `INSERT ... SELECT`
+                    if m.conflict.is_some() && self.dialect == Dialect::Sqlite && src.filter.is_none() {
+                        let at = sql.iter().position(|l| l.starts_with("GROUP BY") || l.starts_with("HAVING") || l.starts_with("ORDER BY") || l.starts_with("LIMIT") || l.starts_with("OFFSET")).unwrap_or(sql.len());
+                        sql.insert(at, "WHERE TRUE".to_string());
+                    }
+                    lines.extend(sql);
+                } else if !m.rows.is_empty() {
+                    let cols: Vec<String> = m.insert_columns.iter().map(|c| self.id(c)).collect();
+                    lines.push(format!("INSERT INTO {table} ({})", cols.join(", ")));
+                    let rows: Vec<String> = m
+                        .rows
+                        .iter()
+                        .map(|r| format!("({})", r.iter().map(|e| self.expr(e)).collect::<Vec<_>>().join(", ")))
+                        .collect();
+                    lines.push(format!("VALUES {}", rows.join(", ")));
+                } else {
+                    let cols: Vec<String> = m.assignments.iter().map(|a| self.id(&a.column)).collect();
+                    let vals: Vec<String> = m.assignments.iter().map(|a| self.expr(&a.expr)).collect();
+                    if cols.is_empty() {
+                        lines.push(format!("INSERT INTO {table} DEFAULT VALUES"));
+                    } else {
+                        lines.push(format!("INSERT INTO {table} ({})", cols.join(", ")));
+                        lines.push(format!("VALUES ({})", vals.join(", ")));
+                    }
                 }
                 if let Some(c) = &m.conflict {
                     let target: Vec<String> = c.columns.iter().map(|x| self.id(x)).collect();
@@ -99,13 +120,31 @@ impl Lowerer<'_> {
     }
 
     fn query(&mut self, q: &QueryIR) -> String {
+        self.select_lines(&q.sources, &q.select, &q.filter, &q.group_by, &q.having, q.distinct, &q.order_by, &q.limit, &q.offset)
+            .join("\n")
+    }
+
+    /// The clauses of a SELECT, one per line.
+    #[allow(clippy::too_many_arguments)]
+    fn select_lines(
+        &mut self,
+        sources: &[SourceIR],
+        select: &[ColumnOut],
+        filter: &Option<QExpr>,
+        group_by: &[QExpr],
+        having: &Option<QExpr>,
+        distinct: bool,
+        order_by: &[OrderIR],
+        limit: &Option<QExpr>,
+        offset: &Option<QExpr>,
+    ) -> Vec<String> {
         let mut lines = Vec::new();
 
         let cols: Vec<String> =
-            q.select.iter().map(|c| format!("{} AS {}", self.expr(&c.expr), self.id(&c.name))).collect();
-        lines.push(format!("SELECT {}{}", if q.distinct { "DISTINCT " } else { "" }, cols.join(", ")));
+            select.iter().map(|c| format!("{} AS {}", self.expr(&c.expr), self.id(&c.name))).collect();
+        lines.push(format!("SELECT {}{}", if distinct { "DISTINCT " } else { "" }, cols.join(", ")));
 
-        for (i, s) in q.sources.iter().enumerate() {
+        for (i, s) in sources.iter().enumerate() {
             let table = format!("{} AS {}", self.id(&s.table), self.id(&s.alias));
             if i == 0 {
                 lines.push(format!("FROM {table}"));
@@ -115,33 +154,42 @@ impl Lowerer<'_> {
                 lines.push(format!("{kind} {table} ON {on}"));
             }
         }
-        if let Some(f) = &q.filter {
+        if let Some(f) = filter {
             lines.push(format!("WHERE {}", self.expr(f)));
         }
-        if !q.group_by.is_empty() {
-            let g: Vec<String> = q.group_by.iter().map(|e| self.expr(e)).collect();
+        if !group_by.is_empty() {
+            let g: Vec<String> = group_by.iter().map(|e| self.expr(e)).collect();
             lines.push(format!("GROUP BY {}", g.join(", ")));
         }
-        if let Some(h) = &q.having {
+        if let Some(h) = having {
             lines.push(format!("HAVING {}", self.expr(h)));
         }
-        if !q.order_by.is_empty() {
-            let o: Vec<String> = q
-                .order_by
+        if !order_by.is_empty() {
+            let o: Vec<String> = order_by
                 .iter()
                 .map(|o| format!("{}{}", self.expr(&o.expr), if o.desc { " DESC" } else { "" }))
                 .collect();
             lines.push(format!("ORDER BY {}", o.join(", ")));
         }
-        if let Some(l) = &q.limit {
+        if let Some(l) = limit {
             lines.push(format!("LIMIT {}", self.expr(l)));
-        } else if q.offset.is_some() && self.dialect == Dialect::Sqlite {
+        } else if offset.is_some() && self.dialect == Dialect::Sqlite {
             lines.push("LIMIT -1".to_string()); // SQLite has no OFFSET without LIMIT
         }
-        if let Some(o) = &q.offset {
+        if let Some(o) = offset {
             lines.push(format!("OFFSET {}", self.expr(o)));
         }
-        lines.join("\n")
+        lines
+    }
+
+    /// A subquery on one line (its columns are qualified as usual, even under SQLite's bare RETURNING).
+    fn nested(&mut self, q: &SubqueryIR) -> String {
+        let bare = std::mem::replace(&mut self.bare_columns, false);
+        let sql = self
+            .select_lines(&q.sources, &q.select, &q.filter, &q.group_by, &q.having, q.distinct, &q.order_by, &q.limit, &q.offset)
+            .join(" ");
+        self.bare_columns = bare;
+        sql
     }
 
     fn param(&mut self, name: &str) -> String {
@@ -217,6 +265,11 @@ impl Lowerer<'_> {
                 None => format!("{func}(*)"),
                 Some(a) => format!("{func}({}{})", if *distinct { "DISTINCT " } else { "" }, self.expr(a)),
             },
+            QExpr::Exists { query } => format!("EXISTS ({})", self.nested(query)),
+            QExpr::InQuery { expr, query, negated } => {
+                format!("({} {}IN ({}))", self.expr(expr), if *negated { "NOT " } else { "" }, self.nested(query))
+            }
+            QExpr::Scalar { query } => format!("({})", self.nested(query)),
             QExpr::Case { whens, otherwise } => {
                 let mut s = String::from("CASE");
                 for w in whens {

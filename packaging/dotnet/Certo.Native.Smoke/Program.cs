@@ -59,7 +59,13 @@ const string ql = """
         from orders o join customers c on o.customer_id == c.id
         where o.total >= :min select o.id, c.name as customer, o.total order by o.id limit 10
     }
+    query busy() {
+        from customers c
+        where exists (from orders o where o.customer_id == c.id select 1)
+        select c.id, (from orders o where o.customer_id == c.id select count(*)) as orders
+    }
     insert add(e: varchar(100), n: text null) { into customers set email = :e, name = :n returning id }
+    insert add_two(a: varchar(100), b: varchar(100)) { into customers (email, name) values (:a, "A"), (:b, "B") returning id }
     update pay(id: int) { orders o set status = "paid" where o.id == :id }
     delete purge() { from orders o all rows }
     """;
@@ -67,7 +73,7 @@ foreach (var dialect in new[] { "postgres", "sqlite" })
 {
     var r = J(CertoNative.CompileQl(ir, ql, dialect));
     var kinds = r.GetProperty("statements").EnumerateArray().Select(s => s.GetProperty("kind").GetString()).ToArray();
-    Check(r.GetProperty("ok").GetBoolean() && string.Join(",", kinds) == "query,insert,update,delete",
+    Check(r.GetProperty("ok").GetBoolean() && string.Join(",", kinds) == "query,query,insert,insert,update,delete",
         $"CompileQl ({dialect}): {string.Join(",", kinds)}");
     var q = r.GetProperty("queries")[0];
     // o.id is NOT NULL; c.name is a nullable column, and `min` is the only parameter used
@@ -116,6 +122,7 @@ try
     {
         conn.Open();
         var add = stmts.First(s => s.GetProperty("name").GetString() == "add");
+    var busy = stmts.First(s => s.GetProperty("name").GetString() == "busy");
         using var insert = conn.CreateCommand();
         insert.CommandText = add.GetProperty("sql").GetString();
         var values = new Dictionary<string, object?> { ["e"] = "a@x.com", ["n"] = "Ann" };
@@ -124,6 +131,10 @@ try
             insert.Parameters.AddWithValue($"?{i++}", values[p.GetString()!] ?? DBNull.Value);
         var id = insert.ExecuteScalar();
         Check(Convert.ToInt64(id) == 1, "compiled INSERT ... RETURNING runs through Microsoft.Data.Sqlite");
+        using var sel = conn.CreateCommand();
+        sel.CommandText = busy.GetProperty("sql").GetString();
+        using var reader = sel.ExecuteReader();
+        Check(!reader.Read(), "compiled correlated subqueries run (no customer has orders yet)");
     }
 
     var missing = J(CertoNative.MigrateStatus(dir, "{}"));

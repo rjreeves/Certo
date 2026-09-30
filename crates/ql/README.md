@@ -83,10 +83,33 @@ values are stored without narrowing (an `int` parameter does not fit a
 `returning` gives the same typed contract as `select`; without it the host
 gets a row count. Placeholders are numbered by first use in the SQL text.
 
+## Subqueries and bulk inserts
+
+```
+query active() {
+    from customers c
+    where exists (from orders o where o.customer_id == c.id select 1)
+      and c.id not in (from blocked b select b.customer_id)
+    select c.name,
+           (from orders o where o.customer_id == c.id select count(*)) as orders,
+           (from orders o where o.customer_id == c.id select o.status order by o.id desc limit 1) as latest
+}
+insert add_two(a: text, b: text) {
+    into customers (name, email) values (:a, "a@x.com"), (:b, "b@x.com") returning id
+}
+insert snapshot() { into archive (id, total) from orders o where o.paid select o.id, o.total }
+```
+
+A subquery is a query's own clauses in parentheses. It sees the tables around it (correlation),
+inner names winning. `in` and value subqueries need one column; a value subquery must be
+provably one row (aggregates without `group by`) or say `limit 1`, and is then typed like the
+aggregate, or nullable. Tabular inserts check every row like a `set` value and count the values
+against the column list. Both are run against PostgreSQL and SQLite in the live tests.
+
 ## Not covered yet
 
-- No subqueries, `union`, window functions or CTEs; no `insert ... select`
-  or multi-row inserts.
+- No `union`, window functions or CTEs; subqueries cannot appear in `limit` / `offset`;
+  an `insert` cannot take a variable number of rows from one parameter.
 - Dialects: PostgreSQL and SQLite (`--dialect sqlite`; see `crates/sql/README.md` for the
   differences). A small function set (see `docs/ebnf.md`).
 - A `case` cannot mix a string literal with an enum column in its branches.

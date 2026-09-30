@@ -20,11 +20,14 @@ const MAX_NESTING: usize = 64;
 /// Words that end a table reference, so they are never taken as its alias.
 const CLAUSE_WORDS: &[&str] = &[
     "inner", "left", "join", "on", "where", "group", "having", "select", "order", "limit", "offset", "set", "all",
-    "returning",
+    "returning", "values", "from",
 ];
 
+/// How many subqueries may sit inside one another.
+const MAX_SUBQUERY_DEPTH: usize = 6;
+
 pub fn parse(src: &str) -> (QlFile, Vec<Diagnostic>) {
-    let mut q = Q { p: Parser::new(src), nodes: 0, nesting: 0 };
+    let mut q = Q { p: Parser::new(src), nodes: 0, nesting: 0, sub_depth: 0 };
     let (mut queries, mut mutations) = (Vec::new(), Vec::new());
     while !q.p.at_eof() {
         let start = q.p.pos();
@@ -51,6 +54,7 @@ struct Q {
     p: Parser,
     nodes: usize,
     nesting: usize,
+    sub_depth: usize,
 }
 
 impl Q {
@@ -73,7 +77,16 @@ impl Q {
         let name = self.p.ident("a query name")?;
         let params = self.param_list()?;
         self.p.expect(TokKind::LBrace)?;
+        let mut q = self.query_body(name, params)?;
+        let end = self.p.expect(TokKind::RBrace)?;
+        q.span = start.to(end);
+        Ok(q)
+    }
 
+    /// `from ... select ... [order by] [limit] [offset]`: a query's clauses, which
+    /// are also a subquery's and an `insert ... select`'s.
+    fn query_body(&mut self, name: certo_sdl::Ident, params: Vec<ParamDecl>) -> PResult<Query> {
+        let start = self.p.span();
         self.p.expect_word("from")?;
         let from = self.table_ref()?;
         let mut joins = Vec::new();
@@ -117,14 +130,30 @@ impl Q {
         }
         let limit = if self.p.eat_word("limit") { Some(self.expr()?) } else { None };
         let offset = if self.p.eat_word("offset") { Some(self.expr()?) } else { None };
-        let end = self.p.expect(TokKind::RBrace)?;
 
         Ok(Query {
             name, params, from, joins, filter, group_by, having,
             select: Select { distinct, items },
             order_by, limit, offset,
-            span: start.to(end),
+            span: start.to(self.p.prev_span()),
         })
+    }
+
+    /// A subquery after its opening `(` (already consumed); consumes the closing `)`.
+    fn subquery(&mut self) -> PResult<Box<Query>> {
+        if self.sub_depth >= MAX_SUBQUERY_DEPTH {
+            let s = self.p.span();
+            return self.fail("QL243", format!("subqueries are nested too deeply (more than {MAX_SUBQUERY_DEPTH} levels)"), s);
+        }
+        let start = self.p.span();
+        self.sub_depth += 1;
+        let name = certo_sdl::Ident { name: String::new(), span: start };
+        let body = self.query_body(name, Vec::new());
+        self.sub_depth -= 1;
+        let mut q = body?;
+        let end = self.p.expect(TokKind::RParen)?;
+        q.span = start.to(end);
+        Ok(Box::new(q))
     }
 
     /// `( name: type [null], ... )`
@@ -172,12 +201,33 @@ impl Q {
             MutationKind::Update => self.table_ref()?,
             MutationKind::Delete => { self.p.expect_word("from")?; self.table_ref()? }
         };
-        let assignments = if kind == MutationKind::Delete {
-            Vec::new()
-        } else {
+        let (mut assignments, mut insert_columns, mut rows, mut source) = (Vec::new(), Vec::new(), Vec::new(), None);
+        if kind == MutationKind::Insert && *self.p.peek() == TokKind::LParen {
+            // tabular form: (cols) values (..), (..)   or   (cols) from ... select ...
+            self.p.bump();
+            insert_columns.push(self.p.ident("a column name")?);
+            while self.p.eat(&TokKind::Comma) { insert_columns.push(self.p.ident("a column name")?); }
+            self.p.expect(TokKind::RParen)?;
+            if self.p.eat_word("values") {
+                loop {
+                    self.p.expect(TokKind::LParen)?;
+                    let mut row = vec![self.expr()?];
+                    while self.p.eat(&TokKind::Comma) { row.push(self.expr()?); }
+                    self.p.expect(TokKind::RParen)?;
+                    rows.push(row);
+                    if !self.p.eat(&TokKind::Comma) { break; }
+                }
+            } else if self.word_is("from") {
+                let qstart = self.p.span();
+                let name = certo_sdl::Ident { name: String::new(), span: qstart };
+                source = Some(Box::new(self.query_body(name, Vec::new())?));
+            } else {
+                return self.p.err("`values` or `from`");
+            }
+        } else if kind != MutationKind::Delete {
             self.p.expect_word("set")?;
-            self.assignments()?
-        };
+            assignments = self.assignments()?;
+        }
 
         let mut conflict = None;
         if kind == MutationKind::Insert && self.word_is("on") {
@@ -219,7 +269,7 @@ impl Q {
             while self.p.eat(&TokKind::Comma) { returning.push(self.select_item()?); }
         }
         let end = self.p.expect(TokKind::RBrace)?;
-        Ok(Mutation { kind, name, params, table, assignments, filter, all_rows, conflict, returning, span: start.to(end) })
+        Ok(Mutation { kind, name, params, table, assignments, insert_columns, rows, source, filter, all_rows, conflict, returning, span: start.to(end) })
     }
 
     fn table_ref(&mut self) -> PResult<TableRef> {
@@ -278,7 +328,8 @@ impl Q {
     fn depth(e: &Expr) -> usize {
         1 + match e {
             Expr::Number(..) | Expr::Decimal(..) | Expr::Str(..) | Expr::Bool(..) | Expr::Null(_)
-            | Expr::Column { .. } | Expr::Param(_) => 0,
+            | Expr::Column { .. } | Expr::Param(_) | Expr::Exists(..) | Expr::Scalar(..) => 0,
+            Expr::InQuery { expr, .. } => Self::depth(expr),
             Expr::Binary { lhs, rhs, .. } => Self::depth(lhs).max(Self::depth(rhs)),
             Expr::Not(i, _) | Expr::Paren(i, _) => Self::depth(i),
             Expr::IsNull { expr, .. } => Self::depth(expr),
@@ -365,6 +416,13 @@ impl Q {
                     let negated = self.p.eat_word("not");
                     self.p.expect_word("in")?;
                     self.p.expect(TokKind::LParen)?;
+                    if self.word_is("from") {
+                        let query = self.subquery()?;
+                        let span = lhs.span().to(query.span);
+                        lhs = Expr::InQuery { expr: Box::new(lhs), query, negated, span };
+                        self.check_depth(&lhs)?;
+                        continue;
+                    }
                     let mut list = vec![self.expr()?];
                     while self.p.eat(&TokKind::Comma) { list.push(self.expr()?); }
                     let end = self.p.expect(TokKind::RParen)?;
@@ -443,6 +501,12 @@ impl Q {
                 let name = self.p.ident("a parameter name")?;
                 Ok(Expr::Param(name))
             }
+            TokKind::LParen if matches!(self.p.peek_at(1), TokKind::Ident(w) if w == "from") => {
+                self.p.bump();
+                let query = self.subquery()?;
+                let span = span.to(query.span);
+                Ok(Expr::Scalar(query, span))
+            }
             TokKind::LParen => {
                 self.p.bump();
                 let e = self.expr()?;
@@ -452,6 +516,16 @@ impl Q {
             TokKind::Ident(w) => match w.as_str() {
                 "true" | "false" => { self.p.bump(); Ok(Expr::Bool(w == "true", span)) }
                 "null" => { self.p.bump(); Ok(Expr::Null(span)) }
+                "exists"
+                    if *self.p.peek_at(1) == TokKind::LParen
+                        && matches!(self.p.peek_at(2), TokKind::Ident(w) if w == "from") =>
+                {
+                    self.p.bump();
+                    self.p.bump();
+                    let query = self.subquery()?;
+                    let span = span.to(query.span);
+                    Ok(Expr::Exists(query, span))
+                }
                 "case" if !matches!(self.p.peek_at(1), TokKind::Dot | TokKind::LParen) => self.case_expr(span),
                 _ => self.name_or_call(),
             },

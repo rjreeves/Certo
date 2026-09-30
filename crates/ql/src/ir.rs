@@ -85,6 +85,27 @@ pub enum QExpr {
     /// An aggregate; `arg: None` is `count(*)`.
     Agg { func: String, arg: Option<Box<QExpr>>, distinct: bool },
     Case { whens: Vec<When>, otherwise: Option<Box<QExpr>> },
+    /// `exists (subquery)`
+    Exists { query: Box<SubqueryIR> },
+    /// `expr in (subquery)`: the subquery has one column.
+    InQuery { expr: Box<QExpr>, query: Box<SubqueryIR>, negated: bool },
+    /// `(subquery)` as a value: one column, at most one row (NULL if none).
+    Scalar { query: Box<SubqueryIR> },
+}
+
+/// A query nested in an expression. It may refer to the tables of the queries
+/// around it (correlation); `select` columns are named but nameless in SQL use.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SubqueryIR {
+    pub sources: Vec<SourceIR>,
+    pub filter: Option<QExpr>,
+    pub group_by: Vec<QExpr>,
+    pub having: Option<QExpr>,
+    pub distinct: bool,
+    pub select: Vec<ColumnOut>,
+    pub order_by: Vec<OrderIR>,
+    pub limit: Option<QExpr>,
+    pub offset: Option<QExpr>,
 }
 
 /// A checked `insert` / `update` / `delete`.
@@ -97,6 +118,13 @@ pub struct MutationIR {
     pub alias: String,
     /// `set` assignments (insert and update), in the order written.
     pub assignments: Vec<AssignIR>,
+    /// Insert, tabular form: the columns, and the `values` rows or the `select` that feeds them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub insert_columns: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rows: Vec<Vec<QExpr>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<Box<SubqueryIR>>,
     /// The `where` condition (update and delete); `None` with `all_rows` when written `all rows`.
     pub filter: Option<QExpr>,
     pub all_rows: bool,

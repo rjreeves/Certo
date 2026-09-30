@@ -11,6 +11,7 @@ pub struct QlFile {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Query {
+    /// Empty (and `params` empty) for a subquery.
     pub name: Ident,
     pub params: Vec<ParamDecl>,
     pub from: TableRef,
@@ -97,17 +98,24 @@ pub enum Expr {
     Call { func: Ident, args: Vec<Expr>, star: bool, distinct: bool, span: Span },
     Case { whens: Vec<(Expr, Expr)>, otherwise: Option<Box<Expr>>, span: Span },
     Paren(Box<Expr>, Span),
+    /// `exists (from ... select ...)`
+    Exists(Box<Query>, Span),
+    /// `x in (from ... select col)`
+    InQuery { expr: Box<Expr>, query: Box<Query>, negated: bool, span: Span },
+    /// `(from ... select expr)`: one column, at most one row.
+    Scalar(Box<Query>, Span),
 }
 
 impl Expr {
     pub fn span(&self) -> Span {
         match self {
             Expr::Number(_, s) | Expr::Decimal(_, s) | Expr::Str(_, s) | Expr::Bool(_, s) | Expr::Null(s)
-            | Expr::Not(_, s) | Expr::Paren(_, s) => *s,
+            | Expr::Not(_, s) | Expr::Paren(_, s) | Expr::Exists(_, s) | Expr::Scalar(_, s) => *s,
             Expr::Column { qualifier, name } => qualifier.as_ref().map_or(name.span, |q| q.span.to(name.span)),
             Expr::Param(i) => i.span,
             Expr::Binary { span, .. } | Expr::IsNull { span, .. } | Expr::In { span, .. } | Expr::Like { span, .. }
-            | Expr::Between { span, .. } | Expr::Call { span, .. } | Expr::Case { span, .. } => *span,
+            | Expr::Between { span, .. } | Expr::Call { span, .. } | Expr::Case { span, .. }
+            | Expr::InQuery { span, .. } => *span,
         }
     }
 }
@@ -135,6 +143,10 @@ pub struct Mutation {
     pub table: TableRef,
     /// `set col = expr, ...` (insert and update).
     pub assignments: Vec<Assignment>,
+    /// Insert, tabular form: `into t (a, b) values (..), (..)` or `into t (a, b) from ... select ...`.
+    pub insert_columns: Vec<Ident>,
+    pub rows: Vec<Vec<Expr>>,
+    pub source: Option<Box<Query>>,
     /// `where expr` (update and delete).
     pub filter: Option<Expr>,
     /// `all rows`: an update or delete that deliberately has no `where`.

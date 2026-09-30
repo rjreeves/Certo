@@ -286,3 +286,46 @@ fn a_column_may_be_called_like_a_statement_keyword() {
     let m = mutation("update u() { t set returning = 1, all = 2 where t.set == 1 }");
     assert_eq!(m.assignments[0].column.name, "returning");
 }
+
+// ---- subqueries and tabular inserts ------------------------------------------------ //
+
+#[test]
+fn subquery_forms_parse() {
+    let e = where_of("a in (from t select t.x)");
+    assert!(matches!(e, Expr::InQuery { negated: false, .. }));
+    assert!(matches!(where_of("a not in (from t select t.x)"), Expr::InQuery { negated: true, .. }));
+    assert!(matches!(where_of("exists (from t where t.a == 1 select 1)"), Expr::Exists(..)));
+    let Expr::Binary { rhs, .. } = where_of("a > (from t select max(t.x))") else { panic!() };
+    assert!(matches!(*rhs, Expr::Scalar(..)));
+    // a plain list and a plain parenthesised expression are unchanged
+    assert!(matches!(where_of("a in (1, 2)"), Expr::In { .. }));
+    assert!(matches!(where_of("(a + 1) > 2"), Expr::Binary { .. }));
+    // `exists` stays usable as a column name
+    assert!(matches!(where_of("exists == 1"), Expr::Binary { .. }));
+}
+
+#[test]
+fn subqueries_nest_but_only_so_far() {
+    let mut src = String::from("1 == 1");
+    for _ in 0..6 {
+        src = format!("exists (from t where {src} select 1)");
+    }
+    let (_, d) = parse(&format!("query q() {{ from t where {src} select t.x }}"));
+    assert!(d.is_empty(), "{d:?}");
+    let src = format!("exists (from t where {src} select 1)");
+    let (_, d) = parse(&format!("query q() {{ from t where {src} select t.x }}"));
+    assert!(d.iter().any(|x| x.code == "QL243"), "{d:?}");
+}
+
+#[test]
+fn tabular_insert_forms_parse() {
+    let m = mutation("insert i() { into t (a, b) values (1, 2), (3, 4) }");
+    assert_eq!(m.insert_columns.len(), 2);
+    assert_eq!(m.rows.len(), 2);
+    assert!(m.assignments.is_empty() && m.source.is_none());
+    let m = mutation("insert i() { into t (a) from u select u.x returning a }");
+    assert!(m.source.is_some() && m.rows.is_empty());
+    assert_eq!(m.returning.len(), 1);
+    let (_, d) = parse("insert i() { into t (a) }");
+    assert!(d.iter().any(|x| x.message.contains("values")), "{d:?}");
+}
