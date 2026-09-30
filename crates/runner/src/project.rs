@@ -30,7 +30,7 @@ impl Project {
     /// Create a new project in `root` (which must not already be one).
     pub fn init(root: &Path, dialect: &str) -> Result<Project, RunnerError> {
         if Dialect::from_name(dialect).is_none() {
-            return Err(RunnerError::Project(format!("unknown dialect `{dialect}` (supported: postgres)")));
+            return Err(RunnerError::Project(format!("unknown dialect `{dialect}` (supported: postgres, sqlite)")));
         }
         let config_path = root.join(CONFIG_FILE);
         if config_path.exists() {
@@ -65,7 +65,7 @@ impl Project {
             .map_err(|e| RunnerError::Project(format!("{}: {e}", path.display())))?;
         if Dialect::from_name(&config.dialect).is_none() {
             return Err(RunnerError::Project(format!(
-                "{}: unknown dialect `{}` (supported: postgres)",
+                "{}: unknown dialect `{}` (supported: postgres, sqlite)",
                 path.display(),
                 config.dialect
             )));

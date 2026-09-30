@@ -32,7 +32,7 @@ Subcommands:
 
 Options:
   -C <dir>              Project directory (default: current directory)
-  --dialect <name>      (init) SQL dialect: postgres
+  --dialect <name>      (init) SQL dialect: postgres or sqlite (sqlite: migrations are written, but the built-in runner applies postgres only)
   --mdl <file>          (new) MDL file steering renames, enum remaps, backfills, steps
   --allow-destructive   (new) accept operations that can lose data
   --url <url>           (apply, status) postgres:// URL; default: $DATABASE_URL

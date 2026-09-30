@@ -655,3 +655,26 @@ mod adopt_tests {
         assert!(adopt(&p, &mut db, &AdoptOptions::default()).is_ok());
     }
 }
+
+#[test]
+fn a_sqlite_project_freezes_sqlite_scripts_but_the_postgres_executor_refuses_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = Project::init(dir.path(), "sqlite").unwrap();
+    set_schema(&p, "enum Status { a, b }\ntable t { id: serial primary key  s: Status not null default a }");
+    create(&p, "init", None, false).unwrap();
+    let files = list(&p).unwrap();
+    let sql = files[0].script.to_sql();
+    assert_eq!(files[0].script.dialect, "sqlite");
+    assert!(sql.contains("INTEGER PRIMARY KEY AUTOINCREMENT") && sql.contains("CHECK (\"s\" IN ('a', 'b'))"), "{sql}");
+
+    // a second migration that needs a rebuild is written from the schemas of both sides
+    set_schema(&p, "enum Status { a, b }\ntable t { id: serial primary key  s: Status not null default a  n: text not null }");
+    create(&p, "more", None, true).unwrap();
+    let sql = list(&p).unwrap()[1].script.to_sql();
+    assert!(sql.contains("__certo_new_t"), "{sql}");
+
+    let mut fake = Fake::default();
+    let err = apply(&p, &mut fake, &ApplyOptions::default()).unwrap_err();
+    assert!(matches!(&err, RunnerError::Project(m) if m.contains("PostgreSQL only")), "{err}");
+    assert!(fake.ran.is_empty() && !fake.ensured);
+}

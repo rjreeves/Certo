@@ -62,8 +62,20 @@ pub(crate) fn connection_err(e: crate::exec::ExecError) -> RunnerError {
     RunnerError::Connection(e.message)
 }
 
+/// A project's migrations are written for one dialect; refuse an executor for another.
+pub(crate) fn check_dialect(project: &Project, exec: &dyn Executor) -> Result<(), RunnerError> {
+    if project.config.dialect != exec.dialect() {
+        return Err(RunnerError::Project(format!(
+            "the project dialect is `{}` but this executor talks `{}` (the built-in executor is PostgreSQL only;              a `{}` project can still write migrations with `migrate new` and run the scripts with your own driver)",
+            project.config.dialect, exec.dialect(), project.config.dialect
+        )));
+    }
+    Ok(())
+}
+
 /// Compare the migration files with the database history. Never writes.
 pub fn status(project: &Project, exec: &mut dyn Executor) -> Result<Status, RunnerError> {
+    check_dialect(project, exec)?;
     let files = list(project)?;
     let applied = exec.applied().map_err(connection_err)?;
     let k = reconcile(&files, &applied)?;
@@ -87,6 +99,7 @@ pub fn apply_with_progress(
     opts: &ApplyOptions,
     progress: &mut dyn FnMut(&str),
 ) -> Result<ApplyReport, RunnerError> {
+    check_dialect(project, exec)?;
     let files = list(project)?;
     if let Some(to) = opts.to
         && !files.iter().any(|m| m.seq == to)

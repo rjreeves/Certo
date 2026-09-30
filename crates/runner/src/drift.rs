@@ -302,6 +302,7 @@ pub fn compare(dialect: Dialect, expected: &SchemaIR, live: LiveSchema, expected
 /// Introspect the database and compare it with the last applied migration.
 /// Fails first if the migration history itself is inconsistent.
 pub fn check(project: &Project, exec: &mut dyn Executor) -> Result<Drift, RunnerError> {
+    crate::runner::check_dialect(project, exec)?;
     let files = list(project)?;
     let applied = exec.applied().map_err(connection_err)?;
     let k = reconcile(&files, &applied)?;

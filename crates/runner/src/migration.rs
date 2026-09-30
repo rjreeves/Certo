@@ -3,7 +3,7 @@ use crate::project::Project;
 use certo_diagnostics::{render_all, Diagnostic, Severity};
 use certo_mdl::{compile_migration, diff, MigrationPlan};
 use certo_sdl::{compile, SchemaIR};
-use certo_sql::lower_batches;
+use certo_sql::{lower_batches_with, Schemas};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fs;
@@ -195,7 +195,8 @@ pub fn create(
     }
 
     // ---- lower
-    let batches = lower_batches(&plan, project.dialect()).map_err(RunnerError::Unsupported)?;
+    let batches = lower_batches_with(&plan, project.dialect(), Schemas { old: &state, new: &new_ir })
+        .map_err(RunnerError::Unsupported)?;
     let script = Script {
         dialect: project.config.dialect.clone(),
         compiler_version: COMPILER_VERSION.to_string(),

@@ -6,3 +6,6 @@ edition = "2024"
 [dependencies]
 certo-sdl = { path = "../sdl" }
 certo-mdl = { path = "../mdl" }
+
+[dev-dependencies]
+rusqlite = { version = "0.32", features = ["bundled"] }

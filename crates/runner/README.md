@@ -127,7 +127,9 @@ prints that list too, so you know it is expected.
 - Sequence `last_value` (where the counter is) is state, not schema, and is
   never compared. Adding serial or identity to a column with rows catches the
   new counter up to the largest existing value.
-- PostgreSQL only. `sslmode=require` selects TLS but has not been exercised
+- The built-in executor is PostgreSQL only. A project may use `dialect = sqlite`: `migrate new`
+  writes `up.sql` / `up.json` for it (see `crates/sql/README.md`), but applying, drift and
+  adoption are refused until a SQLite executor exists. `sslmode=require` selects TLS but has not been exercised
   against a TLS-enabled server.
 - The history table and lock key are fixed (`_certo_migrations`).
 

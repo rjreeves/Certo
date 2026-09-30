@@ -5,19 +5,23 @@
 //! express so the user can write that step by hand.
 
 mod postgres;
+mod sqlite;
 
 use certo_mdl::{MigrationPlan, Op};
+use certo_sdl::SchemaIR;
 use std::fmt;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Dialect {
     Postgres,
+    Sqlite,
 }
 
 impl Dialect {
     pub fn from_name(s: &str) -> Option<Dialect> {
         match s {
             "postgres" | "postgresql" | "pg" => Some(Dialect::Postgres),
+            "sqlite" | "sqlite3" => Some(Dialect::Sqlite),
             _ => None,
         }
     }
@@ -46,6 +50,7 @@ pub(crate) fn unsupported(op: &Op, reason: impl Into<String>) -> LowerError {
 pub fn render_type(dialect: Dialect, t: &certo_sdl::TypeIR) -> String {
     match dialect {
         Dialect::Postgres => postgres::ty(t),
+        Dialect::Sqlite => sqlite::ty(t),
     }
 }
 
@@ -53,6 +58,7 @@ pub fn render_type(dialect: Dialect, t: &certo_sdl::TypeIR) -> String {
 pub fn quote_ident(dialect: Dialect, s: &str) -> String {
     match dialect {
         Dialect::Postgres => postgres::q(s),
+        Dialect::Sqlite => sqlite::q(s),
     }
 }
 
@@ -60,6 +66,7 @@ pub fn quote_ident(dialect: Dialect, s: &str) -> String {
 pub fn quote_literal(dialect: Dialect, s: &str) -> String {
     match dialect {
         Dialect::Postgres => postgres::lit(s),
+        Dialect::Sqlite => sqlite::lit(s),
     }
 }
 
@@ -68,12 +75,30 @@ pub fn quote_literal(dialect: Dialect, s: &str) -> String {
 pub fn render_expr(dialect: Dialect, e: &certo_sdl::ExprIR) -> String {
     match dialect {
         Dialect::Postgres => postgres::expr(e),
+        Dialect::Sqlite => sqlite::expr(e).unwrap_or_else(|why| format!("/* {why} */")),
+    }
+}
+
+/// The schemas a plan was made between. SQLite needs them: it rebuilds tables
+/// (whose final shape comes from `new`), and writes enums as CHECK constraints.
+/// PostgreSQL lowers from the plan alone and ignores them.
+#[derive(Debug, Clone, Copy)]
+pub struct Schemas<'a> {
+    pub old: &'a SchemaIR,
+    pub new: &'a SchemaIR,
+}
+
+fn needs_schemas(dialect: Dialect) -> LowerError {
+    LowerError {
+        op: format!("(the whole plan, for {dialect:?})"),
+        reason: "SQLite lowering needs the schemas the plan was made between (use the `_with` functions)".into(),
     }
 }
 
 /// Lower every op in `plan`, flat and in plan order. Fails on the first op
 /// the dialect cannot express. Prefer `lower_batches` when executing: it
-/// separates the statements that cannot run inside a transaction.
+/// separates the statements that cannot run inside a transaction. SQLite
+/// needs schemas, so it is only available through [`lower_with`].
 pub fn lower(plan: &MigrationPlan, dialect: Dialect) -> Result<Vec<String>, LowerError> {
     let mut out = Vec::new();
     for op in &plan.ops {
@@ -82,9 +107,18 @@ pub fn lower(plan: &MigrationPlan, dialect: Dialect) -> Result<Vec<String>, Lowe
     Ok(out)
 }
 
+/// Like [`lower`], with the schemas the plan came from (required for SQLite).
+pub fn lower_with(plan: &MigrationPlan, dialect: Dialect, schemas: Schemas) -> Result<Vec<String>, LowerError> {
+    match dialect {
+        Dialect::Postgres => lower(plan, dialect),
+        Dialect::Sqlite => Ok(lower_batches_with(plan, dialect, schemas)?.into_iter().flat_map(|b| b.statements).collect()),
+    }
+}
+
 fn lower_op(op: &Op, dialect: Dialect, out: &mut Vec<String>) -> Result<(), LowerError> {
     match dialect {
         Dialect::Postgres => postgres::lower_op(op, out),
+        Dialect::Sqlite => Err(needs_schemas(dialect)),
     }
 }
 
@@ -101,7 +135,11 @@ pub struct Batch {
 /// PostgreSQL cannot use a new enum value in the transaction that added it,
 /// so `ADD VALUE` statements (purely additive, safe to run early) form a
 /// leading non-transactional batch; everything else is one atomic batch.
+/// (SQLite: see [`lower_batches_with`].)
 pub fn lower_batches(plan: &MigrationPlan, dialect: Dialect) -> Result<Vec<Batch>, LowerError> {
+    if dialect == Dialect::Sqlite {
+        return Err(needs_schemas(dialect));
+    }
     let (mut early, mut main) = (Vec::new(), Vec::new());
     for op in &plan.ops {
         let target = match (dialect, op) {
@@ -120,16 +158,36 @@ pub fn lower_batches(plan: &MigrationPlan, dialect: Dialect) -> Result<Vec<Batch
     Ok(batches)
 }
 
+/// Like [`lower_batches`], with the schemas the plan came from. SQLite needs
+/// them; when a table has to be rebuilt the result is three batches:
+/// `PRAGMA foreign_keys = OFF`, the transactional body, `PRAGMA foreign_keys = ON`.
+pub fn lower_batches_with(plan: &MigrationPlan, dialect: Dialect, schemas: Schemas) -> Result<Vec<Batch>, LowerError> {
+    match dialect {
+        Dialect::Postgres => lower_batches(plan, dialect),
+        Dialect::Sqlite => sqlite::lower_batches(plan, &schemas),
+    }
+}
+
 /// A runnable script: non-transactional batches as-is, transactional ones
 /// wrapped in `BEGIN;` / `COMMIT;`.
 pub fn render(plan: &MigrationPlan, dialect: Dialect) -> Result<String, LowerError> {
+    Ok(script(lower_batches(plan, dialect)?))
+}
+
+/// Like [`render`], with the schemas the plan came from (required for SQLite).
+pub fn render_with(plan: &MigrationPlan, dialect: Dialect, schemas: Schemas) -> Result<String, LowerError> {
+    Ok(script(lower_batches_with(plan, dialect, schemas)?))
+}
+
+fn script(batches: Vec<Batch>) -> String {
     let mut lines = Vec::new();
-    for b in lower_batches(plan, dialect)? {
+    for b in batches {
         if b.transactional { lines.push("BEGIN;".to_string()); }
         lines.extend(b.statements);
         if b.transactional { lines.push("COMMIT;".to_string()); }
     }
-    Ok(lines.join("\n"))
+    lines.join("
+")
 }
 
 #[cfg(test)]

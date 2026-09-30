@@ -156,6 +156,29 @@ pub unsafe extern "C" fn certo_lower_sql(plan: *const c_char, dialect: *const c_
     }
 }
 
+/// Like `certo_lower_sql`, with the old and new schema IR the plan was made between
+/// (required for the "sqlite" dialect, which rebuilds tables; ignored by "postgres").
+///
+/// # Safety
+/// All arguments must be NULL or valid NUL-terminated strings.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn certo_lower_sql_with_schemas(
+    plan: *const c_char,
+    dialect: *const c_char,
+    old_ir: *const c_char,
+    new_ir: *const c_char,
+) -> *mut c_char {
+    let args = unsafe {
+        arg(plan, "plan").and_then(|p| {
+            arg(dialect, "dialect").and_then(|d| arg(old_ir, "old_ir").and_then(|o| arg(new_ir, "new_ir").map(|n| (p, d, o, n))))
+        })
+    };
+    match args {
+        Ok((plan, dialect, old, new)) => respond(|| api::lower_sql_with_schemas(plan, dialect, old, new)),
+        Err(e) => into_c(e),
+    }
+}
+
 // ---- migration runner ----------------------------------------------------
 //
 // Each call takes the project directory and an optional options JSON object

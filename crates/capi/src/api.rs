@@ -46,7 +46,7 @@ pub fn compile(source: &str) -> String {
 /// come back as `diagnostics` positioned in the QL text with `ok: false`.
 pub fn ql_compile(schema_ir: &str, ql_source: &str, dialect: &str) -> String {
     let Some(dialect) = Dialect::from_name(dialect) else {
-        return error("unknown_dialect", format!("unknown SQL dialect `{dialect}` (supported: postgres)"));
+        return error("unknown_dialect", format!("unknown SQL dialect `{dialect}` (supported: postgres, sqlite)"));
     };
     let schema = match parse_ir(schema_ir, "schema") { Ok(v) => v, Err(e) => return e };
     let (statements, diags) = certo_ql::compile(&schema, ql_source, dialect);
@@ -111,10 +111,22 @@ fn plan_json(plan: MigrationPlan) -> String {
     .to_string()
 }
 
-/// Lower a migration plan JSON document to SQL batches.
+/// Lower a migration plan JSON document to SQL batches. SQLite also needs the
+/// schemas the plan was made between: use `lower_sql_with_schemas`.
 pub fn lower_sql(plan_json: &str, dialect: &str) -> String {
+    lower_sql_impl(plan_json, dialect, None)
+}
+
+/// Like `lower_sql`, with the old and new schema IR (needed for SQLite, ignored by PostgreSQL).
+pub fn lower_sql_with_schemas(plan_json: &str, dialect: &str, old_ir: &str, new_ir: &str) -> String {
+    let old = match parse_ir(old_ir, "old") { Ok(v) => v, Err(e) => return e };
+    let new = match parse_ir(new_ir, "new") { Ok(v) => v, Err(e) => return e };
+    lower_sql_impl(plan_json, dialect, Some((&old, &new)))
+}
+
+fn lower_sql_impl(plan_json: &str, dialect: &str, schemas: Option<(&SchemaIR, &SchemaIR)>) -> String {
     let Some(dialect) = Dialect::from_name(dialect) else {
-        return error("unknown_dialect", format!("unknown SQL dialect `{dialect}` (supported: postgres)"));
+        return error("unknown_dialect", format!("unknown SQL dialect `{dialect}` (supported: postgres, sqlite)"));
     };
     let plan: MigrationPlan = match serde_json::from_str(plan_json) {
         Ok(p) => p,
@@ -126,15 +138,31 @@ pub fn lower_sql(plan_json: &str, dialect: &str) -> String {
             format!("plan version {} is not supported (expected {PLAN_VERSION})", plan.version),
         );
     }
-    match certo_sql::lower_batches(&plan, dialect) {
+    let lowered = match schemas {
+        Some((old, new)) => certo_sql::lower_batches_with(&plan, dialect, certo_sql::Schemas { old, new }),
+        None => certo_sql::lower_batches(&plan, dialect),
+    };
+    match lowered {
         Ok(batches) => {
-            let script = certo_sql::render(&plan, dialect).unwrap_or_default();
+            let script = match schemas {
+                Some((old, new)) => certo_sql::render_with(&plan, dialect, certo_sql::Schemas { old, new }),
+                None => certo_sql::render(&plan, dialect),
+            }
+            .unwrap_or_default();
             let batches: Vec<Value> = batches
                 .iter()
                 .map(|b| json!({ "transactional": b.transactional, "statements": b.statements }))
                 .collect();
             json!({ "ok": true, "batches": batches, "script": script }).to_string()
         }
+        Err(LowerError { op, reason }) if schemas.is_none() && dialect == Dialect::Sqlite => json!({
+            "ok": false,
+            "error": {
+                "code": "needs_schemas",
+                "message": format!("cannot lower `{op}`: {reason}"),
+            }
+        })
+        .to_string(),
         Err(LowerError { op, reason }) => json!({
             "ok": false,
             "error": {
@@ -209,6 +237,20 @@ mod tests {
     fn v(s: &str) -> Value { serde_json::from_str(s).unwrap() }
 
     fn code(s: &str) -> String { v(s)["error"]["code"].as_str().unwrap_or("<none>").to_string() }
+
+    #[test]
+    fn sqlite_lowering_needs_schemas() {
+        let (old, new) = (
+            compile("table t { id: serial primary key }"),
+            compile("table t { id: serial primary key  n: int not null default 0 }"),
+        );
+        let (old, new) = (v(&old)["ir"].to_string(), v(&new)["ir"].to_string());
+        let plan = v(&diff_ir(&old, &new))["plan"].to_string();
+        assert_eq!(v(&lower_sql(&plan, "sqlite"))["error"]["code"], "needs_schemas");
+        let r = v(&lower_sql_with_schemas(&plan, "sqlite", &old, &new));
+        assert_eq!(r["ok"], true, "{r}");
+        assert!(r["script"].as_str().unwrap().contains("ADD COLUMN \"n\" INTEGER NOT NULL DEFAULT 0"));
+    }
 
     #[test]
     fn position_counts_utf16_columns() {
