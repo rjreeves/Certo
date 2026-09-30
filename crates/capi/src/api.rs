@@ -111,6 +111,46 @@ fn plan_json(plan: MigrationPlan) -> String {
     .to_string()
 }
 
+/// Generate typed host code from QL (see `certo_ql::csharp`). `options`: `{"language":
+/// "csharp", "dialect": "postgres" | "sqlite", "namespace"?, "class_name"?}` (`dialect`
+/// defaults to postgres). On success `code` holds one source file; QL errors come back
+/// as `diagnostics` exactly as for `ql_compile`, with `ok: false`.
+pub fn ql_codegen(schema_ir: &str, ql_source: &str, options: &str) -> String {
+    #[derive(serde::Deserialize, Default)]
+    #[serde(deny_unknown_fields)]
+    struct Opts {
+        language: Option<String>,
+        dialect: Option<String>,
+        namespace: Option<String>,
+        class_name: Option<String>,
+    }
+    let opts: Opts = match serde_json::from_str(if options.trim().is_empty() { "{}" } else { options }) {
+        Ok(o) => o,
+        Err(e) => return error("invalid_options", format!("options are invalid: {e}")),
+    };
+    match opts.language.as_deref() {
+        Some("csharp" | "cs") => {}
+        Some(other) => return error("unknown_language", format!("unknown language `{other}` (supported: csharp)")),
+        None => return error("invalid_options", "options.language is required (supported: csharp)"),
+    }
+    let dialect_name = opts.dialect.as_deref().unwrap_or("postgres");
+    let Some(dialect) = Dialect::from_name(dialect_name) else {
+        return error("unknown_dialect", format!("unknown SQL dialect `{dialect_name}` (supported: postgres, sqlite)"));
+    };
+    let schema = match parse_ir(schema_ir, "schema") { Ok(v) => v, Err(e) => return e };
+    let (statements, diags) = certo_ql::compile(&schema, ql_source, dialect);
+    let mut cs = certo_ql::CSharpOptions { dialect, ..Default::default() };
+    if let Some(n) = opts.namespace { cs.namespace = n; }
+    if let Some(c) = opts.class_name { cs.class_name = c; }
+    json!({
+        "ok": statements.is_some(),
+        "code": statements.as_deref().map(|s| certo_ql::generate_csharp(&schema, s, &cs)),
+        "diagnostics": diagnostics_json(&diags, ql_source),
+        "rendered": render_all(&diags, ql_source, "queries.ql", false),
+    })
+    .to_string()
+}
+
 /// Lower a migration plan JSON document to SQL batches. SQLite also needs the
 /// schemas the plan was made between: use `lower_sql_with_schemas`.
 pub fn lower_sql(plan_json: &str, dialect: &str) -> String {
@@ -237,6 +277,24 @@ mod tests {
     fn v(s: &str) -> Value { serde_json::from_str(s).unwrap() }
 
     fn code(s: &str) -> String { v(s)["error"]["code"].as_str().unwrap_or("<none>").to_string() }
+
+    #[test]
+    fn codegen_returns_a_source_file_or_diagnostics() {
+        let ir = v(&compile("table t { id: serial primary key  n: int }"))["ir"].to_string();
+        let opts = r#"{"language":"csharp","namespace":"App.Db","class_name":"Q","dialect":"sqlite"}"#;
+        let r = v(&ql_codegen(&ir, "query by_n(n: int) { from t where t.n == :n select t.id, t.n }", opts));
+        assert_eq!(r["ok"], true);
+        let code = r["code"].as_str().unwrap();
+        assert!(code.contains("namespace App.Db;") && code.contains("public static partial class Q"), "{code}");
+        assert!(code.contains("ByNRow(int Id, int? N)") && code.contains("ByNAsync(this DbConnection connection, int n"), "{code}");
+        assert!(code.contains("p.ParameterName = \"?1\";"), "sqlite binds ?1");
+        let bad = v(&ql_codegen(&ir, "query q() { from t select t.ghost }", opts));
+        assert_eq!(bad["ok"], false);
+        assert!(bad["code"].is_null() && bad["diagnostics"][0]["code"] == "QL206");
+        assert_eq!(v(&ql_codegen(&ir, "", r#"{"language":"rust"}"#))["error"]["code"], "unknown_language");
+        assert_eq!(v(&ql_codegen(&ir, "", "{}"))["error"]["code"], "invalid_options");
+        assert_eq!(v(&ql_codegen(&ir, "", r#"{"language":"csharp","bogus":1}"#))["error"]["code"], "invalid_options");
+    }
 
     #[test]
     fn sqlite_lowering_needs_schemas() {

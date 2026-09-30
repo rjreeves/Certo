@@ -2,3 +2,4 @@ Certo.Native/native/
 feed/
 **/bin/
 **/obj/
+Certo.Codegen.Check/generated/

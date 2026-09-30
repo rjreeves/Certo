@@ -38,6 +38,9 @@ public static class CertoNative
     private static extern IntPtr certo_ql_compile(byte[] schemaIr, byte[] qlSource, byte[] dialect);
 
     [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+    private static extern IntPtr certo_ql_codegen(byte[] schemaIr, byte[] qlSource, byte[] options);
+
+    [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
     private static extern IntPtr certo_lower_sql(byte[] plan, byte[] dialect);
 
     [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
@@ -98,6 +101,14 @@ public static class CertoNative
     /// </summary>
     public static string CompileQl(string schemaIrJson, string qlSource, string dialect = "postgres") =>
         Take(certo_ql_compile(Z(schemaIrJson), Z(qlSource), Z(dialect)));
+
+    /// <summary>
+    /// Generate typed host code from QL: a record per result and an extension method per statement.
+    /// Options: {"language":"csharp", "dialect":"postgres"|"sqlite", "namespace"?, "class_name"?}.
+    /// The result's <c>code</c> is one C# source file (or null with positioned diagnostics).
+    /// </summary>
+    public static string CodegenQl(string schemaIrJson, string qlSource, string optionsJson) =>
+        Take(certo_ql_codegen(Z(schemaIrJson), Z(qlSource), Z(optionsJson)));
 
     /// <summary>Lower a plan JSON document to SQL batches ("postgres"; "sqlite" needs <see cref="LowerSqlWithSchemas"/>).</summary>
     public static string LowerSql(string planJson, string dialect) =>

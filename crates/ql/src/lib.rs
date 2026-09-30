@@ -15,14 +15,16 @@
 
 pub mod ast;
 pub mod check;
+pub mod csharp;
 pub mod ir;
 pub mod lower;
 pub mod parser;
 
 pub use ast::*;
 pub use check::{check, check_mutations};
+pub use csharp::{generate_csharp, CSharpOptions};
 pub use ir::*;
-pub use lower::{lower, lower_mutation, Lowered};
+pub use lower::{lower, lower_mutation, lower_mutation_with, lower_with, LowerOptions, Lowered};
 pub use parser::parse;
 
 use certo_diagnostics::{Diagnostic, Severity};

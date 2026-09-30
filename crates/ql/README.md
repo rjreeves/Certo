@@ -106,6 +106,29 @@ provably one row (aggregates without `group by`) or say `limit 1`, and is then t
 aggregate, or nullable. Tabular inserts check every row like a `set` value and count the values
 against the column list. Both are run against PostgreSQL and SQLite in the live tests.
 
+## Generated host code (C#)
+
+```
+certo ql codegen queries.ql --schema schema.sdl --lang csharp --dialect sqlite --namespace App.Db -o Queries.cs
+```
+
+The typed contract becomes C#: a `sealed record <Name>Row` per statement that returns rows
+(nullable columns are `T?`), and an extension method `<Name>Async(this DbConnection, ...)`
+per statement with one C# parameter per QL parameter (`T?` for `null` ones), an optional
+`DbTransaction` and a `CancellationToken`. A query or a mutation with `returning` gives
+`List<Row>`; any other mutation gives the affected-row count. Enums become C# enums (with
+their database text in a generated `<Enum>Text` class), and every statement's SQL is also a
+constant. It is plain ADO.NET, so it runs on Npgsql and Microsoft.Data.Sqlite; under
+PostgreSQL, enum result columns are selected as `text` so drivers need no enum mapping.
+Type mapping: `timestamp` is `DateTimeOffset`, `timestamp naive` `DateTime`, `date`
+`DateOnly`, `uuid` `Guid`, `json` the JSON text, `decimal` `decimal`. Under SQLite,
+timestamps are stored as the driver writes them, which differs from `now()`'s form: compare
+them in the application.
+
+`packaging/dotnet/codegen-check.ps1` generates code from `Certo.Codegen.Check/sample`, compiles
+it, and runs it against SQLite (always) and PostgreSQL (when `CERTO_TEST_PG_URL` is set). The same
+generator is available to hosts as `certo_ql_codegen` in the C ABI.
+
 ## Not covered yet
 
 - No `union`, window functions or CTEs; subqueries cannot appear in `limit` / `offset`;

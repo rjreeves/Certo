@@ -81,6 +81,10 @@ foreach (var dialect in new[] { "postgres", "sqlite" })
           && q.GetProperty("columns")[1].GetProperty("nullable").GetBoolean()
           && q.GetProperty("param_order").GetArrayLength() == 1, $"CompileQl ({dialect}) typed contract");
 }
+var generated = J(CertoNative.CodegenQl(ir, ql, "{\"language\":\"csharp\",\"dialect\":\"sqlite\",\"namespace\":\"Smoke.Db\"}"));
+var code = generated.GetProperty("code").GetString() ?? "";
+Check(generated.GetProperty("ok").GetBoolean() && code.Contains("namespace Smoke.Db;") && code.Contains("public static async Task<List<RecentRow>> RecentAsync"),
+    "CodegenQl returns a C# source file");
 var qerr = J(CertoNative.CompileQl(ir, "query q() { from orders o select o.ghost }"));
 Check(!qerr.GetProperty("ok").GetBoolean() && qerr.GetProperty("diagnostics")[0].GetProperty("code").GetString() == "QL206",
     "CompileQl reports QL diagnostics");
