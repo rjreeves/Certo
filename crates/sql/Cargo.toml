@@ -1,0 +1,8 @@
+[package]
+name    = "certo-sql"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+certo-sdl = { path = "../sdl" }
+certo-mdl = { path = "../mdl" }
