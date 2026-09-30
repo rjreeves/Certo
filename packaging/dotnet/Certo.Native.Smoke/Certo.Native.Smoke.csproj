@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Uses the PACKED package (from ../feed), so it tests what consumers get, layout included. -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RollForward>Major</RollForward>
+    <CertoNativeVersion Condition="'$(CertoNativeVersion)' == ''">0.1.0</CertoNativeVersion>
+    <RestoreSources>$(MSBuildThisFileDirectory)..\feed;https://api.nuget.org/v3/index.json</RestoreSources>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Certo.Native" Version="$(CertoNativeVersion)" />
+    <!-- a host runs the SQL Certo produces through an ordinary driver; the smoke test does the same -->
+    <PackageReference Include="Microsoft.Data.Sqlite" Version="8.0.*" />
+  </ItemGroup>
+
+</Project>

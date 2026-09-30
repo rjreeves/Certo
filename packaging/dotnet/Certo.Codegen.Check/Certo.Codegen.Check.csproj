@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Compiles and runs the code `certo ql codegen` generates (see ../codegen-check.ps1, which
+       writes the generated/ folder), against SQLite and, if configured, PostgreSQL. -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RollForward>Major</RollForward>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Content Include="generated\*.sql" CopyToOutputDirectory="PreserveNewest" LinkBase="generated" />
+    <PackageReference Include="Microsoft.Data.Sqlite" Version="8.0.*" />
+    <PackageReference Include="Npgsql" Version="8.0.*" />
+  </ItemGroup>
+
+</Project>

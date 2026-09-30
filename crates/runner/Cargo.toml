@@ -1,0 +1,28 @@
+[package]
+name    = "certo-runner"
+version = "0.1.0"
+edition = "2024"
+description = "Migration project files, history tracking and execution for Certo schemas"
+
+[dependencies]
+certo-diagnostics    = { path = "../diagnostics" }
+certo-sdl            = { path = "../sdl" }
+certo-mdl            = { path = "../mdl" }
+certo-sql            = { path = "../sql" }
+serde                = { version = "1", features = ["derive"] }
+serde_json           = "1"
+toml                 = "0.8"
+sha2                 = "0.10"
+postgres             = "0.19"
+postgres-native-tls  = "0.5"
+native-tls           = "0.2"
+rusqlite             = { version = "0.32", features = ["bundled"] }
+
+[dev-dependencies]
+tempfile = "3"
+
+# The C ABI library is shipped as a NuGet package, so on Linux it must not depend on
+# the host's libssl: build OpenSSL statically (feature unification turns it on for
+# openssl-sys, which native-tls uses). Windows uses SChannel and macOS Security.framework.
+[target.'cfg(target_os = "linux")'.dependencies]
+openssl = { version = "0.10", features = ["vendored"] }

@@ -1,0 +1,167 @@
+name: Certo.Native package
+
+# Builds certo_capi for every supported platform, packs them into one NuGet package
+# (Certo.Native) and smoke-tests the PACKED package on each OS that can run it.
+# A tag `certo-native-v<version>` also publishes to nuget.org (needs NUGET_API_KEY).
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["certo-native-v*"]
+  pull_request:
+    paths:
+      - "crates/capi/**"
+      - "crates/sdl/**"
+      - "crates/mdl/**"
+      - "crates/sql/**"
+      - "crates/ql/**"
+      - "crates/runner/**"
+      - "packaging/dotnet/**"
+      - "Cargo.lock"
+      - ".github/workflows/dotnet-package.yml"
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  rust-tests:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test --locked -p certo-sdl -p certo-mdl -p certo-sql -p certo-ql -p certo-runner -p certo-capi
+
+  codegen:
+    # generate C# from sample queries, compile it, and run it against SQLite and PostgreSQL
+    runs-on: ubuntu-22.04
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 5s --health-timeout 5s --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+      - name: Generated code compiles and runs
+        shell: pwsh
+        env:
+          CERTO_TEST_PG_URL: postgres://postgres:postgres@localhost:5432/postgres
+        run: ./packaging/dotnet/codegen-check.ps1
+
+  native:
+    name: native (${{ matrix.rid }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Linux is built on the oldest runner image so the library runs on older glibc (2.35+).
+          - { rid: win-x64,     os: windows-latest }
+          - { rid: linux-x64,   os: ubuntu-22.04 }
+          - { rid: linux-arm64, os: ubuntu-22.04-arm }
+          - { rid: osx-arm64,   os: macos-14 }
+          # Intel macs: cross-compiled on the arm runner.
+          - { rid: osx-x64,     os: macos-14, target: x86_64-apple-darwin }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Build and stage certo_capi
+        shell: pwsh
+        run: |
+          # a hashtable splats as named parameters (an array would be passed positionally)
+          $stage = @{ Rid = '${{ matrix.rid }}' }
+          if ('${{ matrix.target }}') { $stage.Target = '${{ matrix.target }}' }
+          ./packaging/dotnet/stage-native.ps1 @stage
+      - uses: actions/upload-artifact@v4
+        with:
+          name: native-${{ matrix.rid }}
+          path: packaging/dotnet/Certo.Native/native
+          if-no-files-found: error
+
+  pack:
+    needs: [native, rust-tests]
+    runs-on: ubuntu-22.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: native-*
+          merge-multiple: true
+          path: packaging/dotnet/Certo.Native/native
+      - name: Work out the version
+        id: version
+        shell: pwsh
+        run: |
+          # the native library reports the capi crate's version; the package must match it
+          $v = (Select-String -Path crates/capi/Cargo.toml -Pattern '^version\s*=\s*"(.+)"').Matches[0].Groups[1].Value
+          if ($env:GITHUB_REF -like 'refs/tags/certo-native-v*') {
+            $tag = $env:GITHUB_REF -replace '^refs/tags/certo-native-v', ''
+            if ($tag -ne $v) { throw "tag version $tag does not match crates/capi/Cargo.toml version $v" }
+          }
+          "version=$v" >> $env:GITHUB_OUTPUT
+      - name: Pack
+        run: dotnet pack packaging/dotnet/Certo.Native -c Release -o packaging/dotnet/feed -p:Version=${{ steps.version.outputs.version }}
+      - name: Check the package carries every platform
+        shell: pwsh
+        run: |
+          Add-Type -A System.IO.Compression.FileSystem
+          $pkg = Get-ChildItem packaging/dotnet/feed/*.nupkg | Select-Object -First 1
+          $entries = [IO.Compression.ZipFile]::OpenRead($pkg.FullName).Entries.FullName
+          foreach ($e in 'runtimes/win-x64/native/certo_capi.dll', 'runtimes/linux-x64/native/libcerto_capi.so',
+                         'runtimes/linux-arm64/native/libcerto_capi.so', 'runtimes/osx-arm64/native/libcerto_capi.dylib',
+                         'runtimes/osx-x64/native/libcerto_capi.dylib', 'lib/net8.0/Certo.Native.dll') {
+            if ($entries -notcontains $e) { throw "missing $e in $($pkg.Name)" }
+          }
+          $entries | Where-Object { $_ -like 'runtimes/*' }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nupkg
+          path: packaging/dotnet/feed/*.nupkg
+
+  smoke:
+    name: smoke (${{ matrix.os }})
+    needs: pack
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-22.04, ubuntu-24.04, ubuntu-22.04-arm, macos-14]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+      - uses: actions/download-artifact@v4
+        with:
+          name: nupkg
+          path: packaging/dotnet/feed
+      - name: Run the smoke test against the packed package
+        run: dotnet run --project packaging/dotnet/Certo.Native.Smoke -c Release -p:CertoNativeVersion=${{ needs.pack.outputs.version }}
+
+  publish:
+    if: startsWith(github.ref, 'refs/tags/certo-native-v')
+    needs: [pack, smoke]
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: nupkg
+          path: feed
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+      - name: Push to nuget.org
+        run: dotnet nuget push "feed/*.nupkg" --api-key "${{ secrets.NUGET_API_KEY }}" --source https://api.nuget.org/v3/index.json --skip-duplicate

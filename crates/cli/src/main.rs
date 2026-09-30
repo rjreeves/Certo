@@ -1,4 +1,7 @@
 mod cmd_doc;
+mod cmd_sdl;
+mod cmd_sdl_migrate;
+mod cmd_ql;
 mod cmd_watch;
 mod cmd_repl;
 mod cmd_lint;
@@ -94,6 +97,8 @@ fn real_main() {
             "check"   => cmd_check(&args[2..]),
             "run"     => cmd_run(&args[2..]),
             "doc"     => cmd_doc::cmd_doc(&args[2..]),
+            "sdl"     => cmd_sdl::cmd_sdl(&args[2..]),
+            "ql"      => cmd_ql::cmd_ql(&args[2..]),
             "fmt"     => cmd_fmt(&args[2..]),
             "test"    => cmd_test(&args[2..]),
             "lint"    => cmd_lint(&args[2..]),
@@ -3662,6 +3667,8 @@ fn print_top_help() {
     eprintln!("  certo <file.cto> [-o <out>]    Compile a Certo source file");
     eprintln!("  certo build <file.cto> ...     Same with explicit subcommand");
     eprintln!("  certo doc   <file.cto>         Generate HTML documentation");
+    eprintln!("  certo sdl check|compile <file.sdl>  Validate a schema / emit SchemaIR JSON");
+    eprintln!("  certo ql check|compile <file.ql> --schema <schema>  Type-check / compile queries to SQL");
     eprintln!("  certo fmt   <file.cto>...      Format source files in place");
     eprintln!("  certo test  <file.cto>...      Run test blocks");
     eprintln!("  certo lint  <file.cto>...      Lint for unused params / dead code");

@@ -20,6 +20,11 @@ certo-diagnostics = { path = "../diagnostics" }
 certo-typeck      = { path = "../typeck" }
 certo-traits      = { path = "../traits" }
 certo-dbschema    = { path = "../dbschema" }
+certo-sdl         = { path = "../sdl" }
+certo-mdl         = { path = "../mdl" }
+certo-sql         = { path = "../sql" }
+certo-runner      = { path = "../runner" }
+certo-ql          = { path = "../ql" }
 certo-effects     = { path = "../effects" }
 certo-ui          = { path = "../ui" }
 tempfile          = "3"
