@@ -41,6 +41,9 @@ public static class CertoNative
     private static extern IntPtr certo_lower_sql(byte[] plan, byte[] dialect);
 
     [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+    private static extern IntPtr certo_lower_sql_with_schemas(byte[] plan, byte[] dialect, byte[] oldIr, byte[] newIr);
+
+    [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
     private static extern IntPtr certo_migrate_init(byte[] dir, byte[]? options);
 
     [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
@@ -96,9 +99,16 @@ public static class CertoNative
     public static string CompileQl(string schemaIrJson, string qlSource, string dialect = "postgres") =>
         Take(certo_ql_compile(Z(schemaIrJson), Z(qlSource), Z(dialect)));
 
-    /// <summary>Lower a plan JSON document to SQL batches ("postgres").</summary>
+    /// <summary>Lower a plan JSON document to SQL batches ("postgres"; "sqlite" needs <see cref="LowerSqlWithSchemas"/>).</summary>
     public static string LowerSql(string planJson, string dialect) =>
         Take(certo_lower_sql(Z(planJson), Z(dialect)));
+
+    /// <summary>
+    /// Lower a plan with the old and new schema IR it was made between. Required for "sqlite",
+    /// which rebuilds tables (PRAGMA foreign_keys OFF, the transaction, PRAGMA foreign_keys ON).
+    /// </summary>
+    public static string LowerSqlWithSchemas(string planJson, string dialect, string oldIrJson, string newIrJson) =>
+        Take(certo_lower_sql_with_schemas(Z(planJson), Z(dialect), Z(oldIrJson), Z(newIrJson)));
 
     // ---- migration runner ------------------------------------------------
     // Options are JSON objects (or null). Every call returns the result JSON;

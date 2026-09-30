@@ -87,7 +87,8 @@ gets a row count. Placeholders are numbered by first use in the SQL text.
 
 - No subqueries, `union`, window functions or CTEs; no `insert ... select`
   or multi-row inserts.
-- One dialect (PostgreSQL); a small function set (see `docs/ebnf.md`).
+- Dialects: PostgreSQL and SQLite (`--dialect sqlite`; see `crates/sql/README.md` for the
+  differences). A small function set (see `docs/ebnf.md`).
 - A `case` cannot mix a string literal with an enum column in its branches.
 
 ## Testing against a live server

@@ -1,7 +1,8 @@
 //! Lower a checked `QueryIR` to SQL.
 //!
-//! Parameters become numbered placeholders (`$1`, `$2`, ...) in order of first
-//! use, each cast to its declared type so PostgreSQL never has to guess;
+//! Parameters become numbered placeholders (PostgreSQL `$1`, SQLite `?1`, ...)
+//! in order of first use, each cast to its declared type so the engine never
+//! has to guess;
 //! `param_order` says which declared parameter is which placeholder. Every
 //! identifier is quoted, every binary expression parenthesised.
 //!
@@ -21,14 +22,14 @@ pub struct Lowered {
 }
 
 pub fn lower(dialect: Dialect, q: &QueryIR) -> Lowered {
-    let mut l = Lowerer { dialect, params: &q.params, order: Vec::new() };
+    let mut l = Lowerer { dialect, params: &q.params, order: Vec::new(), bare_columns: false };
     let sql = l.query(q);
     Lowered { sql, param_order: l.order }
 }
 
 /// `INSERT` / `UPDATE` / `DELETE`, with `RETURNING` when the mutation has one.
 pub fn lower_mutation(dialect: Dialect, m: &MutationIR) -> Lowered {
-    let mut l = Lowerer { dialect, params: &m.params, order: Vec::new() };
+    let mut l = Lowerer { dialect, params: &m.params, order: Vec::new(), bare_columns: false };
     let sql = l.mutation(m);
     Lowered { sql, param_order: l.order }
 }
@@ -37,6 +38,8 @@ struct Lowerer<'a> {
     dialect: Dialect,
     params: &'a [ParamIR],
     order: Vec<String>,
+    /// SQLite's RETURNING cannot use table-qualified names.
+    bare_columns: bool,
 }
 
 impl Lowerer<'_> {
@@ -79,8 +82,10 @@ impl Lowerer<'_> {
             lines.push(format!("WHERE {}", self.expr(f)));
         }
         if !m.returning.is_empty() {
+            self.bare_columns = self.dialect == Dialect::Sqlite;
             let cols: Vec<String> =
                 m.returning.iter().map(|c| format!("{} AS {}", self.expr(&c.expr), self.id(&c.name))).collect();
+            self.bare_columns = false;
             lines.push(format!("RETURNING {}", cols.join(", ")));
         }
         lines.join("\n")
@@ -130,6 +135,8 @@ impl Lowerer<'_> {
         }
         if let Some(l) = &q.limit {
             lines.push(format!("LIMIT {}", self.expr(l)));
+        } else if q.offset.is_some() && self.dialect == Dialect::Sqlite {
+            lines.push("LIMIT -1".to_string()); // SQLite has no OFFSET without LIMIT
         }
         if let Some(o) = &q.offset {
             lines.push(format!("OFFSET {}", self.expr(o)));
@@ -146,9 +153,11 @@ impl Lowerer<'_> {
             }
         };
         let ty = self.params.iter().find(|p| p.name == name).map(|p| render_type(self.dialect, &p.ty));
-        match ty {
-            Some(t) => format!("(${idx}::{t})"),
-            None => format!("${idx}"),
+        match (self.dialect, ty) {
+            (Dialect::Postgres, Some(t)) => format!("(${idx}::{t})"),
+            (Dialect::Postgres, None) => format!("${idx}"),
+            (Dialect::Sqlite, Some(t)) => format!("CAST(?{idx} AS {t})"),
+            (Dialect::Sqlite, None) => format!("?{idx}"),
         }
     }
 
@@ -161,6 +170,7 @@ impl Lowerer<'_> {
             QExpr::String { value } => quote_literal(self.dialect, value),
             QExpr::Bool { value } => if *value { "TRUE" } else { "FALSE" }.to_string(),
             QExpr::Null => "NULL".to_string(),
+            QExpr::Column { column, .. } if self.bare_columns => self.id(column),
             QExpr::Column { source, column } => format!("{}.{}", self.id(source), self.id(column)),
             QExpr::Param { name } => self.param(name),
             QExpr::Binary { op, lhs, rhs } => {
@@ -193,8 +203,12 @@ impl Lowerer<'_> {
             }
             QExpr::Call { func, args } => match func.as_str() {
                 "today" => "CURRENT_DATE".to_string(),
+                "now" if self.dialect == Dialect::Sqlite => "CURRENT_TIMESTAMP".to_string(),
                 other => {
-                    let name = if other == "trim" { "btrim" } else { other };
+                    let name = match (self.dialect, other) {
+                        (Dialect::Postgres, "trim") => "btrim",
+                        _ => other,
+                    };
                     let a: Vec<String> = args.iter().map(|a| self.expr(a)).collect();
                     format!("{name}({})", a.join(", "))
                 }

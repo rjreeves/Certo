@@ -1,7 +1,7 @@
 //! `certo ql` — typed queries against a schema.
 //!
 //!   certo ql check   <file.ql> --schema <schema.sdl|IR.json>
-//!   certo ql compile <file.ql> --schema <schema.sdl|IR.json> [--json]
+//!   certo ql compile <file.ql> --schema <schema.sdl|IR.json> [--json] [--dialect postgres|sqlite]
 
 use certo_diagnostics::{render_all, Severity};
 use certo_sdl::{describe_type, SchemaIR};
@@ -21,6 +21,7 @@ Subcommands:
 Options:
   --schema <file>   the schema: a .sdl file, or an IR.json
   --json            (compile) machine-readable output: params, columns, sql, param_order, ir
+  --dialect <name>  (compile) postgres (default) or sqlite
 ";
 
 pub fn cmd_ql(args: &[String]) {
@@ -38,11 +39,17 @@ pub fn cmd_ql(args: &[String]) {
         process::exit(2);
     }
     let (mut file, mut schema, mut json) = (None::<PathBuf>, None::<PathBuf>, false);
+    let mut dialect = Dialect::Postgres;
     let mut it = args[1..].iter();
     while let Some(a) = it.next() {
         match a.as_str() {
             "--schema" => schema = Some(PathBuf::from(it.next().unwrap_or_else(|| die("--schema requires a file", 2)))),
             "--json" => json = true,
+            "--dialect" => {
+                let n = it.next().unwrap_or_else(|| die("--dialect requires a name", 2));
+                dialect = Dialect::from_name(n)
+                    .unwrap_or_else(|| die(&format!("unknown SQL dialect `{n}` (supported: postgres, sqlite)"), 2));
+            }
             "--help" | "-h" => {
                 print!("{USAGE}");
                 return;
@@ -60,7 +67,7 @@ pub fn cmd_ql(args: &[String]) {
 
     let src = std::fs::read_to_string(&file).unwrap_or_else(|e| die(&format!("cannot read {}: {e}", file.display()), 2));
     let name = file.display().to_string();
-    let (queries, diags) = certo_ql::compile(&schema, &src, Dialect::Postgres);
+    let (queries, diags) = certo_ql::compile(&schema, &src, dialect);
     eprint!("{}", render_all(&diags, &src, &name, stderr_is_tty()));
     let errors = diags.iter().filter(|d| d.severity == Severity::Error).count();
     let Some(queries) = queries else {
@@ -92,7 +99,7 @@ pub fn cmd_ql(args: &[String]) {
                 println!("  -> row count");
             }
         } else {
-            let binds: Vec<String> = q.param_order().iter().enumerate().map(|(i, p)| format!("${}={p}", i + 1)).collect();
+            let binds: Vec<String> = q.param_order().iter().enumerate().map(|(i, p)| format!("{}{}={p}", if dialect == Dialect::Sqlite { "?" } else { "$" }, i + 1)).collect();
             println!("-- {}{}", q.name(), if binds.is_empty() { String::new() } else { format!("  ({})", binds.join(", ")) });
             println!("{};\n", q.sql());
         }

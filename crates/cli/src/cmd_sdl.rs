@@ -27,7 +27,7 @@ Options (compile):
 Options (diff):
   --mdl <file>         Apply an MDL migration (renames, remaps, backfills, data steps)
   --json               Print the plan as JSON instead of a summary
-  --sql <dialect>      Print SQL instead of a summary (dialects: postgres)
+  --sql <dialect>      Print SQL instead of a summary (dialects: postgres, sqlite)
   --deny-destructive   Exit 1 if the plan can lose data
 ";
 
@@ -127,9 +127,9 @@ fn run_diff(args: &[String]) {
                 mdl = Some(PathBuf::from(p));
             }
             "--sql" => {
-                let name = it.next().unwrap_or_else(|| die("--sql requires a dialect (postgres)", 2));
+                let name = it.next().unwrap_or_else(|| die("--sql requires a dialect (postgres, sqlite)", 2));
                 dialect = Some(certo_sql::Dialect::from_name(name)
-                    .unwrap_or_else(|| die(&format!("unknown SQL dialect `{name}` (supported: postgres)"), 2)));
+                    .unwrap_or_else(|| die(&format!("unknown SQL dialect `{name}` (supported: postgres, sqlite)"), 2)));
             }
             "--deny-destructive" => deny = true,
             "--help" | "-h" => { print!("{USAGE}"); return; }
@@ -159,7 +159,7 @@ fn run_diff(args: &[String]) {
         die("--json and --sql are mutually exclusive", 2);
     }
     if let Some(d) = dialect {
-        match certo_sql::render(&plan, d) {
+        match certo_sql::render_with(&plan, d, certo_sql::Schemas { old: &old, new: &new }) {
             Ok(sql) => if !sql.is_empty() { println!("{sql}") },
             Err(e) => {
                 eprintln!("error: {e}");

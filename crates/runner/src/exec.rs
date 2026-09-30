@@ -31,6 +31,10 @@ impl fmt::Display for ExecError {
 }
 
 pub trait Executor {
+    /// The SQL dialect this executor talks (`Project` dialect names).
+    fn dialect(&self) -> &'static str {
+        "postgres"
+    }
     /// Create the history table if it does not exist.
     fn ensure_history(&mut self) -> Result<(), ExecError>;
     /// Applied migrations in order. Empty (not an error) if the history table

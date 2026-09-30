@@ -325,6 +325,7 @@ pub fn prepare(live: LiveSchema) -> Result<Prepared, RunnerError> {
 
 /// Adopt the database behind `exec` into `project` (which must be fresh).
 pub fn adopt(project: &Project, exec: &mut dyn Executor, opts: &AdoptOptions) -> Result<AdoptReport, RunnerError> {
+    crate::runner::check_dialect(project, exec)?;
     // ---- preconditions: this is for a fresh project and an unmanaged database
     if !list(project)?.is_empty() || !is_empty_ir(&project.state_ir()?) {
         return Err(RunnerError::Project(

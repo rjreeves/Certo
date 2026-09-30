@@ -23,6 +23,7 @@
  *     or plan_migration(prev, new, mdl text) when the change needs intent
  *     (renames, enum value removal, backfills, hand-written steps)
  *   lower_sql(plan, "postgres")      -> batches / script to execute
+ *                                       (sqlite: lower_sql_with_schemas(plan, "sqlite", prev, new))
  */
 #ifndef CERTO_H
 #define CERTO_H
@@ -65,9 +66,17 @@ char *certo_plan_migration(const char *old_ir, const char *new_ir, const char *m
  * diagnostics positioned in the QL text (codes QL2xx). Additive within ABI 1. */
 char *certo_ql_compile(const char *schema_ir, const char *ql_source, const char *dialect);
 
-/* Lower a plan (the "plan" value from certo_diff_ir) to SQL. dialect: "postgres".
- * -> {"ok", "batches":[{"transactional","statements":[...]}], "script"} */
+/* Lower a plan (the "plan" value from certo_diff_ir) to SQL. dialect: "postgres" or
+ * "sqlite". -> {"ok", "batches":[{"transactional","statements":[...]}], "script"}
+ * SQLite cannot be lowered from the plan alone (it rebuilds tables and writes enums as
+ * CHECK constraints): certo_lower_sql answers error code "needs_schemas" for it. */
 char *certo_lower_sql(const char *plan, const char *dialect);
+
+/* certo_lower_sql plus the old and new schema IR the plan was made between. Required for
+ * "sqlite" (rebuilds run as: PRAGMA foreign_keys = OFF; the transaction; PRAGMA foreign_keys
+ * = ON, in separate batches); ignored for "postgres". Additive within ABI 1. */
+char *certo_lower_sql_with_schemas(const char *plan, const char *dialect,
+                                   const char *old_ir, const char *new_ir);
 
 /* ---- Migration runner -------------------------------------------------------
  * Every call takes the project directory and an optional JSON options object
