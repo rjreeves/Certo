@@ -31,6 +31,29 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo test --locked -p certo-sdl -p certo-mdl -p certo-sql -p certo-ql -p certo-runner -p certo-capi
 
+  codegen:
+    # generate C# from sample queries, compile it, and run it against SQLite and PostgreSQL
+    runs-on: ubuntu-22.04
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 5s --health-timeout 5s --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+      - name: Generated code compiles and runs
+        shell: pwsh
+        env:
+          CERTO_TEST_PG_URL: postgres://postgres:postgres@localhost:5432/postgres
+        run: ./packaging/dotnet/codegen-check.ps1
+
   native:
     name: native (${{ matrix.rid }})
     strategy:

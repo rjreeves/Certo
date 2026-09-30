@@ -21,15 +21,27 @@ pub struct Lowered {
     pub param_order: Vec<String>,
 }
 
-pub fn lower(dialect: Dialect, q: &QueryIR) -> Lowered {
-    let mut l = Lowerer { dialect, params: &q.params, order: Vec::new(), bare_columns: false };
+/// Variations of the SQL for a particular consumer.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct LowerOptions {
+    /// Select enum result columns as `text` (PostgreSQL). Drivers that do not know the
+    /// enum type, such as Npgsql without a mapping, cannot read the column otherwise.
+    pub enums_as_text: bool,
+}
+
+pub fn lower(dialect: Dialect, q: &QueryIR) -> Lowered { lower_with(dialect, q, LowerOptions::default()) }
+
+pub fn lower_with(dialect: Dialect, q: &QueryIR, opts: LowerOptions) -> Lowered {
+    let mut l = Lowerer { dialect, params: &q.params, order: Vec::new(), bare_columns: false, enums_as_text: opts.enums_as_text, cast_enums: false };
     let sql = l.query(q);
     Lowered { sql, param_order: l.order }
 }
 
 /// `INSERT` / `UPDATE` / `DELETE`, with `RETURNING` when the mutation has one.
-pub fn lower_mutation(dialect: Dialect, m: &MutationIR) -> Lowered {
-    let mut l = Lowerer { dialect, params: &m.params, order: Vec::new(), bare_columns: false };
+pub fn lower_mutation(dialect: Dialect, m: &MutationIR) -> Lowered { lower_mutation_with(dialect, m, LowerOptions::default()) }
+
+pub fn lower_mutation_with(dialect: Dialect, m: &MutationIR, opts: LowerOptions) -> Lowered {
+    let mut l = Lowerer { dialect, params: &m.params, order: Vec::new(), bare_columns: false, enums_as_text: opts.enums_as_text, cast_enums: false };
     let sql = l.mutation(m);
     Lowered { sql, param_order: l.order }
 }
@@ -40,6 +52,9 @@ struct Lowerer<'a> {
     order: Vec<String>,
     /// SQLite's RETURNING cannot use table-qualified names.
     bare_columns: bool,
+    enums_as_text: bool,
+    /// Applies to the next column list only (the statement's own, not a subquery's).
+    cast_enums: bool,
 }
 
 impl Lowerer<'_> {
@@ -104,8 +119,8 @@ impl Lowerer<'_> {
         }
         if !m.returning.is_empty() {
             self.bare_columns = self.dialect == Dialect::Sqlite;
-            let cols: Vec<String> =
-                m.returning.iter().map(|c| format!("{} AS {}", self.expr(&c.expr), self.id(&c.name))).collect();
+            let cast = self.enums_as_text;
+            let cols: Vec<String> = m.returning.iter().map(|c| self.output(c, cast)).collect();
             self.bare_columns = false;
             lines.push(format!("RETURNING {}", cols.join(", ")));
         }
@@ -119,7 +134,19 @@ impl Lowerer<'_> {
         parts.join(", ")
     }
 
+    /// `expr AS "name"`, selecting an enum as text when asked.
+    fn output(&mut self, c: &ColumnOut, cast: bool) -> String {
+        let e = self.expr(&c.expr);
+        let e = if cast && self.dialect == Dialect::Postgres && matches!(c.ty, certo_sdl::TypeIR::Enum(_)) {
+            format!("({e})::text")
+        } else {
+            e
+        };
+        format!("{e} AS {}", self.id(&c.name))
+    }
+
     fn query(&mut self, q: &QueryIR) -> String {
+        self.cast_enums = self.enums_as_text;
         self.select_lines(&q.sources, &q.select, &q.filter, &q.group_by, &q.having, q.distinct, &q.order_by, &q.limit, &q.offset)
             .join("\n")
     }
@@ -140,8 +167,8 @@ impl Lowerer<'_> {
     ) -> Vec<String> {
         let mut lines = Vec::new();
 
-        let cols: Vec<String> =
-            select.iter().map(|c| format!("{} AS {}", self.expr(&c.expr), self.id(&c.name))).collect();
+        let cast = std::mem::take(&mut self.cast_enums);
+        let cols: Vec<String> = select.iter().map(|c| self.output(c, cast)).collect();
         lines.push(format!("SELECT {}{}", if distinct { "DISTINCT " } else { "" }, cols.join(", ")));
 
         for (i, s) in sources.iter().enumerate() {

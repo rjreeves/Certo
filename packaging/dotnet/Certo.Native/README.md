@@ -24,6 +24,18 @@ CertoNative.MigrateApply(dir, "{\"url\":\"app.db\"}");
 `"ok": false` is a normal outcome (schema errors come back as positioned `diagnostics`);
 only an ABI mismatch between the binding and the native library throws.
 
+## Generated, typed access
+
+`CertoNative.CodegenQl(ir, qlSource, optionsJson)` (or `certo ql codegen`) turns QL into one C# file:
+a record per result and an extension method per statement, plain ADO.NET so it works with Npgsql and
+Microsoft.Data.Sqlite.
+
+```csharp
+var orders = await connection.RecentOrdersAsync(minTotal: 20m, since: null);   // List<RecentOrdersRow>
+var id = (await connection.AddCustomerAsync("Ann", null)).Single().Id;          // insert ... returning id
+var changed = await connection.SetStatusAsync(id, Status.Paid);                  // update: rows affected
+```
+
 ## Platforms
 
 The package carries the native library for `win-x64`, `linux-x64`, `linux-arm64`,

@@ -2,6 +2,7 @@
 //!
 //!   certo ql check   <file.ql> --schema <schema.sdl|IR.json>
 //!   certo ql compile <file.ql> --schema <schema.sdl|IR.json> [--json] [--dialect postgres|sqlite]
+//!   certo ql codegen <file.ql> --schema <schema.sdl|IR.json> --lang csharp [--dialect ..] [--namespace N] [--class C] [-o out.cs]
 
 use certo_diagnostics::{render_all, Severity};
 use certo_sdl::{describe_type, SchemaIR};
@@ -17,11 +18,16 @@ Usage: certo ql <subcommand> <file.ql> --schema <schema> [options]
 Subcommands:
   check     Type-check the queries and show each one's parameters and typed result columns
   compile   Print the SQL for each query (with its parameter placeholders)
+  codegen   Generate typed host code: a record per result, a method per statement (--lang csharp)
 
 Options:
   --schema <file>   the schema: a .sdl file, or an IR.json
   --json            (compile) machine-readable output: params, columns, sql, param_order, ir
-  --dialect <name>  (compile) postgres (default) or sqlite
+  --dialect <name>  (compile, codegen) postgres (default) or sqlite
+  --lang <name>     (codegen) csharp
+  --namespace <ns>  (codegen) C# namespace (default Certo.Generated)
+  --class <name>    (codegen) the static class holding the methods (default CertoQueries)
+  -o <file>         (codegen) write here instead of standard output
 ";
 
 pub fn cmd_ql(args: &[String]) {
@@ -33,13 +39,14 @@ pub fn cmd_ql(args: &[String]) {
         print!("{USAGE}");
         return;
     }
-    if !matches!(sub, "check" | "compile") {
+    if !matches!(sub, "check" | "compile" | "codegen") {
         eprintln!("Unknown ql subcommand: {sub}\n");
         eprint!("{USAGE}");
         process::exit(2);
     }
     let (mut file, mut schema, mut json) = (None::<PathBuf>, None::<PathBuf>, false);
     let mut dialect = Dialect::Postgres;
+    let (mut lang, mut namespace, mut class, mut out) = (None::<String>, None::<String>, None::<String>, None::<PathBuf>);
     let mut it = args[1..].iter();
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -50,6 +57,10 @@ pub fn cmd_ql(args: &[String]) {
                 dialect = Dialect::from_name(n)
                     .unwrap_or_else(|| die(&format!("unknown SQL dialect `{n}` (supported: postgres, sqlite)"), 2));
             }
+            "--lang" => lang = Some(it.next().unwrap_or_else(|| die("--lang requires a name", 2)).clone()),
+            "--namespace" => namespace = Some(it.next().unwrap_or_else(|| die("--namespace requires a name", 2)).clone()),
+            "--class" => class = Some(it.next().unwrap_or_else(|| die("--class requires a name", 2)).clone()),
+            "-o" => out = Some(PathBuf::from(it.next().unwrap_or_else(|| die("-o requires a file", 2)))),
             "--help" | "-h" => {
                 print!("{USAGE}");
                 return;
@@ -75,6 +86,25 @@ pub fn cmd_ql(args: &[String]) {
         process::exit(1);
     };
 
+    if sub == "codegen" {
+        match lang.as_deref() {
+            Some("csharp" | "cs" | "c#") => {}
+            Some(other) => die(&format!("unknown language `{other}` (supported: csharp)"), 2),
+            None => die("--lang is required (supported: csharp)", 2),
+        }
+        let mut opts = certo_ql::CSharpOptions { dialect, ..Default::default() };
+        if let Some(n) = namespace { opts.namespace = n; }
+        if let Some(c) = class { opts.class_name = c; }
+        let code = certo_ql::generate_csharp(&schema, &queries, &opts);
+        match out {
+            Some(path) => {
+                std::fs::write(&path, code).unwrap_or_else(|e| die(&format!("cannot write {}: {e}", path.display()), 2));
+                eprintln!("{name}: {} statement(s) -> {}", queries.len(), path.display());
+            }
+            None => print!("{code}"),
+        }
+        return;
+    }
     if json {
         println!("{}", serde_json::to_string_pretty(&certo_ql::to_json(&queries)).expect("json"));
         return;

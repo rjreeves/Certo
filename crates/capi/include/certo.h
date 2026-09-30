@@ -66,6 +66,12 @@ char *certo_plan_migration(const char *old_ir, const char *new_ir, const char *m
  * diagnostics positioned in the QL text (codes QL2xx). Additive within ABI 1. */
 char *certo_ql_compile(const char *schema_ir, const char *ql_source, const char *dialect);
 
+/* Generate typed host code from QL: one source file with a record per result and a method per
+ * statement. options: {"language":"csharp", "dialect"?:"postgres"|"sqlite", "namespace"?, "class_name"?}
+ * -> {"ok", "code": "<C# source>" | null, "diagnostics":[...], "rendered"} (QL errors are
+ * diagnostics, as for certo_ql_compile). Additive within ABI 1. */
+char *certo_ql_codegen(const char *schema_ir, const char *ql_source, const char *options);
+
 /* Lower a plan (the "plan" value from certo_diff_ir) to SQL. dialect: "postgres" or
  * "sqlite". -> {"ok", "batches":[{"transactional","statements":[...]}], "script"}
  * SQLite cannot be lowered from the plan alone (it rebuilds tables and writes enums as

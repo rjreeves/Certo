@@ -142,6 +142,28 @@ pub unsafe extern "C" fn certo_ql_compile(
     }
 }
 
+/// Generate typed host code from QL. `options` is JSON: `{"language":"csharp",
+/// "dialect"?, "namespace"?, "class_name"?}`. See `api::ql_codegen` for the result.
+///
+/// # Safety
+/// All arguments must be NULL or valid NUL-terminated strings.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn certo_ql_codegen(
+    schema_ir: *const c_char,
+    ql_source: *const c_char,
+    options: *const c_char,
+) -> *mut c_char {
+    let args = unsafe {
+        arg(schema_ir, "schema_ir").and_then(|s| {
+            arg(ql_source, "ql_source").and_then(|q| arg(options, "options").map(|o| (s, q, o)))
+        })
+    };
+    match args {
+        Ok((schema, ql, options)) => respond(|| api::ql_codegen(schema, ql, options)),
+        Err(e) => into_c(e),
+    }
+}
+
 /// Lower a migration plan JSON document to SQL batches for `dialect`
 /// (currently `"postgres"`).
 ///
