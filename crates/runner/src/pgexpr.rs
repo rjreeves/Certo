@@ -397,8 +397,8 @@ fn parse(
 }
 
 /// Both safety checks: same meaning as the server's text, and valid SDL.
-fn verify(raw: &str, e: &ExprIR, synthetic: &SchemaIR) -> Result<(), String> {
-    let rendered = render_expr(Dialect::Postgres, e);
+fn verify(dialect: Dialect, raw: &str, e: &ExprIR, synthetic: &SchemaIR) -> Result<(), String> {
+    let rendered = render_expr(dialect, e);
     if normalize(&rendered) != normalize(raw) {
         return Err(format!("translation `{rendered}` is not equivalent to the original"));
     }
@@ -449,6 +449,21 @@ fn spellable(enums: &[EnumIR]) -> Vec<EnumIR> {
         .collect()
 }
 
+/// SQLite spells some defaults in ways PostgreSQL never does: booleans are 0/1
+/// and `gen_uuid()` is a long `randomblob` expression.
+fn sqlite_shortcut(dialect: Dialect, raw: &str, col_ty: &TypeIR) -> Option<ExprIR> {
+    if dialect != Dialect::Sqlite {
+        return None;
+    }
+    let uuid = ExprIR::Call { func: "gen_uuid".into(), args: vec![] };
+    match (col_ty, raw.trim().trim_start_matches('(').trim_end_matches(')').trim()) {
+        (TypeIR::Builtin(certo_sdl::Builtin::Bool), "1") => Some(ExprIR::Bool { value: true }),
+        (TypeIR::Builtin(certo_sdl::Builtin::Bool), "0") => Some(ExprIR::Bool { value: false }),
+        (TypeIR::Builtin(certo_sdl::Builtin::Uuid), _) if normalize(raw) == normalize(&render_expr(dialect, &uuid)) => Some(uuid),
+        _ => None,
+    }
+}
+
 /// Translate a column default read from a live database (no sequences known).
 pub fn translate_default(raw: &str, col_ty: &TypeIR, enums: &[EnumIR]) -> Result<ExprIR, String> {
     translate_default_with(raw, col_ty, enums, &[])
@@ -457,6 +472,18 @@ pub fn translate_default(raw: &str, col_ty: &TypeIR, enums: &[EnumIR]) -> Result
 /// Like `translate_default`, with the standalone sequences a `nextval(...)`
 /// default may refer to.
 pub fn translate_default_with(
+    raw: &str,
+    col_ty: &TypeIR,
+    enums: &[EnumIR],
+    sequences: &[SequenceIR],
+) -> Result<ExprIR, String> {
+    translate_default_for(Dialect::Postgres, raw, col_ty, enums, sequences)
+}
+
+/// `translate_default_with` for a live database of `dialect`. A result is
+/// only trusted if it renders back (in that dialect) to the text it came from.
+pub fn translate_default_for(
+    dialect: Dialect,
     raw: &str,
     col_ty: &TypeIR,
     enums: &[EnumIR],
@@ -472,7 +499,10 @@ pub fn translate_default_with(
         return Err(format!("its enum type {n} cannot be expressed in SDL"));
     }
     let seq_names: Vec<String> = sequences.iter().filter(|s| ident_ok(&s.name)).map(|s| s.name.clone()).collect();
-    let e = parse(raw, enums, None, &seq_names)?;
+    let e = match sqlite_shortcut(dialect, raw, col_ty) {
+        Some(e) => e,
+        None => parse(raw, enums, None, &seq_names)?,
+    };
     let mut id = plain("id", TypeIR::Builtin(certo_sdl::Builtin::Int));
     id.primary_key = true;
     id.nullable = false;
@@ -485,13 +515,18 @@ pub fn translate_default_with(
         types: vec![],
         sequences: sequences.iter().filter(|s| ident_ok(&s.name)).cloned().collect(),
     };
-    verify(raw, &e, &synth)?;
+    verify(dialect, raw, &e, &synth)?;
     Ok(e)
 }
 
 /// Translate a CHECK body read from a live database. `columns` are the
 /// table's columns (only builtin- and enum-typed ones can appear in SDL checks).
 pub fn translate_check(raw: &str, columns: &[ColumnIR], enums: &[EnumIR]) -> Result<ExprIR, String> {
+    translate_check_for(Dialect::Postgres, raw, columns, enums)
+}
+
+/// `translate_check` for a live database of `dialect`.
+pub fn translate_check_for(dialect: Dialect, raw: &str, columns: &[ColumnIR], enums: &[EnumIR]) -> Result<ExprIR, String> {
     let enums = &spellable(enums);
     let usable: Vec<ColumnIR> = columns
         .iter()
@@ -512,7 +547,7 @@ pub fn translate_check(raw: &str, columns: &[ColumnIR], enums: &[EnumIR]) -> Res
         types: vec![],
         sequences: vec![],
     };
-    verify(raw, &e, &synth)?;
+    verify(dialect, raw, &e, &synth)?;
     Ok(e)
 }
 

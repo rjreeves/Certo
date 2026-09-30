@@ -17,7 +17,30 @@ cargo build -p certo-capi --release
 ```
 
 Copy the library next to the host executable and add `CertoNative.cs` to the
-C# project.
+C# project, or use the NuGet package below.
+
+## NuGet package (`Certo.Native`)
+
+`packaging/dotnet/` builds one package with the binding and the native library for
+`win-x64`, `linux-x64`, `linux-arm64`, `osx-x64` and `osx-arm64` (under
+`runtimes/<rid>/native/`, so NuGet copies the right one next to the app).
+
+```powershell
+pwsh packaging/dotnet/stage-native.ps1            # build + stage this machine's library
+dotnet pack packaging/dotnet/Certo.Native -c Release -o packaging/dotnet/feed
+dotnet run --project packaging/dotnet/Certo.Native.Smoke -c Release   # tests the PACKED package
+```
+
+`.github/workflows/dotnet-package.yml` does this for every platform, packs them together,
+smoke-tests the package on Windows, Linux (x64 and arm64) and macOS, and on a
+`certo-native-v<version>` tag publishes to nuget.org (secret `NUGET_API_KEY`). The tag and
+`crates/capi/Cargo.toml` versions must match, and the smoke test checks the native library
+reports the package's version.
+
+Self-contained by design: the Windows build links the C runtime statically, the Linux build
+vendors OpenSSL (glibc 2.35+ is the only requirement), macOS uses system frameworks, and SQLite
+is bundled. The smoke test covers every entry point, the SQLite runner (apply, drift, table
+rebuild, adopt), compiled QL run through `Microsoft.Data.Sqlite`, and concurrent calls.
 
 ## Flow
 

@@ -190,3 +190,21 @@ impl Executor for PgExecutor {
         Ok(())
     }
 }
+
+impl Executor for Box<dyn Executor> {
+    fn dialect(&self) -> &'static str { (**self).dialect() }
+    fn ensure_history(&mut self) -> Result<(), ExecError> { (**self).ensure_history() }
+    fn applied(&mut self) -> Result<Vec<AppliedRow>, ExecError> { (**self).applied() }
+    fn apply(&mut self, m: &Migration) -> Result<(), ExecError> { (**self).apply(m) }
+    fn record_applied(&mut self, m: &Migration) -> Result<(), ExecError> { (**self).record_applied(m) }
+    fn introspect(&mut self) -> Result<LiveSchema, ExecError> { (**self).introspect() }
+}
+
+/// Connect to the database `target` names, with the executor for the project's
+/// dialect: a `postgres://` URL, or for SQLite a file path / `sqlite:<path>`.
+pub fn connect(project: &crate::project::Project, target: &str) -> Result<Box<dyn Executor>, RunnerError> {
+    match project.config.dialect.as_str() {
+        "sqlite" => Ok(Box::new(crate::sqlite_exec::SqliteExecutor::open(target)?)),
+        _ => Ok(Box::new(PgExecutor::connect(target)?)),
+    }
+}

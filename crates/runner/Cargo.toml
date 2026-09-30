@@ -16,6 +16,13 @@ sha2                 = "0.10"
 postgres             = "0.19"
 postgres-native-tls  = "0.5"
 native-tls           = "0.2"
+rusqlite             = { version = "0.32", features = ["bundled"] }
 
 [dev-dependencies]
 tempfile = "3"
+
+# The C ABI library is shipped as a NuGet package, so on Linux it must not depend on
+# the host's libssl: build OpenSSL statically (feature unification turns it on for
+# openssl-sys, which native-tls uses). Windows uses SChannel and macOS Security.framework.
+[target.'cfg(target_os = "linux")'.dependencies]
+openssl = { version = "0.10", features = ["vendored"] }

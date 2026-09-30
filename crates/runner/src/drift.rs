@@ -176,6 +176,9 @@ pub fn normalize(sql: &str) -> String {
 /// expected ones with the expected ones.
 pub fn align(dialect: Dialect, expected: &SchemaIR, live: &mut SchemaIR) {
     let same = |raw: &str, e: &ExprIR| normalize(raw) == normalize(&render_expr(dialect, e));
+    if dialect == Dialect::Sqlite {
+        align_sqlite(expected, live);
+    }
     for lt in &mut live.tables {
         let Some(et) = expected.table(&lt.name) else { continue };
         lt.relationships = et.relationships.clone();
@@ -191,6 +194,38 @@ pub fn align(dialect: Dialect, expected: &SchemaIR, live: &mut SchemaIR) {
                 && same(sql, &ek.expr)
             {
                 lk.expr = ek.expr.clone();
+            }
+        }
+    }
+}
+
+/// What SQLite cannot keep apart or cannot show:
+/// * an enum that no column uses leaves no trace in the database;
+/// * `serial` and both identity forms are one thing (`INTEGER PRIMARY KEY
+///   AUTOINCREMENT`), and it is always an `INTEGER`, whatever width was asked.
+fn align_sqlite(expected: &SchemaIR, live: &mut SchemaIR) {
+    let used: HashSet<&str> = expected
+        .tables
+        .iter()
+        .flat_map(|t| &t.columns)
+        .filter_map(|c| match &c.ty {
+            certo_sdl::TypeIR::Enum(n) => Some(n.as_str()),
+            _ => None,
+        })
+        .collect();
+    for e in &expected.enums {
+        if !used.contains(e.name.as_str()) && !live.enums.iter().any(|l| l.name == e.name) {
+            live.enums.push(e.clone());
+        }
+    }
+    live.enums.sort_by(|a, b| a.name.cmp(&b.name));
+    for lt in &mut live.tables {
+        let Some(et) = expected.table(&lt.name) else { continue };
+        for lc in &mut lt.columns {
+            let Some(ec) = et.column(&lc.name) else { continue };
+            if lc.generated.is_some() && ec.generated.is_some() {
+                lc.generated = ec.generated;
+                lc.ty = ec.ty.clone();
             }
         }
     }

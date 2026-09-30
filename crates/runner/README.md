@@ -127,9 +127,10 @@ prints that list too, so you know it is expected.
 - Sequence `last_value` (where the counter is) is state, not schema, and is
   never compared. Adding serial or identity to a column with rows catches the
   new counter up to the largest existing value.
-- The built-in executor is PostgreSQL only. A project may use `dialect = sqlite`: `migrate new`
-  writes `up.sql` / `up.json` for it (see `crates/sql/README.md`), but applying, drift and
-  adoption are refused until a SQLite executor exists. `sslmode=require` selects TLS but has not been exercised
+- PostgreSQL and SQLite (`dialect = "sqlite"`; `--url app.db`, `sqlite:<path>` or `:memory:`). SQLite has
+  no advisory lock, so two runners are only serialised per transaction, not per migration run; its
+  reader can only see types the SQLite adapter's spellings (`UUID TEXT`, `ENUM_Role TEXT`, ...)
+  identify, so a database not created by Certo reports other types as not represented. `sslmode=require` selects TLS but has not been exercised
   against a TLS-enabled server.
 - The history table and lock key are fixed (`_certo_migrations`).
 

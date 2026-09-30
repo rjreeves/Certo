@@ -11,7 +11,7 @@
 //! `--url` or the DATABASE_URL environment variable; it is never written to a file.
 
 use certo_runner::{
-    apply, drift, status, ApplyOptions, Drift, DriftKind, PgExecutor, Project, RunnerError,
+    apply, drift, status, ApplyOptions, Drift, DriftKind, Executor, Project, RunnerError,
 };
 use std::path::{Path, PathBuf};
 use std::process;
@@ -32,10 +32,10 @@ Subcommands:
 
 Options:
   -C <dir>              Project directory (default: current directory)
-  --dialect <name>      (init) SQL dialect: postgres or sqlite (sqlite: migrations are written, but the built-in runner applies postgres only)
+  --dialect <name>      (init) SQL dialect: postgres or sqlite
   --mdl <file>          (new) MDL file steering renames, enum remaps, backfills, steps
   --allow-destructive   (new) accept operations that can lose data
-  --url <url>           (apply, status) postgres:// URL; default: $DATABASE_URL
+  --url <url>           postgres:// URL, or a database file for sqlite; default: $DATABASE_URL
                         (add ?sslmode=require for TLS)
   --dry-run             (apply) print the SQL that would run; touch nothing
   --check-drift         (apply) refuse to run if the database has drifted
@@ -166,16 +166,16 @@ fn new(root: &Path, o: &Opts) -> Result<(), RunnerError> {
     Ok(())
 }
 
-fn connect(o: &Opts) -> Result<PgExecutor, RunnerError> {
+fn connect(project: &Project, o: &Opts) -> Result<Box<dyn Executor>, RunnerError> {
     let url = o.url().ok_or_else(|| {
-        RunnerError::Connection("no database URL: pass --url or set DATABASE_URL".into())
+        RunnerError::Connection("no database: pass --url (a postgres:// URL, or a file path for sqlite) or set DATABASE_URL".into())
     })?;
-    PgExecutor::connect(&url)
+    certo_runner::connect(project, &url)
 }
 
 fn apply_cmd(root: &Path, o: &Opts) -> Result<(), RunnerError> {
     let project = Project::open(root)?;
-    let mut db = connect(o)?;
+    let mut db = connect(&project, o)?;
     if o.check_drift {
         let d = drift::check(&project, &mut db)?;
         if !d.in_sync() {
@@ -218,7 +218,7 @@ fn status_cmd(root: &Path, o: &Opts) -> Result<(), RunnerError> {
         eprintln!("(no database URL: showing local migrations only)");
         return Ok(());
     }
-    let mut db = connect(o)?;
+    let mut db = connect(&project, o)?;
     let s = status(&project, &mut db)?;
     for a in &s.applied {
         println!("applied  {:04}_{}  ({})", a.seq, a.name, a.applied_at);
@@ -251,7 +251,7 @@ fn print_findings(d: &Drift) {
 
 fn drift_cmd(root: &Path, o: &Opts) -> Result<(), RunnerError> {
     let project = Project::open(root)?;
-    let mut db = connect(o)?;
+    let mut db = connect(&project, o)?;
     let d = drift::check(&project, &mut db)?;
 
     if o.json {
@@ -289,7 +289,7 @@ fn drift_cmd(root: &Path, o: &Opts) -> Result<(), RunnerError> {
 
 fn adopt_cmd(root: &Path, o: &Opts) -> Result<(), RunnerError> {
     let project = Project::open(root)?;
-    let mut db = connect(o)?;
+    let mut db = connect(&project, o)?;
     let r = certo_runner::adopt(
         &project,
         &mut db,

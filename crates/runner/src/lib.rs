@@ -33,13 +33,16 @@ pub mod migration;
 pub mod pgexpr;
 pub mod project;
 pub mod runner;
+pub mod sqlite_exec;
+pub mod sqlite_introspect;
 
 pub use adopt::{adopt, AdoptOptions, AdoptReport, Counts};
 pub use drift::{Drift, DriftItem, DriftKind};
 pub use error::RunnerError;
-pub use exec::{AppliedRow, ExecError, Executor, PgExecutor};
+pub use exec::{connect, AppliedRow, ExecError, Executor, PgExecutor};
 pub use migration::{Created, Migration, Script};
 pub use project::{Config, Project};
+pub use sqlite_exec::SqliteExecutor;
 pub use runner::{apply, apply_with_progress, status, ApplyOptions, ApplyReport, Status};
 
 #[cfg(test)]

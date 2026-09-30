@@ -33,7 +33,7 @@ use crate::api::diagnostics_json;
 use certo_diagnostics::Diagnostic;
 use certo_runner::{
     adopt as adopt_database, apply_with_progress, drift, migration, status, AdoptOptions, ApplyOptions,
-    DriftKind, PgExecutor, Project, RunnerError,
+    DriftKind, Executor, Project, RunnerError,
 };
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
@@ -98,11 +98,15 @@ fn open(dir: &str) -> Result<Project, String> {
     Project::open(Path::new(dir)).map_err(|e| runner_error(&e))
 }
 
-fn connect(url: &Option<String>) -> Result<PgExecutor, String> {
+fn connect(project: &Project, url: &Option<String>) -> Result<Box<dyn Executor>, String> {
     let Some(url) = url.as_deref().filter(|u| !u.is_empty()) else {
-        return Err(error_json("missing_url", "options.url (a postgres:// URL) is required", json!({})));
+        return Err(error_json(
+            "missing_url",
+            "options.url is required (a postgres:// URL, or a database file path for a sqlite project)",
+            json!({}),
+        ));
     };
-    PgExecutor::connect(url).map_err(|e| runner_error(&e))
+    certo_runner::connect(project, url).map_err(|e| runner_error(&e))
 }
 
 // ---- init ---------------------------------------------------------------
@@ -199,7 +203,7 @@ struct DbOpts {
 pub fn migration_status(dir: &str, opts: Option<&str>) -> String {
     let o: DbOpts = match parse_opts(opts) { Ok(o) => o, Err(e) => return e };
     let project = match open(dir) { Ok(p) => p, Err(e) => return e };
-    let mut db = match connect(&o.url) { Ok(d) => d, Err(e) => return e };
+    let mut db = match connect(&project, &o.url) { Ok(d) => d, Err(e) => return e };
     match status(&project, &mut db) {
         Ok(s) => json!({
             "ok": true,
@@ -229,7 +233,7 @@ struct ApplyOpts {
 pub fn apply(dir: &str, opts: Option<&str>) -> String {
     let o: ApplyOpts = match parse_opts(opts) { Ok(o) => o, Err(e) => return e };
     let project = match open(dir) { Ok(p) => p, Err(e) => return e };
-    let mut db = match connect(&o.url) { Ok(d) => d, Err(e) => return e };
+    let mut db = match connect(&project, &o.url) { Ok(d) => d, Err(e) => return e };
 
     if o.check_drift {
         match drift::check(&project, &mut db) {
@@ -292,7 +296,7 @@ impl Default for DriftOpts {
 pub fn drift_report(dir: &str, opts: Option<&str>) -> String {
     let o: DriftOpts = match parse_opts(opts) { Ok(o) => o, Err(e) => return e };
     let project = match open(dir) { Ok(p) => p, Err(e) => return e };
-    let mut db = match connect(&o.url) { Ok(d) => d, Err(e) => return e };
+    let mut db = match connect(&project, &o.url) { Ok(d) => d, Err(e) => return e };
     let d = match drift::check(&project, &mut db) { Ok(d) => d, Err(e) => return runner_error(&e) };
 
     let (mut repair_sql, mut repair_error) = (Value::Null, Value::Null);
@@ -334,7 +338,7 @@ struct AdoptOpts {
 pub fn adopt(dir: &str, opts: Option<&str>) -> String {
     let o: AdoptOpts = match parse_opts(opts) { Ok(o) => o, Err(e) => return e };
     let project = match open(dir) { Ok(p) => p, Err(e) => return e };
-    let mut db = match connect(&o.url) { Ok(d) => d, Err(e) => return e };
+    let mut db = match connect(&project, &o.url) { Ok(d) => d, Err(e) => return e };
     match adopt_database(&project, &mut db, &AdoptOptions { dry_run: o.dry_run, force: o.force }) {
         Ok(r) => json!({
             "ok": true,
