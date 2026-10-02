@@ -2,6 +2,7 @@ module db_version
 
 import Stdlib.Core
 import Stdlib.Db
+import Stdlib.Env
 
 // ---------------------------------------------------------------------------
 // db_version — connect to PostgreSQL and display its version
@@ -11,13 +12,18 @@ import Stdlib.Db
 //
 // Example:
 //   db_version "host=localhost dbname=postgres user=postgres port=5432"
+//
+// With no argument, falls back to a default built from
+// FIREWORKS_DB_PASSWORD in the environment.
 // ---------------------------------------------------------------------------
 
 fn main(): Unit [io] = {
-    val connstr = arg(1) ?? "host=192.168.0.2 port=5433 dbname=fireworks user=fireworks password=***REMOVED***"
+    val password = getEnv("FIREWORKS_DB_PASSWORD") ?? "changeme"
+    val connstr = arg(1) ?? ("host=192.168.0.2 port=5433 dbname=fireworks user=fireworks password=" ++ password)
+    val displayConnstr = arg(1) ?? "host=192.168.0.2 port=5433 dbname=fireworks user=fireworks password=****"
 
     println("Connecting to PostgreSQL...")
-    println(f"  connection string : {connstr}")
+    println(f"  connection string : {displayConnstr}")
     println("")
 
     val conn = dbConnect(connstr)

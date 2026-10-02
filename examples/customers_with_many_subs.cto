@@ -9,14 +9,17 @@ module CustomersWithManySubs
 //   GET /customers/high-subscriber-count           → threshold defaults to 10
 //   GET /customers/high-subscriber-count?min=<N>   → override threshold
 //
-// Edit CONNSTR below to match your database.
+// Edit the host/user/dbname below to match your database, and set
+// FIREWORKS_DB_PASSWORD in the environment before running.
 
 import Stdlib.Core
 import Stdlib.Db
+import Stdlib.Env
 import Stdlib.Http
 
 fn queryCustomers(minSubs: Text): List<List<Text?>> [io] = {
-    val conn = dbConnect("host=192.168.0.2 port=5433 dbname=fireworks user=fireworks password=***REMOVED***")
+    val password = getEnv("FIREWORKS_DB_PASSWORD") ?? "changeme"
+    val conn = dbConnect("host=192.168.0.2 port=5433 dbname=fireworks user=fireworks password=" ++ password)
     if conn == 0 then {
         eprintln(f"db connect failed: {dbError(0)}")
         []

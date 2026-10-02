@@ -2,9 +2,11 @@ module littleQ
 
 import Stdlib.Core
 import Stdlib.Db
+import Stdlib.Env
 
 fn main(): Unit [io] = {
-    val conn = dbConnect("host=localhost dbname=fireworks user=fireworks password=***REMOVED***")
+    val password = getEnv("FIREWORKS_DB_PASSWORD") ?? "changeme"
+    val conn = dbConnect("host=localhost dbname=fireworks user=fireworks password=" ++ password)
     if conn == 0 then {
         eprintln(f"connect failed: {dbError(0)}")
     } else {

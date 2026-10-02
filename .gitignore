@@ -10,6 +10,22 @@
 bin/
 obj/
 
+# Compiled example/demo binaries — these have no source value and have
+# historically ended up committed by accident (see the 2026-10-02 history
+# rewrite that purged dozens of them, some embedding a hardcoded test
+# credential compiled in as a literal string).
+*.exe
+*.lib
+*.obj
+*.pdb
+*.dll
+
+# Secrets and local logs — a committed examples/.env (with a real database
+# password) was the original trigger for that same history rewrite.
+.env
+*.env
+*.log
+
 # Editor/OS cruft
 .DS_Store
 Thumbs.db
