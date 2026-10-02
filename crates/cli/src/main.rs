@@ -771,6 +771,17 @@ fn cmd_build(args: &[String], quiet: bool) {
             let implib = out_path.with_extension("lib");
             cmd.arg("-Xlinker").arg(format!("/IMPLIB:{}", implib.display()));
             cmd.arg("-Xlinker").arg("/DLL");
+            // Source containing `main()` still codegens a WinMain that
+            // references CommandLineToArgvW (emit_module.rs), regardless of
+            // exe-vs-dll target - unlike the executable branch below, this
+            // branch never linked shell32, so that symbol was left
+            // unresolved for any --emit-dll source with a main() anywhere
+            // in its import graph (confirmed live: a 7-line main()-only
+            // repro fails the same way). Linking it unconditionally, same
+            // as the executable branch already does, is harmless when
+            // nothing references it - the linker only pulls in symbols
+            // actually used.
+            cmd.arg("-lshell32"); // CommandLineToArgvW (used by WinMain, if present)
         } else {
             cmd.arg("-fPIC");
             if !cfg!(target_os = "macos") {
