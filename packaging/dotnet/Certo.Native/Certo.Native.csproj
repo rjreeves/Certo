@@ -10,6 +10,19 @@
     <!-- keep in step with crates/capi/Cargo.toml; the smoke test checks they agree -->
     <Version Condition="'$(Version)' == ''">0.1.0</Version>
     <Description>In-process Certo database compiler for .NET: SDL schemas, migrations, QL queries, SQL lowering and a migration runner (PostgreSQL, SQLite), as a P/Invoke binding plus the native library for each platform.</Description>
+    <Authors>rjreeves</Authors>
+    <Company>rjreeves</Company>
+    <Copyright>Copyright (c) rjreeves</Copyright>
+    <RepositoryUrl>https://github.com/rjreeves/Certo</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PackageProjectUrl>https://github.com/rjreeves/Certo/tree/master/packaging/dotnet</PackageProjectUrl>
+    <!-- GitHub Packages links the package to the repository through RepositoryUrl; no license is declared
+         because the repository has none yet: add PackageLicenseExpression when it does -->
+    <PublishRepositoryUrl>true</PublishRepositoryUrl>
+    <IncludeSymbols>false</IncludeSymbols>
+    <DebugType>embedded</DebugType>
+    <EmbedUntrackedSources>true</EmbedUntrackedSources>
+    <ContinuousIntegrationBuild Condition="'$(GITHUB_ACTIONS)' == 'true'">true</ContinuousIntegrationBuild>
     <PackageReadmeFile>README.md</PackageReadmeFile>
     <PackageTags>certo;database;migrations;schema;sql;sqlite;postgres</PackageTags>
     <GenerateDocumentationFile>true</GenerateDocumentationFile>

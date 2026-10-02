@@ -33,9 +33,12 @@ dotnet run --project packaging/dotnet/Certo.Native.Smoke -c Release   # tests th
 
 `.github/workflows/dotnet-package.yml` does this for every platform, packs them together,
 smoke-tests the package on Windows, Linux (x64 and arm64) and macOS, and on a
-`certo-native-v<version>` tag publishes to nuget.org (secret `NUGET_API_KEY`). The tag and
+`certo-native-v<version>` tag (or a manual run with `publish` ticked) pushes the package to this
+repository's GitHub Packages feed, authenticated by the workflow's own token (see
+`packaging/dotnet/Certo.Native/README.md` for installing from it). The tag and
 `crates/capi/Cargo.toml` versions must match, and the smoke test checks the native library
-reports the package's version.
+reports the package's version. To release: bump `version` in `crates/capi/Cargo.toml`, merge,
+then `git tag certo-native-v<version> && git push origin certo-native-v<version>`.
 
 Self-contained by design: the Windows build links the C runtime statically, the Linux build
 vendors OpenSSL (glibc 2.35+ is the only requirement), macOS uses system frameworks, and SQLite

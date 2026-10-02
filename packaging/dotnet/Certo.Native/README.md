@@ -24,6 +24,21 @@ CertoNative.MigrateApply(dir, "{\"url\":\"app.db\"}");
 `"ok": false` is a normal outcome (schema errors come back as positioned `diagnostics`);
 only an ABI mismatch between the binding and the native library throws.
 
+## Installing from the private feed
+
+The package is published to this repository's GitHub Packages feed, not to nuget.org. GitHub
+requires a sign-in even to read from it: create a personal access token (classic) with the
+`read:packages` scope, then add the feed to the consuming project's `nuget.config` (a sample is
+in `packaging/dotnet/nuget.config.sample`) and keep the token out of the file:
+
+```
+dotnet nuget add source "https://nuget.pkg.github.com/rjreeves/index.json" \
+    --name certo --username <your GitHub user> --password <token> --store-password-in-clear-text
+dotnet add package Certo.Native --version 0.1.0
+```
+
+In CI, use the workflow's own `GITHUB_TOKEN` (give the job `packages: read`) as the password.
+
 ## Generated, typed access
 
 `CertoNative.CodegenQl(ir, qlSource, optionsJson)` (or `certo ql codegen`) turns QL into one C# file:
