@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Copy next to the solution that uses Certo.Native as nuget.config.
+     Credentials do not belong in the file: pass them at restore time, e.g. in CI
+       dotnet nuget update source certo --username <user> --password "$GITHUB_TOKEN" --store-password-in-clear-text
+     or locally with `dotnet nuget add source` (see packaging/dotnet/Certo.Native/README.md). -->
+<configuration>
+  <packageSources>
+    <add key="certo" value="https://nuget.pkg.github.com/rjreeves/index.json" />
+  </packageSources>
+  <!-- only Certo.Native comes from the private feed; everything else keeps coming from nuget.org -->
+  <packageSourceMapping>
+    <packageSource key="certo">
+      <package pattern="Certo.Native" />
+    </packageSource>
+    <packageSource key="nuget.org">
+      <package pattern="*" />
+    </packageSource>
+  </packageSourceMapping>
+</configuration>

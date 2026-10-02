@@ -2,10 +2,16 @@ name: Certo.Native package
 
 # Builds certo_capi for every supported platform, packs them into one NuGet package
 # (Certo.Native) and smoke-tests the PACKED package on each OS that can run it.
-# A tag `certo-native-v<version>` also publishes to nuget.org (needs NUGET_API_KEY).
+# A tag `certo-native-v<version>` (or a manual run with `publish` ticked) pushes the package to
+# this repository's GitHub Packages NuGet feed, using the workflow's own token: no secret to set up.
 
 on:
   workflow_dispatch:
+    inputs:
+      publish:
+        description: Push the package to the GitHub Packages feed (the version comes from crates/capi/Cargo.toml)
+        type: boolean
+        default: false
   push:
     tags: ["certo-native-v*"]
   pull_request:
@@ -152,9 +158,12 @@ jobs:
         run: dotnet run --project packaging/dotnet/Certo.Native.Smoke -c Release -p:CertoNativeVersion=${{ needs.pack.outputs.version }}
 
   publish:
-    if: startsWith(github.ref, 'refs/tags/certo-native-v')
+    if: startsWith(github.ref, 'refs/tags/certo-native-v') || (github.event_name == 'workflow_dispatch' && inputs.publish)
     needs: [pack, smoke]
     runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+      packages: write
     steps:
       - uses: actions/download-artifact@v4
         with:
@@ -163,5 +172,10 @@ jobs:
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: 8.0.x
-      - name: Push to nuget.org
-        run: dotnet nuget push "feed/*.nupkg" --api-key "${{ secrets.NUGET_API_KEY }}" --source https://api.nuget.org/v3/index.json --skip-duplicate
+      - name: Push to GitHub Packages
+        # --skip-duplicate: re-running a release does not fail on a version that is already there
+        run: >-
+          dotnet nuget push "feed/*.nupkg"
+          --source "https://nuget.pkg.github.com/${{ github.repository_owner }}/index.json"
+          --api-key "${{ secrets.GITHUB_TOKEN }}"
+          --skip-duplicate
