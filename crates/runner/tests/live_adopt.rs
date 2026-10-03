@@ -55,6 +55,10 @@ CREATE TABLE refs (
     FOREIGN KEY (ra, rb) REFERENCES audit (a, b),
     lg integer REFERENCES "Legacy Table" (id)
 );
+CREATE VIEW customer_names AS SELECT name FROM customers;
+CREATE MATERIALIZED VIEW order_totals AS SELECT customer_id, sum(total) AS t FROM orders GROUP BY customer_id;
+CREATE FUNCTION touch() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END $$;
+CREATE TRIGGER orders_touch BEFORE UPDATE ON orders FOR EACH ROW EXECUTE FUNCTION touch();
 "#;
 
 fn url() -> Option<String> { std::env::var("CERTO_TEST_PG_URL").ok().filter(|u| !u.is_empty()) }

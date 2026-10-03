@@ -326,6 +326,23 @@ pub fn introspect(client: &mut Client) -> Result<LiveSchema, postgres::Error> {
     }
     sequences.sort_by(|a, b| a.name.cmp(&b.name));
 
+    // ---- objects SDL has no place for: said so, never silently dropped -----------
+    for r in client.query(
+        "SELECT kind, name FROM (
+             SELECT CASE c.relkind WHEN 'v' THEN 'view' ELSE 'materialized view' END AS kind, c.relname::text AS name
+             FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+             WHERE n.nspname = current_schema() AND c.relkind IN ('v', 'm')
+           UNION ALL
+             SELECT 'trigger', t.tgname::text || ' on ' || c.relname::text
+             FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid JOIN pg_namespace n ON n.oid = c.relnamespace
+             WHERE NOT t.tgisinternal AND n.nspname = current_schema()
+         ) o ORDER BY kind, name",
+        &[],
+    )? {
+        let (kind, name): (String, String) = (r.get(0), r.get(1));
+        notes.push(format!("{kind} {name} is not represented in the schema"));
+    }
+
     // ---- assemble ---------------------------------------------------------
     let ir = SchemaIR {
         version: certo_sdl::IR_VERSION,
