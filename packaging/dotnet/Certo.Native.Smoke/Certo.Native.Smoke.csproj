@@ -15,6 +15,7 @@
     <PackageReference Include="Certo.Native" Version="$(CertoNativeVersion)" />
     <!-- a host runs the SQL Certo produces through an ordinary driver; the smoke test does the same -->
     <PackageReference Include="Microsoft.Data.Sqlite" Version="8.0.*" />
+    <PackageReference Include="Npgsql" Version="8.0.*" />
   </ItemGroup>
 
 </Project>

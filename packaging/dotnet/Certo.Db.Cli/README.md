@@ -27,6 +27,11 @@ dotnet build packaging/dotnet/Certo.Db.Cli -c Release
 pwsh packaging/dotnet/cli-check.ps1         # drives every command on SQLite and checks output and exit codes
 ```
 
+With `CERTO_TEST_PG_URL` set (`postgres://user@host:port/db`; its `public` schema is reset) and `psql` on the
+path, `cli-check.ps1` also runs the migration lifecycle against PostgreSQL: init, an enum-value migration, drift
+reported with a repair script that is then run, `--check-drift` refusing while drifted, and adopting a database
+made with `psql`. The CI job `PostgreSQL (typed runner and CLI)` does this with a service container.
+
 It references the `Certo.Native` project rather than the package, so it always exercises the current code;
 `cli-check.ps1` stages the native library itself if it is missing.
 
