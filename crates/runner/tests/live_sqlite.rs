@@ -177,3 +177,36 @@ fn an_existing_sqlite_database_can_be_adopted() {
     // and the project carries on from there
     fs::write(p.schema_path(), format!("{}\n", fs::read_to_string(p.schema_path()).unwrap()).replace("table audit", "table audit")).unwrap();
 }
+
+#[test]
+fn a_second_runner_on_the_same_database_is_refused_until_the_first_is_done() {
+    use certo_runner::RunnerError;
+    let (_dir, p, db) = fixture(V1);
+    create(&p, "init", None, false).unwrap();
+
+    let mut first = SqliteExecutor::open(&db).unwrap();
+    assert!(std::path::Path::new(&format!("{db}.certo-lock")).is_file(), "the lock lives beside the database");
+    // while the first holds the lock, the second cannot even connect
+    match SqliteExecutor::open(&db) {
+        Err(RunnerError::Connection(m)) => assert!(m.contains("holds the lock"), "{m}"),
+        Err(e) => panic!("wrong error: {e}"),
+        Ok(_) => panic!("a second runner got in"),
+    }
+    // the first is unaffected
+    apply(&p, &mut first, &ApplyOptions::default()).unwrap();
+
+    // dropping it releases the lock; a runner can start again
+    drop(first);
+    let mut second = SqliteExecutor::open(&db).expect("the lock was released");
+    assert!(status(&p, &mut second).unwrap().pending.is_empty());
+    drop(second);
+
+    // an in-memory database has nothing to lock, so any number of them can be open
+    let (a, b) = (SqliteExecutor::open(":memory:").unwrap(), SqliteExecutor::open(":memory:").unwrap());
+    drop((a, b));
+    // and `sqlite:` URLs lock the same file as the plain path
+    let held = SqliteExecutor::open(&format!("sqlite:{db}")).unwrap();
+    assert!(SqliteExecutor::open(&db).is_err());
+    drop(held);
+}
+

@@ -39,7 +39,8 @@ Hand-written steps belong in MDL (`--mdl`), not in `up.sql`.
 - **Tamper-evident:** the SHA-256 of `up.json` is stored in the history table.
   Before anything runs, the history must be an exact prefix of the files on
   disk: an edited, renamed, missing or out-of-order migration is refused.
-- **Serialised:** a session advisory lock stops two runners interleaving.
+- **Serialised:** a session advisory lock (PostgreSQL) or a file lock on `<database>.certo-lock` (SQLite) stops two
+  runners interleaving; the second fails at once instead of waiting.
 - **Read-only where it should be:** `status` and `apply --dry-run` never
   create the history table.
 - **Destructive changes need consent:** `new` refuses a plan that can lose
@@ -128,7 +129,9 @@ prints that list too, so you know it is expected.
   never compared. Adding serial or identity to a column with rows catches the
   new counter up to the largest existing value.
 - PostgreSQL and SQLite (`dialect = "sqlite"`; `--url app.db`, `sqlite:<path>` or `:memory:`). SQLite has
-  no advisory lock, so two runners are only serialised per transaction, not per migration run; its
+  no advisory lock, so the runner takes an operating-system lock on a sidecar file, `<database>.certo-lock`, while it is
+  connected (released when the process ends, however it ends; the empty file stays, so you may want to ignore
+  `*.certo-lock` in version control; an in-memory database, or one in a folder that cannot be written, is not locked); its
   reader can only see types the SQLite adapter's spellings (`UUID TEXT`, `ENUM_Role TEXT`, ...)
   identify, so a database not created by Certo reports other types as not represented. `sslmode=require` selects TLS but has not been exercised
   against a TLS-enabled server.
