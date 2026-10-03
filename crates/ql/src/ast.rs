@@ -101,11 +101,40 @@ pub enum SelectItem {
     Expr { expr: Expr, alias: Option<Ident> },
 }
 
-/// `over (partition by ... order by ...)`
+/// `over (partition by ... order by ... [rows between ... and ...])`
 #[derive(Debug, Clone, PartialEq)]
 pub struct WindowSpec {
     pub partition_by: Vec<Expr>,
     pub order_by: Vec<OrderItem>,
+    pub frame: Option<Box<Frame>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FrameUnits {
+    Rows,
+    Range,
+    Groups,
+}
+
+/// Which rows around the current one a window function sees:
+/// `rows between 2 preceding and current row`, or `rows unbounded preceding` (to the current row).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Frame {
+    pub units: FrameUnits,
+    pub start: FrameBound,
+    /// `None` for the one-bound form, which ends at the current row.
+    pub end: Option<FrameBound>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum FrameBound {
+    UnboundedPreceding,
+    Preceding(Expr),
+    CurrentRow,
+    Following(Expr),
+    UnboundedFollowing,
 }
 
 #[derive(Debug, Clone, PartialEq)]

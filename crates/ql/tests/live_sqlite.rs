@@ -316,3 +316,36 @@ fn with_queries_run_on_sqlite() {
         from customers d where d.id in (from idle i select i.id) returning d.name }");
     assert_eq!(db.run(&m, &[]), [["Cy"]]);
 }
+
+#[test]
+fn window_frames_run_on_sqlite() {
+    let mut db = db();
+    // orders: id 1 (cust 1) 10, id 2 (cust 1) 25.5, id 3 (cust 2) 5
+    let q = db.stmt("query running() { from orders o select o.id,
+        sum(o.total) over (order by o.id rows between unbounded preceding and current row) as running,
+        sum(o.total) over (partition by o.customer_id order by o.id rows between unbounded preceding and current row) as per_customer,
+        count(*) over (order by o.id rows between 1 preceding and current row) as last_two,
+        sum(o.total) over (order by o.id rows between current row and unbounded following) as remaining
+        order by o.id }");
+    assert_eq!(
+        db.run(&q, &[]),
+        [["1", "10", "10", "1", "40.5"], ["2", "35.5", "35.5", "2", "30.5"], ["3", "40.5", "5", "2", "5"]]
+    );
+    // a parameter as the offset
+    let q = db.stmt("query recent(n: int) { from orders o select o.id,
+        count(*) over (order by o.id rows between :n preceding and current row) as seen order by o.id }");
+    assert_eq!(db.run(&q, &[("n", i(0))]), [["1", "1"], ["2", "1"], ["3", "1"]]);
+    assert_eq!(db.run(&q, &[("n", i(5))]), [["1", "1"], ["2", "2"], ["3", "3"]]);
+    // a frame of only later rows is empty on the last row
+    let q = db.stmt("query next_id() { from orders o select o.id,
+        first_value(o.id) over (order by o.id rows between 1 following and 2 following) as nxt order by o.id }");
+    assert_eq!(db.run(&q, &[]), [["1", "2"], ["2", "3"], ["3", "NULL"]]);
+    assert!(q.columns()[1].nullable);
+    // range by value, and groups of equal keys
+    let q = db.stmt("query near() { from orders o select o.id,
+        count(*) over (order by o.total range between 10 preceding and current row) as within_ten order by o.id }");
+    assert_eq!(db.run(&q, &[]), [["1", "2"], ["2", "1"], ["3", "1"]]);
+    let q = db.stmt("query by_group() { from orders o select o.id,
+        count(*) over (order by o.status groups between current row and current row) as peers order by o.id }");
+    assert_eq!(db.run(&q, &[]), [["1", "2"], ["2", "1"], ["3", "2"]]);
+}

@@ -953,3 +953,97 @@ fn with_queries_serialise() {
     let back: QueryIR = serde_json::from_value(j[0]["ir"].clone()).unwrap();
     assert_eq!(back.ctes.len(), 1);
 }
+
+// ---- window frames ------------------------------------------------------------------ //
+
+#[test]
+fn window_frames_lower() {
+    let q = &ok(
+        "query q(n: int) { from orders o select o.id,
+            sum(o.total) over (partition by o.customer_id order by o.id rows between unbounded preceding and current row) as running,
+            avg(o.qty) over (order by o.id rows between 2 preceding and 2 following) as moving,
+            count(*) over (order by o.id rows 1 preceding) as pair,
+            max(o.total) over (order by o.id rows between :n preceding and current row) as recent,
+            sum(o.total) over (order by o.total range between 10 preceding and current row) as near,
+            count(*) over (order by o.status groups between current row and 1 following) as peers
+            order by o.id }",
+    )[0];
+    for want in [
+        "OVER (PARTITION BY \"o\".\"customer_id\" ORDER BY \"o\".\"id\" ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)",
+        "OVER (ORDER BY \"o\".\"id\" ROWS BETWEEN 2 PRECEDING AND 2 FOLLOWING)",
+        "OVER (ORDER BY \"o\".\"id\" ROWS BETWEEN 1 PRECEDING AND CURRENT ROW)",
+        "ROWS BETWEEN ($1::integer) PRECEDING AND CURRENT ROW",
+        "RANGE BETWEEN 10 PRECEDING AND CURRENT ROW",
+        "OVER (ORDER BY \"o\".\"status\" GROUPS BETWEEN CURRENT ROW AND 1 FOLLOWING)",
+    ] {
+        assert!(q.sql.contains(want), "missing {want}\n{}", q.sql);
+    }
+    assert_eq!(q.param_order, ["n"]);
+}
+
+#[test]
+fn a_frame_that_may_be_empty_makes_first_and_last_value_nullable() {
+    let nullable = |expr: &str| {
+        let q = &ok(&format!("query q() {{ from orders o select {expr} as x }}"))[0];
+        q.ir.select[0].nullable
+    };
+    // status is NOT NULL: with the current row in the frame the value always exists
+    assert!(!nullable("first_value(o.status) over (order by o.id)"), "the default frame includes the current row");
+    assert!(!nullable("first_value(o.status) over (order by o.id rows between 1 preceding and 1 following)"));
+    assert!(!nullable("last_value(o.status) over (order by o.id rows between current row and unbounded following)"));
+    // a frame of only later rows can be empty on the last row
+    assert!(nullable("first_value(o.status) over (order by o.id rows between 1 following and 2 following)"));
+    assert!(nullable("last_value(o.status) over (order by o.id rows between 3 preceding and 1 preceding)"));
+    // count over an empty frame is 0, never NULL
+    assert!(!nullable("count(*) over (order by o.id rows between 1 following and 2 following)"));
+}
+
+#[test]
+fn window_frame_rules() {
+    let frame = |over: &str| errors(&format!("query q(n: int, f: float) {{ from orders o select sum(o.total) over ({over}) as x }}"));
+    // functions that ignore a frame refuse one
+    assert_eq!(
+        errors("query q() { from orders o select row_number() over (order by o.id rows between unbounded preceding and current row) as x }"),
+        ["QL255"]
+    );
+    assert_eq!(errors("query q() { from orders o select lag(o.id) over (order by o.id rows 1 preceding) as x }"), ["QL255"]);
+    // bounds that cannot make a frame
+    assert_eq!(frame("order by o.id rows between unbounded following and current row"), ["QL255"]);
+    assert_eq!(frame("order by o.id rows between current row and unbounded preceding"), ["QL255"]);
+    assert_eq!(frame("order by o.id rows between current row and 1 preceding"), ["QL255"]);
+    assert_eq!(frame("order by o.id rows between 1 following and current row"), ["QL255"]);
+    assert_eq!(frame("order by o.id rows 1 following"), ["QL255"]);
+    // offsets
+    assert_eq!(frame("order by o.id rows between -1 preceding and current row"), ["QL255"]);
+    assert_eq!(frame("order by o.id rows between 1.5 preceding and current row"), ["QL255"]);
+    assert_eq!(frame("order by o.id rows between :f preceding and current row"), ["QL255"]);
+    assert_eq!(frame("order by o.id rows between o.id preceding and current row"), ["QL255"]);
+    // groups needs an ordering; range with an offset needs exactly one numeric key
+    assert_eq!(frame("groups between current row and current row"), ["QL255"]);
+    assert_eq!(frame("range between 1 preceding and current row"), ["QL255"]);
+    assert_eq!(frame("order by o.id, o.total range between 1 preceding and current row"), ["QL255"]);
+    assert_eq!(frame("order by o.status range between 1 preceding and current row"), ["QL255"]);
+    // and what is fine
+    ok("query q(n: int, d: decimal(10,2)) { from orders o select
+        sum(o.total) over (order by o.total range between :d preceding and current row) as a,
+        sum(o.total) over (order by o.id rows between :n preceding and :n following) as b,
+        sum(o.total) over (rows between unbounded preceding and unbounded following) as c,
+        sum(o.total) over (range between unbounded preceding and current row) as d2,
+        sum(o.total) over (partition by o.customer_id order by o.id groups between 1 preceding and 1 following) as e }");
+}
+
+#[test]
+fn frames_serialise() {
+    let (s, _) = compile(
+        &schema(),
+        "query q() { from orders o select sum(o.total) over (order by o.id rows between 1 preceding and current row) as x }",
+        Dialect::Postgres,
+    );
+    let j = to_json(&s.unwrap());
+    let frame = &j[0]["ir"]["select"][0]["expr"]["frame"];
+    assert_eq!(frame["units"], "rows");
+    assert_eq!(frame["start"]["kind"], "preceding");
+    assert_eq!(frame["end"]["kind"], "current_row");
+    let back: QueryIR = serde_json::from_value(j[0]["ir"].clone()).unwrap();
+    assert!(matches!(&back.select[0].expr, QExpr::Window { frame: Some(_), .. }));
+}

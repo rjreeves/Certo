@@ -390,3 +390,38 @@ fn with_queries_parse() {
     let (_, d) = parse("query q() { with recursive a as (from t select t.x) from a select a.x }");
     assert!(d.iter().any(|x| x.code == "QL254"), "{d:?}");
 }
+
+// ---- window frames ---------------------------------------------------------------------- //
+
+#[test]
+fn window_frames_parse() {
+    let frame_of = |over: &str| -> Frame {
+        let q = one(&format!("from t select sum(t.a) over ({over}) as s"));
+        let SelectItem::Expr { expr: Expr::Call { over: Some(w), .. }, .. } = &q.select.items[0] else { panic!() };
+        *w.frame.clone().expect("a frame")
+    };
+    let f = frame_of("order by t.b rows between unbounded preceding and current row");
+    assert_eq!(f.units, FrameUnits::Rows);
+    assert!(matches!(f.start, FrameBound::UnboundedPreceding) && matches!(f.end, Some(FrameBound::CurrentRow)));
+    let f = frame_of("order by t.b range between 5 preceding and 2 following");
+    assert_eq!(f.units, FrameUnits::Range);
+    assert!(matches!(f.start, FrameBound::Preceding(Expr::Number(5, _))) && matches!(f.end, Some(FrameBound::Following(_))));
+    let f = frame_of("order by t.b groups between current row and unbounded following");
+    assert_eq!(f.units, FrameUnits::Groups);
+    assert!(matches!(f.end, Some(FrameBound::UnboundedFollowing)));
+    // the one-bound form, and a parameter as the offset
+    let f = frame_of("order by t.b rows 3 preceding");
+    assert!(f.end.is_none() && matches!(f.start, FrameBound::Preceding(_)));
+    let f = frame_of("order by t.b rows between :n preceding and :n following");
+    assert!(matches!(f.start, FrameBound::Preceding(Expr::Param(_))));
+    // a frame without an order by, and none at all
+    assert!(frame_of("rows between unbounded preceding and unbounded following").units == FrameUnits::Rows);
+    let q = one("from t select sum(t.a) over (order by t.b) as s");
+    let SelectItem::Expr { expr: Expr::Call { over: Some(w), .. }, .. } = &q.select.items[0] else { panic!() };
+    assert!(w.frame.is_none());
+    // `rows` and `range` remain usable as column names
+    one("from t select t.rows, t.range");
+    // a frame must be complete
+    let (_, d) = parse("query q() { from t select sum(t.a) over (order by t.b rows between 1 preceding) as s }");
+    assert!(!d.is_empty());
+}

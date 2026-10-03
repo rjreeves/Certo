@@ -588,6 +588,46 @@ impl Q {
         }
     }
 
+    /// `rows|range|groups  <bound>  |  between <bound> and <bound>`
+    fn frame(&mut self) -> PResult<Frame> {
+        let start_span = self.p.span();
+        let units = match self.p.bump().kind {
+            TokKind::Ident(w) if w == "rows" => FrameUnits::Rows,
+            TokKind::Ident(w) if w == "range" => FrameUnits::Range,
+            _ => FrameUnits::Groups,
+        };
+        let (start, end) = if self.p.eat_word("between") {
+            let s = self.frame_bound()?;
+            self.p.expect_word("and")?;
+            (s, Some(self.frame_bound()?))
+        } else {
+            (self.frame_bound()?, None)
+        };
+        Ok(Frame { units, start, end, span: start_span.to(self.p.prev_span()) })
+    }
+
+    /// `unbounded preceding | <n> preceding | current row | <n> following | unbounded following`
+    fn frame_bound(&mut self) -> PResult<FrameBound> {
+        if self.p.eat_word("unbounded") {
+            if self.p.eat_word("preceding") {
+                return Ok(FrameBound::UnboundedPreceding);
+            }
+            self.p.expect_word("following")?;
+            return Ok(FrameBound::UnboundedFollowing);
+        }
+        if self.p.eat_word("current") {
+            self.p.expect_word("row")?;
+            return Ok(FrameBound::CurrentRow);
+        }
+        let offset = self.expr()?;
+        if self.p.eat_word("preceding") {
+            Ok(FrameBound::Preceding(offset))
+        } else {
+            self.p.expect_word("following")?;
+            Ok(FrameBound::Following(offset))
+        }
+    }
+
     fn case_expr(&mut self, start: Span) -> PResult<Expr> {
         self.p.bump(); // case
         let mut whens = Vec::new();
@@ -648,8 +688,13 @@ impl Q {
                     if !self.p.eat(&TokKind::Comma) { break; }
                 }
             }
+            let frame = if self.word_is("rows") || self.word_is("range") || self.word_is("groups") {
+                Some(Box::new(self.frame()?))
+            } else {
+                None
+            };
             end = self.p.expect(TokKind::RParen)?;
-            over = Some(WindowSpec { partition_by, order_by });
+            over = Some(WindowSpec { partition_by, order_by, frame });
         }
         let span = first.span.to(end);
         let e = Expr::Call { func: first, args, star, distinct, over, span };
