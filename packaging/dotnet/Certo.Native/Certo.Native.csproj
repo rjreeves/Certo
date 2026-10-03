@@ -16,8 +16,8 @@
     <RepositoryUrl>https://github.com/rjreeves/Certo</RepositoryUrl>
     <RepositoryType>git</RepositoryType>
     <PackageProjectUrl>https://github.com/rjreeves/Certo/tree/master/packaging/dotnet</PackageProjectUrl>
-    <!-- GitHub Packages links the package to the repository through RepositoryUrl; no license is declared
-         because the repository has none yet: add PackageLicenseExpression when it does -->
+    <!-- GitHub Packages links the package to the repository through RepositoryUrl -->
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
     <PublishRepositoryUrl>true</PublishRepositoryUrl>
     <IncludeSymbols>false</IncludeSymbols>
     <DebugType>embedded</DebugType>

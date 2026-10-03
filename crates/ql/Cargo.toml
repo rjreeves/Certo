@@ -2,6 +2,7 @@
 name    = "certo-ql"
 version = "0.1.0"
 edition = "2024"
+license = "MIT"
 description = "QL: a typed query language checked against a Certo schema and lowered to SQL"
 
 [dependencies]
