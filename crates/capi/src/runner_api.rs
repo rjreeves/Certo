@@ -301,7 +301,7 @@ pub fn drift_report(dir: &str, opts: Option<&str>) -> String {
 
     let (mut repair_sql, mut repair_error) = (Value::Null, Value::Null);
     if o.repair_sql && !d.in_sync() {
-        match certo_sql::render(&d.plan, project.dialect()) {
+        match d.repair_sql(project.dialect()) {
             Ok(s) => repair_sql = json!(s),
             Err(e) => repair_error = json!(e.to_string()),
         }

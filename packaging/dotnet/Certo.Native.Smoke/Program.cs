@@ -236,6 +236,126 @@ finally
     Check(System.Text.Json.JsonSerializer.Deserialize<SchemaType>(rt)!.ToString() == "decimal(10,2)", "SchemaType round-trips through JSON");
 }
 
+// ---- typed plans, SQL and the migration runner ---------------------------------------------------
+{
+    var v1 = CertoSdl.Compile("table users { id: serial primary key  email: text not null }").EnsureOk();
+    var v2 = CertoSdl.Compile("table users { id: serial primary key  email: text not null  age: int }").EnsureOk();
+    var v3 = CertoSdl.Compile("table users { id: serial primary key  email: text }").EnsureOk();
+
+    var tplan = CertoPlans.Diff(v1, v2).EnsureOk();
+    Check(!tplan.Empty && !tplan.Destructive && tplan.Summary.Count == 1 && tplan.Summary[0].Text.Contains("age"), "typed plan: summary of a column add");
+    Check(CertoPlans.Diff(v1, v1).EnsureOk().Empty, "typed plan: identical schemas give an empty tplan");
+    var drop = CertoPlans.Diff(v2, v1).EnsureOk();
+    Check(drop.Destructive && drop.Summary.Any(x => x.Destructive), "typed plan: a dropped column is destructive");
+
+    var pgSql = CertoSql.Lower(tplan.PlanJson, SqlDialect.Postgres).EnsureOk();
+    Check(pgSql.Batches.Count == 1 && pgSql.Batches[0].Transactional && pgSql.Batches[0].Statements[0].Contains("ADD COLUMN \"age\""), "typed SQL batches (postgres)");
+    Check(pgSql.Script!.StartsWith("BEGIN;"), "typed SQL script");
+    var tneeds = CertoSql.Lower(tplan.PlanJson, SqlDialect.Sqlite);
+    Check(!tneeds.Ok && tneeds.Error?.Code == "needs_schemas", "sqlite without schemas is a typed error");
+    var liteSql = CertoSql.Lower(tplan.PlanJson, SqlDialect.Sqlite, v1, v2).EnsureOk();
+    Check(liteSql.Batches.Count == 1 && liteSql.Batches[0].Statements[0].Contains("ADD COLUMN"), "typed SQL (sqlite, with schemas)");
+    var rebuild = CertoSql.Lower(CertoPlans.Diff(v1, v3).EnsureOk().PlanJson, SqlDialect.Sqlite, v1, v3).EnsureOk();
+    Check(rebuild.Batches.Count == 3 && !rebuild.Batches[0].Transactional && rebuild.Batches[1].Transactional,
+        "a SQLite rebuild is three batches: pragma off, transaction, pragma on");
+
+    var badMdl = CertoPlans.Plan(v1, v2, "rename nope.x -> y");
+    Check(!badMdl.Ok && badMdl.Diagnostics.Count > 0, "MDL problems are typed diagnostics");
+    try { badMdl.EnsureOk(); Check(false, "EnsureOk throws for bad MDL"); }
+    catch (CertoException e) { Check(e.Diagnostics.Count > 0, "EnsureOk on a tplan carries the MDL diagnostics"); }
+    Check(CertoPlans.Plan(v1, v2, "").Ok, "an empty MDL migration is a plain diff");
+    Check(CertoPlans.Diff("nope", v1).Error?.Code == "invalid_ir", "a bad IR is a typed error");
+
+    // ---- the runner, end to end on SQLite
+    var proj = Path.Combine(Path.GetTempPath(), "certo-typed-" + Guid.NewGuid().ToString("N"));
+    Directory.CreateDirectory(proj);
+    try
+    {
+        var db = Path.Combine(proj, "app.db");
+        var init = CertoMigrations.Init(proj, SqlDialect.Sqlite).EnsureOk();
+        Check(init.Dialect == "sqlite" && init.Root.Length > 0, "typed Init");
+
+        var none = CertoMigrations.New(proj, new NewMigrationOptions { Name = "nothing" });
+        Check(!none.Ok && none.Error?.Code == "no_changes", "no changes is a typed error");
+
+        File.WriteAllText(Path.Combine(proj, "schema.sdl"), "table users { id: serial primary key  email: text not null }");
+        var created = CertoMigrations.New(proj, new NewMigrationOptions { Name = "init" }).EnsureOk();
+        Check(created.Seq == 1 && created.Name == "init" && created.Summary.Count == 1 && !created.Destructive, "typed New: seq, name, summary");
+        Check(CertoMigrations.List(proj).EnsureOk().Migrations is [{ Label: "0001_init", Statements: >= 1 }], "typed List");
+
+        var dry = CertoMigrations.Apply(proj, new ApplyOptions { Url = db, DryRun = true }).EnsureOk();
+        Check(dry.DryRun && dry.Scripts.Count == 1 && dry.Scripts[0].Label == "0001_init" && dry.Scripts[0].Sql.Contains("CREATE TABLE"), "typed dry-run Apply");
+        Check(CertoMigrations.Status(proj, db).EnsureOk().Pending.Count == 1, "...applied nothing");
+        var applied = CertoMigrations.Apply(proj, new ApplyOptions { Url = db }).EnsureOk();
+        Check(applied.Migrations.SequenceEqual(new[] { "0001_init" }), "typed Apply lists the migrations it applied");
+        var status = CertoMigrations.Status(proj, db).EnsureOk();
+        Check(status.Applied is [{ Seq: 1, Name: "init" }] && status.Pending.Count == 0 && status.Applied[0].AppliedAt.Length > 0, "typed Status");
+        var driftNone = CertoMigrations.Drift(proj, new DriftOptions { Url = db }).EnsureOk();
+        Check(driftNone.InSync && driftNone.Items.Count == 0 && driftNone.ExpectedFrom.Contains("0001_init"), "typed Drift: in sync");
+
+        // a destructive migration tneeds permission
+        File.WriteAllText(Path.Combine(proj, "schema.sdl"), "table users { id: serial primary key }");
+        var refused = CertoMigrations.New(proj, new NewMigrationOptions { Name = "drop_email" });
+        Check(!refused.Ok && refused.Error?.Code == "destructive" && refused.Error.Operations is { Count: > 0 }, "a destructive change is refused with the operations listed");
+        try { refused.EnsureOk(); Check(false, "EnsureOk throws"); }
+        catch (CertoException e) { Check(e.Error?.Code == "destructive", "EnsureOk carries the typed error"); }
+        CertoMigrations.New(proj, new NewMigrationOptions { Name = "drop_email", AllowDestructive = true }).EnsureOk();
+        CertoMigrations.Apply(proj, new ApplyOptions { Url = db, CheckDrift = true }).EnsureOk();
+
+        // drift: a hand-made change, reported with a repair script
+        using (var c = new SqliteConnection($"Data Source={db};Pooling=False"))
+        {
+            c.Open();
+            using var cmd = c.CreateCommand();
+            cmd.CommandText = "ALTER TABLE users ADD COLUMN sneaky INTEGER";
+            cmd.ExecuteNonQuery();
+        }
+        var drifted = CertoMigrations.Drift(proj, new DriftOptions { Url = db }).EnsureOk();
+        Check(!drifted.InSync && drifted.Items.Any(i => i.Kind == DriftKind.Unexpected && i.Text.Contains("sneaky")) && drifted.RepairSql is not null,
+            "typed Drift: an unexpected column, with a repair script");
+        var blocked = CertoMigrations.Apply(proj, new ApplyOptions { Url = db, CheckDrift = true });
+        Check(blocked.Error?.Code == "schema_drift" && blocked.Error.Items is { Count: > 0 }, "Apply with CheckDrift refuses and lists the drift");
+
+        // a schema with errors comes back as a typed compile error
+        File.WriteAllText(Path.Combine(proj, "schema.sdl"), "table users { id: nope }");
+        var broken = CertoMigrations.New(proj, new NewMigrationOptions { Name = "broken" });
+        Check(broken.Error is { Code: "compile", Diagnostics.Count: > 0 }, "a schema error in New is a typed compile error with diagnostics");
+        try { broken.EnsureOk(); Check(false, "EnsureOk throws"); }
+        catch (CertoException e) { Check(e.Diagnostics.Count > 0, "...and EnsureOk exposes the diagnostics"); }
+
+        var noUrl = CertoMigrations.Status(proj, "");
+        Check(noUrl.Error?.Code == "missing_url", "a missing url is a typed error");
+    }
+    finally { try { Directory.Delete(proj, true); } catch { } }
+
+    // adopting a database nobody manages yet
+    var adoptProj = Path.Combine(Path.GetTempPath(), "certo-typed-adopt-" + Guid.NewGuid().ToString("N"));
+    Directory.CreateDirectory(adoptProj);
+    try
+    {
+        var legacy = Path.Combine(adoptProj, "legacy.db");
+        using (var c = new SqliteConnection($"Data Source={legacy};Pooling=False"))
+        {
+            c.Open();
+            using var cmd = c.CreateCommand();
+            cmd.CommandText = "CREATE TABLE t (id INTEGER PRIMARY KEY, v VARCHAR(10) NOT NULL); CREATE VIEW vw AS SELECT id FROM t;";
+            cmd.ExecuteNonQuery();
+        }
+        var pdir = Path.Combine(adoptProj, "p");
+        Directory.CreateDirectory(pdir);
+        CertoMigrations.Init(pdir, SqlDialect.Sqlite).EnsureOk();
+        var preview = CertoMigrations.Adopt(pdir, new AdoptOptions { Url = legacy, DryRun = true }).EnsureOk();
+        Check(preview.DryRun && preview.Migration is null && preview.Adopted is { Tables: 1, Columns: 2 }, "typed Adopt dry run: counts");
+        Check(preview.Omissions.Any(o => o.Contains("vw")), "typed Adopt: omissions are listed");
+        var adopted = CertoMigrations.Adopt(pdir, new AdoptOptions { Url = legacy }).EnsureOk();
+        Check(adopted.SchemaSdl.Contains("table t") && adopted.Migration is not null, "typed Adopt: schema and baseline migration");
+        Check(CertoMigrations.Drift(pdir, new DriftOptions { Url = legacy }).EnsureOk().InSync, "the adopted project is in sync");
+        var again = CertoMigrations.Adopt(pdir, new AdoptOptions { Url = legacy });
+        Check(again.Error?.Code == "project", "adopting twice is a typed error");
+    }
+    finally { try { Directory.Delete(adoptProj, true); } catch { } }
+}
+
 // ---- concurrency ------------------------------------------------------------------------------
 var results = Enumerable.Range(0, 32).AsParallel().WithDegreeOfParallelism(8)
     .Select(i => J(CertoNative.CompileSdl($"table t{i} {{ id: int primary key }}")).GetProperty("ok").GetBoolean())
