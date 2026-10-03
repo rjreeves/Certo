@@ -447,3 +447,29 @@ fn concat_parses_as_one_flat_join() {
     let (_, d) = parse("query q() { from t where a | b select t.a }");
     assert!(!d.is_empty());
 }
+
+// ---- fragments, filter, string_agg ---------------------------------------------------------- //
+
+#[test]
+fn fragments_parse_and_take_no_parameters() {
+    let f = ok("fragment f() { from orders o select o.id } query q() { from f x select x.id }");
+    assert_eq!((f.fragments.len(), f.queries.len()), (1, 1));
+    assert_eq!(f.fragments[0].name.name, "f");
+    // with parameters it is an error, and the next statement is still found
+    let (f, d) = parse("fragment f(n: int) { from orders o select o.id } query q() { from orders o select o.id }");
+    assert!(d.iter().any(|x| x.code == "QL260"), "{d:?}");
+    assert_eq!((f.fragments.len(), f.queries.len()), (0, 1));
+}
+
+#[test]
+fn filter_and_inner_order_by_parse() {
+    let f = ok("query q() { from orders o select count(*) filter (where o.paid) as n, string_agg(o.status, \",\" order by o.id desc) as s,
+        sum(o.total) filter (where o.paid) over (partition by o.customer_id) as w }");
+    let items = &f.queries[0].select.items;
+    let SelectItem::Expr { expr: Expr::Call { filter: Some(_), over: None, star: true, .. }, .. } = &items[0] else { panic!("{:?}", items[0]) };
+    let SelectItem::Expr { expr: Expr::Call { agg_order, filter: None, .. }, .. } = &items[1] else { panic!() };
+    assert_eq!(agg_order.len(), 1);
+    assert!(agg_order[0].desc);
+    let SelectItem::Expr { expr: Expr::Call { filter: Some(_), over: Some(_), .. }, .. } = &items[2] else { panic!() };
+}
+

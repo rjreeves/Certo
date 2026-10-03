@@ -16,6 +16,7 @@
 pub mod ast;
 pub mod check;
 pub mod csharp;
+pub mod fragments;
 pub mod ir;
 pub mod lower;
 pub mod parser;
@@ -50,6 +51,7 @@ pub struct CompiledMutation {
 
 /// One compiled statement of a QL file.
 #[derive(Debug, Clone, PartialEq)]
+#[allow(clippy::large_enum_variant)] // a few per file, and boxing would change the public shape
 pub enum Statement {
     Query(CompiledQuery),
     Mutation(CompiledMutation),
@@ -111,7 +113,12 @@ impl Statement {
 /// is `Some` only when there are no error diagnostics (warnings may accompany
 /// it). Queries come first, then mutations, each in source order.
 pub fn compile(schema: &SchemaIR, src: &str, dialect: Dialect) -> (Option<Vec<Statement>>, Vec<Diagnostic>) {
-    let (file, mut diags) = parse(src);
+    let (mut file, mut diags) = parse(src);
+    if has_errors(&diags) {
+        return (None, diags);
+    }
+    // fragments are checked once, then become `with` queries of the statements that use them
+    fragments::expand(schema, &mut file, &mut diags);
     if has_errors(&diags) {
         return (None, diags);
     }

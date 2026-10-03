@@ -163,6 +163,23 @@ whatever the PostgreSQL session's zone is.
 `add_days(date, 7)` (a date and a whole number of days, negative to go back) and `days_between(from, to)` (whole days,
 `to - from`) are the same on both databases. There is no month or year arithmetic: Jan 31 plus one month ends differently.
 
+## Fragments
+
+```
+fragment paid_orders() { from orders o where o.paid select o.id, o.customer_id, o.total }
+query q() { from paid_orders p join customers c on p.customer_id == c.id select c.name, p.total }
+```
+
+A `fragment` is a named, parameter-free query used as a table, anywhere a table can be (including in subqueries and in the
+source or filter of a mutation). It is inlined as a `with` query of each statement that uses it: no migration, no database
+object. Fragments can use other fragments, are checked once on their own, and cannot be written to (`QL260`).
+
+## Filtered aggregates and `string_agg`
+
+`count(*) filter (where o.paid)` counts only matching rows (any aggregate, also over a window). `string_agg(c.name, ", " order by
+c.id)` joins text values (NULLs skipped; `NULL` for an empty group; `group_concat` on SQLite). `filter` needs SQLite 3.30,
+and an `order by` inside `string_agg` SQLite 3.44. Misuse is `QL259`.
+
 ## Named windows
 
 ```

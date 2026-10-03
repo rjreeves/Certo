@@ -7,6 +7,16 @@ use certo_sdl::{BinaryOp, Ident, TypeRef};
 pub struct QlFile {
     pub queries: Vec<Query>,
     pub mutations: Vec<Mutation>,
+    /// `fragment name() { ... }`: named, parameter-free queries used as tables (see `fragments`).
+    pub fragments: Vec<Fragment>,
+}
+
+/// `fragment name() { from ... select ... }`
+#[derive(Debug, Clone, PartialEq)]
+pub struct Fragment {
+    pub name: Ident,
+    pub query: Query,
+    pub span: Span,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -163,8 +173,10 @@ pub enum Expr {
     In { expr: Box<Expr>, list: Vec<Expr>, negated: bool, span: Span },
     Like { expr: Box<Expr>, pattern: Box<Expr>, negated: bool, span: Span },
     Between { expr: Box<Expr>, low: Box<Expr>, high: Box<Expr>, negated: bool, span: Span },
-    /// A function or aggregate call. `star` is `count(*)`; `distinct` is `count(distinct x)`.
-    Call { func: Ident, args: Vec<Expr>, star: bool, distinct: bool, over: Option<WindowSpec>, span: Span },
+    /// A function or aggregate call. `star` is `count(*)`; `distinct` is `count(distinct x)`;
+    /// `filter` is `filter (where ...)` after an aggregate; `agg_order` is the `order by` inside
+    /// `string_agg(x, ", " order by y)`.
+    Call { func: Ident, args: Vec<Expr>, star: bool, distinct: bool, filter: Option<Box<Expr>>, agg_order: Vec<OrderItem>, over: Option<WindowSpec>, span: Span },
     Case { whens: Vec<(Expr, Expr)>, otherwise: Option<Box<Expr>>, span: Span },
     Paren(Box<Expr>, Span),
     /// `a || b || c`: text joined end to end (NULL if any part is).

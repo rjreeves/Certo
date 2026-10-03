@@ -467,3 +467,46 @@ fn more_text_date_functions_and_named_windows_run_on_sqlite() {
         select c.id, row_number() over w as n, sum(c.id) over w as running order by c.id }");
     assert_eq!(db.run(&q, &[]), [["1", "1", "1"], ["2", "2", "3"], ["3", "3", "6"]]);
 }
+
+#[test]
+fn filtered_aggregates_and_string_agg_run_on_sqlite() {
+    let mut db = db();
+    // orders: (1: customer 1, 10, new, paid), (2: customer 1, 25.5, paid, not paid), (3: customer 2, 5, new, not paid)
+    let q = db.stmt("query f() { from orders o group by o.customer_id select o.customer_id,
+        count(*) filter (where o.paid) as paid_n, sum(o.total) filter (where o.status == \"new\") as new_total,
+        string_agg(o.status, \",\" order by o.id) as asc_, string_agg(o.status, \",\" order by o.id desc) as desc_ order by o.customer_id }");
+    let rows = db.run(&q, &[]);
+    assert_eq!(rows[0], ["1", "1", "10", "new,paid", "paid,new"]);
+    assert_eq!(rows[1], ["2", "0", "5", "new", "new"]);
+    // names, and a group with nothing in it
+    let q = db.stmt("query n() { from customers c select string_agg(c.name, \", \" order by c.name desc) as names }");
+    assert_eq!(db.run(&q, &[]), [["Cy, Bob, Ann"]]);
+    let q = db.stmt("query e() { from customers c where c.id > 99 select string_agg(c.name, \",\") as s, count(*) filter (where c.id > 0) as n }");
+    assert_eq!(db.run(&q, &[]), [["NULL", "0"]]);
+    // NULL values are skipped (Bob has no email)
+    let q = db.stmt("query m() { from customers c select string_agg(c.email, \";\" order by c.id) as emails }");
+    assert_eq!(db.run(&q, &[]), [["a@x.com;c@x.com"]]);
+    // a filter with a parameter, as a window
+    let q = db.stmt("query w(min: decimal(10,2)) { from orders o select o.id, count(*) filter (where o.total > :min) over () as big order by o.id }");
+    assert_eq!(db.run(&q, &[("min", Value::Real(8.0))]), [["1", "2"], ["2", "2"], ["3", "2"]]);
+}
+
+#[test]
+fn fragments_run_on_sqlite() {
+    let mut db = db();
+    // orders: (1: customer 1, 10, paid), (2: customer 1, 25.5, not paid), (3: customer 2, 5, not paid)
+    let file = "fragment paid_orders() { from orders o where o.paid select o.id, o.customer_id, o.total }
+        fragment paying() { from customers c where c.id in (from paid_orders p select p.customer_id) select c.id, c.name }
+        query q() { from paid_orders p join customers c on p.customer_id == c.id select c.name, p.total }
+        query names() { from paying x select x.name order by x.name }
+        query unpaid() { from customers c left join paid_orders p on p.customer_id == c.id where p.id is null select c.name order by c.name }
+        delete gone() { from orders o where o.id in (from paid_orders p select p.id) }";
+    let (stmts, d) = certo_ql::compile(&db.schema, file, certo_sql::Dialect::Sqlite);
+    let stmts = stmts.unwrap_or_else(|| panic!("{d:?}"));
+    let by = |n: &str| stmts.iter().find(|s| s.name() == n).unwrap().clone();
+    assert_eq!(db.run(&by("q"), &[]), [["Ann", "10"]]);
+    assert_eq!(db.run(&by("names"), &[]), [["Ann"]], "a fragment using another");
+    assert_eq!(db.run(&by("unpaid"), &[]), [["Bob"], ["Cy"]], "left join against a fragment");
+    assert_eq!(db.exec(&by("gone"), &[]), 1, "a mutation that reads a fragment");
+    assert_eq!(db.run(&by("q"), &[]), Vec::<Vec<String>>::new());
+}
