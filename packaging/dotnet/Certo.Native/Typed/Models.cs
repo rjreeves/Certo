@@ -19,6 +19,28 @@ namespace Certo.Models
         /// <summary>A stable code such as <c>invalid_ir</c>, <c>unknown_dialect</c> or <c>invalid_options</c>.</summary>
         [JsonPropertyName("code")] public string Code { get; init; } = "";
         [JsonPropertyName("message")] public string Message { get; init; } = "";
+
+        // Details that only some errors carry:
+        /// <summary><c>io</c>: the file involved.</summary>
+        [JsonPropertyName("path")] public string? Path { get; init; }
+        /// <summary><c>compile</c>: the file that failed to compile, with its diagnostics and a rendering.</summary>
+        [JsonPropertyName("file")] public string? File { get; init; }
+        [JsonPropertyName("rendered")] public string? Rendered { get; init; }
+        [JsonPropertyName("diagnostics")] public List<CertoDiagnostic>? Diagnostics { get; init; }
+        /// <summary><c>destructive</c>: the operations that can lose data (pass <c>AllowDestructive</c> to proceed).</summary>
+        [JsonPropertyName("operations")] public List<string>? Operations { get; init; }
+        /// <summary><c>unsupported</c>: the operation the dialect cannot express, and why.</summary>
+        [JsonPropertyName("op")] public string? Op { get; init; }
+        [JsonPropertyName("reason")] public string? Reason { get; init; }
+        /// <summary><c>database</c>: the migration that failed, the statement, and the migrations already applied.</summary>
+        [JsonPropertyName("seq")] public int? Seq { get; init; }
+        [JsonPropertyName("name")] public string? Name { get; init; }
+        [JsonPropertyName("statement")] public string? Statement { get; init; }
+        [JsonPropertyName("applied")] public List<string>? Applied { get; init; }
+        /// <summary><c>schema_drift</c>: what differs.</summary>
+        [JsonPropertyName("items")] public List<DriftItem>? Items { get; init; }
+
+        public override string ToString() => $"{Code}: {Message}";
     }
 
     public enum DiagnosticSeverity { Error, Warning, Note }
@@ -185,7 +207,9 @@ namespace Certo.Models
 
         internal static CertoException From(CertoError? error, List<CertoDiagnostic> diagnostics, string? rendered, string what)
         {
-            var detail = error is not null ? $"{error.Code}: {error.Message}"
+            if (diagnostics.Count == 0 && error?.Diagnostics is { Count: > 0 } inner) diagnostics = inner;
+            if (string.IsNullOrWhiteSpace(rendered)) rendered = error?.Rendered;
+            var detail = error is not null && string.IsNullOrWhiteSpace(rendered) ? $"{error.Code}: {error.Message}"
                        : !string.IsNullOrWhiteSpace(rendered) ? rendered!.TrimEnd()
                        : string.Join("; ", diagnostics);
             return new CertoException($"{what}: {detail}", error, diagnostics);

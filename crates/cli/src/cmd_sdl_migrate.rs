@@ -278,7 +278,7 @@ fn drift_cmd(root: &Path, o: &Opts) -> Result<(), RunnerError> {
             eprintln!("note: {n}");
         }
         if o.sql && !d.in_sync() {
-            match certo_sql::render(&d.plan, project.dialect()) {
+            match d.repair_sql(project.dialect()) {
                 Ok(script) => println!("\n-- script that would bring the database back to the migrations (review before running):\n{script}"),
                 Err(e) => eprintln!("\nno repair script: {e}"),
             }

@@ -2,8 +2,8 @@
 
 The Certo database compiler, in-process. Two layers over the same native library:
 
-- **Typed API** (`Certo.CertoSdl`, `Certo.CertoQl`, models in `Certo.Models`): results come back as C# objects.
-- **Raw API** (`Certo.CertoNative`): every call takes and returns JSON text, for everything else (migrations, plans, SQL lowering).
+- **Typed API** (`CertoSdl`, `CertoQl`, `CertoPlans`, `CertoSql`, `CertoMigrations`; models in `Certo.Models`): results come back as C# objects.
+- **Raw API** (`Certo.CertoNative`): every call takes and returns JSON text.
 
 ```csharp
 using Certo;
@@ -27,18 +27,29 @@ foreach (var s in qlResult.EnsureOk())                                   // thro
 // generated, typed host code for the same statements
 string code = CertoQl.GenerateCSharp(schema.EnsureOk(), qlSource, SqlDialect.Sqlite, "App.Db").EnsureOk();
 
-// migrations: the raw API
-CertoNative.MigrateInit(dir, "{\"dialect\":\"sqlite\"}");
-CertoNative.MigrateNew(dir, "{\"name\":\"init\"}");
-CertoNative.MigrateApply(dir, "{\"url\":\"app.db\"}");
+// plans and SQL
+var plan = CertoPlans.Diff(oldIr, newIr).EnsureOk();                    // plan.Summary, plan.Destructive, plan.PlanJson
+var sql  = CertoSql.Lower(plan.PlanJson, SqlDialect.Sqlite, oldIr, newIr).EnsureOk();   // sql.Batches (SQLite needs both schemas)
+
+// migrations
+CertoMigrations.Init(dir, SqlDialect.Sqlite).EnsureOk();
+// write dir/schema.sdl, then:
+var created = CertoMigrations.New(dir, new NewMigrationOptions { Name = "init" }).EnsureOk();
+var applied = CertoMigrations.Apply(dir, new ApplyOptions { Url = "app.db" }).EnsureOk();   // applied.Migrations
+var drift   = CertoMigrations.Drift(dir, new DriftOptions { Url = "app.db" }).EnsureOk();  // drift.InSync, drift.Items, drift.RepairSql
 ```
+
+A call that fails without throwing carries a typed `Error`: `result.Error?.Code` is `destructive` (with
+`Error.Operations`), `no_changes`, `compile` (with `Error.Diagnostics`), `database` (the failing `Seq`,
+`Statement` and the migrations already `Applied`), `schema_drift` (with `Error.Items`), `connection`,
+`needs_schemas`, ... `EnsureOk()` turns any of them into a `CertoException`.
 
 The models are plain classes: `QlStatement` (kind, name, parameters, result columns, SQL, placeholder
 order, raw IR), `QlParam` / `QlColumn` (name, `SchemaType`, nullable), `SchemaType` (kind, name, length /
 precision / scale; `ToString()` gives `varchar(100)`, `decimal(10,2)`, `Role`), `CertoDiagnostic` (severity,
 code, message, `SourceSpan` with 1-based line and column) and `CertoError` (a failed call: `invalid_ir`,
 `unknown_dialect`, ...). Unknown JSON members are ignored, so a newer native library does not break an
-older host. Typed wrappers exist for SDL compilation and QL so far; the other calls return JSON text.
+older host. The raw `CertoNative` calls remain for hosts that want the JSON itself.
 
 `"ok": false` is a normal outcome (schema errors come back as positioned `diagnostics`): the typed API
 returns them in `Diagnostics` and throws only if you call `EnsureOk()`. Only an ABI mismatch between the

@@ -102,6 +102,13 @@ fn apply_status_and_drift_on_a_database_file() {
     let d = drift::check(&p, &mut ex).unwrap();
     let text: Vec<String> = d.items.iter().map(|i| i.text.clone()).collect();
     assert!(text.iter().any(|t| t.contains("sneaky")) && text.iter().any(|t| t.contains("stray")), "{text:?}");
+
+    // the repair script is real SQL for SQLite (it needs both schemas, which the report carries) and fixes it
+    let repair = d.repair_sql(certo_sql::Dialect::Sqlite).unwrap_or_else(|e| panic!("{e}"));
+    ex.connection().execute_batch(&repair).unwrap_or_else(|e| panic!("{e}
+{repair}"));
+    let d = drift::check(&p, &mut ex).unwrap();
+    assert!(d.in_sync(), "after the repair: {:?}", d.items);
 }
 
 #[test]

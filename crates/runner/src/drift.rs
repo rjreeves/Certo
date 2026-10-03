@@ -53,10 +53,19 @@ pub struct Drift {
     /// The plan that would bring the database to the expected schema
     /// (`diff(live, expected)`). Lower it to review a repair script.
     pub plan: MigrationPlan,
+    /// The schemas `plan` goes between: the database as read (aligned), and the expected schema.
+    /// SQLite lowering needs them.
+    pub live: SchemaIR,
+    pub expected: SchemaIR,
 }
 
 impl Drift {
     pub fn in_sync(&self) -> bool { self.items.is_empty() }
+
+    /// The script that would bring the database back to the migrations (review before running).
+    pub fn repair_sql(&self, dialect: Dialect) -> Result<String, certo_sql::LowerError> {
+        certo_sql::render_with(&self.plan, dialect, certo_sql::Schemas { old: &self.live, new: &self.expected })
+    }
 }
 
 /// Words that can continue a multi-word type name after `::`.
@@ -331,6 +340,8 @@ pub fn compare(dialect: Dialect, expected: &SchemaIR, live: LiveSchema, expected
         items: items(dialect, &plan),
         notes,
         plan,
+        live: live_ir,
+        expected: expected.clone(),
     }
 }
 
