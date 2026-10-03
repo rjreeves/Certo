@@ -1829,7 +1829,57 @@ impl<'a> Checker<'a> {
             None::<Typed>
         };
         let text_arg = |t: &T| matches!(t, T::Null) || matches!(t, T::Known(k) if is_text(k));
+        // a function's name in the IR, when the same QL function lowers differently for another argument type
+        let mut ir_name = name.to_string();
         let (ret, nullable): (T, bool) = match name {
+            "left" | "right" => {
+                if n != 2 { return arity(self, "two arguments (text, length)"); }
+                if !text_arg(&typed[0].t) {
+                    self.fail("QL209", format!("`{name}` expects text, found {}", describe_t(&typed[0].t)), args[0].span());
+                    return None;
+                }
+                // `right(s, 0)` is empty in PostgreSQL and the whole text in SQLite, so its length starts at 1
+                let min = if name == "left" { 0 } else { 1 };
+                if !matches!(&typed[1].e, QExpr::Number { value } if *value >= min) {
+                    self.fail("QL209", format!("`{name}` length ({min} or more) must be a whole-number literal"), args[1].span());
+                    return None;
+                }
+                (T::Known(builtin(Builtin::Text)), typed[0].nullable)
+            }
+            "starts_with" => {
+                if n != 2 { return arity(self, "two arguments (text, prefix)"); }
+                for (t, src) in typed.iter().zip(args) {
+                    if !text_arg(&t.t) {
+                        self.fail("QL209", format!("`starts_with` expects text, found {}", describe_t(&t.t)), src.span());
+                        return None;
+                    }
+                }
+                (T::Known(builtin(Builtin::Bool)), typed.iter().any(|t| t.nullable))
+            }
+            "add_days" => {
+                if n != 2 { return arity(self, "two arguments (date, days)"); }
+                if !matches!(&typed[0].t, T::Known(TypeIR::Builtin(Builtin::Date))) {
+                    self.fail("QL209", format!("`add_days` expects a date, found {}", describe_t(&typed[0].t)), args[0].span());
+                    return None;
+                }
+                let whole = matches!(&typed[1].t, T::Known(TypeIR::Builtin(Builtin::SmallInt | Builtin::Int | Builtin::BigInt)));
+                if !whole {
+                    self.fail("QL209", format!("`add_days` expects a whole number of days, found {}", describe_t(&typed[1].t)), args[1].span());
+                    return None;
+                }
+                (T::Known(builtin(Builtin::Date)), typed.iter().any(|t| t.nullable))
+            }
+            "days_between" => {
+                if n != 2 { return arity(self, "two arguments (from, to)"); }
+                for (t, src) in typed.iter().zip(args) {
+                    if !matches!(&t.t, T::Known(TypeIR::Builtin(Builtin::Date))) {
+                        self.fail("QL209", format!("`days_between` expects dates, found {}", describe_t(&t.t)), src.span());
+                        return None;
+                    }
+                }
+                // to - from, in whole days
+                (T::Known(builtin(Builtin::Int)), typed.iter().any(|t| t.nullable))
+            }
             "lower" | "upper" | "trim" => {
                 if n != 1 { return arity(self, "one argument"); }
                 if !text_arg(&typed[0].t) {
@@ -1890,7 +1940,7 @@ impl<'a> Checker<'a> {
                     self.fail("QL209", "`date_part` part must be a string literal: \"year\", \"month\", \"day\", \"hour\" or \"minute\"", args[0].span());
                     return None;
                 };
-                let is_ts = matches!(&typed[1].t, T::Known(TypeIR::Builtin(Builtin::Timestamp)));
+                let is_ts = matches!(&typed[1].t, T::Known(TypeIR::Builtin(Builtin::Timestamp | Builtin::TimestampNaive)));
                 let is_date = matches!(&typed[1].t, T::Known(TypeIR::Builtin(Builtin::Date)));
                 if !is_ts && !is_date {
                     self.fail("QL209", format!("`date_part` expects a date or timestamp, found {}", describe_t(&typed[1].t)), args[1].span());
@@ -1908,6 +1958,8 @@ impl<'a> Checker<'a> {
                         return None;
                     }
                 }
+                // a timestamp with a time zone is read in UTC, as SQLite stores it, not in the session's zone
+                if matches!(&typed[1].t, T::Known(TypeIR::Builtin(Builtin::Timestamp))) { ir_name = "date_part_utc".to_string(); }
                 (T::Known(builtin(Builtin::Int)), typed[1].nullable)
             }
             "abs" | "round" => {
@@ -1951,7 +2003,7 @@ impl<'a> Checker<'a> {
                 return None;
             }
         };
-        Some(Typed { e: QExpr::Call { func: name.to_string(), args: typed.into_iter().map(|t| t.e).collect() }, t: ret, nullable, agg })
+        Some(Typed { e: QExpr::Call { func: ir_name, args: typed.into_iter().map(|t| t.e).collect() }, t: ret, nullable, agg })
     }
 
     /// `f(args) over (partition by ... order by ...)`.

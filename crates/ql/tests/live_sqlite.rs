@@ -444,3 +444,26 @@ fn text_and_date_functions_run_on_sqlite() {
     let q = db.stmt("query p(d: date) { from customers c where date_part(\"year\", :d) == 1990 select c.id order by c.id }");
     assert_eq!(db.run(&q, &[("d", t("1990-05-05"))]).len(), 3);
 }
+
+#[test]
+fn more_text_date_functions_and_named_windows_run_on_sqlite() {
+    let mut db = db();
+    db.c.execute_batch("UPDATE customers SET born = '1990-03-25' WHERE id = 1;").unwrap();
+    let q = db.stmt("query f() { from customers c select c.id, left(c.name, 2) as l, right(c.name, 2) as r,
+        starts_with(c.name, \"B\") as sb, starts_with(c.name, \"\") as se,
+        add_days(c.born, 7) as plus, add_days(c.born, -25) as minus, days_between(c.born, add_days(c.born, 40)) as span order by c.id }");
+    let rows = db.run(&q, &[]);
+    assert_eq!(rows[0], ["1", "An", "nn", "0", "1", "1990-04-01", "1990-02-28", "40"]);
+    assert_eq!(rows[1], ["2", "Bo", "ob", "1", "1", "NULL", "NULL", "NULL"]);
+    assert_eq!(rows[2], ["3", "Cy", "Cy", "0", "1", "NULL", "NULL", "NULL"]);
+    // NULL in, NULL out
+    let q = db.stmt("query n() { from customers c where c.id == 2 select starts_with(c.email, \"a\") as s, left(c.email, 1) as l }");
+    assert_eq!(db.run(&q, &[]), [["NULL", "NULL"]]);
+    // days as a parameter
+    let q = db.stmt("query p(d: int) { from customers c where c.id == 1 select add_days(c.born, :d) as x }");
+    assert_eq!(db.run(&q, &[("d", i(10))]), [["1990-04-04"]]);
+    // a named window is the window written out
+    let q = db.stmt("query w() { from customers c window w as (order by c.id)
+        select c.id, row_number() over w as n, sum(c.id) over w as running order by c.id }");
+    assert_eq!(db.run(&q, &[]), [["1", "1", "1"], ["2", "2", "3"], ["3", "3", "6"]]);
+}

@@ -1,6 +1,6 @@
 //! QL parser, built on the SDL lexer and cursor.
 //!
-//! Clause order is fixed: `from`, `join`s, `where`, `group by`, `having`,
+//! Clause order is fixed: `from`, `join`s, `where`, `group by`, `having`, `window`,
 //! `select`, `order by`, `limit`, `offset`. Keywords are contextual.
 //!
 //! Expressions are bounded (elements, tree depth, nesting) so type checking
@@ -20,14 +20,14 @@ const MAX_NESTING: usize = 64;
 /// Words that end a table reference, so they are never taken as its alias.
 const CLAUSE_WORDS: &[&str] = &[
     "inner", "left", "join", "on", "where", "group", "having", "select", "order", "limit", "offset", "set", "all",
-    "returning", "values", "from",
+    "returning", "values", "from", "window",
 ];
 
 /// How many subqueries may sit inside one another.
 const MAX_SUBQUERY_DEPTH: usize = 6;
 
 pub fn parse(src: &str) -> (QlFile, Vec<Diagnostic>) {
-    let mut q = Q { p: Parser::new(src), nodes: 0, nesting: 0, sub_depth: 0 };
+    let mut q = Q { p: Parser::new(src), nodes: 0, nesting: 0, sub_depth: 0, windows: Vec::new() };
     let (mut queries, mut mutations) = (Vec::new(), Vec::new());
     while !q.p.at_eof() {
         let start = q.p.pos();
@@ -55,6 +55,9 @@ struct Q {
     nodes: usize,
     nesting: usize,
     sub_depth: usize,
+    /// The `window name as (...)` definitions of the query being parsed: `over name` is replaced by the
+    /// definition as it is read, so nothing after the parser knows about names.
+    windows: Vec<(String, WindowSpec)>,
 }
 
 impl Q {
@@ -162,6 +165,21 @@ impl Q {
             while self.p.eat(&TokKind::Comma) { group_by.push(self.expr()?); }
         }
         let having = if self.p.eat_word("having") { Some(self.expr()?) } else { None };
+        self.windows.clear();
+        if self.p.eat_word("window") {
+            loop {
+                let name = self.p.ident("a window name")?;
+                self.p.expect_word("as")?;
+                self.p.expect(TokKind::LParen)?;
+                let spec = self.window_spec()?;
+                self.p.expect(TokKind::RParen)?;
+                if self.windows.iter().any(|(n, _)| *n == name.name) {
+                    return self.fail("QL258", format!("window `{}` is defined twice", name.name), name.span);
+                }
+                self.windows.push((name.name, spec));
+                if !self.p.eat(&TokKind::Comma) { break; }
+            }
+        }
 
         self.p.expect_word("select")?;
         let distinct = self.p.eat_word("distinct");
@@ -178,6 +196,32 @@ impl Q {
         })
     }
 
+    /// The inside of `over (...)` / `window w as (...)`: `[partition by ...] [order by ...] [frame]`.
+    fn window_spec(&mut self) -> PResult<WindowSpec> {
+        let (mut partition_by, mut order_by) = (Vec::new(), Vec::new());
+        if self.p.eat_word("partition") {
+            self.p.expect_word("by")?;
+            partition_by.push(self.expr()?);
+            while self.p.eat(&TokKind::Comma) { partition_by.push(self.expr()?); }
+        }
+        if self.p.eat_word("order") {
+            self.p.expect_word("by")?;
+            loop {
+                let expr = self.expr()?;
+                let desc = self.p.eat_word("desc");
+                if !desc { self.p.eat_word("asc"); }
+                order_by.push(OrderItem { expr, desc });
+                if !self.p.eat(&TokKind::Comma) { break; }
+            }
+        }
+        let frame = if self.word_is("rows") || self.word_is("range") || self.word_is("groups") {
+            Some(Box::new(self.frame()?))
+        } else {
+            None
+        };
+        Ok(WindowSpec { partition_by, order_by, frame })
+    }
+
     /// A subquery after its opening `(` (already consumed); consumes the closing `)`.
     fn subquery(&mut self) -> PResult<Box<Query>> {
         if self.sub_depth >= MAX_SUBQUERY_DEPTH {
@@ -186,8 +230,10 @@ impl Q {
         }
         let start = self.p.span();
         self.sub_depth += 1;
+        let outer_windows = std::mem::take(&mut self.windows);
         let name = certo_sdl::Ident { name: String::new(), span: start };
         let body = self.query_body(name, Vec::new());
+        self.windows = outer_windows;
         self.sub_depth -= 1;
         let mut q = body?;
         let end = self.p.expect(TokKind::RParen)?;
@@ -689,29 +735,18 @@ impl Q {
         if self.word_is("over") && *self.p.peek_at(1) == TokKind::LParen {
             self.p.bump();
             self.p.bump();
-            let (mut partition_by, mut order_by) = (Vec::new(), Vec::new());
-            if self.p.eat_word("partition") {
-                self.p.expect_word("by")?;
-                partition_by.push(self.expr()?);
-                while self.p.eat(&TokKind::Comma) { partition_by.push(self.expr()?); }
-            }
-            if self.p.eat_word("order") {
-                self.p.expect_word("by")?;
-                loop {
-                    let expr = self.expr()?;
-                    let desc = self.p.eat_word("desc");
-                    if !desc { self.p.eat_word("asc"); }
-                    order_by.push(OrderItem { expr, desc });
-                    if !self.p.eat(&TokKind::Comma) { break; }
-                }
-            }
-            let frame = if self.word_is("rows") || self.word_is("range") || self.word_is("groups") {
-                Some(Box::new(self.frame()?))
-            } else {
-                None
-            };
+            let spec = self.window_spec()?;
             end = self.p.expect(TokKind::RParen)?;
-            over = Some(WindowSpec { partition_by, order_by, frame });
+            over = Some(spec);
+        } else if self.word_is("over") && matches!(self.p.peek_at(1), TokKind::Ident(w) if !CLAUSE_WORDS.contains(&w.as_str())) {
+            // `over name`: a window defined by `window name as (...)`
+            self.p.bump();
+            let name = self.p.ident("a window name")?;
+            end = name.span;
+            match self.windows.iter().find(|(n, _)| *n == name.name) {
+                Some((_, spec)) => over = Some(spec.clone()),
+                None => return self.fail("QL258", format!("unknown window `{}` (define it with `window {} as (...)` before `select`)", name.name, name.name), name.span),
+            }
         }
         let span = first.span.to(end);
         let e = Expr::Call { func: first, args, star, distinct, over, span };
