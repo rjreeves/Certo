@@ -96,3 +96,7 @@ Windows build links the C runtime statically (no VC++ redistributable needed).
   `error.code: "panic"`.
 - Database calls (`Migrate*` with a `url`) block until the database answers: run them off the UI thread.
 - PostgreSQL URLs are `postgres://...`; for SQLite the `url` is a database file path.
+
+## License
+
+MIT, see [LICENSE](https://github.com/rjreeves/Certo/blob/master/LICENSE).

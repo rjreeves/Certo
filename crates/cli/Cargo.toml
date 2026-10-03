@@ -2,6 +2,7 @@
 name    = "certo"
 version = "1.0.71"
 edition = "2024"
+license = "MIT"
 
 [[bin]]
 name = "certo"

@@ -2,6 +2,7 @@
 name        = "certo-llvm"
 version     = "0.1.0"
 edition     = "2021"
+license = "MIT"
 description = "LLVM IR backend for the Certo compiler"
 
 [[bin]]

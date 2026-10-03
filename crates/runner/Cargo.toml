@@ -2,6 +2,7 @@
 name    = "certo-runner"
 version = "0.1.0"
 edition = "2024"
+license = "MIT"
 description = "Migration project files, history tracking and execution for Certo schemas"
 
 [dependencies]
