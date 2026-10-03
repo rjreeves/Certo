@@ -1411,3 +1411,136 @@ fn more_functions_lower_per_dialect() {
     assert!(sql.contains("CAST(julianday(\"c\".\"born\") - julianday(\"c\".\"born\") AS INTEGER)"), "{sql}");
     assert!(sql.contains("(substr(\"c\".\"name\", 1, length('x')) = 'x')"), "{sql}");
 }
+
+// ---- filter (where ...) and string_agg ------------------------------------------------------ //
+
+#[test]
+fn aggregates_take_a_filter() {
+    let q = &ok("query q() { from orders o group by o.customer_id
+        select o.customer_id, count(*) filter (where o.paid) as paid_n, sum(o.total) filter (where o.status == \"paid\") as paid_total,
+               max(o.created) filter (where o.paid) as last_paid }")[0];
+    let c = &q.ir.select;
+    assert_eq!((c[1].ty.clone(), c[1].nullable), (b(Builtin::BigInt), false), "count is never null, filtered or not");
+    assert_eq!((c[2].ty.clone(), c[2].nullable), (b(Builtin::Decimal), true));
+    assert_eq!((c[3].ty.clone(), c[3].nullable), (b(Builtin::Timestamp), true));
+    assert!(q.sql.contains("count(*) FILTER (WHERE \"o\".\"paid\") AS \"paid_n\""), "{}", q.sql);
+    assert!(q.sql.contains("sum(\"o\".\"total\") FILTER (WHERE (\"o\".\"status\" = 'paid'))"), "{}", q.sql);
+    // a filtered aggregate may also be a window function, and may use parameters
+    let s = sql_of("query q(min: decimal(10,2)) { from orders o select count(*) filter (where o.total > :min) over (partition by o.customer_id) as n }");
+    assert!(s.contains("count(*) FILTER (WHERE (\"o\".\"total\" > ($1::numeric(10,2)))) OVER (PARTITION BY"), "{s}");
+    // and in having / order by
+    ok("query q() { from orders o group by o.customer_id having count(*) filter (where o.paid) > 1 select o.customer_id order by count(*) filter (where o.paid) desc }");
+}
+
+#[test]
+fn filter_errors() {
+    assert_eq!(errors("query q() { from orders o select lower(o.status) filter (where o.paid) as x }"), ["QL259"]);
+    assert_eq!(errors("query q() { from orders o select row_number() filter (where o.paid) over (order by o.id) as x }"), ["QL259"]);
+    assert_eq!(errors("query q() { from orders o select count(*) filter (where o.total) as x }"), ["QL212"]);
+    assert_eq!(errors("query q() { from orders o select count(*) filter (where count(*) > 1) as x }"), ["QL213"]);
+    assert_eq!(errors("query q() { from orders o select count(*) filter (where o.nope) as x }"), ["QL206"]);
+}
+
+#[test]
+fn string_agg_is_typed_and_lowered_for_both_databases() {
+    let q = &ok("query q() { from customers c select string_agg(c.name, \", \" order by c.id desc) as names, string_agg(c.email, \";\") filter (where c.id > 1) as emails }")[0];
+    let c = &q.ir.select;
+    assert_eq!((c[0].ty.clone(), c[0].nullable), (b(Builtin::Text), true), "a group with no value gives NULL");
+    assert_eq!((c[1].ty.clone(), c[1].nullable), (b(Builtin::Text), true));
+    assert!(q.sql.contains("string_agg(\"c\".\"name\", ', ' ORDER BY \"c\".\"id\" DESC)"), "{}", q.sql);
+    let (s, d) = compile(&schema(), "query q() { from customers c select string_agg(c.name, \", \" order by c.id desc) as names, string_agg(c.email, \";\") filter (where c.id > 1) as e }", Dialect::Sqlite);
+    let sql = &s.unwrap_or_else(|| panic!("{d:?}"))[0].as_query().unwrap().sql.clone();
+    assert!(sql.contains("group_concat(\"c\".\"name\", ', ' ORDER BY \"c\".\"id\" DESC)"), "{sql}");
+    assert!(sql.contains("group_concat(\"c\".\"email\", ';') FILTER (WHERE (\"c\".\"id\" > 1))"), "{sql}");
+    // grouped
+    ok("query q() { from orders o group by o.customer_id select o.customer_id, string_agg(o.status, \",\" order by o.id) as statuses }");
+}
+
+#[test]
+fn string_agg_errors() {
+    assert_eq!(errors("query q() { from customers c select string_agg(c.id, \",\") as x }"), ["QL209"]);
+    assert_eq!(errors("query q() { from customers c select string_agg(c.name) as x }"), ["QL209"]);
+    assert_eq!(errors("query q() { from customers c select string_agg(c.name, c.email) as x }"), ["QL209"]);
+    assert_eq!(errors("query q() { from customers c select string_agg(distinct c.name, \",\") as x }"), ["QL209"]);
+    assert_eq!(errors("query q() { from customers c select count(c.id order by c.id) as x }"), ["QL259"]);
+    assert_eq!(errors("query q() { from customers c select string_agg(c.name, \",\" order by count(*)) as x }"), ["QL213"]);
+    assert_eq!(errors("query q() { from customers c select lower(c.name order by c.id) as x }"), ["QL259"]);
+    // not a window function
+    assert_eq!(errors("query q() { from customers c select string_agg(c.name, \",\") over () as x }"), ["QL252"]);
+}
+
+// ---- fragments -------------------------------------------------------------------------------- //
+
+#[test]
+fn a_fragment_is_used_like_a_table() {
+    let q = &ok("fragment paid_orders() { from orders o where o.paid select o.id, o.customer_id, o.total }
+        query q() { from paid_orders p join customers c on p.customer_id == c.id select c.name, p.total, c.email }")[0];
+    assert!(q.sql.starts_with("WITH \"paid_orders\" AS (SELECT"), "{}", q.sql);
+    let c = &q.ir.select;
+    assert_eq!((c[0].ty.clone(), c[0].nullable), (b(Builtin::Text), false));
+    assert_eq!((c[1].ty.clone(), c[1].nullable), (TypeIR::Builtin(Builtin::Numeric(10, 2)), false));
+    assert_eq!((c[2].ty.clone(), c[2].nullable), (TypeIR::Builtin(Builtin::Varchar(100)), true));
+    // nullability travels through the fragment, and a left join makes it nullable on the far side
+    let q = &ok("fragment emails() { from customers c select c.id, c.email }
+        query q() { from emails e select e.email }
+        query r() { from customers c left join emails e on e.id == c.id select e.id as eid }")[0];
+    assert!(q.ir.select[0].nullable);
+    // several statements share one, and a fragment nobody uses adds nothing
+    let out = ok("fragment f() { from orders o select o.id }
+        fragment unused() { from customers c select c.id }
+        query a() { from f x select x.id }
+        query b() { from f x select count(*) as n }");
+    assert_eq!(out.len(), 2);
+    assert!(out.iter().all(|q| q.sql.starts_with("WITH \"f\" AS") && !q.sql.contains("unused")), "{:?}", out.iter().map(|q| &q.sql).collect::<Vec<_>>());
+}
+
+#[test]
+fn fragments_use_other_fragments_and_are_used_everywhere_a_table_is() {
+    let q = &ok("fragment big() { from orders o where o.total > 100 select o.id, o.customer_id }
+        fragment big_customers() { from customers c where c.id in (from big b select b.customer_id) select c.id, c.name }
+        query q() { from big_customers bc select bc.name }")[0];
+    // dependencies come first
+    let (i_big, i_bc) = (q.sql.find("\"big\" AS").unwrap(), q.sql.find("\"big_customers\" AS").unwrap());
+    assert!(i_big < i_bc, "{}", q.sql);
+    // in a subquery, in a mutation's source and in its filter
+    ok("fragment f() { from orders o select o.id, o.customer_id }
+        query q() { from customers c where exists (from f x where x.customer_id == c.id select x.id) select c.id }");
+    let m = mutation("fragment f() { from orders o where o.paid select o.id, o.total }
+        insert copy() { into items (order_id, sku, price, qty) from f x select x.id, \"x\", x.total, 1 }");
+    assert!(m.sql.starts_with("WITH \"f\" AS (SELECT"), "{}", m.sql);
+    let m = mutation("fragment f() { from orders o where o.paid select o.id }
+        delete gone() { from orders o where o.id in (from f x select x.id) }");
+    assert!(m.sql.starts_with("WITH \"f\" AS (SELECT"), "{}", m.sql);
+    // a statement's own `with` of the same name wins, without a clash
+    let q = &ok("fragment f() { from orders o select o.id }
+        query q() { with f as (from customers c select c.id) from f x select x.id }")[0];
+    assert!(q.sql.contains("FROM \"customers\""), "{}", q.sql);
+    assert!(!q.sql.contains("FROM \"orders\""), "{}", q.sql);
+}
+
+#[test]
+fn fragment_errors() {
+    // reported once, where they are written, even if nothing uses the fragment
+    let e = errors("fragment bad() { from nope n select n.id }");
+    assert_eq!(e.len(), 1, "{e:?}");
+    // and once when another fragment (or statement) depends on it
+    let e = errors("fragment bad() { from nope n select n.id } fragment worse() { from bad b select b.id } query q() { from worse w select w.id }");
+    assert_eq!(e.len(), 1, "{e:?}");
+    assert_eq!(errors("fragment f() { from orders o select o.id } fragment f() { from orders o select o.id }"), ["QL260"]);
+    assert_eq!(errors("fragment orders() { from customers c select c.id }"), ["QL260"]);
+    assert_eq!(errors("fragment a() { from b x select x.id } fragment b() { from a y select y.id }"), ["QL260"]);
+    assert_eq!(errors("fragment a() { from a x select x.id }"), ["QL260"]);
+    assert_eq!(errors("fragment f(n: int) { from orders o where o.id == :n select o.id }"), ["QL260"]);
+    assert_eq!(errors("fragment f() { from orders o select o.id } update bump() { f x set id = 1 where x.id == 1 }"), ["QL260"]);
+    // a fragment's own rules apply: its output columns need names
+    assert_eq!(errors("fragment f() { from orders o select o.id + 1 }"), ["QL215"]);
+    // a fragment cannot use the statement's parameters
+    assert!(!errors("fragment f() { from orders o where o.id == :n select o.id } query q(n: int) { from f x select x.id }").is_empty());
+}
+
+#[test]
+fn fragments_are_part_of_the_file_not_the_result() {
+    let out = ok("fragment f() { from orders o select o.id } query a() { from f x select x.id }");
+    assert_eq!(out.len(), 1, "a fragment is not a statement");
+    assert_eq!(out[0].ir.name, "a");
+}

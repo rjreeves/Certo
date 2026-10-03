@@ -158,6 +158,7 @@ Functions:  now() gen_uuid() today()                       no arguments
             days_between(from-date, to-date)               -> int    (to - from)
             position(text, find)                           -> int   (1-based, 0 if absent)
             date_part("year"|"month"|"day"|"hour"|"minute", date|timestamp) -> int
+            string_agg(text, "sep" [ "order" "by" OrderItem { "," OrderItem } ])  -> text (aggregate)
             length(text)                                   -> int
             abs(number) round(number)                      -> same type
             coalesce(a, b, ...) nullif(a, b)               -> type of a
@@ -255,6 +256,7 @@ nullability of each result column, and the type of each parameter.
 QL              = { Query | Mutation } ;
 
 Query           = "query" Ident "(" [ Param { "," Param } ] ")" "{" QueryBody "}" ;
+Fragment        = "fragment" Ident "(" ")" "{" QueryBody "}" ;       (* a named query used as a table *)
 QueryBody       = [ With ] Branch { SetOp Branch }
                   [ "order" "by" OrderItem { "," OrderItem } ]
                   [ "limit" QExpr ] [ "offset" QExpr ] ;
@@ -321,6 +323,7 @@ QExpr           = Literal | "null" | Column | Param | FunctionCall | CaseExpr
                 | "exists" "(" SelectBody ")"
                 | "(" SelectBody ")"                           (* subquery as a value *)
                 | FunctionCall "over" ( "(" WindowSpec ")" | Ident )     (* window function *)
+                | FunctionCall "filter" "(" "where" QExpr ")" [ "over" ... ]   (* filtered aggregate *)
                 | QExpr [ "not" ] "like" QExpr
                 | QExpr [ "not" ] "between" QExpr "and" QExpr
                 | "(" QExpr ")" ;
@@ -437,6 +440,21 @@ value), and `first_value` / `last_value`.  They are allowed only in `select` and
 The window's inputs follow the grouping rule: in a query with `group by` its columns must be
 grouped, but it may order by an aggregate (`rank() over (order by sum(o.total) desc)`).  A
 window function does not by itself make a query grouped.
+
+Fragments: `fragment active_customers() { from customers c where c.balance > 0 select c.id, c.name }`
+declares a named query once, and `from active_customers a join orders o on o.customer_id == a.id` uses it as a table
+(in `from`, `join`, subqueries, and the source or filter of `insert`, `update` and `delete`).  It is not a database
+object: each statement that uses one gets it as a `with` query, so there is no migration and nothing to drift, and
+typing, nullability and the SQL are exactly those of `with`.  A fragment takes no parameters (it reads only the schema),
+may use other fragments but not itself, cannot be written to, and is checked on its own, so a mistake is reported once,
+where it is written (QL260 for a repeated or table-named fragment, a cycle, parameters, or a write).  A statement's own
+`with` of the same name takes precedence.
+
+Filtered aggregates and `string_agg`: `count(*) filter (where o.paid)` counts only the rows that meet the condition
+(any aggregate, also as a window function; the condition is boolean and has no aggregate of its own).
+`string_agg(c.name, ", " order by c.id)` joins the values, skipping NULLs; the separator is a literal, the result is
+`text` and NULL for an empty group, and it takes no `distinct` and is not a window function (SQLite's `group_concat`).
+`filter` needs SQLite 3.30 and an `order by` inside `string_agg` needs SQLite 3.44.  Misuse is QL259.
 
 Named windows: `window w as (partition by o.customer_id order by o.id)` before `select` (after `having`)
 defines a window once; `over w` uses it, in `select` and `order by`, and several may be defined

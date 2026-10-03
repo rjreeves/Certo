@@ -141,8 +141,19 @@ pub enum QExpr {
     Like { expr: Box<QExpr>, pattern: Box<QExpr>, negated: bool },
     /// A scalar function (`lower`, `coalesce`, ...).
     Call { func: String, args: Vec<QExpr> },
-    /// An aggregate; `arg: None` is `count(*)`.
-    Agg { func: String, arg: Option<Box<QExpr>>, distinct: bool },
+    /// An aggregate; `arg: None` is `count(*)`. `filter` is `filter (where ...)`; `separator` and
+    /// `order_by` belong to `string_agg`.
+    Agg {
+        func: String,
+        arg: Option<Box<QExpr>>,
+        distinct: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        filter: Option<Box<QExpr>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        separator: Option<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        order_by: Vec<OrderIR>,
+    },
     Case { whens: Vec<When>, otherwise: Option<Box<QExpr>> },
     /// `a || b || c`: text joined end to end; NULL if any part is.
     Concat { parts: Vec<QExpr> },

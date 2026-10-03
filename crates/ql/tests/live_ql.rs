@@ -566,4 +566,43 @@ fn compiled_queries_run_and_their_declared_contract_is_true() {
     let auckland = db.rows(&q, &[]);
     db.client.batch_execute("RESET TIME ZONE").unwrap();
     assert_eq!(utc, auckland);
+
+    // ==== filtered aggregates and string_agg ===============================================
+    let q = db.query("query f() { from orders o group by o.customer_id select o.customer_id,
+        count(*) filter (where o.paid) as paid_n, sum(o.total) filter (where o.status == \"new\") as new_total,
+        string_agg(o.status, \",\" order by o.id) as asc_, string_agg(o.status, \",\" order by o.id desc) as desc_ order by o.customer_id }");
+    let rows = db.rows(&q, &[]);
+    assert!(!rows.is_empty());
+    for r in &rows {
+        let asc = r["asc_"].as_str().unwrap().split(',').collect::<Vec<_>>();
+        let mut desc = r["desc_"].as_str().unwrap().split(',').collect::<Vec<_>>();
+        desc.reverse();
+        assert_eq!(asc, desc, "the two orders are mirror images");
+        assert!(r["paid_n"].as_i64().unwrap() >= 0);
+    }
+    let q = db.query("query e() { from customers c where c.id > 999999 select string_agg(c.name, \",\") as s, count(*) filter (where c.id > 0) as n }");
+    let rows = db.rows(&q, &[]);
+    assert!(rows[0]["s"].is_null());
+    assert_eq!(rows[0]["n"], 0);
+    let q = db.query("query m() { from customers c select string_agg(c.email, \";\" order by c.id) as emails }");
+    let rows = db.rows(&q, &[]);
+    assert!(!rows[0]["emails"].as_str().unwrap().contains("null"), "NULL values are skipped");
+    let q = db.query("query w(min: decimal(10,2)) { from orders o select o.id, count(*) filter (where o.total > :min) over () as big order by o.id }");
+    db.check_contract(&q);
+
+    // ==== fragments =========================================================================
+    let file = "fragment paid_orders() { from orders o where o.paid select o.id, o.customer_id, o.total }
+        fragment paying() { from customers c where c.id in (from paid_orders p select p.customer_id) select c.id, c.name }
+        query q() { from paid_orders p join customers c on p.customer_id == c.id select c.name, p.total order by p.id }
+        query names() { from paying x select x.name order by x.name }
+        query unpaid() { from customers c left join paid_orders p on p.customer_id == c.id where p.id is null select c.name order by c.name }
+        delete gone() { from orders o where o.id in (from paid_orders p select p.id) }";
+    let (stmts, d) = compile(&db.schema, file, Dialect::Postgres);
+    let stmts = stmts.unwrap_or_else(|| panic!("{d:?}"));
+    for s in &stmts {
+        match s {
+            certo_ql::Statement::Query(q) => { db.rows(q, &[]); }
+            certo_ql::Statement::Mutation(m) => db.check_mutation(m),
+        }
+    }
 }

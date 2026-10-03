@@ -28,7 +28,7 @@ const MAX_SUBQUERY_DEPTH: usize = 6;
 
 pub fn parse(src: &str) -> (QlFile, Vec<Diagnostic>) {
     let mut q = Q { p: Parser::new(src), nodes: 0, nesting: 0, sub_depth: 0, windows: Vec::new() };
-    let (mut queries, mut mutations) = (Vec::new(), Vec::new());
+    let (mut queries, mut mutations, mut fragments) = (Vec::new(), Vec::new(), Vec::new());
     while !q.p.at_eof() {
         let start = q.p.pos();
         let result = if q.p.at_word("insert") {
@@ -37,6 +37,8 @@ pub fn parse(src: &str) -> (QlFile, Vec<Diagnostic>) {
             q.mutation(MutationKind::Update).map(|m| mutations.push(m))
         } else if q.p.at_word("delete") {
             q.mutation(MutationKind::Delete).map(|m| mutations.push(m))
+        } else if q.p.at_word("fragment") {
+            q.fragment().map(|f| fragments.push(f))
         } else {
             q.query().map(|x| queries.push(x))
         };
@@ -44,10 +46,10 @@ pub fn parse(src: &str) -> (QlFile, Vec<Diagnostic>) {
             if q.p.pos() == start {
                 q.p.bump();
             }
-            q.p.recover_to(&["query", "insert", "update", "delete"]);
+            q.p.recover_to(&["query", "insert", "update", "delete", "fragment"]);
         }
     }
-    (QlFile { queries, mutations }, q.p.into_diagnostics())
+    (QlFile { queries, mutations, fragments }, q.p.into_diagnostics())
 }
 
 struct Q {
@@ -84,6 +86,26 @@ impl Q {
         let end = self.p.expect(TokKind::RBrace)?;
         q.span = start.to(end);
         Ok(q)
+    }
+
+    /// `fragment name() { from ... select ... }`: a named query with no parameters, used as a table.
+    fn fragment(&mut self) -> PResult<Fragment> {
+        let start = self.p.span();
+        self.p.expect_word("fragment")?;
+        let name = self.p.ident("a fragment name")?;
+        let params = self.param_list()?;
+        if let Some(p) = params.first() {
+            return self.fail(
+                "QL260",
+                "a fragment takes no parameters: it is used as a table and reads only the schema (use a `query` for parameters)",
+                p.name.span,
+            );
+        }
+        self.p.expect(TokKind::LBrace)?;
+        let mut query = self.query_body(name.clone(), Vec::new())?;
+        let end = self.p.expect(TokKind::RBrace)?;
+        query.span = start.to(end);
+        Ok(Fragment { name, query, span: start.to(end) })
     }
 
     /// `from ... select ... [union ...] [order by] [limit] [offset]`: a query's clauses, which
@@ -432,8 +454,10 @@ impl Q {
             Expr::In { expr, list, .. } => Self::depth(expr).max(list.iter().map(Self::depth).max().unwrap_or(0)),
             Expr::Like { expr, pattern, .. } => Self::depth(expr).max(Self::depth(pattern)),
             Expr::Between { expr, low, high, .. } => Self::depth(expr).max(Self::depth(low)).max(Self::depth(high)),
-            Expr::Call { args, over, .. } => args
+            Expr::Call { args, over, filter, agg_order, .. } => args
                 .iter()
+                .chain(filter.iter().map(|f| &**f))
+                .chain(agg_order.iter().map(|o| &o.expr))
                 .chain(over.iter().flat_map(|w| w.partition_by.iter().chain(w.order_by.iter().map(|o| &o.expr))))
                 .map(Self::depth)
                 .max()
@@ -729,7 +753,30 @@ impl Q {
             args.push(self.expr()?);
             while self.p.eat(&TokKind::Comma) { args.push(self.expr()?); }
         }
+        // `string_agg(x, ", " order by y)`: an `order by` inside the call (only aggregates take one; the checker says so)
+        let mut agg_order = Vec::new();
+        if self.word_is("order") {
+            self.p.bump();
+            self.p.expect_word("by")?;
+            loop {
+                let expr = self.expr()?;
+                let desc = self.p.eat_word("desc");
+                if !desc { self.p.eat_word("asc"); }
+                agg_order.push(OrderItem { expr, desc });
+                if !self.p.eat(&TokKind::Comma) { break; }
+            }
+        }
         let mut end = self.p.expect(TokKind::RParen)?;
+        // `agg(...) filter (where cond)`: only the rows that meet the condition feed the aggregate
+        let mut filter = None;
+        if self.word_is("filter") && *self.p.peek_at(1) == TokKind::LParen {
+            self.p.bump();
+            self.p.bump();
+            self.p.expect_word("where")?;
+            let cond = self.expr()?;
+            end = self.p.expect(TokKind::RParen)?;
+            filter = Some(Box::new(cond));
+        }
         // `f(...) over (...)` is a window function
         let mut over = None;
         if self.word_is("over") && *self.p.peek_at(1) == TokKind::LParen {
@@ -749,7 +796,7 @@ impl Q {
             }
         }
         let span = first.span.to(end);
-        let e = Expr::Call { func: first, args, star, distinct, over, span };
+        let e = Expr::Call { func: first, args, star, distinct, filter, agg_order, over, span };
         self.check_depth(&e)?;
         Ok(e)
     }

@@ -388,10 +388,29 @@ impl Lowerer<'_> {
                     format!("{name}({})", a.join(", "))
                 }
             },
-            QExpr::Agg { func, arg, distinct } => match arg {
-                None => format!("{func}(*)"),
-                Some(a) => format!("{func}({}{})", if *distinct { "DISTINCT " } else { "" }, self.expr(a)),
-            },
+            QExpr::Agg { func, arg, distinct, filter, separator, order_by } => {
+                let mut sql = match (arg, separator) {
+                    (None, _) => format!("{func}(*)"),
+                    // string_agg is group_concat in SQLite; the text, the separator, then the order (the order the
+                    // placeholders appear in)
+                    (Some(a), Some(sep)) => {
+                        let name = if self.dialect == Dialect::Sqlite { "group_concat" } else { "string_agg" };
+                        let text = self.expr(a);
+                        let order = if order_by.is_empty() {
+                            String::new()
+                        } else {
+                            let o: Vec<String> = order_by.iter().map(|o| format!("{}{}", self.expr(&o.expr), if o.desc { " DESC" } else { "" })).collect();
+                            format!(" ORDER BY {}", o.join(", "))
+                        };
+                        format!("{name}({text}, {}{order})", quote_literal(self.dialect, sep))
+                    }
+                    (Some(a), None) => format!("{func}({}{})", if *distinct { "DISTINCT " } else { "" }, self.expr(a)),
+                };
+                if let Some(f) = filter {
+                    sql.push_str(&format!(" FILTER (WHERE {})", self.expr(f)));
+                }
+                sql
+            }
             QExpr::Concat { parts } => {
                 let p: Vec<String> = parts.iter().map(|e| self.expr(e)).collect();
                 format!("({})", p.join(" || "))

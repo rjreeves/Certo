@@ -15,7 +15,7 @@
 //! unique key. `with`: QL254 duplicate name, QL256 a recursive query that is not well formed.
 //! Set operations: QL250 `order by` must name an output column, QL253
 //! the branches do not line up (columns, types, mixed or unsupported operators).
-//! `||`: QL257 an operand that cannot be joined as text. Window functions: QL251 misplaced or nested, QL252 unknown
+//! `filter (where ...)` / `string_agg` misuse: QL259. `||`: QL257 an operand that cannot be joined as text. Window functions: QL251 misplaced or nested, QL252 unknown
 //! function or wrong arguments, QL255 bad frame. Subqueries: QL240 must return one column, QL241 scalar
 //! subquery may return several rows, QL242 insert row/column count, QL243
 //! (parser) nested too deeply. QL290 (warning): unused parameter.
@@ -243,7 +243,11 @@ fn in_subquery(e: &QExpr, name: &str) -> bool {
         QExpr::Like { expr, pattern, .. } => in_subquery(expr, name) || in_subquery(pattern, name),
         QExpr::Call { args, .. } => args.iter().any(|a| in_subquery(a, name)),
         QExpr::Concat { parts } => parts.iter().any(|p| in_subquery(p, name)),
-        QExpr::Agg { arg, .. } => arg.as_ref().is_some_and(|a| in_subquery(a, name)),
+        QExpr::Agg { arg, filter, order_by, .. } => {
+            arg.as_ref().is_some_and(|a| in_subquery(a, name))
+                || filter.as_ref().is_some_and(|f| in_subquery(f, name))
+                || order_by.iter().any(|o| in_subquery(&o.expr, name))
+        }
         QExpr::Window { call, partition_by, order_by, .. } => {
             in_subquery(call, name)
                 || partition_by.iter().any(|p| in_subquery(p, name))
@@ -307,10 +311,14 @@ fn refs_expr(e: &QExpr, bound: &HashSet<String>, out: &mut Vec<QExpr>) {
             partition_by.iter().for_each(|p| refs_expr(p, bound, out));
             order_by.iter().for_each(|o| refs_expr(&o.expr, bound, out));
         }
-        QExpr::Agg { arg, .. } => {
+        QExpr::Agg { arg, filter, order_by, .. } => {
             if let Some(a) = arg {
                 refs_expr(a, bound, out);
             }
+            if let Some(f) = filter {
+                refs_expr(f, bound, out);
+            }
+            order_by.iter().for_each(|o| refs_expr(&o.expr, bound, out));
         }
         QExpr::Case { whens, otherwise } => {
             for w in whens {
@@ -1614,7 +1622,9 @@ impl<'a> Checker<'a> {
                 };
                 Some(Typed { e: QExpr::Case { whens: ws, otherwise: other }, t: result, nullable, agg })
             }
-            Expr::Call { func, args, star, distinct, over, span } => self.call(func, args, *star, *distinct, over.as_ref(), *span, ctx),
+            Expr::Call { func, args, star, distinct, filter, agg_order, over, span } => {
+                self.call(func, args, *star, *distinct, filter.as_deref(), agg_order, over.as_ref(), *span, ctx)
+            }
             Expr::Concat(parts, span) => {
                 let mut typed = Vec::new();
                 let mut ok = true;
@@ -1787,32 +1797,44 @@ impl<'a> Checker<'a> {
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)]
     fn call(
         &mut self,
         func: &certo_sdl::Ident,
         args: &[Expr],
         star: bool,
         distinct: bool,
+        filter: Option<&Expr>,
+        agg_order: &[OrderItem],
         over: Option<&WindowSpec>,
         span: Span,
         ctx: Ctx,
     ) -> Option<Typed> {
         let name = func.name.as_str();
         if let Some(w) = over {
-            return self.window(name, args, star, distinct, w, span, ctx);
+            if !agg_order.is_empty() {
+                self.fail("QL259", "an `order by` inside the call only applies to `string_agg`, which is not a window function", span);
+                return None;
+            }
+            return self.window(name, args, star, distinct, filter, w, span, ctx);
         }
         if matches!(name, "row_number" | "rank" | "dense_rank" | "ntile" | "percent_rank" | "cume_dist" | "lag" | "lead" | "first_value" | "last_value") {
             self.fail("QL252", format!("`{name}` is a window function: add `over (...)`"), span);
             return None;
         }
-        let is_agg = matches!(name, "count" | "sum" | "avg" | "min" | "max");
+        let is_agg = matches!(name, "count" | "sum" | "avg" | "min" | "max" | "string_agg");
+        if !is_agg && (filter.is_some() || !agg_order.is_empty()) {
+            let what = if filter.is_some() { "`filter (where ...)`" } else { "an `order by` inside the call" };
+            self.fail("QL259", format!("{what} only applies to aggregates (count, sum, avg, min, max, string_agg), not `{name}`"), span);
+            return None;
+        }
 
         if is_agg {
             if !ctx.allows_agg() {
                 self.fail("QL213", format!("aggregate `{name}` is not allowed here (only in `select`, `having` and `order by`)"), span);
                 return None;
             }
-            return self.aggregate(name, args, star, distinct, span, ctx);
+            return self.aggregate(name, args, star, distinct, filter, agg_order, span, ctx);
         }
         if star || distinct {
             self.fail("QL209", format!("`{name}` is not an aggregate, so `*` and `distinct` do not apply"), span);
@@ -2008,7 +2030,8 @@ impl<'a> Checker<'a> {
 
     /// `f(args) over (partition by ... order by ...)`.
     #[allow(clippy::too_many_arguments)]
-    fn window(&mut self, name: &str, args: &[Expr], star: bool, distinct: bool, over: &WindowSpec, span: Span, ctx: Ctx) -> Option<Typed> {
+    #[allow(clippy::too_many_arguments)]
+    fn window(&mut self, name: &str, args: &[Expr], star: bool, distinct: bool, filter: Option<&Expr>, over: &WindowSpec, span: Span, ctx: Ctx) -> Option<Typed> {
         if !ctx.allows_window() {
             self.fail("QL251", "window functions are only allowed in `select` and `order by`", span);
             return None;
@@ -2018,13 +2041,13 @@ impl<'a> Checker<'a> {
             return None;
         }
         self.in_window = true;
-        let r = self.window_inner(name, args, star, distinct, over, span, ctx);
+        let r = self.window_inner(name, args, star, distinct, filter, over, span, ctx);
         self.in_window = false;
         r
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn window_inner(&mut self, name: &str, args: &[Expr], star: bool, distinct: bool, over: &WindowSpec, span: Span, ctx: Ctx) -> Option<Typed> {
+    fn window_inner(&mut self, name: &str, args: &[Expr], star: bool, distinct: bool, filter: Option<&Expr>, over: &WindowSpec, span: Span, ctx: Ctx) -> Option<Typed> {
         if distinct {
             self.fail("QL252", "`distinct` is not supported in a window function", span);
             return None;
@@ -2089,10 +2112,14 @@ impl<'a> Checker<'a> {
             }
             Some(t.e)
         };
+        if filter.is_some() && !matches!(name, "count" | "sum" | "avg" | "min" | "max") {
+            self.fail("QL259", format!("`filter (where ...)` only applies to aggregates, not the window function `{name}`"), span);
+            return None;
+        }
         let (call, t, nullable): (QExpr, T, bool) = match name {
             "count" | "sum" | "avg" | "min" | "max" => {
                 // the aggregate's own typing, for its result type and nullability
-                let a = self.aggregate(name, args, star, false, span, Ctx::Select)?;
+                let a = self.aggregate(name, args, star, false, filter, &[], span, Ctx::Select)?;
                 (a.e, a.t, a.nullable)
             }
             "row_number" | "rank" | "dense_rank" | "percent_rank" | "cume_dist" => {
@@ -2223,14 +2250,76 @@ impl<'a> Checker<'a> {
         Some(t.e)
     }
 
-    fn aggregate(&mut self, name: &str, args: &[Expr], star: bool, distinct: bool, span: Span, ctx: Ctx) -> Option<Typed> {
+    /// `string_agg(text, "separator" [order by ...])`: the values joined with the separator; NULL values are skipped
+    /// and a group with no value is NULL, in both databases. The separator is a literal, and `distinct` is not offered
+    /// (SQLite's `group_concat` takes it only with one argument).
+    fn string_agg(&mut self, args: &[Expr], distinct: bool, filter: Option<Box<QExpr>>, agg_order: &[OrderItem], span: Span, ctx: Ctx) -> Option<Typed> {
+        if args.len() != 2 {
+            self.fail("QL209", format!("`string_agg` takes the text and a separator, got {} argument(s)", args.len()), span);
+            return None;
+        }
+        if distinct {
+            self.fail("QL209", "`string_agg` does not take `distinct`", span);
+            return None;
+        }
+        let a = self.expr(&args[0], ctx)?;
+        if a.agg {
+            self.fail("QL213", "aggregates cannot be nested", args[0].span());
+            return None;
+        }
+        if !matches!(&a.t, T::Known(k) if is_text(k)) {
+            self.fail("QL209", format!("`string_agg` expects text, found {}", describe_t(&a.t)), args[0].span());
+            return None;
+        }
+        let Expr::Str(sep, _) = &args[1] else {
+            self.fail("QL209", "the separator of `string_agg` must be a string literal", args[1].span());
+            return None;
+        };
+        let mut order_by = Vec::new();
+        for o in agg_order {
+            let t = self.expr(&o.expr, ctx)?;
+            if t.agg {
+                self.fail("QL213", "aggregates cannot be nested", o.expr.span());
+                return None;
+            }
+            order_by.push(OrderIR { expr: t.e, desc: o.desc });
+        }
+        Some(Typed {
+            e: QExpr::Agg { func: "string_agg".into(), arg: Some(Box::new(a.e)), distinct: false, filter, separator: Some(sep.clone()), order_by },
+            t: T::Known(builtin(Builtin::Text)),
+            nullable: true,
+            agg: true,
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn aggregate(&mut self, name: &str, args: &[Expr], star: bool, distinct: bool, filter: Option<&Expr>, agg_order: &[OrderItem], span: Span, ctx: Ctx) -> Option<Typed> {
         let big = T::Known(builtin(Builtin::BigInt));
+        // `filter (where cond)`: a plain boolean condition over the rows, with no aggregate of its own
+        let filter_ir = match filter {
+            Some(f) => {
+                let t = self.expr(f, Ctx::Where)?;
+                if !is_bool(&t.t) {
+                    self.fail("QL212", format!("`filter (where ...)` must be boolean, found {}", describe_t(&t.t)), f.span());
+                    return None;
+                }
+                Some(Box::new(t.e))
+            }
+            None => None,
+        };
+        if !agg_order.is_empty() && name != "string_agg" {
+            self.fail("QL259", format!("an `order by` inside the call only applies to `string_agg`, not `{name}`"), span);
+            return None;
+        }
         if star {
             if name != "count" || distinct {
                 self.fail("QL209", format!("`{name}(*)` is not valid; only `count(*)` is"), span);
                 return None;
             }
-            return Some(Typed { e: QExpr::Agg { func: "count".into(), arg: None, distinct: false }, t: big, nullable: false, agg: true });
+            return Some(Typed { e: QExpr::Agg { func: "count".into(), arg: None, distinct: false, filter: filter_ir, separator: None, order_by: vec![] }, t: big, nullable: false, agg: true });
+        }
+        if name == "string_agg" {
+            return self.string_agg(args, distinct, filter_ir, agg_order, span, ctx);
         }
         if args.len() != 1 {
             self.fail("QL209", format!("`{name}` takes one argument, got {}", args.len()), span);
@@ -2275,7 +2364,7 @@ impl<'a> Checker<'a> {
             }
         };
         Some(Typed {
-            e: QExpr::Agg { func: name.to_string(), arg: Some(Box::new(a.e)), distinct },
+            e: QExpr::Agg { func: name.to_string(), arg: Some(Box::new(a.e)), distinct, filter: filter_ir, separator: None, order_by: vec![] },
             t: ret,
             nullable,
             agg: true,
