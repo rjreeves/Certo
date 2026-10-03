@@ -1,10 +1,13 @@
 //! The SQLite executor: the same history, apply and introspection contract as
 //! `PgExecutor`, on a database file (or `:memory:`).
 //!
-//! SQLite has no advisory locks. A migration's transactional batches run in a
-//! write transaction, which SQLite itself serialises, so two runners cannot
-//! interleave inside one batch; unlike PostgreSQL, nothing stops a second
-//! runner from starting its own migration between batches.
+//! SQLite has no advisory locks, so the executor takes an operating-system file lock on a
+//! sidecar file, `<database>.certo-lock`, for as long as it lives: a second runner on the same
+//! database fails at once ("another migration run holds the lock"), as with PostgreSQL's
+//! advisory lock, instead of starting its own migration between two batches. The lock goes
+//! away with the process, however it ends, so a crash leaves nothing stale; the small empty
+//! file stays (deleting it would let two runners hold "the" lock on different files).
+//! An in-memory database, and one in a folder the process cannot write to, use no lock.
 
 use crate::error::RunnerError;
 use crate::exec::{AppliedRow, ExecError, Executor};
@@ -12,9 +15,34 @@ use crate::introspect::{LiveSchema, HISTORY_TABLE};
 use crate::migration::Migration;
 use crate::sqlite_introspect;
 use rusqlite::Connection;
+use std::fs::{File, OpenOptions, TryLockError};
+use std::io::ErrorKind;
 
 pub struct SqliteExecutor {
     conn: Connection,
+    /// Held for the executor's lifetime; unlocked when it is dropped.
+    _lock: Option<File>,
+}
+
+/// Take the lock on `<path>.certo-lock` without waiting.
+fn lock_beside(path: &str) -> Result<Option<File>, RunnerError> {
+    if path.is_empty() || path == ":memory:" {
+        return Ok(None);
+    }
+    let lock_path = format!("{path}.certo-lock");
+    let file = match OpenOptions::new().create(true).write(true).truncate(false).open(&lock_path) {
+        Ok(f) => f,
+        // a database opened just to be read, in a folder this process cannot write to
+        Err(e) if matches!(e.kind(), ErrorKind::PermissionDenied | ErrorKind::ReadOnlyFilesystem) => return Ok(None),
+        Err(e) => return Err(RunnerError::Connection(format!("could not create the lock file `{lock_path}`: {e}"))),
+    };
+    match file.try_lock() {
+        Ok(()) => Ok(Some(file)),
+        Err(TryLockError::WouldBlock) => Err(RunnerError::Connection(
+            "another migration run holds the lock on this database; wait for it to finish".into(),
+        )),
+        Err(TryLockError::Error(e)) => Err(RunnerError::Connection(format!("could not lock `{lock_path}`: {e}"))),
+    }
 }
 
 fn err(e: rusqlite::Error, statement: Option<&str>) -> ExecError {
@@ -34,11 +62,12 @@ impl SqliteExecutor {
         let conn = Connection::open(path).map_err(conn_err)?;
         conn.pragma_update(None, "foreign_keys", "ON").map_err(conn_err)?;
         conn.busy_timeout(std::time::Duration::from_secs(10)).map_err(conn_err)?;
-        Ok(SqliteExecutor { conn })
+        let lock = lock_beside(path)?;
+        Ok(SqliteExecutor { conn, _lock: lock })
     }
 
     /// Wrap an already-open connection (tests, hosts that manage their own).
-    pub fn from_connection(conn: Connection) -> SqliteExecutor { SqliteExecutor { conn } }
+    pub fn from_connection(conn: Connection) -> SqliteExecutor { SqliteExecutor { conn, _lock: None } }
 
     pub fn connection(&self) -> &Connection { &self.conn }
 
