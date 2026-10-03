@@ -78,6 +78,9 @@ unknown fields, and connection errors never echo the URL's password. See
 `src/runner_api.rs` for every option, result field and error code, and
 `../runner/README.md` for what each operation guarantees.
 
+A reference host built on the typed API lives in `packaging/dotnet/Certo.Db.Cli` (`certo-db`: schema,
+query, code generation and migration commands); see its README. It is the model for the C# CLI.
+
 ## Guarantees
 
 - Returned strings are owned by the library; release them with

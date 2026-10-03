@@ -99,6 +99,8 @@ namespace Certo.Models
         [JsonPropertyName("seq")] public int Seq { get; init; }
         [JsonPropertyName("name")] public string Name { get; init; } = "";
         [JsonPropertyName("dir")] public string Dir { get; init; } = "";
+        /// <summary>For example <c>0003_add_slug</c>.</summary>
+        public string Label => $"{Seq:D4}_{Name}";
         /// <summary>One line per operation: <c>+</c> add, <c>~</c> change, <c>-</c> remove.</summary>
         [JsonPropertyName("summary")] public List<string> Summary { get; init; } = new();
         [JsonPropertyName("destructive")] public bool Destructive { get; init; }
@@ -130,12 +132,16 @@ namespace Certo.Models
         [JsonPropertyName("name")] public string Name { get; init; } = "";
         [JsonPropertyName("checksum")] public string Checksum { get; init; } = "";
         [JsonPropertyName("applied_at")] public string AppliedAt { get; init; } = "";
+        /// <summary>For example <c>0003_add_slug</c>.</summary>
+        public string Label => $"{Seq:D4}_{Name}";
     }
 
     public sealed class PendingMigration
     {
         [JsonPropertyName("seq")] public int Seq { get; init; }
         [JsonPropertyName("name")] public string Name { get; init; } = "";
+        /// <summary>For example <c>0003_add_slug</c>.</summary>
+        public string Label => $"{Seq:D4}_{Name}";
     }
 
     public sealed class MigrateStatusResult : CertoResult
