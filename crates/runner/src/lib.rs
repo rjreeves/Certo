@@ -36,10 +36,10 @@ pub mod runner;
 pub mod sqlite_exec;
 pub mod sqlite_introspect;
 
-pub use adopt::{adopt, AdoptOptions, AdoptReport, Counts};
+pub use adopt::{adopt, import_schema, AdoptOptions, AdoptReport, Counts, Prepared};
 pub use drift::{Drift, DriftItem, DriftKind};
 pub use error::RunnerError;
-pub use exec::{connect, AppliedRow, ExecError, Executor, PgExecutor};
+pub use exec::{connect, connect_to, AppliedRow, ExecError, Executor, PgExecutor};
 pub use migration::{Created, Migration, Script};
 pub use project::{Config, Project};
 pub use sqlite_exec::SqliteExecutor;

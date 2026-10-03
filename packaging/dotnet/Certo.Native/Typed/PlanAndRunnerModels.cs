@@ -190,6 +190,15 @@ namespace Certo.Models
         [JsonPropertyName("constraints")] public int Constraints { get; init; }
     }
 
+    /// <summary>A database's schema read as SDL (see <see cref="CertoSdl.Import"/>).</summary>
+    public sealed class SchemaImportResult : CertoResult
+    {
+        [JsonPropertyName("schema_sdl")] public string SchemaSdl { get; init; } = "";
+        [JsonPropertyName("imported")] public AdoptedCounts Imported { get; init; } = new();
+        /// <summary>Everything in the database the schema language cannot express, and so was left out.</summary>
+        [JsonPropertyName("omissions")] public List<string> Omissions { get; init; } = new();
+    }
+
     public sealed class MigrateAdoptResult : CertoResult
     {
         [JsonPropertyName("dry_run")] public bool DryRun { get; init; }

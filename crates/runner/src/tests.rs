@@ -614,6 +614,21 @@ mod adopt_tests {
     }
 
     #[test]
+    fn import_reads_a_schema_without_changing_anything_even_when_managed() {
+        use crate::adopt::import_schema;
+        let (_d, _p, mut db) = fresh(legacy_live());
+        // a database with a migration history can still be read: only adopting it is refused
+        db.applied.push(AppliedRow { seq: 1, name: "x".into(), checksum: "c".into(), applied_at: "t".into() });
+        let p = import_schema(&mut db).unwrap();
+        assert!(compile(&p.sdl).0.is_some(), "the SDL compiles");
+        assert!(p.counts.tables > 0 && !p.omissions.is_empty());
+        assert!(db.recorded.is_empty() && db.ran.is_empty(), "nothing was written");
+        // an empty database is an empty schema, not an error
+        let (_d, _p, mut empty) = fresh(LiveSchema { ir: SchemaIR::empty(), notes: vec![] });
+        assert_eq!(import_schema(&mut empty).unwrap().counts.tables, 0);
+    }
+
+    #[test]
     fn adopt_refuses_when_it_should() {
         // project already has migrations
         let (_d, p) = project();

@@ -68,6 +68,9 @@ public static class CertoNative
     private static extern IntPtr certo_migrate_adopt(byte[] dir, byte[]? options);
 
     [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+    private static extern IntPtr certo_schema_import(byte[] options);
+
+    [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
     private static extern void certo_string_free(IntPtr s);
 
     static CertoNative()
@@ -157,6 +160,12 @@ public static class CertoNative
     /// </summary>
     public static string MigrateAdopt(string projectDir, string optionsJson) =>
         Take(certo_migrate_adopt(Z(projectDir), ZN(optionsJson)));
+
+    /// <summary>
+    /// Read a database's schema as SDL, with no project, changing nothing. Options: {"url", "dialect"?}.
+    /// The result has schema_sdl, imported (counts) and omissions (what SDL cannot express).
+    /// </summary>
+    public static string SchemaImport(string optionsJson) => Take(certo_schema_import(Z(optionsJson)));
 
     private static byte[]? ZN(string? s) => s is null ? null : Z(s);
 

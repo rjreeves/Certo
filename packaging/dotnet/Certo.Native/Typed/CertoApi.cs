@@ -39,6 +39,18 @@ namespace Certo
         /// <summary>Compile schema source. Errors are in <see cref="SdlCompileResult.Diagnostics"/>; use <see cref="SdlCompileResult.EnsureOk"/> to get the IR or an exception.</summary>
         public static SdlCompileResult Compile(string source) =>
             Wire.Parse<SdlCompileResult>(CertoNative.CompileSdl(source), "CompileSdl");
+
+        /// <summary>
+        /// Read a database's schema as SDL, with no project and without changing the database (a missing SQLite file is an
+        /// error, not an empty database). <paramref name="url"/> is a <c>postgres://</c> URL or a SQLite file path; the dialect
+        /// follows from it unless given. What SDL cannot express is listed in <see cref="SchemaImportResult.Omissions"/>.
+        /// </summary>
+        public static SchemaImportResult Import(string url, SqlDialect? dialect = null)
+        {
+            var options = new System.Collections.Generic.Dictionary<string, string> { ["url"] = url };
+            if (dialect is { } d) options["dialect"] = d.Name();
+            return Wire.Parse<SchemaImportResult>(CertoNative.SchemaImport(System.Text.Json.JsonSerializer.Serialize(options)), "SchemaImport");
+        }
     }
 
     /// <summary>Compile QL queries and mutations, and generate host code from them.</summary>

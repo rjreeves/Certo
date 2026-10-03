@@ -356,6 +356,13 @@ finally
         var pdir = Path.Combine(adoptProj, "p");
         Directory.CreateDirectory(pdir);
         CertoMigrations.Init(pdir, SqlDialect.Sqlite).EnsureOk();
+        // reading a schema needs no project and changes nothing; a mistyped path is an error, not a new empty database
+        var imported = CertoSdl.Import(legacy).EnsureOk();
+        Check(imported.SchemaSdl.Contains("table t") && imported.Imported is { Tables: 1, Columns: 2 } && imported.Omissions.Any(o => o.Contains("vw")),
+            "typed Import: SDL, counts and omissions from a SQLite file");
+        var missingDb = Path.Combine(adoptProj, "missing.db");
+        var notThere = CertoSdl.Import(missingDb);
+        Check(!notThere.Ok && notThere.Error?.Code == "connection" && !File.Exists(missingDb), "typed Import: a missing SQLite file is an error and is not created");
         var preview = CertoMigrations.Adopt(pdir, new AdoptOptions { Url = legacy, DryRun = true }).EnsureOk();
         Check(preview.DryRun && preview.Migration is null && preview.Adopted is { Tables: 1, Columns: 2 }, "typed Adopt dry run: counts");
         Check(preview.Omissions.Any(o => o.Contains("vw")), "typed Adopt: omissions are listed");
@@ -364,6 +371,7 @@ finally
         Check(CertoMigrations.Drift(pdir, new DriftOptions { Url = legacy }).EnsureOk().InSync, "the adopted project is in sync");
         var again = CertoMigrations.Adopt(pdir, new AdoptOptions { Url = legacy });
         Check(again.Error?.Code == "project", "adopting twice is a typed error");
+        Check(CertoSdl.Import(legacy).EnsureOk().SchemaSdl == adopted.SchemaSdl, "typed Import still reads a database that is now managed");
     }
     finally { try { Directory.Delete(adoptProj, true); } catch { } }
 }
