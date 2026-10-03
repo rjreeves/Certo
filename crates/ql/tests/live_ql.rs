@@ -41,6 +41,12 @@ table items {
     price: decimal(10,2) not null
     qty: int not null
 }
+table categories {
+    id: serial primary key
+    parent_id: int references categories
+    name: text not null
+    note: text
+}
 "#;
 
 const DATA: &str = r#"
@@ -54,6 +60,7 @@ INSERT INTO orders (customer_id, total, status, qty, paid, shipped) VALUES
     (2,  5.00, 'new',  3, false, NULL);
 INSERT INTO items (order_id, sku, price, qty) VALUES
     (1, 'A',  4.00, 1), (1, 'B', 3.00, 2), (2, 'A', 25.50, 1);
+INSERT INTO categories (parent_id, name, note) VALUES (NULL, 'root', NULL), (1, 'a', 'n'), (1, 'b', NULL), (2, 'a1', NULL);
 "#;
 
 fn url() -> Option<String> { std::env::var("CERTO_TEST_PG_URL").ok().filter(|u| !u.is_empty()) }
@@ -470,4 +477,31 @@ fn compiled_queries_run_and_their_declared_contract_is_true() {
     assert!(!rows.is_empty());
     assert!(rows.last().unwrap()["nxt"].is_null(), "no row follows the last one");
     assert!(rows.iter().all(|r| !r["seen"].is_null()), "count is never NULL");
+
+    // ==== with recursive ==============================================================
+    let q = db.query("query tree() { with recursive tree as (
+            from categories c where c.parent_id is null select c.id, c.name, 0 as depth
+            union all
+            from categories c join tree t on c.parent_id == t.id select c.id, c.name, t.depth + 1 as depth)
+        from tree t select t.name, t.depth order by t.depth, t.name }");
+    let rows = db.rows(&q, &[]);
+    assert_eq!(rows.iter().map(|r| r["depth"].as_i64().unwrap()).collect::<Vec<_>>(), [0, 1, 1, 2]);
+    let q = db.query("query below(root: int) { with recursive sub as (
+            from categories c where c.id == :root select c.id
+            union all
+            from categories c join sub s on c.parent_id == s.id select c.id)
+        from sub select count(*) as n }");
+    assert_eq!(db.rows(&q, &[&1i32]), [json!({"n": 4})]);
+    let q = db.query("query labels() { with recursive t as (
+            from categories c where c.parent_id is null select c.id, c.name as label
+            union all
+            from categories c join t on c.parent_id == t.id select c.id, c.note as label)
+        from t select t.id, t.label order by t.id }");
+    assert!(q.ir.select[1].nullable);
+    db.rows(&q, &[]);
+    let m = db.mutation("delete prune(root: int) { with recursive sub as (
+            from categories c where c.id == :root select c.id
+            union all from categories c join sub s on c.parent_id == s.id select c.id)
+        from categories x where x.id in (from sub s select s.id) and x.id <> :root returning x.name }");
+    db.check_mutation(&m);
 }

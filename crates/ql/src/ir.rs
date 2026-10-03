@@ -55,7 +55,13 @@ pub enum FrameBoundIR {
 pub struct CteIR {
     pub name: String,
     pub query: SubqueryIR,
+    /// The query reads itself: its first select is the starting rows and the `unions`
+    /// are the steps repeated until no new rows appear.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub recursive: bool,
 }
+
+fn is_false(b: &bool) -> bool { !*b }
 
 /// One `select` of a set operation (no ordering or limits of its own).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

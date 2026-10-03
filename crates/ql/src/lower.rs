@@ -160,7 +160,8 @@ impl Lowerer<'_> {
             return Vec::new();
         }
         let defs: Vec<String> = ctes.iter().map(|c| format!("{} AS ({})", self.id(&c.name), self.nested(&c.query))).collect();
-        vec![format!("WITH {}", defs.join(", "))]
+        let keyword = if ctes.iter().any(|c| c.recursive) { "WITH RECURSIVE" } else { "WITH" };
+        vec![format!("{keyword} {}", defs.join(", "))]
     }
 
     /// The clauses of a SELECT, one per line.

@@ -915,8 +915,9 @@ fn with_query_rules() {
     assert_eq!(errors("query q() { from customers c where exists (with t as (from orders o select o.id) from t select 1) and c.id in (from t select t.id) select c.id }"), ["QL203"]);
     // a with query does not see its own name
     assert_eq!(errors("query q() { with a as (from a select a.id) from a select a.id }"), ["QL203"]);
+    // `recursive` alone is fine (it only matters to a query that reads itself)
     let (_, d) = parse("query q() { with recursive a as (from orders o select o.id) from a select a.id }");
-    assert!(d.iter().any(|x| x.code == "QL254"), "{d:?}");
+    assert!(d.is_empty(), "{d:?}");
 }
 
 #[test]
@@ -933,6 +934,9 @@ fn mutations_take_with_queries() {
     assert!(m.sql.starts_with("WITH \"src\" AS (SELECT"), "{}", m.sql);
     assert!(m.sql.contains("INSERT INTO \"items\""), "{}", m.sql);
     mutation("delete gone() { with idle as (from customers c select c.id) from orders o where o.customer_id in (from idle i select i.id) }");
+    // a `with` query of a mutation may use the mutation's parameters
+    let m = mutation("update pick(id: int) { with one as (from orders o where o.id == :id select o.id) orders x set status = \"p\" where x.id in (from one i select i.id) }");
+    assert_eq!(m.param_order, ["id"]);
     // the target of a mutation is a real table, not a with query
     assert_eq!(
         errors("update u() { with t as (from orders o select o.id) t set id = 1 all rows }"),
@@ -1046,4 +1050,168 @@ fn frames_serialise() {
     assert_eq!(frame["end"]["kind"], "current_row");
     let back: QueryIR = serde_json::from_value(j[0]["ir"].clone()).unwrap();
     assert!(matches!(&back.select[0].expr, QExpr::Window { frame: Some(_), .. }));
+}
+
+// ---- with recursive ---------------------------------------------------------------- //
+
+const TREE: &str = "
+table categories {
+    id: serial primary key
+    parent_id: int references categories
+    name: text not null
+    note: text
+}";
+
+fn tree_compile(ql: &str) -> (Option<Vec<Statement>>, Vec<certo_diagnostics::Diagnostic>) {
+    let (ir, d) = compile_sdl(TREE);
+    let schema = ir.unwrap_or_else(|| panic!("{d:?}"));
+    compile(&schema, ql, Dialect::Postgres)
+}
+
+fn tree_ok(ql: &str) -> Vec<CompiledQuery> {
+    let (s, d) = tree_compile(ql);
+    s.unwrap_or_else(|| panic!("{d:?}")).into_iter().filter_map(|s| s.as_query().cloned()).collect()
+}
+
+fn tree_errors(ql: &str) -> Vec<String> {
+    let (s, d) = tree_compile(ql);
+    assert!(s.is_none(), "expected failure for: {ql}");
+    d.iter().filter(|x| x.severity == Severity::Error).map(|x| x.code.clone()).collect()
+}
+
+const DEPTH: &str = "query q() {
+    with recursive tree as (
+        from categories c where c.parent_id is null select c.id, c.parent_id, c.name, 0 as depth
+        union all
+        from categories c join tree t on c.parent_id == t.id select c.id, c.parent_id, c.name, t.depth + 1 as depth)
+    from tree t select t.name, t.depth order by t.depth, t.name }";
+
+#[test]
+fn recursive_queries_walk_a_hierarchy() {
+    let q = &tree_ok(DEPTH)[0];
+    assert!(q.sql.starts_with("WITH RECURSIVE \"tree\" AS (SELECT \"c\".\"id\" AS \"id\""), "{}", q.sql);
+    assert!(q.sql.contains(" UNION ALL SELECT \"c\".\"id\" AS \"id\""), "{}", q.sql);
+    assert!(q.sql.contains("INNER JOIN \"tree\" AS \"t\" ON (\"c\".\"parent_id\" = \"t\".\"id\")"), "{}", q.sql);
+    assert_eq!(q.ir.ctes.len(), 1);
+    assert!(q.ir.ctes[0].recursive);
+    assert_eq!(q.ir.ctes[0].query.unions.len(), 1);
+    let c = &q.ir.select;
+    assert_eq!((c[0].ty.clone(), c[0].nullable), (b(Builtin::Text), false));
+    assert_eq!((c[1].ty.clone(), c[1].nullable), (b(Builtin::Int), false), "depth: a literal 0, then depth + 1");
+
+    // `union` drops duplicates instead of `union all`
+    let q = &tree_ok(&DEPTH.replace("union all", "union"))[0];
+    assert!(q.sql.contains(" UNION SELECT"), "{}", q.sql);
+    // a plain `with` query is fine under `with recursive`, and later queries may read the recursive one
+    let q = &tree_ok(
+        "query q() { with recursive roots as (from categories c where c.parent_id is null select c.id),
+             tree as (from categories c where c.id in (from roots r select r.id) select c.id, c.parent_id
+                      union all from categories c join tree t on c.parent_id == t.id select c.id, c.parent_id),
+             counted as (from tree t select count(*) as n)
+           from counted select counted.n }",
+    )[0];
+    assert!(q.sql.starts_with("WITH RECURSIVE \"roots\" AS"), "{}", q.sql);
+    assert!(q.ir.ctes[0..1].iter().all(|c| !c.recursive) && q.ir.ctes[1].recursive && !q.ir.ctes[2].recursive);
+    // `recursive` on a query that does not read itself changes nothing
+    assert!(!tree_ok("query q() { with recursive a as (from categories c select c.id) from a select a.id }")[0].ir.ctes[0].recursive);
+}
+
+#[test]
+fn a_step_that_makes_a_column_nullable_is_taken_into_account() {
+    // the starting select's label is NOT NULL; the step's is nullable, so the whole column is
+    let q = &tree_ok(
+        "query q() { with recursive t as (
+             from categories c where c.parent_id is null select c.id, c.name as label
+             union all
+             from categories c join t on c.parent_id == t.id select c.id, c.note as label)
+           from t select t.id, t.label, lower(t.label) as shout }",
+    )[0];
+    assert!(q.ir.select[1].nullable, "label can be NULL once a step contributes rows");
+    assert!(q.ir.select[2].nullable);
+    assert!(q.ir.ctes[0].query.select[1].nullable);
+}
+
+#[test]
+fn recursive_query_rules() {
+    let rec = |anchor: &str, step: &str| {
+        format!(
+            "query q() {{ with recursive t as ({anchor} union all {step}) from t select t.id }}"
+        )
+    };
+    let anchor = "from categories c where c.parent_id is null select c.id, c.parent_id";
+    let step = "from categories c join t on c.parent_id == t.id select c.id, c.parent_id";
+    tree_ok(&rec(anchor, step));
+    // a step reads the query exactly once, and not on the nullable side of a left join
+    // selects that never read the query make a plain union, which is fine
+    tree_ok(&rec(anchor, "from categories c select c.id, c.parent_id"));
+    // but if one step reads it, every step must
+    assert_eq!(
+        tree_errors(&format!("query q() {{ with recursive t as ({anchor} union all {step} union all from categories c select c.id, c.parent_id) from t select t.id }}")),
+        ["QL256"]
+    );
+    assert_eq!(
+        tree_errors(&rec(anchor, "from t a join t b on a.id == b.parent_id join categories c on c.id == a.id select c.id, c.parent_id")),
+        ["QL256"]
+    );
+    assert_eq!(tree_errors(&rec(anchor, "from categories c left join t on c.parent_id == t.id select c.id, c.parent_id")), ["QL256"]);
+    // no subquery over it, no aggregates, windows, distinct, group by
+    assert_eq!(
+        tree_errors(&rec(anchor, "from categories c join t on c.parent_id == t.id where exists (from t u select 1) select c.id, c.parent_id")),
+        ["QL256"]
+    );
+    assert_eq!(tree_errors(&rec(anchor, "from categories c join t on c.parent_id == t.id select distinct c.id, c.parent_id")), ["QL256"]);
+    assert_eq!(
+        tree_errors(&rec(anchor, "from categories c join t on c.parent_id == t.id group by c.id, c.parent_id select c.id, c.parent_id")),
+        ["QL256"]
+    );
+    assert_eq!(
+        tree_errors(&rec(anchor, "from categories c join t on c.parent_id == t.id select c.id, row_number() over (order by c.id) as parent_id")),
+        ["QL256", "QL256"]
+    );
+    // the columns must line up with the starting select
+    assert_eq!(tree_errors(&rec(anchor, "from categories c join t on c.parent_id == t.id select c.id")), ["QL256"]);
+    assert_eq!(tree_errors(&rec(anchor, "from categories c join t on c.parent_id == t.id select c.id, c.name")), ["QL256"]);
+    // only union / union all, no ordering, not named like a table, the start cannot read itself
+    assert_eq!(
+        tree_errors(&format!("query q() {{ with recursive t as ({anchor} intersect {step}) from t select t.id }}")),
+        ["QL256"]
+    );
+    assert_eq!(
+        tree_errors(&format!("query q() {{ with recursive t as ({anchor} union all {step} order by id) from t select t.id }}")),
+        ["QL256"]
+    );
+    assert_eq!(
+        tree_errors(&format!("query q() {{ with recursive categories as ({anchor} union all from categories c join categories t on c.parent_id == t.id select c.id, c.parent_id) from categories select categories.id }}")),
+        ["QL256"]
+    );
+    assert_eq!(
+        tree_errors("query q() { with recursive t as (from t select t.id union all from categories c join t on c.parent_id == t.id select c.id) from t select t.id }"),
+        ["QL203"]
+    );
+    // a mistake in the starting select is reported once, not once per round
+    assert_eq!(tree_errors(&rec("from categories c select c.nope, c.parent_id", step)), ["QL206"]);
+}
+
+#[test]
+fn mutations_take_recursive_queries() {
+    let (s, d) = tree_compile(
+        "delete prune() { with recursive sub as (
+             from categories c where c.id == 1 select c.id
+             union all from categories c join sub s on c.parent_id == s.id select c.id)
+           from categories x where x.id in (from sub s select s.id) }",
+    );
+    let s = s.unwrap_or_else(|| panic!("{d:?}"));
+    let m = s[0].as_mutation().unwrap();
+    assert!(m.sql.starts_with("WITH RECURSIVE \"sub\" AS"), "{}", m.sql);
+    assert!(m.sql.contains("\nDELETE FROM \"categories\" AS \"x\""), "{}", m.sql);
+}
+
+#[test]
+fn recursive_queries_serialise() {
+    let (s, _) = tree_compile(DEPTH);
+    let j = to_json(&s.unwrap());
+    assert_eq!(j[0]["ir"]["ctes"][0]["recursive"], true);
+    assert_eq!(j[0]["ir"]["ctes"][0]["query"]["unions"][0]["op"], "union");
+    let back: QueryIR = serde_json::from_value(j[0]["ir"].clone()).unwrap();
+    assert!(back.ctes[0].recursive);
 }

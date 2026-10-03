@@ -121,10 +121,7 @@ impl Q {
     /// `with name as (...) [, name as (...)]`
     fn ctes(&mut self) -> PResult<Vec<Cte>> {
         self.p.expect_word("with")?;
-        if self.word_is("recursive") {
-            let s = self.p.span();
-            return self.fail("QL254", "recursive queries are not supported", s);
-        }
+        let recursive = self.p.eat_word("recursive");
         let mut out = Vec::new();
         loop {
             let start = self.p.span();
@@ -132,7 +129,7 @@ impl Q {
             self.p.expect_word("as")?;
             self.p.expect(TokKind::LParen)?;
             let query = self.subquery()?;
-            out.push(Cte { name, query, span: start.to(self.p.prev_span()) });
+            out.push(Cte { recursive, name, query, span: start.to(self.p.prev_span()) });
             if !self.p.eat(&TokKind::Comma) { break; }
         }
         Ok(out)
@@ -237,9 +234,11 @@ impl Q {
         let name = self.p.ident("a name for this statement")?;
         let params = self.param_list()?;
         self.p.expect(TokKind::LBrace)?;
+        let named = |q: &Q, at: usize| {
+            matches!(q.p.peek_at(at), TokKind::Ident(_)) && matches!(q.p.peek_at(at + 1), TokKind::Ident(w) if w == "as")
+        };
         let ctes = if self.word_is("with")
-            && matches!(self.p.peek_at(1), TokKind::Ident(_))
-            && matches!(self.p.peek_at(2), TokKind::Ident(w) if w == "as")
+            && (named(self, 1) || (matches!(self.p.peek_at(1), TokKind::Ident(w) if w == "recursive") && named(self, 2)))
         {
             self.ctes()?
         } else {

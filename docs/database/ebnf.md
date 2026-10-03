@@ -257,7 +257,7 @@ Branch          = FromClause { JoinClause }
                   [ "having" QExpr ]
                   "select" [ "distinct" ] SelectItem { "," SelectItem } ;
                   (* the clause order is fixed *)
-With            = "with" Ident "as" "(" QueryBody ")" { "," Ident "as" "(" QueryBody ")" } ;
+With            = "with" [ "recursive" ] Ident "as" "(" QueryBody ")" { "," Ident "as" "(" QueryBody ")" } ;
 SetOp           = "union" [ "all" ] | "intersect" | "except" ;
 
 Mutation        = Insert | Update | Delete ;
@@ -378,9 +378,30 @@ lets the body, its later `with` queries and its subqueries use it like a table. 
 are its select list's names (which must be given and unique, QL215 / QL216), with their types
 and nullability; a left join to it makes them nullable like any table's.  A name hides a table
 of the same name, but only for what follows its definition, so a `with` query cannot see itself
-(`with recursive` is not supported, QL254), and defining a name twice in one `with` is QL254.
+and defining a name twice in one `with` is QL254.
 `with` may also start an `insert`, `update` or `delete` (before its own clauses), for use in its
-subqueries; the table a mutation changes is always a real table.
+subqueries (and it may use the statement's parameters); the table a mutation changes is always a
+real table.
+
+Recursive queries: `with recursive tree as (<start> union [all] <step>) ...` where the start is a
+`from ... select` that does not read `tree`, and each step is a `from ... select` that reads `tree`
+(as a table in `from` or an inner `join`).  The columns, their names, types and nullability come
+from the start; a step may make a column nullable, which is taken into account.  Rules (QL256):
+`with recursive` marks the whole list, but only a query whose later selects read it is recursive
+(the others are ordinary); every step reads the query exactly once, not on the nullable side of a
+left join and not inside a subquery; a step has no aggregates, window functions, `distinct`,
+`group by` or `having`; each step returns the same columns with the same types as the start
+(there are no casts, so write the literal that matches, e.g. `0` for an integer depth); only
+`union` / `union all` join them, with no `order by` / `limit` (put those on the query that reads
+it); and a recursive query is not named like a table.  `union` drops duplicates, which also ends
+a cycle; with `union all` a cyclic graph never terminates, so bound it (a depth column and a
+`where depth < n` in the step) or use `union`.  Example, a tree with depths:
+
+    with recursive tree as (
+        from categories c where c.parent_id is null select c.id, c.name, 0 as depth
+        union all
+        from categories c join tree t on c.parent_id == t.id select c.id, c.name, t.depth + 1 as depth)
+    from tree t select t.name, t.depth order by t.depth, t.name
 
 Window functions: `row_number() over (partition by c.id order by o.total desc)`.  Available:
 `count`, `sum`, `avg`, `min`, `max` (typed as the aggregates, `count` never null),
