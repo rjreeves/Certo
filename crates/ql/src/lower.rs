@@ -62,18 +62,20 @@ impl Lowerer<'_> {
 
     fn mutation(&mut self, m: &MutationIR) -> String {
         let table = format!("{} AS {}", self.id(&m.table), self.id(&m.alias));
-        let mut lines = Vec::new();
+        let mut lines = self.with_lines(&m.ctes);
         match m.kind {
             MutationKind::Insert => {
                 if let Some(src) = &m.source {
                     let cols: Vec<String> = m.insert_columns.iter().map(|c| self.id(c)).collect();
                     lines.push(format!("INSERT INTO {table} ({})", cols.join(", ")));
-                    let mut sql = self.select_lines(&src.sources, &src.select, &src.filter, &src.group_by, &src.having, src.distinct, &src.order_by, &src.limit, &src.offset);
+                    let prefix = self.with_lines(&src.ctes);
+                    let mut sql = self.select_lines(&src.sources, &src.select, &src.filter, &src.group_by, &src.having, src.distinct, &src.unions, &src.order_by, &src.limit, &src.offset);
                     // SQLite cannot tell `ON CONFLICT` from a join's `ON` after a bare `INSERT ... SELECT`
                     if m.conflict.is_some() && self.dialect == Dialect::Sqlite && src.filter.is_none() {
                         let at = sql.iter().position(|l| l.starts_with("GROUP BY") || l.starts_with("HAVING") || l.starts_with("ORDER BY") || l.starts_with("LIMIT") || l.starts_with("OFFSET")).unwrap_or(sql.len());
                         sql.insert(at, "WHERE TRUE".to_string());
                     }
+                    lines.extend(prefix);
                     lines.extend(sql);
                 } else if !m.rows.is_empty() {
                     let cols: Vec<String> = m.insert_columns.iter().map(|c| self.id(c)).collect();
@@ -147,8 +149,18 @@ impl Lowerer<'_> {
 
     fn query(&mut self, q: &QueryIR) -> String {
         self.cast_enums = self.enums_as_text;
-        self.select_lines(&q.sources, &q.select, &q.filter, &q.group_by, &q.having, q.distinct, &q.order_by, &q.limit, &q.offset)
-            .join("\n")
+        let mut lines = self.with_lines(&q.ctes);
+        lines.extend(self.select_lines(&q.sources, &q.select, &q.filter, &q.group_by, &q.having, q.distinct, &q.unions, &q.order_by, &q.limit, &q.offset));
+        lines.join("\n")
+    }
+
+    /// `WITH "a" AS (...), "b" AS (...)`, or nothing.
+    fn with_lines(&mut self, ctes: &[CteIR]) -> Vec<String> {
+        if ctes.is_empty() {
+            return Vec::new();
+        }
+        let defs: Vec<String> = ctes.iter().map(|c| format!("{} AS ({})", self.id(&c.name), self.nested(&c.query))).collect();
+        vec![format!("WITH {}", defs.join(", "))]
     }
 
     /// The clauses of a SELECT, one per line.
@@ -161,14 +173,51 @@ impl Lowerer<'_> {
         group_by: &[QExpr],
         having: &Option<QExpr>,
         distinct: bool,
+        unions: &[UnionIR],
         order_by: &[OrderIR],
         limit: &Option<QExpr>,
         offset: &Option<QExpr>,
     ) -> Vec<String> {
-        let mut lines = Vec::new();
-
         let cast = std::mem::take(&mut self.cast_enums);
-        let cols: Vec<String> = select.iter().map(|c| self.output(c, cast)).collect();
+        let mut lines = self.branch_lines(sources, select, select, filter, group_by, having, distinct, cast);
+        for u in unions {
+            let op = match (u.op, u.all) {
+                (crate::ast::SetOp::Union, false) => "UNION",
+                (crate::ast::SetOp::Union, true) => "UNION ALL",
+                (crate::ast::SetOp::Intersect, _) => "INTERSECT",
+                (crate::ast::SetOp::Except, _) => "EXCEPT",
+            };
+            lines.push(op.to_string());
+            let b = &u.branch;
+            // the combined column's type decides whether an enum is selected as text
+            lines.extend(self.branch_lines(&b.sources, &b.select, select, &b.filter, &b.group_by, &b.having, b.distinct, cast));
+        }
+        self.tail_lines(&mut lines, order_by, limit, offset);
+        lines
+    }
+
+    /// The clauses of one SELECT up to `HAVING`. `merged` gives each column's final type.
+    #[allow(clippy::too_many_arguments)]
+    fn branch_lines(
+        &mut self,
+        sources: &[SourceIR],
+        select: &[ColumnOut],
+        merged: &[ColumnOut],
+        filter: &Option<QExpr>,
+        group_by: &[QExpr],
+        having: &Option<QExpr>,
+        distinct: bool,
+        cast: bool,
+    ) -> Vec<String> {
+        let mut lines = Vec::new();
+        let cols: Vec<String> = select
+            .iter()
+            .zip(merged)
+            .map(|(c, m)| {
+                let typed = ColumnOut { ty: m.ty.clone(), ..c.clone() };
+                self.output(&typed, cast)
+            })
+            .collect();
         lines.push(format!("SELECT {}{}", if distinct { "DISTINCT " } else { "" }, cols.join(", ")));
 
         for (i, s) in sources.iter().enumerate() {
@@ -191,6 +240,10 @@ impl Lowerer<'_> {
         if let Some(h) = having {
             lines.push(format!("HAVING {}", self.expr(h)));
         }
+        lines
+    }
+
+    fn tail_lines(&mut self, lines: &mut Vec<String>, order_by: &[OrderIR], limit: &Option<QExpr>, offset: &Option<QExpr>) {
         if !order_by.is_empty() {
             let o: Vec<String> = order_by
                 .iter()
@@ -206,15 +259,14 @@ impl Lowerer<'_> {
         if let Some(o) = offset {
             lines.push(format!("OFFSET {}", self.expr(o)));
         }
-        lines
     }
 
     /// A subquery on one line (its columns are qualified as usual, even under SQLite's bare RETURNING).
     fn nested(&mut self, q: &SubqueryIR) -> String {
         let bare = std::mem::replace(&mut self.bare_columns, false);
-        let sql = self
-            .select_lines(&q.sources, &q.select, &q.filter, &q.group_by, &q.having, q.distinct, &q.order_by, &q.limit, &q.offset)
-            .join(" ");
+        let mut lines = self.with_lines(&q.ctes);
+        lines.extend(self.select_lines(&q.sources, &q.select, &q.filter, &q.group_by, &q.having, q.distinct, &q.unions, &q.order_by, &q.limit, &q.offset));
+        let sql = lines.join(" ");
         self.bare_columns = bare;
         sql
     }
@@ -245,6 +297,8 @@ impl Lowerer<'_> {
             QExpr::String { value } => quote_literal(self.dialect, value),
             QExpr::Bool { value } => if *value { "TRUE" } else { "FALSE" }.to_string(),
             QExpr::Null => "NULL".to_string(),
+            // the output column of a set operation (what `order by` names)
+            QExpr::Column { source, column } if source.is_empty() => self.id(column),
             QExpr::Column { column, .. } if self.bare_columns => self.id(column),
             QExpr::Column { source, column } => format!("{}.{}", self.id(source), self.id(column)),
             QExpr::Param { name } => self.param(name),
@@ -292,6 +346,22 @@ impl Lowerer<'_> {
                 None => format!("{func}(*)"),
                 Some(a) => format!("{func}({}{})", if *distinct { "DISTINCT " } else { "" }, self.expr(a)),
             },
+            QExpr::Window { call, partition_by, order_by } => {
+                let call = self.expr(call);
+                let mut spec = Vec::new();
+                if !partition_by.is_empty() {
+                    let p: Vec<String> = partition_by.iter().map(|e| self.expr(e)).collect();
+                    spec.push(format!("PARTITION BY {}", p.join(", ")));
+                }
+                if !order_by.is_empty() {
+                    let o: Vec<String> = order_by
+                        .iter()
+                        .map(|o| format!("{}{}", self.expr(&o.expr), if o.desc { " DESC" } else { "" }))
+                        .collect();
+                    spec.push(format!("ORDER BY {}", o.join(", ")));
+                }
+                format!("{call} OVER ({})", spec.join(" "))
+            }
             QExpr::Exists { query } => format!("EXISTS ({})", self.nested(query)),
             QExpr::InQuery { expr, query, negated } => {
                 format!("({} {}IN ({}))", self.expr(expr), if *negated { "NOT " } else { "" }, self.nested(query))

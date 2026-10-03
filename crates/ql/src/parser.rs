@@ -83,9 +83,63 @@ impl Q {
         Ok(q)
     }
 
-    /// `from ... select ... [order by] [limit] [offset]`: a query's clauses, which
+    /// `from ... select ... [union ...] [order by] [limit] [offset]`: a query's clauses, which
     /// are also a subquery's and an `insert ... select`'s.
     fn query_body(&mut self, name: certo_sdl::Ident, params: Vec<ParamDecl>) -> PResult<Query> {
+        let start = self.p.span();
+        let ctes = if self.word_is("with") { self.ctes()? } else { Vec::new() };
+        let mut q = self.branch(name, params)?;
+        q.ctes = ctes;
+        while self.word_is("union") || self.word_is("intersect") || self.word_is("except") {
+            let bstart = self.p.span();
+            let op = match self.p.bump().kind {
+                TokKind::Ident(w) if w == "union" => SetOp::Union,
+                TokKind::Ident(w) if w == "intersect" => SetOp::Intersect,
+                _ => SetOp::Except,
+            };
+            let all = self.p.eat_word("all");
+            let bname = certo_sdl::Ident { name: String::new(), span: bstart };
+            let query = Box::new(self.branch(bname, Vec::new())?);
+            q.compound.push(SetBranch { op, all, query, span: bstart.to(self.p.prev_span()) });
+        }
+        if self.p.eat_word("order") {
+            self.p.expect_word("by")?;
+            loop {
+                let expr = self.expr()?;
+                let desc = self.p.eat_word("desc");
+                if !desc { self.p.eat_word("asc"); }
+                q.order_by.push(OrderItem { expr, desc });
+                if !self.p.eat(&TokKind::Comma) { break; }
+            }
+        }
+        if self.p.eat_word("limit") { q.limit = Some(self.expr()?); }
+        if self.p.eat_word("offset") { q.offset = Some(self.expr()?); }
+        q.span = start.to(self.p.prev_span());
+        Ok(q)
+    }
+
+    /// `with name as (...) [, name as (...)]`
+    fn ctes(&mut self) -> PResult<Vec<Cte>> {
+        self.p.expect_word("with")?;
+        if self.word_is("recursive") {
+            let s = self.p.span();
+            return self.fail("QL254", "recursive queries are not supported", s);
+        }
+        let mut out = Vec::new();
+        loop {
+            let start = self.p.span();
+            let name = self.p.ident("a name for the query")?;
+            self.p.expect_word("as")?;
+            self.p.expect(TokKind::LParen)?;
+            let query = self.subquery()?;
+            out.push(Cte { name, query, span: start.to(self.p.prev_span()) });
+            if !self.p.eat(&TokKind::Comma) { break; }
+        }
+        Ok(out)
+    }
+
+    /// `from ... [join ...] [where ...] [group by ...] [having ...] select ...`
+    fn branch(&mut self, name: certo_sdl::Ident, params: Vec<ParamDecl>) -> PResult<Query> {
         let start = self.p.span();
         self.p.expect_word("from")?;
         let from = self.table_ref()?;
@@ -117,24 +171,12 @@ impl Q {
         let mut items = vec![self.select_item()?];
         while self.p.eat(&TokKind::Comma) { items.push(self.select_item()?); }
 
-        let mut order_by = Vec::new();
-        if self.p.eat_word("order") {
-            self.p.expect_word("by")?;
-            loop {
-                let expr = self.expr()?;
-                let desc = self.p.eat_word("desc");
-                if !desc { self.p.eat_word("asc"); }
-                order_by.push(OrderItem { expr, desc });
-                if !self.p.eat(&TokKind::Comma) { break; }
-            }
-        }
-        let limit = if self.p.eat_word("limit") { Some(self.expr()?) } else { None };
-        let offset = if self.p.eat_word("offset") { Some(self.expr()?) } else { None };
-
         Ok(Query {
             name, params, from, joins, filter, group_by, having,
             select: Select { distinct, items },
-            order_by, limit, offset,
+            order_by: Vec::new(), limit: None, offset: None,
+            compound: Vec::new(),
+            ctes: Vec::new(),
             span: start.to(self.p.prev_span()),
         })
     }
@@ -195,6 +237,14 @@ impl Q {
         let name = self.p.ident("a name for this statement")?;
         let params = self.param_list()?;
         self.p.expect(TokKind::LBrace)?;
+        let ctes = if self.word_is("with")
+            && matches!(self.p.peek_at(1), TokKind::Ident(_))
+            && matches!(self.p.peek_at(2), TokKind::Ident(w) if w == "as")
+        {
+            self.ctes()?
+        } else {
+            Vec::new()
+        };
 
         let table = match kind {
             MutationKind::Insert => { self.p.expect_word("into")?; self.table_ref()? }
@@ -269,7 +319,7 @@ impl Q {
             while self.p.eat(&TokKind::Comma) { returning.push(self.select_item()?); }
         }
         let end = self.p.expect(TokKind::RBrace)?;
-        Ok(Mutation { kind, name, params, table, assignments, insert_columns, rows, source, filter, all_rows, conflict, returning, span: start.to(end) })
+        Ok(Mutation { kind, name, params, table, assignments, insert_columns, rows, source, filter, all_rows, conflict, returning, ctes, span: start.to(end) })
     }
 
     fn table_ref(&mut self) -> PResult<TableRef> {
@@ -336,7 +386,12 @@ impl Q {
             Expr::In { expr, list, .. } => Self::depth(expr).max(list.iter().map(Self::depth).max().unwrap_or(0)),
             Expr::Like { expr, pattern, .. } => Self::depth(expr).max(Self::depth(pattern)),
             Expr::Between { expr, low, high, .. } => Self::depth(expr).max(Self::depth(low)).max(Self::depth(high)),
-            Expr::Call { args, .. } => args.iter().map(Self::depth).max().unwrap_or(0),
+            Expr::Call { args, over, .. } => args
+                .iter()
+                .chain(over.iter().flat_map(|w| w.partition_by.iter().chain(w.order_by.iter().map(|o| &o.expr))))
+                .map(Self::depth)
+                .max()
+                .unwrap_or(0),
             Expr::Case { whens, otherwise, .. } => whens
                 .iter()
                 .map(|(w, t)| Self::depth(w).max(Self::depth(t)))
@@ -416,7 +471,7 @@ impl Q {
                     let negated = self.p.eat_word("not");
                     self.p.expect_word("in")?;
                     self.p.expect(TokKind::LParen)?;
-                    if self.word_is("from") {
+                    if self.word_is("from") || self.word_is("with") {
                         let query = self.subquery()?;
                         let span = lhs.span().to(query.span);
                         lhs = Expr::InQuery { expr: Box::new(lhs), query, negated, span };
@@ -501,7 +556,7 @@ impl Q {
                 let name = self.p.ident("a parameter name")?;
                 Ok(Expr::Param(name))
             }
-            TokKind::LParen if matches!(self.p.peek_at(1), TokKind::Ident(w) if w == "from") => {
+            TokKind::LParen if matches!(self.p.peek_at(1), TokKind::Ident(w) if w == "from" || w == "with") => {
                 self.p.bump();
                 let query = self.subquery()?;
                 let span = span.to(query.span);
@@ -518,7 +573,7 @@ impl Q {
                 "null" => { self.p.bump(); Ok(Expr::Null(span)) }
                 "exists"
                     if *self.p.peek_at(1) == TokKind::LParen
-                        && matches!(self.p.peek_at(2), TokKind::Ident(w) if w == "from") =>
+                        && matches!(self.p.peek_at(2), TokKind::Ident(w) if w == "from" || w == "with") =>
                 {
                     self.p.bump();
                     self.p.bump();
@@ -571,9 +626,33 @@ impl Q {
             args.push(self.expr()?);
             while self.p.eat(&TokKind::Comma) { args.push(self.expr()?); }
         }
-        let end = self.p.expect(TokKind::RParen)?;
+        let mut end = self.p.expect(TokKind::RParen)?;
+        // `f(...) over (...)` is a window function
+        let mut over = None;
+        if self.word_is("over") && *self.p.peek_at(1) == TokKind::LParen {
+            self.p.bump();
+            self.p.bump();
+            let (mut partition_by, mut order_by) = (Vec::new(), Vec::new());
+            if self.p.eat_word("partition") {
+                self.p.expect_word("by")?;
+                partition_by.push(self.expr()?);
+                while self.p.eat(&TokKind::Comma) { partition_by.push(self.expr()?); }
+            }
+            if self.p.eat_word("order") {
+                self.p.expect_word("by")?;
+                loop {
+                    let expr = self.expr()?;
+                    let desc = self.p.eat_word("desc");
+                    if !desc { self.p.eat_word("asc"); }
+                    order_by.push(OrderItem { expr, desc });
+                    if !self.p.eat(&TokKind::Comma) { break; }
+                }
+            }
+            end = self.p.expect(TokKind::RParen)?;
+            over = Some(WindowSpec { partition_by, order_by });
+        }
         let span = first.span.to(end);
-        let e = Expr::Call { func: first, args, star, distinct, span };
+        let e = Expr::Call { func: first, args, star, distinct, over, span };
         self.check_depth(&e)?;
         Ok(e)
     }

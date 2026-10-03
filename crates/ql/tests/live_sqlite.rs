@@ -241,3 +241,78 @@ table orders { id: serial primary key  customer_id: int not null  total: decimal
     db2.exec(&m, &[]);
     assert_eq!(db2.c.query_row("SELECT count(*) FROM archive", [], |r| r.get::<_, i64>(0)).unwrap(), 3);
 }
+
+#[test]
+fn window_functions_run_on_sqlite() {
+    let mut db = db();
+    let q = db.stmt("query ranked() { from orders o select o.id,
+        row_number() over (partition by o.customer_id order by o.total desc) as rn,
+        sum(o.total) over (partition by o.customer_id) as cust_total,
+        lag(o.total) over (order by o.id) as prev,
+        count(*) over () as n
+        order by o.id }");
+    assert_eq!(
+        db.run(&q, &[]),
+        [["1", "2", "35.5", "NULL", "3"], ["2", "1", "35.5", "10", "3"], ["3", "1", "5", "25.5", "3"]]
+    );
+    // ranking groups by an aggregate
+    let q = db.stmt("query top() { from orders o group by o.customer_id
+        select o.customer_id, sum(o.total) as total, rank() over (order by sum(o.total) desc) as r order by r }");
+    assert_eq!(db.run(&q, &[]), [["1", "35.5", "1"], ["2", "5", "2"]]);
+    let q = db.stmt("query buckets(n: int) { from orders o select o.id, ntile(:n) over (order by o.id) as b order by o.id }");
+    assert_eq!(db.run(&q, &[("n", i(3))]), [["1", "1"], ["2", "2"], ["3", "3"]]);
+    let q = db.stmt("query firsts() { from orders o select o.id, first_value(o.status) over (partition by o.customer_id order by o.id) as f order by o.id }");
+    assert_eq!(db.run(&q, &[]), [["1", "new"], ["2", "new"], ["3", "new"]]);
+}
+
+#[test]
+fn set_operations_run_on_sqlite() {
+    let mut db = db();
+    let q = db.stmt("query both() { from customers c select c.id, c.name union all from orders o select o.id, o.status order by id, name }");
+    assert_eq!(
+        db.run(&q, &[]),
+        [["1", "Ann"], ["1", "new"], ["2", "Bob"], ["2", "paid"], ["3", "Cy"], ["3", "new"]]
+    );
+    let q = db.stmt("query statuses() { from orders o select o.status union from orders p select p.status order by status }");
+    assert_eq!(db.run(&q, &[]), [["new"], ["paid"]], "union removes duplicates");
+    let q = db.stmt("query have_orders() { from customers c select c.id intersect from orders o select o.customer_id order by id }");
+    assert_eq!(db.run(&q, &[]), [["1"], ["2"]]);
+    let q = db.stmt("query idle() { from customers c select c.id except from orders o select o.customer_id }");
+    assert_eq!(db.run(&q, &[]), [["3"]]);
+    // parameters across branches, with ordering and paging over the whole result
+    let q = db.stmt("query paged(a: int, b: int, lim: int, off: int) {
+        from customers c where c.id >= :a select c.id union all from orders o where o.id >= :b select o.id
+        order by id desc limit :lim offset :off }");
+    assert_eq!(db.run(&q, &[("a", i(2)), ("b", i(2)), ("lim", i(3)), ("off", i(1))]), [["3"], ["2"], ["2"]]);
+    // inside a subquery
+    let q = db.stmt("query ids() { from customers c where c.id in (from orders o select o.customer_id union from orders p select p.id) select c.name order by c.name }");
+    assert_eq!(db.run(&q, &[]), [["Ann"], ["Bob"], ["Cy"]]);
+}
+
+#[test]
+fn with_queries_run_on_sqlite() {
+    let mut db = db();
+    let q = db.stmt("query spenders(min: decimal(10,2)) {
+        with spend as (from orders o group by o.customer_id select o.customer_id, sum(o.total) as total)
+        from customers c join spend s on s.customer_id == c.id where s.total >= :min
+        select c.name, s.total order by s.total desc }");
+    assert_eq!(db.run(&q, &[("min", Value::Real(10.0))]), [["Ann", "35.5"]]);
+    assert_eq!(db.run(&q, &[("min", Value::Real(1.0))]), [["Ann", "35.5"], ["Bob", "5"]]);
+
+    // chained, reused, and combined with a window function and a union
+    let q = db.stmt("query chain() {
+        with a as (from orders o select o.id, o.customer_id, row_number() over (partition by o.customer_id order by o.id) as rn),
+             b as (from a where a.rn == 1 select a.id)
+        from b select b.id order by b.id }");
+    assert_eq!(db.run(&q, &[]), [["1"], ["3"]]);
+    let q = db.stmt("query ids() { with ids as (from customers c select c.id union from orders o select o.id) from ids i select i.id order by i.id }");
+    assert_eq!(db.run(&q, &[]), [["1"], ["2"], ["3"]]);
+
+    // mutations
+    let m = db.stmt("update tag() { with paid_ids as (from orders o where o.paid select o.id)
+        orders x set status = \"tagged\" where x.id in (from paid_ids p select p.id) }");
+    assert_eq!(db.exec(&m, &[]), 1);
+    let m = db.stmt("delete gone() { with idle as (from customers c where not exists (from orders o where o.customer_id == c.id select 1) select c.id)
+        from customers d where d.id in (from idle i select i.id) returning d.name }");
+    assert_eq!(db.run(&m, &[]), [["Cy"]]);
+}

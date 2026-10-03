@@ -404,4 +404,57 @@ fn compiled_queries_run_and_their_declared_contract_is_true() {
     let (n, rows) = db.run(&m, &[]);
     assert!(n >= 1 && rows.iter().all(|r| r["sku"] == "snap"));
     assert_eq!(db.count("SELECT count(*) FROM items"), before + n as i64);
+
+    // ==== window functions ===========================================================
+    let q = db.query("query ranked() { from orders o select o.id,
+        row_number() over (partition by o.customer_id order by o.total desc) as rn,
+        rank() over (order by o.total) as r,
+        sum(o.total) over (partition by o.customer_id) as cust_total,
+        avg(o.qty) over () as avg_qty,
+        count(*) over () as n,
+        lag(o.total) over (order by o.id) as prev,
+        lead(o.total, 1, 0) over (order by o.id) as next,
+        first_value(o.status) over (partition by o.customer_id order by o.id) as first_status,
+        ntile(2) over (order by o.id) as half,
+        percent_rank() over (order by o.id) as pr
+        order by o.id }");
+    let rows = db.rows(&q, &[]);
+    assert!(!rows.is_empty());
+    assert!(rows.iter().all(|r| !r["rn"].is_null() && !r["n"].is_null()), "ranking functions and count are never NULL");
+    assert!(rows[0]["prev"].is_null(), "lag has no row before the first");
+    let q = db.query("query top() { from orders o group by o.customer_id
+        select o.customer_id, sum(o.total) as total, rank() over (order by sum(o.total) desc) as r order by r }");
+    let rows = db.rows(&q, &[]);
+    assert_eq!(rows[0]["r"], 1);
+
+    // ==== union / intersect / except ==================================================
+    let q = db.query("query both() { from customers c select c.id, c.email as contact union all from items i select i.id, i.sku order by id, contact }");
+    let rows = db.rows(&q, &[]);
+    assert!(!rows.is_empty());
+    assert!(q.ir.select[1].nullable, "the nullable email makes the combined column nullable");
+    let q = db.query("query roles() { from customers c select c.role union from customers d select d.role }");
+    db.check_contract(&q); // the combined column is still the enum
+    let q = db.query("query idle() { from customers c select c.id except from orders o select o.customer_id }");
+    db.rows(&q, &[]);
+    let q = db.query("query paged(a: int, lim: int) { from customers c where c.id >= :a select c.id union all from orders o where o.id >= :a select o.id order by id desc limit :lim }");
+    db.check_contract(&q);
+
+    // ==== with ========================================================================
+    let q = db.query("query spenders(min: int) {
+        with spend as (from orders o group by o.customer_id select o.customer_id, sum(o.total) as total, count(*) as n)
+        from customers c left join spend s on s.customer_id == c.id where s.total >= :min or s.total is null
+        select c.id, s.total, s.n order by c.id }");
+    let rows = db.rows(&q, &[&1i32]);
+    assert!(!rows.is_empty());
+    assert!(q.ir.select[1].nullable && q.ir.select[2].nullable, "a left-joined with query's columns are nullable");
+    let q = db.query("query chain() {
+        with a as (from orders o select o.id, o.customer_id, row_number() over (partition by o.customer_id order by o.id) as rn),
+             b as (from a where a.rn == 1 select a.id)
+        from b select b.id order by b.id }");
+    assert!(!db.rows(&q, &[]).is_empty());
+    let q = db.query("query ids() { with ids as (from customers c select c.id union from orders o select o.id) from ids i select i.id order by i.id }");
+    assert!(!db.rows(&q, &[]).is_empty());
+    let m = db.mutation("update tag() { with paid_ids as (from orders o where o.paid select o.id)
+        orders x set status = \"tagged\" where x.id in (from paid_ids p select p.id) }");
+    db.check_mutation(&m);
 }

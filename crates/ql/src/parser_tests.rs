@@ -329,3 +329,64 @@ fn tabular_insert_forms_parse() {
     let (_, d) = parse("insert i() { into t (a) }");
     assert!(d.iter().any(|x| x.message.contains("values")), "{d:?}");
 }
+
+// ---- window functions ------------------------------------------------------------- //
+
+#[test]
+fn window_specs_parse() {
+    let q = one("from t select row_number() over (partition by t.a, t.b order by t.c desc, t.d) as rn");
+    let SelectItem::Expr { expr: Expr::Call { func, over: Some(w), .. }, .. } = &q.select.items[0] else { panic!() };
+    assert_eq!(func.name, "row_number");
+    assert_eq!(w.partition_by.len(), 2);
+    assert_eq!(w.order_by.len(), 2);
+    assert!(w.order_by[0].desc && !w.order_by[1].desc);
+    // empty, partition-only and order-only forms
+    for spec in ["", "partition by t.a", "order by t.a"] {
+        let q = one(&format!("from t select count(*) over ({spec}) as n"));
+        assert!(matches!(&q.select.items[0], SelectItem::Expr { expr: Expr::Call { over: Some(_), star: true, .. }, .. }));
+    }
+    // a plain call has no window; `over` stays usable as a column name
+    let q = one("from t select count(*) as n, t.over as o");
+    assert!(matches!(&q.select.items[0], SelectItem::Expr { expr: Expr::Call { over: None, .. }, .. }));
+}
+
+// ---- set operations ------------------------------------------------------------------ //
+
+#[test]
+fn set_operations_parse() {
+    let q = one("from t select t.a union all from u select u.a intersect from v select v.a order by a limit 5 offset 2");
+    assert_eq!(q.compound.len(), 2);
+    assert_eq!((q.compound[0].op, q.compound[0].all), (SetOp::Union, true));
+    assert_eq!((q.compound[1].op, q.compound[1].all), (SetOp::Intersect, false));
+    // the trailing clauses belong to the whole combination, not to the last branch
+    assert_eq!(q.order_by.len(), 1);
+    assert!(q.limit.is_some() && q.offset.is_some());
+    assert!(q.compound.iter().all(|b| b.query.order_by.is_empty() && b.query.limit.is_none()));
+    assert!(one("from t select t.a except from u select u.a").compound[0].op == SetOp::Except);
+    // a plain query has none
+    assert!(one("from t select t.a order by a").compound.is_empty());
+    // a branch needs its own `from` and `select`
+    let (_, d) = parse("query q() { from t select t.a union select 1 }");
+    assert!(!d.is_empty());
+}
+
+// ---- with ------------------------------------------------------------------------------ //
+
+#[test]
+fn with_queries_parse() {
+    let q = one("with a as (from t select t.x), b as (from a select a.x) from b select b.x");
+    assert_eq!(q.ctes.len(), 2);
+    assert_eq!(q.ctes[0].name.name, "a");
+    assert_eq!(q.ctes[1].query.from.table.name, "a");
+    assert!(one("from t select t.x").ctes.is_empty());
+    // a with query may itself be a combination, and ordering still belongs to the main query
+    let q = one("with a as (from t select t.x union from u select u.x) from a select a.x order by x");
+    assert_eq!(q.ctes[0].query.compound.len(), 1);
+    assert_eq!(q.order_by.len(), 1);
+    // in a mutation, before the statement's own clauses
+    let m = mutation("update u() { with a as (from t select t.x) t set y = 1 where t.x in (from a select a.x) }");
+    assert_eq!(m.ctes.len(), 1);
+    assert!(mutation("update u() { t set y = 1 all rows }").ctes.is_empty());
+    let (_, d) = parse("query q() { with recursive a as (from t select t.x) from a select a.x }");
+    assert!(d.iter().any(|x| x.code == "QL254"), "{d:?}");
+}

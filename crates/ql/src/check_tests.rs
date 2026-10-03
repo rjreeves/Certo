@@ -702,3 +702,254 @@ fn statements_with_subqueries_serialise() {
     let back: QueryIR = serde_json::from_value(j[0]["ir"].clone()).unwrap();
     assert!(matches!(back.filter, Some(QExpr::Exists { .. })));
 }
+
+// ---- window functions ------------------------------------------------------------- //
+
+#[test]
+fn window_functions_lower_and_are_typed() {
+    let q = &ok(
+        "query q() { from orders o select o.id,
+            row_number() over (partition by o.customer_id order by o.total desc) as rn,
+            rank() over (order by o.total) as r,
+            sum(o.total) over (partition by o.customer_id) as running,
+            count(*) over () as n,
+            lag(o.total) over (order by o.id) as prev,
+            lead(o.total, 1, 0) over (order by o.id) as next,
+            first_value(o.status) over (partition by o.customer_id order by o.id) as first_status,
+            ntile(4) over (order by o.id) as quartile,
+            percent_rank() over (order by o.id) as pr
+            order by o.id }",
+    )[0];
+    assert!(
+        q.sql.contains("row_number() OVER (PARTITION BY \"o\".\"customer_id\" ORDER BY \"o\".\"total\" DESC) AS \"rn\""),
+        "{}",
+        q.sql
+    );
+    assert!(q.sql.contains("count(*) OVER () AS \"n\""), "{}", q.sql);
+    assert!(q.sql.contains("lead(\"o\".\"total\", 1, 0) OVER (ORDER BY \"o\".\"id\")"), "{}", q.sql);
+    let c = |i: usize| (q.ir.select[i].ty.clone(), q.ir.select[i].nullable);
+    assert_eq!(c(1), (b(Builtin::BigInt), false), "row_number is a non-null bigint");
+    assert_eq!(c(2), (b(Builtin::BigInt), false));
+    assert_eq!(c(3), (b(Builtin::Decimal), true), "sum over a window is nullable like sum");
+    assert_eq!(c(4), (b(Builtin::BigInt), false), "count is never null");
+    assert_eq!(c(5), (TypeIR::Builtin(Builtin::Numeric(10, 2)), true), "lag may find no earlier row");
+    assert_eq!(c(6), (TypeIR::Builtin(Builtin::Numeric(10, 2)), false), "lead with a non-null default and a non-null value");
+    assert_eq!(c(7), (b(Builtin::Text), false), "first_value of a NOT NULL column");
+    assert_eq!(c(8), (b(Builtin::Int), false), "ntile is an integer");
+    assert_eq!(c(9), (b(Builtin::Float), false));
+}
+
+#[test]
+fn window_functions_in_grouped_queries_and_ordering() {
+    // rank the groups by an aggregate: the aggregate is inside the window's own order by
+    let q = ok("query q() { from orders o group by o.customer_id
+        select o.customer_id, sum(o.total) as total, rank() over (order by sum(o.total) desc) as r order by r }");
+    assert!(q[0].sql.contains("rank() OVER (ORDER BY sum(\"o\".\"total\") DESC) AS \"r\""), "{}", q[0].sql);
+    // a window over an ungrouped column of a grouped query is the usual grouping error
+    assert_eq!(
+        errors("query q() { from orders o group by o.customer_id select o.customer_id, count(*) as n, rank() over (partition by o.status order by count(*)) as r }"),
+        ["QL214"]
+    );
+    // a window function alone does not make the query grouped
+    ok("query q() { from orders o select o.id, o.total, sum(o.total) over () as grand_total }");
+    // windows may drive the ordering
+    ok("query q() { from orders o select o.id order by row_number() over (order by o.total desc) }");
+}
+
+#[test]
+fn window_function_rules() {
+    assert_eq!(errors("query q() { from orders o where row_number() over (order by o.id) == 1 select o.id }"), ["QL251"]);
+    assert_eq!(errors("query q() { from orders o group by row_number() over (order by o.id) select count(*) as n }"), ["QL251"]);
+    assert_eq!(errors("query q() { from orders o select sum(count(*) over ()) over () as x }").len(), 1);
+    assert_eq!(errors("query q() { from orders o select rank() over (partition by row_number() over (order by o.id)) as r }"), ["QL251"]);
+    assert_eq!(errors("query q() { from orders o select row_number() as rn }"), ["QL252"]);
+    assert_eq!(errors("query q() { from orders o select foo(o.id) over () as x }"), ["QL252"]);
+    assert_eq!(errors("query q() { from orders o select ntile(0) over (order by o.id) as x }"), ["QL252"]);
+    assert_eq!(errors("query q() { from orders o select lag(o.id, -1) over (order by o.id) as x }"), ["QL252"]);
+    assert_eq!(errors("query q() { from orders o select lag(o.status, 1, 5) over (order by o.id) as x }"), ["QL252"]);
+    assert_eq!(errors("query q() { from orders o select count(distinct o.id) over () as x }"), ["QL252"]);
+    assert_eq!(errors("query q() { from orders o select row_number(1) over () as x }"), ["QL252"]);
+    // parameters work where a number is wanted
+    ok("query q(n: int, k: int) { from orders o select ntile(:n) over (order by o.id) as x, lag(o.id, :k) over (order by o.id) as y }");
+}
+
+// ---- union / intersect / except --------------------------------------------------- //
+
+#[test]
+fn set_operations_lower_and_merge_their_columns() {
+    let q = &ok(
+        "query q(lim: int) { from customers c select c.id, c.email as contact
+         union all
+         from items i select i.id, i.sku
+         order by id desc limit :lim }",
+    )[0];
+    assert_eq!(
+        q.sql,
+        "SELECT \"c\".\"id\" AS \"id\", \"c\".\"email\" AS \"contact\"\nFROM \"customers\" AS \"c\"\nUNION ALL\nSELECT \"i\".\"id\" AS \"id\", \"i\".\"sku\" AS \"sku\"\nFROM \"items\" AS \"i\"\nORDER BY \"id\" DESC\nLIMIT ($1::integer)"
+    );
+    let cols = &q.ir.select;
+    assert_eq!(cols[0].name, "id");
+    assert_eq!(cols[0].ty, b(Builtin::BigInt), "int and bigint merge to bigint");
+    assert_eq!(cols[1].name, "contact", "the first branch names the columns");
+    assert!(cols[1].nullable, "nullable in one branch makes the column nullable");
+    assert!(!cols[0].nullable);
+    assert_eq!(q.ir.unions.len(), 1);
+
+    // union removes duplicates, intersect and except are available, branches have their own clauses
+    let s = sql_of("query q() { from customers c select c.id union from orders o where o.paid select o.customer_id }");
+    assert!(s.contains("\nUNION\nSELECT") && !s.contains("UNION ALL"), "{s}");
+    assert!(sql_of("query q() { from customers c select c.id intersect from orders o select o.customer_id }").contains("\nINTERSECT\n"));
+    assert!(sql_of("query q() { from customers c select c.id except from orders o select o.customer_id }").contains("\nEXCEPT\n"));
+    // three branches, parameters shared across them
+    let q = ok("query q(a: int, b: int) { from customers c where c.id == :a select c.id
+        union from customers c where c.id == :b select c.id
+        union all from orders o where o.id == :a select o.id }");
+    assert_eq!(q[0].param_order, ["a", "b"]);
+    assert_eq!(q[0].ir.unions.len(), 2);
+    // a branch may have an aggregate and a group by of its own
+    ok("query q() { from orders o group by o.status select o.status, count(*) as n union all from items i group by i.sku select i.sku, count(*) as n }");
+}
+
+#[test]
+fn set_operation_rules() {
+    // the shapes must line up
+    assert_eq!(errors("query q() { from customers c select c.id, c.name union from orders o select o.id }"), ["QL253"]);
+    assert_eq!(errors("query q() { from customers c select c.id union from orders o select o.status }"), ["QL253"]);
+    assert_eq!(errors("query q() { from customers c select c.id union from orders o select o.id intersect from items i select i.id }"), ["QL253"]);
+    assert_eq!(errors("query q() { from customers c select c.id intersect all from orders o select o.id }"), ["QL253"]);
+    assert_eq!(errors("query q() { from customers c select c.id except all from orders o select o.id }"), ["QL253"]);
+    // ordering names an output column of the whole result, not a table's column
+    assert_eq!(errors("query q() { from customers c select c.id union from orders o select o.id order by c.id }"), ["QL250"]);
+    assert_eq!(errors("query q() { from customers c select c.id union from orders o select o.id order by nope }"), ["QL250"]);
+    assert_eq!(errors("query q() { from customers c select c.id union from orders o select o.id order by id + 1 }"), ["QL250"]);
+    // a branch cannot see another branch's tables, but each reports its own mistakes
+    assert_eq!(errors("query q() { from customers c select c.id union from orders o where c.id == 1 select o.id }"), ["QL205"]);
+    assert_eq!(errors("query q() { from customers c select c.nope union from orders o select o.nope }"), ["QL206", "QL206"]);
+    // enums combine with the same enum
+    ok("query q() { from customers c select c.role union from customers d select d.role }");
+    assert_eq!(errors("query q() { from customers c select c.role union from orders o select o.status }"), ["QL253"]);
+}
+
+#[test]
+fn set_operations_inside_subqueries_and_inserts() {
+    let s = sql_of(
+        "query q() { from customers c where c.id in (from orders o select o.customer_id union from orders p select p.id) select c.id }",
+    );
+    assert!(s.contains("IN (SELECT \"o\".\"customer_id\" AS \"customer_id\" FROM \"orders\" AS \"o\" UNION SELECT \"p\".\"id\""), "{s}");
+    let m = mutation("insert i() { into items (order_id, sku, price, qty) from orders o select o.id, \"a\", o.total, 1 union all from orders p select p.id, \"b\", p.total, 2 }");
+    assert!(m.sql.contains("\nUNION ALL\nSELECT"), "{}", m.sql);
+    // a compound query is not a single row, even with aggregates in each branch
+    assert_eq!(
+        errors("query q() { from customers c select (from orders o select count(*) union from orders p select count(*)) as x }"),
+        ["QL241"]
+    );
+}
+
+#[test]
+fn compound_queries_serialise() {
+    let (s, _) = compile(&schema(), "query q() { from customers c select c.id union from orders o select o.id order by id }", Dialect::Postgres);
+    let j = to_json(&s.unwrap());
+    assert_eq!(j[0]["ir"]["unions"][0]["op"], "union");
+    assert_eq!(j[0]["ir"]["order_by"][0]["expr"]["column"], "id");
+    let back: QueryIR = serde_json::from_value(j[0]["ir"].clone()).unwrap();
+    assert_eq!(back.unions.len(), 1);
+}
+
+// ---- with (common table expressions) ---------------------------------------------- //
+
+#[test]
+fn with_queries_become_tables() {
+    let q = &ok(
+        "query q(min: decimal(10,2)) {
+            with spend as (from orders o where o.total >= :min group by o.customer_id select o.customer_id, sum(o.total) as total, count(*) as n)
+            from customers c join spend s on s.customer_id == c.id
+            select c.name, s.total, s.n order by s.total desc }",
+    )[0];
+    assert!(
+        q.sql.starts_with("WITH \"spend\" AS (SELECT \"o\".\"customer_id\" AS \"customer_id\", sum(\"o\".\"total\") AS \"total\""),
+        "{}",
+        q.sql
+    );
+    assert!(q.sql.contains("\nFROM \"customers\" AS \"c\"\nINNER JOIN \"spend\" AS \"s\" ON (\"s\".\"customer_id\" = \"c\".\"id\")"), "{}", q.sql);
+    assert_eq!(q.param_order, ["min"]);
+    let c = &q.ir.select;
+    assert_eq!((c[0].ty.clone(), c[0].nullable), (b(Builtin::Text), false), "a NOT NULL column stays NOT NULL");
+    assert_eq!((c[1].ty.clone(), c[1].nullable), (b(Builtin::Decimal), true), "the CTE's sum is nullable");
+    assert_eq!((c[2].ty.clone(), c[2].nullable), (b(Builtin::BigInt), false), "its count is not");
+    assert_eq!(q.ir.ctes.len(), 1);
+
+    // a left join to a CTE makes its columns nullable, like any table
+    let q = &ok("query q() { with spend as (from orders o group by o.customer_id select o.customer_id, count(*) as n)
+        from customers c left join spend s on s.customer_id == c.id select c.id, s.n }")[0];
+    assert!(q.ir.select[1].nullable);
+}
+
+#[test]
+fn with_queries_chain_nest_and_shadow() {
+    // a later one reads an earlier one; one may be used twice
+    ok("query q() { with a as (from orders o select o.id, o.customer_id),
+                         b as (from a x where x.id > 1 select x.id, x.customer_id)
+        from a p join b q on q.id == p.id select p.id, q.customer_id }");
+    // inside a subquery, and a subquery may have its own
+    ok("query q() { with spend as (from orders o select o.customer_id) from customers c where c.id in (from spend s select s.customer_id) select c.id }");
+    let s = sql_of("query q() { from customers c where exists (with t as (from orders o select o.customer_id) from t where t.customer_id == c.id select 1) select c.id }");
+    assert!(s.contains("EXISTS (WITH \"t\" AS (SELECT"), "{s}");
+    // a name hides a table of the same name, but only after it is defined
+    let s = sql_of("query q() { with orders as (from orders o where o.paid select o.id) from orders x select x.id }");
+    assert!(s.starts_with("WITH \"orders\" AS (SELECT \"o\".\"id\" AS \"id\" FROM \"orders\" AS \"o\""), "{s}");
+    // set operations inside a with query
+    ok("query q() { with ids as (from customers c select c.id union from orders o select o.customer_id) from ids i select i.id }");
+    // windows and aggregates too
+    ok("query q() { with ranked as (from orders o select o.id, row_number() over (order by o.total desc) as rn) from ranked r where r.rn <= 3 select r.id }");
+}
+
+#[test]
+fn with_query_rules() {
+    assert_eq!(errors("query q() { with a as (from orders o select o.id), a as (from orders p select p.id) from a select a.id }"), ["QL254"]);
+    // its columns need names, once
+    assert_eq!(errors("query q() { with a as (from orders o select o.total + 1) from orders p select p.id }"), ["QL215"]);
+    assert_eq!(errors("query q() { with a as (from orders o select o.id, o.id) from a select a.id }"), ["QL216"]);
+    // reading a column it does not have, or a name before it exists or outside its query
+    assert_eq!(errors("query q() { with a as (from orders o select o.id) from a select a.nope }"), ["QL206"]);
+    assert_eq!(errors("query q() { with a as (from b select b.id), b as (from orders o select o.id) from a select a.id }"), ["QL203"]);
+    assert_eq!(errors("query q() { from customers c where exists (with t as (from orders o select o.id) from t select 1) and c.id in (from t select t.id) select c.id }"), ["QL203"]);
+    // a with query does not see its own name
+    assert_eq!(errors("query q() { with a as (from a select a.id) from a select a.id }"), ["QL203"]);
+    let (_, d) = parse("query q() { with recursive a as (from orders o select o.id) from a select a.id }");
+    assert!(d.iter().any(|x| x.code == "QL254"), "{d:?}");
+}
+
+#[test]
+fn mutations_take_with_queries() {
+    let m = mutation(
+        "update tag() { with paid_ids as (from orders o where o.paid select o.id)
+            orders x set status = \"paid\" where x.id in (from paid_ids p select p.id) }",
+    );
+    assert!(m.sql.starts_with("WITH \"paid_ids\" AS (SELECT \"o\".\"id\" AS \"id\" FROM \"orders\" AS \"o\" WHERE \"o\".\"paid\")\nUPDATE \"orders\" AS \"x\""), "{}", m.sql);
+    let m = mutation(
+        "insert copy() { with src as (from orders o select o.id, o.total)
+            into items (order_id, sku, price, qty) from src s select s.id, \"x\", s.total, 1 }",
+    );
+    assert!(m.sql.starts_with("WITH \"src\" AS (SELECT"), "{}", m.sql);
+    assert!(m.sql.contains("INSERT INTO \"items\""), "{}", m.sql);
+    mutation("delete gone() { with idle as (from customers c select c.id) from orders o where o.customer_id in (from idle i select i.id) }");
+    // the target of a mutation is a real table, not a with query
+    assert_eq!(
+        errors("update u() { with t as (from orders o select o.id) t set id = 1 all rows }"),
+        ["QL203"]
+    );
+}
+
+#[test]
+fn with_queries_serialise() {
+    let (s, _) = compile(
+        &schema(),
+        "query q() { with a as (from orders o select o.id) from a select a.id }",
+        Dialect::Postgres,
+    );
+    let j = to_json(&s.unwrap());
+    assert_eq!(j[0]["ir"]["ctes"][0]["name"], "a");
+    assert_eq!(j[0]["ir"]["ctes"][0]["query"]["sources"][0]["table"], "orders");
+    let back: QueryIR = serde_json::from_value(j[0]["ir"].clone()).unwrap();
+    assert_eq!(back.ctes.len(), 1);
+}

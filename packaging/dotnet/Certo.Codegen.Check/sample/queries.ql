@@ -1,5 +1,6 @@
 // Queries the code generator is checked against: parameters of several types (one nullable,
-// one enum), nullable result columns, aggregates, a subquery, and every kind of mutation.
+// one enum), nullable result columns, aggregates, a subquery, window functions, a union,
+// a with query, and every kind of mutation.
 
 query orders_over(min: decimal(10,2), status: Status null) {
     from orders o join customers c on o.customer_id == c.id
@@ -23,6 +24,27 @@ query big_spenders(min: decimal(10,2)) {
     from customers c
     where (from orders o where o.customer_id == c.id select sum(o.total)) >= :min
     select c.name order by c.name
+}
+
+query ranked_orders() {
+    from orders o
+    select o.id, o.total,
+           row_number() over (partition by o.customer_id order by o.total desc) as rn,
+           sum(o.total) over (partition by o.customer_id) as customer_total
+    order by o.id
+}
+
+query all_names() {
+    from customers c select c.id, c.name
+    union all
+    from orders o select o.id, o.note
+    order by id
+}
+
+query top_spender() {
+    with spend as (from orders o group by o.customer_id select o.customer_id, sum(o.total) as total)
+    from customers c join spend s on s.customer_id == c.id
+    select c.name, s.total order by s.total desc limit 1
 }
 
 insert add_customer(name: text, email: varchar(100) null, born: date null, token: uuid null) {
