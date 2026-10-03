@@ -1,28 +1,48 @@
 # Certo.Native
 
-The Certo database compiler, in-process. One static class, `Certo.CertoNative`; every call
-takes and returns JSON text.
+The Certo database compiler, in-process. Two layers over the same native library:
+
+- **Typed API** (`Certo.CertoSdl`, `Certo.CertoQl`, models in `Certo.Models`): results come back as C# objects.
+- **Raw API** (`Certo.CertoNative`): every call takes and returns JSON text, for everything else (migrations, plans, SQL lowering).
 
 ```csharp
-using System.Text.Json;
 using Certo;
+using Certo.Models;
 
-var sdl = "table users { id: serial primary key  email: text not null unique }";
-using var compiled = JsonDocument.Parse(CertoNative.CompileSdl(sdl));
-var ir = compiled.RootElement.GetProperty("ir").GetRawText();
+var schema = CertoSdl.Compile("table users { id: serial primary key  email: varchar(100) not null unique }");
+foreach (var d in schema.Diagnostics) Console.WriteLine(d);              // "error SDL100 at 1:19: ..."
 
-// QL: typed queries and mutations, for PostgreSQL or SQLite
-var ql = CertoNative.CompileQl(ir, "query by_email(e: text) { from users u where u.email == :e select u.id }", "sqlite");
+var qlResult = CertoQl.Compile(schema, """
+    query by_email(e: varchar(100)) { from users u where u.email == :e select u.id, u.email }
+    insert add(e: varchar(100)) { into users set email = :e returning id }
+    """, SqlDialect.Sqlite);
 
-// Migrations: a project directory, then apply to a database
+foreach (var s in qlResult.EnsureOk())                                   // throws CertoException with the diagnostics on errors
+{
+    Console.WriteLine($"{s.Kind} {s.Name}({string.Join(", ", s.Params.Select(p => $"{p.Name}: {p.Type}{(p.Nullable ? "?" : "")}"))})");
+    foreach (var c in s.Columns) Console.WriteLine($"  -> {c.Name}: {c.Type}{(c.Nullable ? "?" : "")}");
+    // s.Sql, s.ParamOrder (which declared parameter is $1, $2, ...), s.Ir (the full checked IR)
+}
+
+// generated, typed host code for the same statements
+string code = CertoQl.GenerateCSharp(schema.EnsureOk(), qlSource, SqlDialect.Sqlite, "App.Db").EnsureOk();
+
+// migrations: the raw API
 CertoNative.MigrateInit(dir, "{\"dialect\":\"sqlite\"}");
-// write dir/schema.sdl, then:
 CertoNative.MigrateNew(dir, "{\"name\":\"init\"}");
 CertoNative.MigrateApply(dir, "{\"url\":\"app.db\"}");
 ```
 
-`"ok": false` is a normal outcome (schema errors come back as positioned `diagnostics`);
-only an ABI mismatch between the binding and the native library throws.
+The models are plain classes: `QlStatement` (kind, name, parameters, result columns, SQL, placeholder
+order, raw IR), `QlParam` / `QlColumn` (name, `SchemaType`, nullable), `SchemaType` (kind, name, length /
+precision / scale; `ToString()` gives `varchar(100)`, `decimal(10,2)`, `Role`), `CertoDiagnostic` (severity,
+code, message, `SourceSpan` with 1-based line and column) and `CertoError` (a failed call: `invalid_ir`,
+`unknown_dialect`, ...). Unknown JSON members are ignored, so a newer native library does not break an
+older host. Typed wrappers exist for SDL compilation and QL so far; the other calls return JSON text.
+
+`"ok": false` is a normal outcome (schema errors come back as positioned `diagnostics`): the typed API
+returns them in `Diagnostics` and throws only if you call `EnsureOk()`. Only an ABI mismatch between the
+binding and the native library throws on its own.
 
 ## Installing from the private feed
 
