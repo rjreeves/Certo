@@ -16,6 +16,7 @@ table customers {
     email: varchar(100) unique
     role: Role default user
     balance: decimal(10,2)
+    born: date
 }
 table orders {
     id: serial primary key
@@ -24,6 +25,7 @@ table orders {
     status: text not null
     qty: smallint not null default 1
     paid: bool not null default false
+    shipped: timestamp
 }
 table categories {
     id: serial primary key
@@ -423,4 +425,22 @@ fn concatenation_runs_on_sqlite() {
             from categories c join t on c.parent_id == t.id select c.id, t.path || \"/\" || c.name as path)
         from t select t.path order by t.path }");
     assert_eq!(db.run(&q, &[]), [["root"], ["root/a"], ["root/a/a1"], ["root/b"]]);
+}
+
+#[test]
+fn text_and_date_functions_run_on_sqlite() {
+    let mut db = db();
+    db.c.execute_batch("UPDATE customers SET born = '1990-03-25' WHERE id = 1; UPDATE orders SET shipped = '2026-01-02 13:45:10' WHERE id = 1;").unwrap();
+    let q = db.stmt("query f() { from customers c select c.id, substr(c.name, 2) as tail, substr(c.name, 1, 2) as head,
+        replace(c.name, \"n\", \"N\") as rep, position(c.name, \"n\") as pos, position(c.name, \"zz\") as none,
+        date_part(\"year\", c.born) as y, date_part(\"month\", c.born) as m, date_part(\"day\", c.born) as d order by c.id }");
+    let rows = db.run(&q, &[]);
+    assert_eq!(rows[0], ["1", "nn", "An", "ANN", "2", "0", "1990", "3", "25"]);
+    assert_eq!(rows[1], ["2", "ob", "Bo", "Bob", "0", "0", "NULL", "NULL", "NULL"]);
+    assert_eq!(rows[2], ["3", "y", "Cy", "Cy", "0", "0", "NULL", "NULL", "NULL"]);
+    let q = db.stmt("query t() { from orders o where o.shipped is not null select date_part(\"hour\", o.shipped) as h, date_part(\"minute\", o.shipped) as mi, date_part(\"day\", o.shipped) as d }");
+    assert_eq!(db.run(&q, &[]), [["13", "45", "2"]]);
+    // a parameter works as the date
+    let q = db.stmt("query p(d: date) { from customers c where date_part(\"year\", :d) == 1990 select c.id order by c.id }");
+    assert_eq!(db.run(&q, &[("d", t("1990-05-05"))]).len(), 3);
 }

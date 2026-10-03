@@ -151,6 +151,9 @@ FunctionCall     = Ident "(" [ ArgList ] ")" ;
 
 Functions:  now() gen_uuid() today()                       no arguments
             lower(text) upper(text) trim(text)             -> text
+            substr(text, start [, len])  replace(text, from, to)  -> text
+            position(text, find)                           -> int   (1-based, 0 if absent)
+            date_part("year"|"month"|"day"|"hour"|"minute", date|timestamp) -> int
             length(text)                                   -> int
             abs(number) round(number)                      -> same type
             coalesce(a, b, ...) nullif(a, b)               -> type of a
@@ -323,7 +326,7 @@ CaseExpr        = "case" "when" QExpr "then" QExpr { "when" QExpr "then" QExpr }
 BinaryOp        = "==" | "=" | "!=" | "<>" | "<" | "<=" | ">" | ">="
                 | "+" | "-" | "*" | "/" | "and" | "or" ;
 
-Functions:  lower upper trim (text)   length (text -> int)   abs round (numbers)
+Functions:  lower upper trim substr replace (text)  position date_part (-> int)   length (text -> int)   abs round (numbers)
             coalesce(a, b, ...)   nullif(a, b)   now()   today()
 Aggregates: count(*)  count([distinct] x)  sum(x)  avg(x)  min(x)  max(x)
 
@@ -347,6 +350,10 @@ from the nullable side of a `left join`, if an operand is a nullable parameter
 or column, for `sum`/`avg`/`min`/`max` (empty input), and for `case` without
 `else`.  `count` is never null; `x is null` is never null; `coalesce` is
 non-null as soon as one argument is.
+
+`substr` takes `start` (1 or more) and `len` (0 or more) as whole-number literals: the two databases
+disagree on anything else.  `date_part`'s part is a string literal; `hour` and `minute` need a timestamp.
+Each is NULL when its subject is.
 
 Concatenation: `a || b || c` joins text end to end and is NULL if any part is (as in both
 databases).  It binds like `+` (so `a || b == c` compares the joined text, and `a || b + c` is
