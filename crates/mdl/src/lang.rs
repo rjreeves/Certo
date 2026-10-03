@@ -1,5 +1,5 @@
 //! The MDL language: hand-written directives that steer how the difference
-//! between two schemas is migrated. Grammar: `docs/ebnf.md` (MDL section).
+//! between two schemas is migrated. Grammar: `docs/database/ebnf.md` (MDL section).
 //!
 //! ```text
 //! rename table users -> accounts

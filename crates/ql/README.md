@@ -167,7 +167,7 @@ generator is available to hosts as `certo_ql_codegen` in the C ABI.
   `intersect all` / `except all`; subqueries cannot appear in `limit` / `offset`; an `insert`
   cannot take a variable number of rows from one parameter.
 - Dialects: PostgreSQL and SQLite (`--dialect sqlite`; see `crates/sql/README.md` for the
-  differences). A small function set (see `docs/ebnf.md`).
+  differences). A small function set (see `docs/database/ebnf.md`).
 - A `case` cannot mix a string literal with an enum column in its branches.
 
 ## Testing against a live server
