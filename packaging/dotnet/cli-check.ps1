@@ -156,6 +156,86 @@ insert add(e: varchar(100), n: text null) { into customers set email = :e, name 
     Check ($code -eq 2 -and $err -match 'cannot read') 'a missing file exits 2'
     Run @('ql', 'compile', 'queries.ql', '--schema', 'schema.sdl', '--dialect', 'oracle')
     Check ($code -eq 2 -and $err -match 'unknown dialect') 'an unknown dialect exits 2'
+
+    # ---- PostgreSQL: the same lifecycle against a real server (needs CERTO_TEST_PG_URL and psql;
+    #      the `public` schema of that database is reset)
+    $pg = $env:CERTO_TEST_PG_URL
+    if ($pg -and (Get-Command psql -ErrorAction SilentlyContinue)) {
+        Write-Host '-- PostgreSQL'
+        function PgExec([string]$url, [string]$sql) {
+            & psql $url -v ON_ERROR_STOP=1 -q -c $sql 2>&1 | Out-Null
+            if ($LASTEXITCODE) { throw "psql failed: $sql" }
+        }
+        PgExec $pg 'DROP SCHEMA public CASCADE; CREATE SCHEMA public;'
+        $pgSchema = @'
+enum Status { new, paid }
+table users { id: serial primary key  email: text not null unique }
+table orders {
+    id: serial primary key
+    user_id: int not null references users
+    status: Status not null default new
+    total: decimal(10,2) not null
+}
+index orders_status on orders (status)
+'@
+        $pgproj = Join-Path $work 'pgproj'
+        New-Item -ItemType Directory $pgproj | Out-Null
+        Run @('migrate', 'init', '--dir', $pgproj, '--dialect', 'postgres')
+        Check ($code -eq 0 -and $out -match 'created postgres project') 'pg: migrate init'
+        Set-Content (Join-Path $pgproj 'schema.sdl') $pgSchema
+        Run @('migrate', 'new', 'init', '--dir', $pgproj)
+        Check ($code -eq 0 -and $out -match 'created 0001_init') 'pg: migrate new'
+        Run @('migrate', 'status', '--dir', $pgproj, '--url', $pg)
+        Check ($code -eq 0 -and $out -match 'pending  0001_init') 'pg: migrate status (one pending)'
+        Run @('migrate', 'apply', '--dir', $pgproj, '--url', $pg, '--dry-run')
+        Check ($code -eq 0 -and $out -match 'CREATE TYPE "Status"') 'pg: apply --dry-run prints the PostgreSQL script'
+        Run @('migrate', 'apply', '--dir', $pgproj, '--url', $pg)
+        Check ($code -eq 0 -and $out -match 'applied 0001_init') 'pg: migrate apply'
+        Run @('migrate', 'drift', '--dir', $pgproj, '--url', $pg)
+        Check ($code -eq 0 -and $out -match 'no drift') 'pg: in sync after the first migration'
+
+        # an enum value is added in its own batch; the rest runs in a transaction
+        PgExec $pg "INSERT INTO users (email) VALUES ('a@x.com'); INSERT INTO orders (user_id, status, total) VALUES (1, 'paid', 10);"
+        Set-Content (Join-Path $pgproj 'schema.sdl') (($pgSchema -replace 'enum Status \{ new, paid \}', 'enum Status { new, paid, shipped }') -replace 'total: decimal\(10,2\) not null', "total: decimal(10,2) not null`n    note: text")
+        Run @('migrate', 'new', 'evolve', '--dir', $pgproj)
+        Check ($code -eq 0 -and $out -match 'created 0002_evolve') 'pg: a second migration (enum value + column)'
+        Run @('migrate', 'apply', '--dir', $pgproj, '--url', $pg, '--check-drift')
+        Check ($code -eq 0 -and $out -match 'applied 0002_evolve') 'pg: apply --check-drift'
+        Run @('migrate', 'drift', '--dir', $pgproj, '--url', $pg)
+        Check ($code -eq 0 -and $out -match 'no drift') 'pg: in sync after evolving'
+
+        # drift: a hand-made change is reported (exit 1), with a repair script that works
+        PgExec $pg 'ALTER TABLE users ADD COLUMN sneaky integer; CREATE INDEX stray ON orders (total);'
+        Run @('migrate', 'drift', '--dir', $pgproj, '--url', $pg, '--sql')
+        Check ($code -eq 1 -and $out -match 'sneaky' -and $out -match 'stray' -and $out -match 'DROP COLUMN') 'pg: drift reports the hand-made changes with a repair script (exit 1)'
+        $repair = ($out -split '(?m)^-- script that would bring[^\n]*\n', 2)[1]
+        Run @('migrate', 'apply', '--dir', $pgproj, '--url', $pg, '--check-drift')
+        Check ($code -eq 1 -and $err -match 'drift') 'pg: apply --check-drift refuses while drifted'
+        PgExec $pg $repair
+        Run @('migrate', 'drift', '--dir', $pgproj, '--url', $pg)
+        Check ($code -eq 0 -and $out -match 'no drift') 'pg: the repair script puts the database back in sync'
+
+        # adopt a database nobody manages yet
+        $adoptDb = 'certo_cli_adopt_' + [guid]::NewGuid().ToString('N').Substring(0, 8)
+        PgExec $pg "CREATE DATABASE $adoptDb"
+        try {
+            $legacy = $pg -replace '/[^/?]*(\?.*)?$', "/$adoptDb`$1"
+            PgExec $legacy "CREATE TYPE mood AS ENUM ('happy', 'sad'); CREATE TABLE t (id serial PRIMARY KEY, v varchar(10) NOT NULL, m mood DEFAULT 'happy'); CREATE INDEX t_v ON t (v);"
+            $adoptproj = Join-Path $work 'pgadopt'
+            New-Item -ItemType Directory $adoptproj | Out-Null
+            Run @('migrate', 'init', '--dir', $adoptproj, '--dialect', 'postgres')
+            Run @('migrate', 'adopt', '--dir', $adoptproj, '--url', $legacy, '--dry-run')
+            Check ($code -eq 0 -and $out -match 'enum mood' -and $out -match 'table t' -and $err -match 'would adopt: 1 table') 'pg: adopt --dry-run shows the schema it would write'
+            Run @('migrate', 'adopt', '--dir', $adoptproj, '--url', $legacy)
+            Check ($code -eq 0 -and $err -match 'recorded 0001_') 'pg: adopt writes schema.sdl and records a baseline'
+            Run @('migrate', 'drift', '--dir', $adoptproj, '--url', $legacy)
+            Check ($code -eq 0 -and $out -match 'no drift') 'pg: the adopted project is in sync'
+            Run @('migrate', 'adopt', '--dir', $adoptproj, '--url', $legacy)
+            Check ($code -eq 1 -and $err -match 'already has migrations|adopt is for') 'pg: adopting into a project that already adopted is refused'
+        }
+        finally { try { PgExec $pg "DROP DATABASE IF EXISTS $adoptDb WITH (FORCE)" } catch { } }
+    }
+    else { Write-Host '-- PostgreSQL checks skipped (needs CERTO_TEST_PG_URL and psql)' }
 }
 finally {
     Pop-Location -ErrorAction SilentlyContinue

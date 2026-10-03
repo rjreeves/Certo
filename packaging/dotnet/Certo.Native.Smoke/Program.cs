@@ -6,6 +6,7 @@ using System.Text.Json;
 using Certo;
 using Certo.Models;
 using Microsoft.Data.Sqlite;
+using Npgsql;
 
 int failures = 0;
 void Check(bool ok, string what)
@@ -365,6 +366,137 @@ finally
         Check(again.Error?.Code == "project", "adopting twice is a typed error");
     }
     finally { try { Directory.Delete(adoptProj, true); } catch { } }
+}
+
+// ---- the typed runner on PostgreSQL (when CERTO_TEST_PG_URL is set: its `public` schema is reset) ----
+if (Environment.GetEnvironmentVariable("CERTO_TEST_PG_URL") is { Length: > 0 } pgUrl)
+{
+    static string ConnString(string url)
+    {
+        var u = new Uri(url);
+        var cs = new NpgsqlConnectionStringBuilder
+        {
+            Host = u.Host, Port = u.Port > 0 ? u.Port : 5432, Database = u.AbsolutePath.TrimStart('/'),
+            Username = Uri.UnescapeDataString(u.UserInfo.Split(':')[0]),
+        };
+        if (u.UserInfo.Contains(':')) cs.Password = Uri.UnescapeDataString(u.UserInfo.Split(':', 2)[1]);
+        return cs.ConnectionString;
+    }
+    static string WithDatabase(string url, string db) => new UriBuilder(url) { Path = "/" + db }.Uri.AbsoluteUri;
+    static void Exec(string url, string sql)
+    {
+        using var c = new NpgsqlConnection(ConnString(url));
+        c.Open();
+        using var cmd = c.CreateCommand();
+        cmd.CommandText = sql;
+        cmd.ExecuteNonQuery();
+    }
+    static long Count(string url, string sql)
+    {
+        using var c = new NpgsqlConnection(ConnString(url));
+        c.Open();
+        using var cmd = c.CreateCommand();
+        cmd.CommandText = sql;
+        return Convert.ToInt64(cmd.ExecuteScalar());
+    }
+
+    Console.WriteLine("-- PostgreSQL runner");
+    Exec(pgUrl, "DROP SCHEMA public CASCADE; CREATE SCHEMA public;");
+    var pgProj = Path.Combine(Path.GetTempPath(), "certo-typed-pg-" + Guid.NewGuid().ToString("N"));
+    Directory.CreateDirectory(pgProj);
+    try
+    {
+        const string pgV1 = """
+            enum Status { new, paid }
+            table users { id: serial primary key  email: text not null unique }
+            table orders {
+                id: serial primary key
+                user_id: int not null references users
+                status: Status not null default new
+                total: decimal(10,2) not null
+            }
+            index orders_status on orders (status)
+            """;
+        var init = CertoMigrations.Init(pgProj, SqlDialect.Postgres).EnsureOk();
+        Check(init.Dialect == "postgres", "typed Init (postgres)");
+        File.WriteAllText(Path.Combine(pgProj, "schema.sdl"), pgV1);
+        var created = CertoMigrations.New(pgProj, new NewMigrationOptions { Name = "init" }).EnsureOk();
+        Check(created.Label == "0001_init" && created.Summary.Count >= 3, "typed New (postgres)");
+        var dry = CertoMigrations.Apply(pgProj, new ApplyOptions { Url = pgUrl, DryRun = true }).EnsureOk();
+        Check(dry.Scripts.Count == 1 && dry.Scripts[0].Sql.Contains("CREATE TYPE \"Status\"") && dry.Scripts[0].Sql.Contains("GENERATED") == false,
+            "typed dry-run Apply shows the PostgreSQL script");
+        Check(CertoMigrations.Status(pgProj, pgUrl).EnsureOk().Pending.Count == 1, "...and applied nothing");
+        Check(CertoMigrations.Apply(pgProj, new ApplyOptions { Url = pgUrl }).EnsureOk().Migrations.SequenceEqual(new[] { "0001_init" }),
+            "typed Apply (postgres)");
+        var status = CertoMigrations.Status(pgProj, pgUrl).EnsureOk();
+        Check(status.Applied is [{ Label: "0001_init" }] && status.Pending.Count == 0, "typed Status (postgres)");
+        var inSync = CertoMigrations.Drift(pgProj, new DriftOptions { Url = pgUrl }).EnsureOk();
+        Check(inSync.InSync && inSync.Items.Count == 0, "typed Drift (postgres): in sync after the first migration");
+
+        Exec(pgUrl, "INSERT INTO users (email) VALUES ('a@x.com'), ('b@x.com'); INSERT INTO orders (user_id, status, total) VALUES (1, 'paid', 10), (2, 'new', 5);");
+        // an enum value is added in a batch of its own, before the rest runs in a transaction
+        File.WriteAllText(Path.Combine(pgProj, "schema.sdl"), pgV1
+            .Replace("enum Status { new, paid }", "enum Status { new, paid, shipped }")
+            .Replace("total: decimal(10,2) not null", "total: decimal(10,2) not null\n    note: text"));
+        CertoMigrations.New(pgProj, new NewMigrationOptions { Name = "evolve" }).EnsureOk();
+        var script = CertoMigrations.Apply(pgProj, new ApplyOptions { Url = pgUrl, DryRun = true }).EnsureOk().Scripts.Single().Sql;
+        Check(script.Contains("ADD VALUE") && script.Contains("ADD COLUMN"), "the evolve migration adds an enum value and a column");
+        CertoMigrations.Apply(pgProj, new ApplyOptions { Url = pgUrl, CheckDrift = true }).EnsureOk();
+        Exec(pgUrl, "INSERT INTO orders (user_id, status, total, note) VALUES (1, 'shipped', 1, 'x')");
+        Check(Count(pgUrl, "SELECT count(*) FROM orders") == 3 && Count(pgUrl, "SELECT count(*) FROM users") == 2, "rows survived and the new enum value is usable");
+        Check(CertoMigrations.Drift(pgProj, new DriftOptions { Url = pgUrl }).EnsureOk().InSync, "typed Drift (postgres): in sync after evolving");
+
+        // a destructive change needs permission
+        File.WriteAllText(Path.Combine(pgProj, "schema.sdl"), pgV1.Replace("enum Status { new, paid }", "enum Status { new, paid, shipped }"));
+        var refused = CertoMigrations.New(pgProj, new NewMigrationOptions { Name = "drop_note" });
+        Check(refused.Error?.Code == "destructive" && refused.Error.Operations is { Count: > 0 }, "a destructive change is refused (postgres)");
+        CertoMigrations.New(pgProj, new NewMigrationOptions { Name = "drop_note", AllowDestructive = true }).EnsureOk();
+        CertoMigrations.Apply(pgProj, new ApplyOptions { Url = pgUrl }).EnsureOk();
+
+        // someone changes the database by hand: it is reported, with a script that puts it right
+        Exec(pgUrl, "ALTER TABLE users ADD COLUMN sneaky integer; CREATE INDEX stray ON orders (total);");
+        var drifted = CertoMigrations.Drift(pgProj, new DriftOptions { Url = pgUrl }).EnsureOk();
+        Check(!drifted.InSync && drifted.Items.Any(i => i.Kind == DriftKind.Unexpected && i.Text.Contains("sneaky"))
+              && drifted.Items.Any(i => i.Text.Contains("stray")) && drifted.RepairSql?.Contains("DROP COLUMN") == true,
+            "typed Drift (postgres): an unexpected column and index, with a repair script");
+        var blocked = CertoMigrations.Apply(pgProj, new ApplyOptions { Url = pgUrl, CheckDrift = true });
+        Check(blocked.Error?.Code == "schema_drift" && blocked.Error.Items is { Count: > 0 }, "Apply with CheckDrift refuses on drift (postgres)");
+        Exec(pgUrl, drifted.RepairSql!);
+        Check(CertoMigrations.Drift(pgProj, new DriftOptions { Url = pgUrl }).EnsureOk().InSync, "running the repair script puts the database back in sync");
+    }
+    finally { try { Directory.Delete(pgProj, true); } catch { } }
+
+    // adopt a database nobody manages yet
+    var adoptDb = "certo_adopt_" + Guid.NewGuid().ToString("N");
+    Exec(pgUrl, $"CREATE DATABASE {adoptDb}");
+    var pgAdoptDir = Path.Combine(Path.GetTempPath(), "certo-typed-pg-adopt-" + Guid.NewGuid().ToString("N"));
+    Directory.CreateDirectory(pgAdoptDir);
+    try
+    {
+        var legacy = WithDatabase(pgUrl, adoptDb);
+        Exec(legacy, """
+            CREATE TYPE mood AS ENUM ('happy', 'sad');
+            CREATE TABLE t (id serial PRIMARY KEY, v varchar(10) NOT NULL, m mood DEFAULT 'happy', n integer CHECK (n >= 0));
+            CREATE INDEX t_v ON t (v);
+            """);
+        CertoMigrations.Init(pgAdoptDir, SqlDialect.Postgres).EnsureOk();
+        var preview = CertoMigrations.Adopt(pgAdoptDir, new AdoptOptions { Url = legacy, DryRun = true }).EnsureOk();
+        Check(preview.DryRun && preview.Migration is null && preview.Adopted is { Tables: 1, Enums: 1, Indexes: 1 }, "typed Adopt dry run (postgres): counts");
+        var adopted = CertoMigrations.Adopt(pgAdoptDir, new AdoptOptions { Url = legacy }).EnsureOk();
+        Check(adopted.SchemaSdl.Contains("enum mood") && adopted.SchemaSdl.Contains("varchar(10)") && adopted.Migration is not null,
+            "typed Adopt (postgres): schema with the enum, and a baseline migration");
+        Check(CertoMigrations.Drift(pgAdoptDir, new DriftOptions { Url = legacy }).EnsureOk().InSync, "the adopted PostgreSQL project is in sync");
+        Check(CertoMigrations.Adopt(pgAdoptDir, new AdoptOptions { Url = legacy }).Error?.Code == "project", "adopting twice is a typed error (postgres)");
+    }
+    finally
+    {
+        try { Directory.Delete(pgAdoptDir, true); } catch { }
+        try { Exec(pgUrl, $"DROP DATABASE IF EXISTS {adoptDb} WITH (FORCE)"); } catch { }
+    }
+}
+else
+{
+    Console.WriteLine("-- PostgreSQL runner checks skipped (CERTO_TEST_PG_URL not set)");
 }
 
 // ---- concurrency ------------------------------------------------------------------------------

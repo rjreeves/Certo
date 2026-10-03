@@ -40,6 +40,10 @@ repository's GitHub Packages feed, authenticated by the workflow's own token (se
 reports the package's version. To release: bump `version` in `crates/capi/Cargo.toml`, merge,
 then `git tag certo-native-v<version> && git push origin certo-native-v<version>`.
 
+CI runs the Rust live tests, the packed-package smoke test and the reference CLI against a real PostgreSQL
+(service container), so the runner's PostgreSQL path (enum values added in their own batch, drift, repair
+scripts, adoption) is covered as well as SQLite's.
+
 Self-contained by design: the Windows build links the C runtime statically, the Linux build
 vendors OpenSSL (glibc 2.35+ is the only requirement), macOS uses system frameworks, and SQLite
 is bundled. The smoke test covers every entry point, the SQLite runner (apply, drift, table
