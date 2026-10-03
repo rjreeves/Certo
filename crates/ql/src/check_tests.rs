@@ -1277,3 +1277,46 @@ fn recursive_queries_can_build_paths() {
     assert!(q.sql.contains("(\"t\".\"path\" || '/' || \"c\".\"name\") AS \"path\""), "{}", q.sql);
     assert!(!q.ir.select[0].nullable);
 }
+
+// ---- text and date functions ---------------------------------------------------------------- //
+
+#[test]
+fn text_and_date_functions_are_typed() {
+    let q = &ok("query q() { from customers c select substr(c.name, 2) as a, substr(c.email, 1, 3) as b, replace(c.name, \"a\", \"b\") as c2,
+        position(c.name, \"a\") as d, position(c.email, \"@\") as e, date_part(\"year\", c.born) as f, date_part(\"day\", c.born) as g }")[0];
+    let s: Vec<_> = q.ir.select.iter().map(|c| (c.ty.clone(), c.nullable)).collect();
+    assert_eq!(s[0], (b(Builtin::Text), false));
+    assert_eq!(s[1], (b(Builtin::Text), true), "email is nullable");
+    assert_eq!(s[2], (b(Builtin::Text), false));
+    assert_eq!(s[3], (b(Builtin::Int), false));
+    assert_eq!(s[4], (b(Builtin::Int), true));
+    assert_eq!(s[5], (b(Builtin::Int), true), "born is nullable");
+    assert!(q.sql.contains("substr(\"c\".\"name\", 2)"), "{}", q.sql);
+    assert!(q.sql.contains("strpos(\"c\".\"name\", 'a')"), "{}", q.sql);
+    assert!(q.sql.contains("CAST(EXTRACT(YEAR FROM \"c\".\"born\") AS integer)"), "{}", q.sql);
+    // timestamps allow hours and minutes
+    ok("query q() { from orders o select date_part(\"hour\", o.created) as h, date_part(\"minute\", o.shipped) as m }");
+}
+
+#[test]
+fn text_and_date_function_errors() {
+    assert_eq!(errors("query q() { from customers c select substr(c.id, 1) as x }"), ["QL209"]);
+    assert_eq!(errors("query q() { from customers c select substr(c.name, 0) as x }"), ["QL209"]);
+    assert_eq!(errors("query q() { from customers c select substr(c.name, 1, -1) as x }"), ["QL209"]);
+    assert_eq!(errors("query q(n: int) { from customers c select substr(c.name, :n) as x }"), ["QL209"]);
+    assert_eq!(errors("query q() { from customers c select replace(c.name, \"a\") as x }"), ["QL209"]);
+    assert_eq!(errors("query q() { from customers c select position(c.name, 1) as x }"), ["QL209"]);
+    assert_eq!(errors("query q() { from customers c select date_part(\"week\", c.born) as x }"), ["QL209"]);
+    assert_eq!(errors("query q() { from customers c select date_part(\"hour\", c.born) as x }"), ["QL209"]);
+    assert_eq!(errors("query q() { from customers c select date_part(\"year\", c.name) as x }"), ["QL209"]);
+    assert_eq!(errors("query q() { from customers c select date_part(c.name, c.born) as x }"), ["QL209"]);
+}
+
+#[test]
+fn text_and_date_functions_lower_per_dialect() {
+    let (s, d) = compile(&schema(), "query q() { from customers c select position(c.name, \"a\") as p, date_part(\"month\", c.born) as m }", Dialect::Sqlite);
+    let s = s.unwrap_or_else(|| panic!("{d:?}"));
+    let sql = &s[0].as_query().unwrap().sql;
+    assert!(sql.contains("instr(\"c\".\"name\", 'a')"), "{sql}");
+    assert!(sql.contains("CAST(strftime('%m', \"c\".\"born\") AS INTEGER)"), "{sql}");
+}

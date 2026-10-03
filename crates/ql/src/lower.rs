@@ -334,6 +334,23 @@ impl Lowerer<'_> {
             QExpr::Call { func, args } => match func.as_str() {
                 "today" => "CURRENT_DATE".to_string(),
                 "now" if self.dialect == Dialect::Sqlite => "CURRENT_TIMESTAMP".to_string(),
+                "date_part" => {
+                    let (QExpr::String { value: part }, Some(x)) = (&args[0], args.get(1)) else { unreachable!("checked") };
+                    let x = self.expr(x);
+                    match self.dialect {
+                        Dialect::Postgres => format!("CAST(EXTRACT({} FROM {x}) AS integer)", part.to_uppercase()),
+                        Dialect::Sqlite => {
+                            let f = match part.as_str() { "year" => "%Y", "month" => "%m", "day" => "%d", "hour" => "%H", _ => "%M" };
+                            format!("CAST(strftime('{f}', {x}) AS INTEGER)")
+                        }
+                    }
+                }
+                "position" => {
+                    // PostgreSQL strpos(haystack, needle) and SQLite instr(haystack, needle) agree
+                    let a: Vec<String> = args.iter().map(|a| self.expr(a)).collect();
+                    let f = if self.dialect == Dialect::Postgres { "strpos" } else { "instr" };
+                    format!("{f}({})", a.join(", "))
+                }
                 other => {
                     let name = match (self.dialect, other) {
                         (Dialect::Postgres, "trim") => "btrim",

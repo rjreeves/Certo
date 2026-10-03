@@ -1846,6 +1846,70 @@ impl<'a> Checker<'a> {
                 }
                 (T::Known(builtin(Builtin::Int)), typed[0].nullable)
             }
+            "replace" => {
+                if n != 3 { return arity(self, "three arguments (text, from, to)"); }
+                for (t, src) in typed.iter().zip(args) {
+                    if !text_arg(&t.t) {
+                        self.fail("QL209", format!("`replace` expects text, found {}", describe_t(&t.t)), src.span());
+                        return None;
+                    }
+                }
+                (T::Known(builtin(Builtin::Text)), typed.iter().any(|t| t.nullable))
+            }
+            "position" => {
+                if n != 2 { return arity(self, "two arguments (text, what to find)"); }
+                for (t, src) in typed.iter().zip(args) {
+                    if !text_arg(&t.t) {
+                        self.fail("QL209", format!("`position` expects text, found {}", describe_t(&t.t)), src.span());
+                        return None;
+                    }
+                }
+                // 1-based, 0 when absent: strpos in PostgreSQL, instr in SQLite
+                (T::Known(builtin(Builtin::Int)), typed.iter().any(|t| t.nullable))
+            }
+            "substr" => {
+                if n != 2 && n != 3 { return arity(self, "two or three arguments (text, start, length)"); }
+                if !text_arg(&typed[0].t) {
+                    self.fail("QL209", format!("`substr` expects text, found {}", describe_t(&typed[0].t)), args[0].span());
+                    return None;
+                }
+                // the databases disagree on a start below 1 and on a negative length, so both are
+                // whole-number literals in the range where they agree
+                for (i, min, what) in [(1usize, 1, "start (1 or more)"), (2, 0, "length (0 or more)")] {
+                    if i >= n { break; }
+                    if !matches!(&typed[i].e, QExpr::Number { value } if *value >= min) {
+                        self.fail("QL209", format!("`substr` {what} must be a whole-number literal"), args[i].span());
+                        return None;
+                    }
+                }
+                (T::Known(builtin(Builtin::Text)), typed[0].nullable)
+            }
+            "date_part" => {
+                if n != 2 { return arity(self, "two arguments (part, date or timestamp)"); }
+                let QExpr::String { value: part } = &typed[0].e else {
+                    self.fail("QL209", "`date_part` part must be a string literal: \"year\", \"month\", \"day\", \"hour\" or \"minute\"", args[0].span());
+                    return None;
+                };
+                let is_ts = matches!(&typed[1].t, T::Known(TypeIR::Builtin(Builtin::Timestamp)));
+                let is_date = matches!(&typed[1].t, T::Known(TypeIR::Builtin(Builtin::Date)));
+                if !is_ts && !is_date {
+                    self.fail("QL209", format!("`date_part` expects a date or timestamp, found {}", describe_t(&typed[1].t)), args[1].span());
+                    return None;
+                }
+                match part.as_str() {
+                    "year" | "month" | "day" => {}
+                    "hour" | "minute" if is_ts => {}
+                    "hour" | "minute" => {
+                        self.fail("QL209", format!("`date_part` cannot take the {part} of a date"), args[0].span());
+                        return None;
+                    }
+                    other => {
+                        self.fail("QL209", format!("`date_part` does not know the part \"{other}\" (year, month, day, hour, minute)"), args[0].span());
+                        return None;
+                    }
+                }
+                (T::Known(builtin(Builtin::Int)), typed[1].nullable)
+            }
             "abs" | "round" => {
                 if n != 1 { return arity(self, "one argument"); }
                 if !matches!(&typed[0].t, T::Known(k) if rank(k).is_some()) {

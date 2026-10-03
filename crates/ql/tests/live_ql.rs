@@ -521,4 +521,22 @@ fn compiled_queries_run_and_their_declared_contract_is_true() {
         from t select t.path order by t.path }");
     let rows = db.rows(&q, &[]);
     assert_eq!(rows.iter().map(|r| r["path"].as_str().unwrap()).collect::<Vec<_>>(), ["root", "root/a", "root/a/a1", "root/b"]);
+
+    // ==== text and date functions =========================================================
+    let q = db.query("query f() { from customers c select c.id, c.name, substr(c.name, 2) as tail, substr(c.name, 1, 2) as head,
+        replace(c.name, \"n\", \"N\") as rep, position(c.name, \"n\") as pos,
+        date_part(\"year\", c.born) as y, date_part(\"month\", c.born) as m, date_part(\"day\", c.born) as d order by c.id }");
+    let rows = db.rows(&q, &[]);
+    // earlier mutations may have renamed rows, so compare with the name itself
+    for r in &rows {
+        let name = r["name"].as_str().unwrap();
+        assert_eq!(r["tail"], name.chars().skip(1).collect::<String>());
+        assert_eq!(r["head"], name.chars().take(2).collect::<String>());
+        assert_eq!(r["rep"], name.replace('n', "N"));
+        assert_eq!(r["pos"], name.find('n').map_or(0, |i| i + 1));
+    }
+    assert!(rows.iter().any(|r| r["y"].as_i64().is_some_and(|y| (1900..2100).contains(&y))));
+    assert!(rows.iter().all(|r| r["m"].is_null() || (1..=12).contains(&r["m"].as_i64().unwrap())));
+    let q = db.query("query t() { from orders o where o.shipped is not null select date_part(\"hour\", o.shipped) as h, date_part(\"minute\", o.shipped) as mi, date_part(\"year\", o.created) as y }");
+    db.rows(&q, &[]);
 }

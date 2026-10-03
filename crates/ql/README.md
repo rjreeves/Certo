@@ -151,6 +151,13 @@ query people() {
 All three run against PostgreSQL and SQLite in the live tests, and the generated C# (below)
 handles them.
 
+## Text and date functions
+
+`substr(text, 2)`, `substr(text, 1, 3)` (literal start >= 1 and length >= 0), `replace(text, "a", "b")`,
+`position(text, "x")` (1-based, 0 if absent) and `date_part("year", d)` (`year`, `month`, `day`; `hour`, `minute` for
+timestamps) behave the same on PostgreSQL and SQLite; `position` lowers to `strpos`/`instr` and `date_part` to
+`EXTRACT`/`strftime`, always giving an `int`.
+
 ## Joining text
 
 `a || b || c` concatenates text (NULL if any part is). Besides text, whole numbers, enums and uuids may be
