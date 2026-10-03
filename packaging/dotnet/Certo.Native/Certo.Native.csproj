@@ -34,6 +34,8 @@
   <ItemGroup>
     <!-- the binding lives next to the C header it mirrors -->
     <Compile Include="..\..\..\crates\capi\bindings\CertoNative.cs" Link="CertoNative.cs" />
+    <!-- netstandard2.1 has no System.Text.Json of its own; net8.0 does -->
+    <PackageReference Include="System.Text.Json" Version="8.0.5" Condition="'$(TargetFramework)' == 'netstandard2.1'" />
     <None Include="README.md" Pack="true" PackagePath="\" />
     <!-- native/<rid>/native/<library>, staged by stage-native.ps1, ends up in runtimes/<rid>/native/ -->
     <None Include="native\**\*" Pack="true" PackagePath="runtimes\%(RecursiveDir)%(Filename)%(Extension)" />

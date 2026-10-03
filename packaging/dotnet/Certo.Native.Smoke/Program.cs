@@ -4,6 +4,7 @@
 using System.Reflection;
 using System.Text.Json;
 using Certo;
+using Certo.Models;
 using Microsoft.Data.Sqlite;
 
 int failures = 0;
@@ -180,6 +181,59 @@ try
 finally
 {
     try { Directory.Delete(adoptDir, true); } catch { /* best effort */ }
+}
+
+// ---- the typed API ---------------------------------------------------------------------------
+{
+    var typedSchema = CertoSdl.Compile("""
+        enum Role { admin, user }
+        table users { id: serial primary key  name: varchar(100) not null  role: Role  balance: decimal(10,2) }
+        """);
+    Check(typedSchema.Ok && typedSchema.Diagnostics.Count == 0, "CertoSdl.Compile");
+    var typedBad = CertoSdl.Compile("table t { id: nope }");
+    Check(!typedBad.Ok && typedBad.Diagnostics[0].Severity == DiagnosticSeverity.Error && typedBad.Diagnostics[0].Span is { Line: 1 },
+        "typed diagnostics carry severity, code and a position");
+    try { typedBad.EnsureOk(); Check(false, "EnsureOk throws on errors"); }
+    catch (CertoException e) { Check(e.Diagnostics.Count > 0 && e.Message.Contains("schema compilation failed"), "EnsureOk throws a CertoException with the diagnostics"); }
+
+    var typed = CertoQl.Compile(typedSchema, """
+        query find(min: decimal(10,2), r: Role null, tag: varchar(20) null) {
+            from users u where u.balance >= :min and (:r is null or u.role == :r) select u.id, u.name, u.role, u.balance
+        }
+        insert add(n: varchar(100)) { into users set name = :n returning id }
+        update bump(id: int) { users u set balance = 0 where u.id == :id }
+        """, SqlDialect.Sqlite);
+    var statements = typed.EnsureOk();
+    Check(statements.Select(x => x.Kind).SequenceEqual(new[] { StatementKind.Query, StatementKind.Insert, StatementKind.Update }),
+        "typed statements come back with their kinds");
+    var find = statements[0];
+    Check(find.Name == "find" && find.Params.Count == 3 && find.ParamOrder.SequenceEqual(new[] { "min", "r" }),
+        "typed parameters and placeholder order (the unused `tag` is declared but not bound)");
+    Check(find.Params[0].Type.ToString() == "decimal(10,2)" && find.Params[0].Type is { Precision: 10, Scale: 2 }, "numeric parameter type: decimal(10,2)");
+    Check(find.Params[1].Type is { IsEnum: true, Name: "Role" } && find.Params[1].Nullable, "enum parameter, nullable");
+    Check(find.Params[2].Type is { Name: "varchar", Length: 20 }, "varchar(n) parameter has its length");
+    Check(find.Columns.Select(c => c.Name).SequenceEqual(new[] { "id", "name", "role", "balance" })
+          && !find.Columns[0].Nullable && find.Columns[2].Nullable && find.Columns[2].Type.IsEnum,
+        "typed result columns with nullability");
+    Check(find.Columns[0].Type.Name == "int" && find.Columns[1].Type.ToString() == "varchar(100)", "builtin column types");
+    Check(!find.IsMutation && find.ReturnsRows && statements[1].IsMutation && statements[1].ReturnsRows && statements[2].IsMutation && !statements[2].ReturnsRows,
+        "IsMutation / ReturnsRows");
+    Check(find.Sql.Contains("CAST(?1 AS NUMERIC(10,2))") && find.Ir.ValueKind == System.Text.Json.JsonValueKind.Object, "the SQL and the raw IR are available");
+    Check(typed.Queries!.Count == 1, "Queries still holds only the read queries");
+
+    var qbad = CertoQl.Compile(typedSchema, "query q() { from users u select u.ghost }");
+    Check(!qbad.Ok && qbad.Statements is null && qbad.Diagnostics[0].Code == "QL206", "typed QL diagnostics");
+    var warned = CertoQl.Compile(typedSchema, "query q(unused: int) { from users u select u.id }");
+    Check(warned.Ok && warned.Diagnostics[0].Severity == DiagnosticSeverity.Warning, "a warning accompanies a success");
+    var failed = CertoQl.Compile("nope", "query q() { from users u select u.id }");
+    Check(!failed.Ok && failed.Error?.Code == "invalid_ir", "a failed call carries a typed error");
+
+    var gen = CertoQl.GenerateCSharp(typedSchema.EnsureOk(), "query by_id(id: int) { from users u where u.id == :id select u.id }",
+        SqlDialect.Sqlite, "My.Db", "Q");
+    Check(gen.Ok && gen.EnsureOk().Contains("namespace My.Db;") && gen.Code!.Contains("public static partial class Q"), "typed code generation");
+    // round trip: the type converter writes what it reads
+    var rt = System.Text.Json.JsonSerializer.Serialize(find.Params[0].Type);
+    Check(System.Text.Json.JsonSerializer.Deserialize<SchemaType>(rt)!.ToString() == "decimal(10,2)", "SchemaType round-trips through JSON");
 }
 
 // ---- concurrency ------------------------------------------------------------------------------
