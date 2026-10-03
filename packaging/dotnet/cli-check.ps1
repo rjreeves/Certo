@@ -163,3 +163,5 @@ finally {
 }
 if ($failures) { Write-Host "`n$failures check(s) FAILED"; exit 1 }
 Write-Host "`nall checks passed"
+# the last command run was one that is meant to fail (exit 2); do not let that become the script's status
+exit 0
