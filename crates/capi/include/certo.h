@@ -38,7 +38,7 @@ extern "C" {
 #define CERTO_ABI_VERSION 1u
 uint32_t certo_abi_version(void);
 
-/* Library version, e.g. "0.1.0". */
+/* Library version, e.g. "0.2.0". */
 char *certo_version(void);
 
 /* Compile SDL source.
