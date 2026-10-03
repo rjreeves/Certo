@@ -1,6 +1,6 @@
 //! SDL (schema definition language) front end: source text -> AST -> SchemaIR.
 //!
-//! Grammar: `docs/ebnf.md` in the DB-project. Keywords are contextual (only
+//! Grammar: `docs/database/ebnf.md`. Keywords are contextual (only
 //! meaningful where the grammar expects them), so words like `key`, `one` or
 //! `many` remain legal column names.
 //!
