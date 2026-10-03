@@ -156,7 +156,24 @@ handles them.
 `substr(text, 2)`, `substr(text, 1, 3)` (literal start >= 1 and length >= 0), `replace(text, "a", "b")`,
 `position(text, "x")` (1-based, 0 if absent) and `date_part("year", d)` (`year`, `month`, `day`; `hour`, `minute` for
 timestamps) behave the same on PostgreSQL and SQLite; `position` lowers to `strpos`/`instr` and `date_part` to
-`EXTRACT`/`strftime`, always giving an `int`.
+`EXTRACT`/`strftime`, always giving an `int`. A timestamp with a time zone is read in UTC, as SQLite stores it,
+whatever the PostgreSQL session's zone is.
+
+`left(text, 2)`, `right(text, 3)` (literal lengths; `right` needs 1 or more), `starts_with(text, "ab")`,
+`add_days(date, 7)` (a date and a whole number of days, negative to go back) and `days_between(from, to)` (whole days,
+`to - from`) are the same on both databases. There is no month or year arithmetic: Jan 31 plus one month ends differently.
+
+## Named windows
+
+```
+from orders o
+window w as (partition by o.customer_id order by o.id)
+select o.id, row_number() over w as n, sum(o.total) over w as running
+```
+
+`window name as (...)` goes after `having` and before `select`; `over name` is exactly the definition written out, in
+`select` and `order by`. Unknown or repeated names are `QL258`. (`intersect all` / `except all` are not offered: SQLite
+has no such operators.)
 
 ## Joining text
 

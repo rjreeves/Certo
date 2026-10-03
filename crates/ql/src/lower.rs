@@ -334,15 +334,43 @@ impl Lowerer<'_> {
             QExpr::Call { func, args } => match func.as_str() {
                 "today" => "CURRENT_DATE".to_string(),
                 "now" if self.dialect == Dialect::Sqlite => "CURRENT_TIMESTAMP".to_string(),
-                "date_part" => {
+                "date_part" | "date_part_utc" => {
                     let (QExpr::String { value: part }, Some(x)) = (&args[0], args.get(1)) else { unreachable!("checked") };
                     let x = self.expr(x);
                     match self.dialect {
+                        Dialect::Postgres if func == "date_part_utc" => format!("CAST(EXTRACT({} FROM ({x} AT TIME ZONE 'UTC')) AS integer)", part.to_uppercase()),
                         Dialect::Postgres => format!("CAST(EXTRACT({} FROM {x}) AS integer)", part.to_uppercase()),
                         Dialect::Sqlite => {
                             let f = match part.as_str() { "year" => "%Y", "month" => "%m", "day" => "%d", "hour" => "%H", _ => "%M" };
                             format!("CAST(strftime('{f}', {x}) AS INTEGER)")
                         }
+                    }
+                }
+                "left" | "right" => {
+                    let (s, QExpr::Number { value: n }) = (self.expr(&args[0]), &args[1]) else { unreachable!("checked") };
+                    match (func.as_str(), self.dialect) {
+                        ("left", _) => format!("substr({s}, 1, {n})"),
+                        ("right", Dialect::Postgres) => format!("right({s}, {n})"),
+                        _ => format!("substr({s}, -{n})"),
+                    }
+                }
+                "starts_with" => {
+                    // the same on both: the prefix is the start of the text (an empty prefix always is)
+                    let (s, p1, p2) = (self.expr(&args[0]), self.expr(&args[1]), self.expr(&args[1]));
+                    format!("(substr({s}, 1, length({p1})) = {p2})")
+                }
+                "add_days" => {
+                    let (d, n) = (self.expr(&args[0]), self.expr(&args[1]));
+                    match self.dialect {
+                        Dialect::Postgres => format!("({d} + CAST({n} AS integer))"),
+                        Dialect::Sqlite => format!("date({d}, CAST({n} AS TEXT) || ' days')"),
+                    }
+                }
+                "days_between" => {
+                    let (from, to) = (self.expr(&args[0]), self.expr(&args[1]));
+                    match self.dialect {
+                        Dialect::Postgres => format!("({to} - {from})"),
+                        Dialect::Sqlite => format!("CAST(julianday({to}) - julianday({from}) AS INTEGER)"),
                     }
                 }
                 "position" => {

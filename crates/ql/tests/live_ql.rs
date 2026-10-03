@@ -539,4 +539,31 @@ fn compiled_queries_run_and_their_declared_contract_is_true() {
     assert!(rows.iter().all(|r| r["m"].is_null() || (1..=12).contains(&r["m"].as_i64().unwrap())));
     let q = db.query("query t() { from orders o where o.shipped is not null select date_part(\"hour\", o.shipped) as h, date_part(\"minute\", o.shipped) as mi, date_part(\"year\", o.created) as y }");
     db.rows(&q, &[]);
+
+    // ==== more text and date functions, named windows ====================================
+    let q = db.query("query f() { from customers c select c.id, c.name, left(c.name, 2) as l, right(c.name, 2) as r, starts_with(c.name, \"A\") as sa,
+        add_days(c.born, 7) as plus, days_between(c.born, add_days(c.born, 40)) as span order by c.id }");
+    let rows = db.rows(&q, &[]);
+    for r in &rows {
+        let name = r["name"].as_str().unwrap();
+        assert_eq!(r["l"], name.chars().take(2).collect::<String>());
+        let n = name.chars().count();
+        assert_eq!(r["r"], name.chars().skip(n.saturating_sub(2)).collect::<String>());
+        assert_eq!(r["sa"], name.starts_with('A'));
+        assert!(r["span"].is_null() || r["span"] == 40);
+    }
+    assert!(rows.iter().any(|r| r["span"] == 40));
+    let q = db.query("query w() { from customers c window w as (order by c.id)
+        select c.id, row_number() over w as n, sum(c.id) over w as running order by c.id }");
+    let rows = db.rows(&q, &[]);
+    assert_eq!(rows[0]["n"], 1);
+    assert_eq!(rows[0]["running"], rows[0]["id"]);
+
+    // a timestamp with a time zone is read in UTC, whatever the session's zone is
+    let q = db.query("query h() { from orders o where o.shipped is not null select date_part(\"hour\", o.shipped) as h, date_part(\"day\", o.shipped) as d }");
+    let utc = db.rows(&q, &[]);
+    db.client.batch_execute("SET TIME ZONE 'Pacific/Auckland'").unwrap();
+    let auckland = db.rows(&q, &[]);
+    db.client.batch_execute("RESET TIME ZONE").unwrap();
+    assert_eq!(utc, auckland);
 }

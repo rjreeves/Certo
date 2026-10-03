@@ -22,6 +22,7 @@ table orders {
     status: text not null
     created: timestamp not null default now()
     shipped: timestamp
+    local: timestamp_naive
     qty: smallint not null default 1
     paid: bool not null default false
 }
@@ -141,8 +142,8 @@ fn star_expansion() {
     let names: Vec<_> = q[0].ir.select.iter().map(|c| c.name.as_str()).collect();
     assert_eq!(names, ["id", "name", "email", "role", "balance", "born", "token", "note"]);
     let q = ok("query t() { from orders o join customers c on o.customer_id == c.id select o.*, c.name as customer }");
-    assert_eq!(q[0].ir.select.len(), 9);
-    assert_eq!(q[0].ir.select[8].name, "customer");
+    assert_eq!(q[0].ir.select.len(), 10);
+    assert_eq!(q[0].ir.select[9].name, "customer");
     // a left join makes the expanded columns of the far side nullable
     let q = ok("query t() { from orders o left join customers c on o.customer_id == c.id select c.* }");
     assert!(q[0].ir.select.iter().all(|c| c.nullable));
@@ -1319,4 +1320,94 @@ fn text_and_date_functions_lower_per_dialect() {
     let sql = &s[0].as_query().unwrap().sql;
     assert!(sql.contains("instr(\"c\".\"name\", 'a')"), "{sql}");
     assert!(sql.contains("CAST(strftime('%m', \"c\".\"born\") AS INTEGER)"), "{sql}");
+}
+
+// ---- named windows -------------------------------------------------------------------------- //
+
+#[test]
+fn named_windows_are_the_same_as_writing_them_out() {
+    let named = sql_of("query q() { from orders o window w as (partition by o.customer_id order by o.id)
+        select row_number() over w as n, sum(o.total) over w as s }");
+    let written = sql_of("query q() { from orders o
+        select row_number() over (partition by o.customer_id order by o.id) as n,
+               sum(o.total) over (partition by o.customer_id order by o.id) as s }");
+    assert_eq!(named, written);
+    // several, a frame, use in `order by`, and one that is never used
+    let s = sql_of("query q() { from orders o
+        window a as (order by o.id), b as (partition by o.status order by o.id rows between 1 preceding and current row), unused as ()
+        select sum(o.total) over b as s, rank() over a as r order by row_number() over a }");
+    assert!(s.contains("ROWS BETWEEN 1 PRECEDING AND CURRENT ROW"), "{s}");
+}
+
+#[test]
+fn named_window_errors_and_scope() {
+    assert_eq!(errors("query q() { from orders o select row_number() over w as n }"), ["QL258"]);
+    assert_eq!(errors("query q() { from orders o window w as (order by o.id), w as (order by o.total) select row_number() over w as n }"), ["QL258"]);
+    // a subquery has its own windows: it does not see the outer ones...
+    assert_eq!(
+        errors("query q() { from orders o window w as (order by o.id)
+            select (from items i select max(row_number() over w) ) as m }"),
+        ["QL258"]
+    );
+    // ...and defining its own does not take the outer one away
+    ok("query q() { from orders o window w as (order by o.id)
+        select o.id, (from items i window w as (order by i.id) select max(i.id) as m) as x, row_number() over w as n }");
+}
+
+// ---- more text and date functions -------------------------------------------------------------- //
+
+#[test]
+fn left_right_starts_with_and_day_arithmetic_are_typed() {
+    let q = &ok("query q() { from customers c select left(c.name, 2) as a, right(c.email, 3) as b, starts_with(c.name, \"A\") as c2,
+        starts_with(c.email, c.name) as d, add_days(c.born, 7) as e, days_between(c.born, c.born) as f }")[0];
+    let s: Vec<_> = q.ir.select.iter().map(|c| (c.ty.clone(), c.nullable)).collect();
+    assert_eq!(s[0], (b(Builtin::Text), false));
+    assert_eq!(s[1], (b(Builtin::Text), true));
+    assert_eq!(s[2], (b(Builtin::Bool), false));
+    assert_eq!(s[3], (b(Builtin::Bool), true));
+    assert_eq!(s[4], (b(Builtin::Date), true));
+    assert_eq!(s[5], (b(Builtin::Int), true));
+    assert!(q.sql.contains("substr(\"c\".\"name\", 1, 2)"), "{}", q.sql);
+    assert!(q.sql.contains("right(\"c\".\"email\", 3)"), "{}", q.sql);
+    assert!(q.sql.contains("(\"c\".\"born\" + CAST(7 AS integer))"), "{}", q.sql);
+    assert!(q.sql.contains("(\"c\".\"born\" - \"c\".\"born\")"), "{}", q.sql);
+    // a whole-number parameter of days
+    ok("query q(n: int) { from customers c select add_days(c.born, :n) as d }");
+}
+
+#[test]
+fn left_right_starts_with_and_day_arithmetic_errors() {
+    assert_eq!(errors("query q() { from customers c select left(c.id, 2) as x }"), ["QL209"]);
+    assert_eq!(errors("query q(n: int) { from customers c select left(c.name, :n) as x }"), ["QL209"]);
+    assert_eq!(errors("query q() { from customers c select right(c.name, 0) as x }"), ["QL209"]);
+    assert_eq!(errors("query q() { from customers c select left(c.name, -1) as x }"), ["QL209"]);
+    assert_eq!(errors("query q() { from customers c select starts_with(c.name, 1) as x }"), ["QL209"]);
+    assert_eq!(errors("query q() { from customers c select add_days(c.name, 1) as x }"), ["QL209"]);
+    assert_eq!(errors("query q() { from customers c select add_days(c.born, 1.5) as x }"), ["QL209"]);
+    assert_eq!(errors("query q() { from orders o select add_days(o.created, 1) as x }"), ["QL209"]);
+    assert_eq!(errors("query q() { from customers c select days_between(c.born, 5) as x }"), ["QL209"]);
+}
+
+#[test]
+fn date_part_reads_time_zone_timestamps_in_utc() {
+    // timestamptz: the session's zone must not matter, so PostgreSQL converts first (SQLite stores UTC)
+    let s = sql_of("query q() { from orders o select date_part(\"hour\", o.created) as h }");
+    assert!(s.contains("EXTRACT(HOUR FROM (\"o\".\"created\" AT TIME ZONE 'UTC'))"), "{s}");
+    // a timestamp without a zone and a date have nothing to convert
+    let s = sql_of("query q() { from orders o select date_part(\"hour\", o.local) as h }");
+    assert!(s.contains("EXTRACT(HOUR FROM \"o\".\"local\")"), "{s}");
+    let s = sql_of("query q() { from customers c select date_part(\"year\", c.born) as y }");
+    assert!(!s.contains("AT TIME ZONE"), "{s}");
+}
+
+#[test]
+fn more_functions_lower_per_dialect() {
+    let (s, d) = compile(&schema(), "query q() { from customers c select right(c.name, 2) as r, add_days(c.born, 3) as a, days_between(c.born, c.born) as n,
+        starts_with(c.name, \"x\") as s }", Dialect::Sqlite);
+    let s = s.unwrap_or_else(|| panic!("{d:?}"));
+    let sql = &s[0].as_query().unwrap().sql;
+    assert!(sql.contains("substr(\"c\".\"name\", -2)"), "{sql}");
+    assert!(sql.contains("date(\"c\".\"born\", CAST(3 AS TEXT) || ' days')"), "{sql}");
+    assert!(sql.contains("CAST(julianday(\"c\".\"born\") - julianday(\"c\".\"born\") AS INTEGER)"), "{sql}");
+    assert!(sql.contains("(substr(\"c\".\"name\", 1, length('x')) = 'x')"), "{sql}");
 }

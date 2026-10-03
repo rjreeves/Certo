@@ -152,6 +152,10 @@ FunctionCall     = Ident "(" [ ArgList ] ")" ;
 Functions:  now() gen_uuid() today()                       no arguments
             lower(text) upper(text) trim(text)             -> text
             substr(text, start [, len])  replace(text, from, to)  -> text
+            left(text, n)  right(text, n)                  -> text   (n a literal; right: 1 or more)
+            starts_with(text, prefix)                      -> bool
+            add_days(date, days)                           -> date
+            days_between(from-date, to-date)               -> int    (to - from)
             position(text, find)                           -> int   (1-based, 0 if absent)
             date_part("year"|"month"|"day"|"hour"|"minute", date|timestamp) -> int
             length(text)                                   -> int
@@ -258,6 +262,7 @@ Branch          = FromClause { JoinClause }
                   [ "where" QExpr ]
                   [ "group" "by" QExpr { "," QExpr } ]
                   [ "having" QExpr ]
+                  [ "window" Ident "as" "(" WindowSpec ")" { "," Ident "as" "(" WindowSpec ")" } ]
                   "select" [ "distinct" ] SelectItem { "," SelectItem } ;
                   (* the clause order is fixed *)
 With            = "with" [ "recursive" ] Ident "as" "(" QueryBody ")" { "," Ident "as" "(" QueryBody ")" } ;
@@ -290,6 +295,9 @@ Assign          = Ident ( "=" | "==" ) QExpr ;
                   (* an insert's values see no columns; an update's see the row;
                      `do update set` sees the row and `excluded` (the refused row) *)
 
+WindowSpec      = [ "partition" "by" QExpr { "," QExpr } ]
+                  [ "order" "by" OrderItem { "," OrderItem } ]
+                  [ Frame ] ;
 Frame           = ( "rows" | "range" | "groups" ) ( Bound | "between" Bound "and" Bound ) ;
 Bound           = "unbounded" "preceding" | "unbounded" "following" | "current" "row"
                 | QExpr "preceding" | QExpr "following" ;
@@ -312,9 +320,7 @@ QExpr           = Literal | "null" | Column | Param | FunctionCall | CaseExpr
                 | QExpr [ "not" ] "in" "(" SelectBody ")"      (* subquery, one column *)
                 | "exists" "(" SelectBody ")"
                 | "(" SelectBody ")"                           (* subquery as a value *)
-                | FunctionCall "over" "(" [ "partition" "by" QExpr { "," QExpr } ]
-                                          [ "order" "by" OrderItem { "," OrderItem } ]
-                                          [ Frame ] ")"                                      (* window function *)
+                | FunctionCall "over" ( "(" WindowSpec ")" | Ident )     (* window function *)
                 | QExpr [ "not" ] "like" QExpr
                 | QExpr [ "not" ] "between" QExpr "and" QExpr
                 | "(" QExpr ")" ;
@@ -326,7 +332,7 @@ CaseExpr        = "case" "when" QExpr "then" QExpr { "when" QExpr "then" QExpr }
 BinaryOp        = "==" | "=" | "!=" | "<>" | "<" | "<=" | ">" | ">="
                 | "+" | "-" | "*" | "/" | "and" | "or" ;
 
-Functions:  lower upper trim substr replace (text)  position date_part (-> int)   length (text -> int)   abs round (numbers)
+Functions:  lower upper trim substr replace left right (text)  starts_with (bool)  position date_part days_between (-> int)  add_days (date)   length (text -> int)   abs round (numbers)
             coalesce(a, b, ...)   nullif(a, b)   now()   today()
 Aggregates: count(*)  count([distinct] x)  sum(x)  avg(x)  min(x)  max(x)
 
@@ -353,6 +359,10 @@ non-null as soon as one argument is.
 
 `substr` takes `start` (1 or more) and `len` (0 or more) as whole-number literals: the two databases
 disagree on anything else.  `date_part`'s part is a string literal; `hour` and `minute` need a timestamp.
+A timestamp with a time zone is read in UTC (SQLite keeps UTC), not in the session's zone.
+`left`/`right` take a literal length (`right(s, 0)` differs between the databases, so it starts at 1).  Date
+arithmetic is whole days on dates only: months and years end differently (Jan 31 + 1 month), and
+timestamps depend on the zone.
 Each is NULL when its subject is.
 
 Concatenation: `a || b || c` joins text end to end and is NULL if any part is (as in both
@@ -427,6 +437,13 @@ value), and `first_value` / `last_value`.  They are allowed only in `select` and
 The window's inputs follow the grouping rule: in a query with `group by` its columns must be
 grouped, but it may order by an aggregate (`rank() over (order by sum(o.total) desc)`).  A
 window function does not by itself make a query grouped.
+
+Named windows: `window w as (partition by o.customer_id order by o.id)` before `select` (after `having`)
+defines a window once; `over w` uses it, in `select` and `order by`, and several may be defined
+(`window a as (...), b as (...)`).  `over w` is exactly the definition written out, so a name cannot
+be extended (`over (w order by ...)` is not available).  A subquery has its own names; it does not
+see the outer ones.  An unknown or repeated name is QL258.  `intersect all` and `except all` are
+not offered: SQLite has no such operators.
 
 Frames: `sum(x) over (order by id rows between 2 preceding and current row)` limits the rows a
 function sees.  `rows` counts rows, `range` uses the value of the single `order by` key, and
