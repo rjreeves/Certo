@@ -129,6 +129,9 @@ query people() {
   `ntile`, `percent_rank`, `cume_dist`, `lag`, `lead`, `first_value`, `last_value`, with
   `over (partition by ... order by ...)`. Typed like the aggregates; ranking functions never
   return NULL; `lag` / `lead` do unless given a default. Only in `select` and `order by`.
+  Frames: `sum(o.total) over (order by o.id rows between unbounded preceding and current row)`
+  (running total), `rows between 2 preceding and 2 following` (moving window), `range` by value,
+  `groups` of equal keys; offsets are literals or parameters.
 - **Set operations:** `union`, `union all`, `intersect`, `except` between full `from ... select`
   branches. Columns merge their types and nullability; `order by` / `limit` at the end apply to
   the whole result and name its columns.
@@ -163,8 +166,8 @@ generator is available to hosts as `certo_ql_codegen` in the C ABI.
 
 ## Not covered yet
 
-- No recursive `with`, window frames (`rows between ...`), named window definitions, or
-  `intersect all` / `except all`; subqueries cannot appear in `limit` / `offset`; an `insert`
+- No recursive `with`, named window definitions (`window w as (...)`), frame `exclude`
+  clauses, or `intersect all` / `except all`; subqueries cannot appear in `limit` / `offset`; an `insert`
   cannot take a variable number of rows from one parameter.
 - Dialects: PostgreSQL and SQLite (`--dialect sqlite`; see `crates/sql/README.md` for the
   differences). A small function set (see `docs/database/ebnf.md`).

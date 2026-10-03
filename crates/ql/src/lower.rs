@@ -346,7 +346,7 @@ impl Lowerer<'_> {
                 None => format!("{func}(*)"),
                 Some(a) => format!("{func}({}{})", if *distinct { "DISTINCT " } else { "" }, self.expr(a)),
             },
-            QExpr::Window { call, partition_by, order_by } => {
+            QExpr::Window { call, partition_by, order_by, frame } => {
                 let call = self.expr(call);
                 let mut spec = Vec::new();
                 if !partition_by.is_empty() {
@@ -359,6 +359,22 @@ impl Lowerer<'_> {
                         .map(|o| format!("{}{}", self.expr(&o.expr), if o.desc { " DESC" } else { "" }))
                         .collect();
                     spec.push(format!("ORDER BY {}", o.join(", ")));
+                }
+                if let Some(f) = frame {
+                    let units = match f.units {
+                        crate::ast::FrameUnits::Rows => "ROWS",
+                        crate::ast::FrameUnits::Range => "RANGE",
+                        crate::ast::FrameUnits::Groups => "GROUPS",
+                    };
+                    let bound = |l: &mut Self, b: &FrameBoundIR| match b {
+                        FrameBoundIR::UnboundedPreceding => "UNBOUNDED PRECEDING".to_string(),
+                        FrameBoundIR::Preceding { offset } => format!("{} PRECEDING", l.expr(offset)),
+                        FrameBoundIR::CurrentRow => "CURRENT ROW".to_string(),
+                        FrameBoundIR::Following { offset } => format!("{} FOLLOWING", l.expr(offset)),
+                        FrameBoundIR::UnboundedFollowing => "UNBOUNDED FOLLOWING".to_string(),
+                    };
+                    let (a, b) = (bound(self, &f.start), bound(self, &f.end));
+                    spec.push(format!("{units} BETWEEN {a} AND {b}"));
                 }
                 format!("{call} OVER ({})", spec.join(" "))
             }

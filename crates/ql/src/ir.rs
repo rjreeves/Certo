@@ -31,6 +31,25 @@ pub struct QueryIR {
     pub ctes: Vec<CteIR>,
 }
 
+/// A window frame: which rows around the current one the function sees.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FrameIR {
+    pub units: crate::ast::FrameUnits,
+    pub start: FrameBoundIR,
+    pub end: FrameBoundIR,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum FrameBoundIR {
+    UnboundedPreceding,
+    /// A non-negative literal or parameter.
+    Preceding { offset: QExpr },
+    CurrentRow,
+    Following { offset: QExpr },
+    UnboundedFollowing,
+}
+
 /// `name as (query)`
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CteIR {
@@ -121,7 +140,13 @@ pub enum QExpr {
     Case { whens: Vec<When>, otherwise: Option<Box<QExpr>> },
     /// A window function: `call` (an aggregate or a ranking / navigation function) over
     /// a partition of the rows, in an order.
-    Window { call: Box<QExpr>, partition_by: Vec<QExpr>, order_by: Vec<OrderIR> },
+    Window {
+        call: Box<QExpr>,
+        partition_by: Vec<QExpr>,
+        order_by: Vec<OrderIR>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        frame: Option<Box<FrameIR>>,
+    },
     /// `exists (subquery)`
     Exists { query: Box<SubqueryIR> },
     /// `expr in (subquery)`: the subquery has one column.

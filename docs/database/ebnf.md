@@ -287,6 +287,11 @@ Assign          = Ident ( "=" | "==" ) QExpr ;
                   (* an insert's values see no columns; an update's see the row;
                      `do update set` sees the row and `excluded` (the refused row) *)
 
+Frame           = ( "rows" | "range" | "groups" ) ( Bound | "between" Bound "and" Bound ) ;
+Bound           = "unbounded" "preceding" | "unbounded" "following" | "current" "row"
+                | QExpr "preceding" | QExpr "following" ;
+                  (* the offset is a non-negative literal or parameter *)
+
 Param           = Ident ":" TypeRef [ "null" ] ;
                   (* declared type; `null` makes the parameter nullable *)
 
@@ -305,7 +310,8 @@ QExpr           = Literal | "null" | Column | Param | FunctionCall | CaseExpr
                 | "exists" "(" SelectBody ")"
                 | "(" SelectBody ")"                           (* subquery as a value *)
                 | FunctionCall "over" "(" [ "partition" "by" QExpr { "," QExpr } ]
-                                          [ "order" "by" OrderItem { "," OrderItem } ] ")"   (* window function *)
+                                          [ "order" "by" OrderItem { "," OrderItem } ]
+                                          [ Frame ] ")"                                      (* window function *)
                 | QExpr [ "not" ] "like" QExpr
                 | QExpr [ "not" ] "between" QExpr "and" QExpr
                 | "(" QExpr ")" ;
@@ -381,10 +387,24 @@ Window functions: `row_number() over (partition by c.id order by o.total desc)`.
 `row_number`, `rank`, `dense_rank`, `ntile(n)`, `percent_rank`, `cume_dist`, `lag` / `lead`
 (value, optional whole-number offset, optional default; null unless a non-null default and
 value), and `first_value` / `last_value`.  They are allowed only in `select` and `order by`
-(QL251), do not nest (QL251), and take the database's default frame (no `rows between`).
+(QL251) and do not nest (QL251).
 The window's inputs follow the grouping rule: in a query with `group by` its columns must be
 grouped, but it may order by an aggregate (`rank() over (order by sum(o.total) desc)`).  A
-window function does not by itself make a query grouped.  `distinct` inside one, wrong
+window function does not by itself make a query grouped.
+
+Frames: `sum(x) over (order by id rows between 2 preceding and current row)` limits the rows a
+function sees.  `rows` counts rows, `range` uses the value of the single `order by` key, and
+`groups` counts groups of equal keys.  A bound is `unbounded preceding`, `<n> preceding`,
+`current row`, `<n> following` or `unbounded following`; one bound alone (`rows 3 preceding`)
+ends at the current row.  Offsets are non-negative literals or parameters: whole numbers for
+`rows` and `groups`, any number for `range`.  Rules (QL255): only aggregates, `first_value` and
+`last_value` take a frame (the others ignore it); a frame cannot start at `unbounded following`,
+end at `unbounded preceding`, or end before it starts; `groups` needs an `order by`; `range` with
+an offset needs exactly one numeric `order by` key.  Without a frame the database's default
+applies (from the start of the partition to the current row's peers, or the whole partition
+without an `order by`).  A frame that leaves out the current row can be empty, so
+`first_value` / `last_value` are then nullable (`count` over an empty frame is 0).
+A  `distinct` inside one, wrong
 argument counts, and calling `row_number` without `over` are QL252.
 
 Tabular inserts: `into t (a, b) values (..), (..)` inserts several rows, and

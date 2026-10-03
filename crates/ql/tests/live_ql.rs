@@ -457,4 +457,17 @@ fn compiled_queries_run_and_their_declared_contract_is_true() {
     let m = db.mutation("update tag() { with paid_ids as (from orders o where o.paid select o.id)
         orders x set status = \"tagged\" where x.id in (from paid_ids p select p.id) }");
     db.check_mutation(&m);
+
+    // ==== window frames ===============================================================
+    let q = db.query("query running(n: int) { from orders o select o.id,
+        sum(o.total) over (order by o.id rows between unbounded preceding and current row) as running,
+        count(*) over (order by o.id rows between :n preceding and current row) as seen,
+        first_value(o.id) over (order by o.id rows between 1 following and 2 following) as nxt,
+        sum(o.total) over (order by o.total range between 10 preceding and current row) as near,
+        count(*) over (order by o.status groups between current row and current row) as peers
+        order by o.id }");
+    let rows = db.rows(&q, &[&2i32]);
+    assert!(!rows.is_empty());
+    assert!(rows.last().unwrap()["nxt"].is_null(), "no row follows the last one");
+    assert!(rows.iter().all(|r| !r["seen"].is_null()), "count is never NULL");
 }

@@ -16,7 +16,7 @@
 //! Set operations: QL250 `order by` must name an output column, QL253
 //! the branches do not line up (columns, types, mixed or unsupported operators).
 //! Window functions: QL251 misplaced or nested, QL252 unknown
-//! function or wrong arguments. Subqueries: QL240 must return one column, QL241 scalar
+//! function or wrong arguments, QL255 bad frame. Subqueries: QL240 must return one column, QL241 scalar
 //! subquery may return several rows, QL242 insert row/column count, QL243
 //! (parser) nested too deeply. QL290 (warning): unused parameter.
 
@@ -234,7 +234,7 @@ fn refs_expr(e: &QExpr, bound: &HashSet<String>, out: &mut Vec<QExpr>) {
             refs_expr(pattern, bound, out);
         }
         QExpr::Call { args, .. } => args.iter().for_each(|a| refs_expr(a, bound, out)),
-        QExpr::Window { call, partition_by, order_by } => {
+        QExpr::Window { call, partition_by, order_by, .. } => {
             refs_expr(call, bound, out);
             partition_by.iter().for_each(|p| refs_expr(p, bound, out));
             order_by.iter().for_each(|o| refs_expr(&o.expr, bound, out));
@@ -332,7 +332,7 @@ fn uncovered(e: &QExpr, groups: &[QExpr], scope: &HashSet<String>) -> Option<Str
         QExpr::Like { expr, pattern, .. } => uncovered(expr, groups, scope).or_else(|| uncovered(pattern, groups, scope)),
         QExpr::Call { args, .. } => args.iter().find_map(|a| uncovered(a, groups, scope)),
         // a window function sees the grouped rows: its inputs follow the same rule as the select list
-        QExpr::Window { call, partition_by, order_by } => {
+        QExpr::Window { call, partition_by, order_by, .. } => {
             let inner = match &**call {
                 QExpr::Agg { arg, .. } => arg.as_ref().and_then(|a| uncovered(a, groups, scope)),
                 other => uncovered(other, groups, scope),
@@ -1639,13 +1639,30 @@ impl<'a> Checker<'a> {
             }
         }
         let mut order_by = Vec::new();
+        let mut order_types = Vec::new();
         for o in &over.order_by {
             match self.expr(&o.expr, ctx) {
                 Some(t) => {
                     agg |= t.agg;
+                    order_types.push(t.t.clone());
                     order_by.push(OrderIR { expr: t.e, desc: o.desc });
                 }
                 None => ok = false,
+            }
+        }
+
+        // the frame: which rows around the current one the function sees
+        let mut frame_ir = None;
+        let mut includes_current = true; // the default frame ends at the current row
+        if let Some(f) = &over.frame {
+            if !matches!(name, "count" | "sum" | "avg" | "min" | "max" | "first_value" | "last_value") {
+                self.fail("QL255", format!("`{name}` does not use a frame: remove the `{}` clause", frame_word(f.units)), f.span);
+                ok = false;
+            } else if let Some((ir, current)) = self.frame(f, &order_types) {
+                frame_ir = Some(Box::new(ir));
+                includes_current = current;
+            } else {
+                ok = false;
             }
         }
 
@@ -1690,7 +1707,8 @@ impl<'a> Checker<'a> {
                     self.fail("QL252", "an aggregate cannot be the argument of a window function", args[0].span());
                     return None;
                 }
-                (QExpr::Call { func: name.into(), args: vec![a.e] }, a.t, a.nullable)
+                // a frame that leaves out the current row may be empty
+                (QExpr::Call { func: name.into(), args: vec![a.e] }, a.t, a.nullable || !includes_current)
             }
             "lag" | "lead" => {
                 if !(1..=3).contains(&n) { return arity(self, "one to three arguments"); }
@@ -1725,7 +1743,79 @@ impl<'a> Checker<'a> {
         if !ok {
             return None;
         }
-        Some(Typed { e: QExpr::Window { call: Box::new(call), partition_by, order_by }, t, nullable, agg })
+        Some(Typed { e: QExpr::Window { call: Box::new(call), partition_by, order_by, frame: frame_ir }, t, nullable, agg })
+    }
+
+    /// Check a window frame. Returns it lowered, and whether it includes the current row.
+    fn frame(&mut self, f: &Frame, order_types: &[T]) -> Option<(FrameIR, bool)> {
+        // rank of each kind of bound along the partition, to catch frames that end before they start
+        let rank = |b: &FrameBound| match b {
+            FrameBound::UnboundedPreceding => 0u8,
+            FrameBound::Preceding(_) => 1,
+            FrameBound::CurrentRow => 2,
+            FrameBound::Following(_) => 3,
+            FrameBound::UnboundedFollowing => 4,
+        };
+        let end = f.end.as_ref().unwrap_or(&FrameBound::CurrentRow);
+        if matches!(f.start, FrameBound::UnboundedFollowing) {
+            self.fail("QL255", "a frame cannot start at `unbounded following`", f.span);
+            return None;
+        }
+        if matches!(end, FrameBound::UnboundedPreceding) {
+            self.fail("QL255", "a frame cannot end at `unbounded preceding`", f.span);
+            return None;
+        }
+        if rank(&f.start) > rank(end) {
+            self.fail("QL255", "the frame ends before it starts", f.span);
+            return None;
+        }
+        let offsets = matches!(f.start, FrameBound::Preceding(_) | FrameBound::Following(_))
+            || matches!(end, FrameBound::Preceding(_) | FrameBound::Following(_));
+        match f.units {
+            FrameUnits::Groups if order_types.is_empty() => {
+                self.fail("QL255", "a `groups` frame needs an `order by`", f.span);
+                return None;
+            }
+            FrameUnits::Range
+                if offsets && (order_types.len() != 1 || !matches!(&order_types[0], T::Known(k) if rank_of(k))) =>
+            {
+                self.fail("QL255", "a `range` frame with an offset needs exactly one numeric `order by` key", f.span);
+                return None;
+            }
+            _ => {}
+        }
+        let lower = |cx: &mut Self, b: &FrameBound| -> Option<FrameBoundIR> {
+            Some(match b {
+                FrameBound::UnboundedPreceding => FrameBoundIR::UnboundedPreceding,
+                FrameBound::CurrentRow => FrameBoundIR::CurrentRow,
+                FrameBound::UnboundedFollowing => FrameBoundIR::UnboundedFollowing,
+                FrameBound::Preceding(e) => FrameBoundIR::Preceding { offset: cx.frame_offset(e, f.units)? },
+                FrameBound::Following(e) => FrameBoundIR::Following { offset: cx.frame_offset(e, f.units)? },
+            })
+        };
+        let start = lower(self, &f.start);
+        let stop = lower(self, end);
+        let (start, stop) = (start?, stop?);
+        let includes_current = rank(&f.start) <= 2 && rank(end) >= 2;
+        Some((FrameIR { units: f.units, start, end: stop }, includes_current))
+    }
+
+    /// A frame offset: a non-negative literal or parameter (whole numbers for `rows` / `groups`).
+    fn frame_offset(&mut self, e: &Expr, units: FrameUnits) -> Option<QExpr> {
+        let t = self.expr(e, Ctx::Limit)?;
+        let whole = |k: &TypeIR| matches!(k, TypeIR::Builtin(Builtin::SmallInt | Builtin::Int | Builtin::BigInt));
+        let fine = match (&t.e, &t.t) {
+            (QExpr::Number { value }, _) => *value >= 0,
+            (QExpr::Decimal { value }, _) => units == FrameUnits::Range && !value.starts_with('-'),
+            (QExpr::Param { .. }, T::Known(k)) => if units == FrameUnits::Range { rank_of(k) } else { whole(k) },
+            _ => false,
+        };
+        if !fine {
+            let what = if units == FrameUnits::Range { "a non-negative number" } else { "a non-negative whole number" };
+            self.fail("QL255", format!("a frame offset must be {what} or a parameter"), e.span());
+            return None;
+        }
+        Some(t.e)
     }
 
     fn aggregate(&mut self, name: &str, args: &[Expr], star: bool, distinct: bool, span: Span, ctx: Ctx) -> Option<Typed> {
@@ -1787,6 +1877,16 @@ impl<'a> Checker<'a> {
         })
     }
 }
+
+fn frame_word(u: FrameUnits) -> &'static str {
+    match u {
+        FrameUnits::Rows => "rows",
+        FrameUnits::Range => "range",
+        FrameUnits::Groups => "groups",
+    }
+}
+
+fn rank_of(k: &TypeIR) -> bool { rank(k).is_some() }
 
 fn narrowing_hint(col: &TypeIR, value: &TypeIR) -> &'static str {
     match (rank(col), rank(value)) {
