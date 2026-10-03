@@ -20,6 +20,40 @@ pub struct QueryIR {
     pub order_by: Vec<OrderIR>,
     pub limit: Option<QExpr>,
     pub offset: Option<QExpr>,
+    /// `union` / `intersect` / `except` branches after the first. `select` (above) holds the
+    /// combined result's columns (merged types, the first branch's names); `order_by`,
+    /// `limit` and `offset` then apply to the whole combination, and `order_by` names output
+    /// columns as `Column { source: "", column }`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unions: Vec<UnionIR>,
+    /// `with` queries, in order; a source whose table is one of these names reads it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ctes: Vec<CteIR>,
+}
+
+/// `name as (query)`
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CteIR {
+    pub name: String,
+    pub query: SubqueryIR,
+}
+
+/// One `select` of a set operation (no ordering or limits of its own).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BranchIR {
+    pub sources: Vec<SourceIR>,
+    pub filter: Option<QExpr>,
+    pub group_by: Vec<QExpr>,
+    pub having: Option<QExpr>,
+    pub distinct: bool,
+    pub select: Vec<ColumnOut>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct UnionIR {
+    pub op: crate::ast::SetOp,
+    pub all: bool,
+    pub branch: BranchIR,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -85,6 +119,9 @@ pub enum QExpr {
     /// An aggregate; `arg: None` is `count(*)`.
     Agg { func: String, arg: Option<Box<QExpr>>, distinct: bool },
     Case { whens: Vec<When>, otherwise: Option<Box<QExpr>> },
+    /// A window function: `call` (an aggregate or a ranking / navigation function) over
+    /// a partition of the rows, in an order.
+    Window { call: Box<QExpr>, partition_by: Vec<QExpr>, order_by: Vec<OrderIR> },
     /// `exists (subquery)`
     Exists { query: Box<SubqueryIR> },
     /// `expr in (subquery)`: the subquery has one column.
@@ -106,6 +143,10 @@ pub struct SubqueryIR {
     pub order_by: Vec<OrderIR>,
     pub limit: Option<QExpr>,
     pub offset: Option<QExpr>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unions: Vec<UnionIR>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ctes: Vec<CteIR>,
 }
 
 /// A checked `insert` / `update` / `delete`.
@@ -125,6 +166,9 @@ pub struct MutationIR {
     pub rows: Vec<Vec<QExpr>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<Box<SubqueryIR>>,
+    /// `with` queries before the statement.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ctes: Vec<CteIR>,
     /// The `where` condition (update and delete); `None` with `all_rows` when written `all rows`.
     pub filter: Option<QExpr>,
     pub all_rows: bool,

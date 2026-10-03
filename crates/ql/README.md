@@ -106,6 +106,38 @@ provably one row (aggregates without `group by`) or say `limit 1`, and is then t
 aggregate, or nullable. Tabular inserts check every row like a `set` value and count the values
 against the column list. Both are run against PostgreSQL and SQLite in the live tests.
 
+## Window functions, set operations and `with`
+
+```
+query ranked() {
+    with spend as (from orders o group by o.customer_id select o.customer_id, sum(o.total) as total)
+    from customers c join spend s on s.customer_id == c.id
+    select c.name, s.total,
+           rank() over (order by s.total desc) as place,
+           lag(s.total) over (order by s.total desc) as next_up
+    order by place
+}
+query people() {
+    from customers c select c.id, c.name
+    union all
+    from staff s select s.id, s.name
+    order by id limit 100
+}
+```
+
+- **Window functions:** `count`/`sum`/`avg`/`min`/`max`, `row_number`, `rank`, `dense_rank`,
+  `ntile`, `percent_rank`, `cume_dist`, `lag`, `lead`, `first_value`, `last_value`, with
+  `over (partition by ... order by ...)`. Typed like the aggregates; ranking functions never
+  return NULL; `lag` / `lead` do unless given a default. Only in `select` and `order by`.
+- **Set operations:** `union`, `union all`, `intersect`, `except` between full `from ... select`
+  branches. Columns merge their types and nullability; `order by` / `limit` at the end apply to
+  the whole result and name its columns.
+- **`with`:** named queries used like tables by the body, later `with` queries, and subqueries;
+  also in front of `insert` / `update` / `delete`.
+
+All three run against PostgreSQL and SQLite in the live tests, and the generated C# (below)
+handles them.
+
 ## Generated host code (C#)
 
 ```
@@ -131,8 +163,9 @@ generator is available to hosts as `certo_ql_codegen` in the C ABI.
 
 ## Not covered yet
 
-- No `union`, window functions or CTEs; subqueries cannot appear in `limit` / `offset`;
-  an `insert` cannot take a variable number of rows from one parameter.
+- No recursive `with`, window frames (`rows between ...`), named window definitions, or
+  `intersect all` / `except all`; subqueries cannot appear in `limit` / `offset`; an `insert`
+  cannot take a variable number of rows from one parameter.
 - Dialects: PostgreSQL and SQLite (`--dialect sqlite`; see `crates/sql/README.md` for the
   differences). A small function set (see `docs/ebnf.md`).
 - A `case` cannot mix a string literal with an enum column in its branches.

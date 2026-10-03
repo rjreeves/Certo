@@ -20,6 +20,14 @@ public static class Scenario_@NAME@
         check(over.Count == 1 && over[0].Customer == "Ann" && over[0].Total == 25.50m, "OrdersOverAsync with a null enum parameter");
         check(over[0].Shipped is null && over[0].Note is null && !over[0].Paid, "nullable columns come back as null, bool as bool");
 
+        var ranked = await c.RankedOrdersAsync();
+        check(ranked.Count == 2 && ranked[0].Rn == 2 && ranked[1].Rn == 1 && ranked.All(r => r.CustomerTotal == 35.50m),
+            "window functions: row_number as long, a windowed sum as decimal?");
+        var names = await c.AllNamesAsync();
+        check(names.Count == 4 && names.Any(n => n.Name is null) && names.Any(n => n.Name == "Ann"), "union all: columns merge, the nullable branch makes the column nullable");
+        var top = await c.TopSpenderAsync();
+        check(top.Count == 1 && top[0].Name == "Ann" && top[0].Total == 35.50m, "a with query joined like a table");
+
         var changed = await c.SetStatusAsync(orders[1].Id, Status.Paid);
         check(changed == 1, "an update without returning gives the affected row count");
         var paid = await c.OrdersOverAsync(0m, Status.Paid);

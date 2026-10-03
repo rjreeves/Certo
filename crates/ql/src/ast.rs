@@ -23,6 +23,37 @@ pub struct Query {
     pub order_by: Vec<OrderItem>,
     pub limit: Option<Expr>,
     pub offset: Option<Expr>,
+    /// `union` / `intersect` / `except` branches after this one's `select`. `order by`,
+    /// `limit` and `offset` above then apply to the whole combination.
+    pub compound: Vec<SetBranch>,
+    /// `with name as (...)`: named queries the body (and its subqueries) may use as tables.
+    pub ctes: Vec<Cte>,
+    pub span: Span,
+}
+
+/// `name as (from ... select ...)`
+#[derive(Debug, Clone, PartialEq)]
+pub struct Cte {
+    pub name: Ident,
+    pub query: Box<Query>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SetOp {
+    Union,
+    Intersect,
+    Except,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct SetBranch {
+    pub op: SetOp,
+    /// `union all` keeps duplicates.
+    pub all: bool,
+    /// Only `from` ... `select` (no `order by` / `limit` / `offset` of its own).
+    pub query: Box<Query>,
     pub span: Span,
 }
 
@@ -70,6 +101,13 @@ pub enum SelectItem {
     Expr { expr: Expr, alias: Option<Ident> },
 }
 
+/// `over (partition by ... order by ...)`
+#[derive(Debug, Clone, PartialEq)]
+pub struct WindowSpec {
+    pub partition_by: Vec<Expr>,
+    pub order_by: Vec<OrderItem>,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct OrderItem {
     pub expr: Expr,
@@ -95,7 +133,7 @@ pub enum Expr {
     Like { expr: Box<Expr>, pattern: Box<Expr>, negated: bool, span: Span },
     Between { expr: Box<Expr>, low: Box<Expr>, high: Box<Expr>, negated: bool, span: Span },
     /// A function or aggregate call. `star` is `count(*)`; `distinct` is `count(distinct x)`.
-    Call { func: Ident, args: Vec<Expr>, star: bool, distinct: bool, span: Span },
+    Call { func: Ident, args: Vec<Expr>, star: bool, distinct: bool, over: Option<WindowSpec>, span: Span },
     Case { whens: Vec<(Expr, Expr)>, otherwise: Option<Box<Expr>>, span: Span },
     Paren(Box<Expr>, Span),
     /// `exists (from ... select ...)`
@@ -154,6 +192,8 @@ pub struct Mutation {
     /// `on conflict (...) do ...` (insert).
     pub conflict: Option<Conflict>,
     pub returning: Vec<SelectItem>,
+    /// `with name as (...)` before the statement.
+    pub ctes: Vec<Cte>,
     pub span: Span,
 }
 

@@ -12,7 +12,11 @@
 //! Mutations: QL231 (unused), QL232 NULL into a NOT NULL column, QL233
 //! required column missing from an insert, QL234 generated-always column
 //! assigned, QL235 column assigned twice, QL236 conflict target is not a
-//! unique key. Subqueries: QL240 must return one column, QL241 scalar
+//! unique key. `with`: QL254 duplicate name (or recursion, which is not supported).
+//! Set operations: QL250 `order by` must name an output column, QL253
+//! the branches do not line up (columns, types, mixed or unsupported operators).
+//! Window functions: QL251 misplaced or nested, QL252 unknown
+//! function or wrong arguments. Subqueries: QL240 must return one column, QL241 scalar
 //! subquery may return several rows, QL242 insert row/column count, QL243
 //! (parser) nested too deeply. QL290 (warning): unused parameter.
 
@@ -24,6 +28,7 @@ use certo_sdl::{
     compatible, describe_type, from_rank, is_text, ordered, rank, BinaryOp, Builtin, SchemaIR, TableIR, TypeIR,
     TypeRef,
 };
+use std::borrow::Cow;
 use std::collections::HashSet;
 
 /// Check every query in `file`. Queries with errors are left out of the result
@@ -39,7 +44,7 @@ pub fn check(schema: &SchemaIR, file: &QlFile, diags: &mut Vec<Diagnostic>) -> V
             );
             continue;
         }
-        let mut cx = Checker { schema, diags, sources: Vec::new(), scopes: vec![0], params: Vec::new(), failed: false };
+        let mut cx = Checker { schema, diags, sources: Vec::new(), scopes: vec![0], ctes: Vec::new(), params: Vec::new(), failed: false, in_window: false };
         if let Some(ir) = cx.query(q)
             && !cx.failed
         {
@@ -61,7 +66,7 @@ pub fn check_mutations(schema: &SchemaIR, file: &QlFile, diags: &mut Vec<Diagnos
             );
             continue;
         }
-        let mut cx = Checker { schema, diags, sources: Vec::new(), scopes: vec![0], params: Vec::new(), failed: false };
+        let mut cx = Checker { schema, diags, sources: Vec::new(), scopes: vec![0], ctes: Vec::new(), params: Vec::new(), failed: false, in_window: false };
         if let Some(ir) = cx.mutation(m)
             && !cx.failed
         {
@@ -103,11 +108,14 @@ enum Ctx {
 
 impl Ctx {
     fn allows_agg(self) -> bool { matches!(self, Ctx::Having | Ctx::Select | Ctx::Order) }
+    /// Window functions run after grouping, so only the select list and `order by` may use them.
+    fn allows_window(self) -> bool { matches!(self, Ctx::Select | Ctx::Order) }
 }
 
 struct SourceInfo<'a> {
     alias: String,
-    table: &'a TableIR,
+    /// A schema table, or the columns of a `with` query.
+    table: Cow<'a, TableIR>,
     /// On the nullable side of a left join.
     nullable: bool,
 }
@@ -133,6 +141,8 @@ struct Body {
     offset: Option<QExpr>,
     /// Aggregates without `group by`: exactly one row, however many match.
     single_row: bool,
+    unions: Vec<UnionIR>,
+    ctes: Vec<CteIR>,
 }
 
 fn columns_of(outputs: Vec<Output>) -> Vec<ColumnOut> {
@@ -159,8 +169,12 @@ struct Checker<'a> {
     /// Where each open query's sources start in `sources`: the outermost query is first, a
     /// subquery being checked is last. Names resolve innermost scope first.
     scopes: Vec<usize>,
+    /// `with` queries in scope, innermost last: a table name finds these before the schema's tables.
+    ctes: Vec<(String, TableIR)>,
     params: Vec<ParamInfo>,
     failed: bool,
+    /// Checking the inside of a window function (they do not nest).
+    in_window: bool,
 }
 
 fn describe_t(t: &T) -> String {
@@ -220,6 +234,11 @@ fn refs_expr(e: &QExpr, bound: &HashSet<String>, out: &mut Vec<QExpr>) {
             refs_expr(pattern, bound, out);
         }
         QExpr::Call { args, .. } => args.iter().for_each(|a| refs_expr(a, bound, out)),
+        QExpr::Window { call, partition_by, order_by } => {
+            refs_expr(call, bound, out);
+            partition_by.iter().for_each(|p| refs_expr(p, bound, out));
+            order_by.iter().for_each(|o| refs_expr(&o.expr, bound, out));
+        }
         QExpr::Agg { arg, .. } => {
             if let Some(a) = arg {
                 refs_expr(a, bound, out);
@@ -262,6 +281,26 @@ fn refs_sub(sub: &SubqueryIR, bound: &HashSet<String>, out: &mut Vec<QExpr>) {
     sub.order_by.iter().for_each(|o| refs_expr(&o.expr, &inner, out));
     opt(&sub.limit, out);
     opt(&sub.offset, out);
+    for c in &sub.ctes {
+        refs_sub(&c.query, bound, out);
+    }
+    for u in &sub.unions {
+        let mut inner = bound.clone();
+        inner.extend(u.branch.sources.iter().map(|s| s.alias.clone()));
+        for s in &u.branch.sources {
+            if let Some(on) = &s.on {
+                refs_expr(on, &inner, out);
+            }
+        }
+        if let Some(f) = &u.branch.filter {
+            refs_expr(f, &inner, out);
+        }
+        u.branch.group_by.iter().for_each(|g| refs_expr(g, &inner, out));
+        if let Some(h) = &u.branch.having {
+            refs_expr(h, &inner, out);
+        }
+        u.branch.select.iter().for_each(|c| refs_expr(&c.expr, &inner, out));
+    }
 }
 
 /// The first column reference of this query (its tables are `scope`) that is not
@@ -292,6 +331,16 @@ fn uncovered(e: &QExpr, groups: &[QExpr], scope: &HashSet<String>) -> Option<Str
         }
         QExpr::Like { expr, pattern, .. } => uncovered(expr, groups, scope).or_else(|| uncovered(pattern, groups, scope)),
         QExpr::Call { args, .. } => args.iter().find_map(|a| uncovered(a, groups, scope)),
+        // a window function sees the grouped rows: its inputs follow the same rule as the select list
+        QExpr::Window { call, partition_by, order_by } => {
+            let inner = match &**call {
+                QExpr::Agg { arg, .. } => arg.as_ref().and_then(|a| uncovered(a, groups, scope)),
+                other => uncovered(other, groups, scope),
+            };
+            inner
+                .or_else(|| partition_by.iter().find_map(|p| uncovered(p, groups, scope)))
+                .or_else(|| order_by.iter().find_map(|o| uncovered(&o.expr, groups, scope)))
+        }
         QExpr::Case { whens, otherwise } => whens
             .iter()
             .find_map(|w| uncovered(&w.when, groups, scope).or_else(|| uncovered(&w.then, groups, scope)))
@@ -403,6 +452,8 @@ impl<'a> Checker<'a> {
             order_by: b.order.into_iter().map(|(t, desc, _)| OrderIR { expr: t.e, desc }).collect(),
             limit: b.limit,
             offset: b.offset,
+            unions: b.unions,
+            ctes: b.ctes,
         })
     }
 
@@ -433,12 +484,187 @@ impl<'a> Checker<'a> {
             order_by: b.order.iter().map(|(t, desc, _)| OrderIR { expr: t.e.clone(), desc: *desc }).collect(),
             limit: b.limit.clone(),
             offset: b.offset.clone(),
+            unions: b.unions.clone(),
+            ctes: b.ctes.clone(),
         };
         Some((ir, b))
     }
 
-    /// The clauses shared by a query and a subquery, checked in the current scope.
+    /// The clauses shared by a query and a subquery, checked in the current scope: one
+    /// `select`, or several combined with `union` / `intersect` / `except`.
     fn select_body(&mut self, q: &Query, named: bool) -> Option<Body> {
+        let mark = self.ctes.len();
+        let ctes = self.with_queries(&q.ctes);
+        let body = ctes.and_then(|ctes| self.select_body_inner(q, named).map(|mut b| {
+            b.ctes = ctes;
+            b
+        }));
+        self.ctes.truncate(mark);
+        body
+    }
+
+    /// Check `with` queries in order, each seeing the ones before it, and bring them into scope.
+    fn with_queries(&mut self, ctes: &[Cte]) -> Option<Vec<CteIR>> {
+        let mut out = Vec::new();
+        let mut ok = true;
+        for c in ctes {
+            if ctes.iter().take_while(|o| !std::ptr::eq(*o, c)).any(|o| o.name.name == c.name.name) {
+                self.fail("QL254", format!("`{}` is defined twice in this `with`", c.name.name), c.name.span);
+                ok = false;
+                continue;
+            }
+            // its columns are the query's named outputs
+            let base = self.sources.len();
+            self.scopes.push(base);
+            let body = self.select_body(&c.query, true);
+            self.sources.truncate(base);
+            self.scopes.pop();
+            let Some(b) = body else {
+                ok = false;
+                continue;
+            };
+            let columns: Vec<certo_sdl::ColumnIR> = b
+                .outputs
+                .iter()
+                .filter_map(|o| match &o.typed.t {
+                    T::Known(ty) => Some(certo_sdl::ColumnIR {
+                        name: o.name.clone(),
+                        ty: ty.clone(),
+                        primary_key: false,
+                        unique: false,
+                        nullable: o.typed.nullable,
+                        default: None,
+                        references: None,
+                        generated: None,
+                    }),
+                    T::Null => None,
+                })
+                .collect();
+            let ir = SubqueryIR {
+                sources: b.sources.clone(),
+                filter: b.filter.clone(),
+                group_by: b.group_by.clone(),
+                having: b.having.as_ref().map(|h| h.e.clone()),
+                distinct: c.query.select.distinct,
+                select: columns_of(b.outputs.clone()),
+                order_by: b.order.iter().map(|(t, desc, _)| OrderIR { expr: t.e.clone(), desc: *desc }).collect(),
+                limit: b.limit.clone(),
+                offset: b.offset.clone(),
+                unions: b.unions.clone(),
+                ctes: b.ctes.clone(),
+            };
+            self.ctes.push((
+                c.name.name.clone(),
+                TableIR { name: c.name.name.clone(), columns, relationships: vec![], indexes: vec![], constraints: vec![] },
+            ));
+            out.push(CteIR { name: c.name.name.clone(), query: ir });
+        }
+        ok.then_some(out)
+    }
+
+    fn select_body_inner(&mut self, q: &Query, named: bool) -> Option<Body> {
+        if q.compound.is_empty() {
+            return self.branch_body(q, named, true);
+        }
+        let base = self.scope_start();
+        let mut first = self.branch_body(q, named, false)?;
+        self.sources.truncate(base); // the next branch cannot see this one's tables
+
+        // `a union b intersect c` means different things in PostgreSQL and SQLite: no mixing
+        let ops: HashSet<SetOp> = q.compound.iter().map(|b| b.op).collect();
+        if ops.len() > 1 {
+            self.fail("QL253", "a query may combine `union`s, or `intersect`s, or `except`s, but not a mixture", q.compound[0].span);
+            return None;
+        }
+        let mut unions = Vec::new();
+        let mut ok = true;
+        for br in &q.compound {
+            if br.all && br.op != SetOp::Union {
+                self.fail("QL253", "`all` is only available with `union`", br.span);
+                ok = false;
+            }
+            let Some(b) = self.branch_body(&br.query, false, false) else {
+                self.sources.truncate(base);
+                ok = false;
+                continue;
+            };
+            self.sources.truncate(base);
+            if b.outputs.len() != first.outputs.len() {
+                self.fail(
+                    "QL253",
+                    format!("this branch returns {} column(s) but the first returns {}", b.outputs.len(), first.outputs.len()),
+                    br.span,
+                );
+                ok = false;
+                continue;
+            }
+            for (i, (a, c)) in first.outputs.iter_mut().zip(&b.outputs).enumerate() {
+                match unify(&a.typed.t, &c.typed.t) {
+                    Some(t) => {
+                        a.typed.t = t;
+                        a.typed.nullable |= c.typed.nullable;
+                    }
+                    None => {
+                        self.fail(
+                            "QL253",
+                            format!(
+                                "column {} (`{}`) has different types in the branches: {} and {}",
+                                i + 1, a.name, describe_t(&a.typed.t), describe_t(&c.typed.t)
+                            ),
+                            c.span,
+                        );
+                        ok = false;
+                    }
+                }
+            }
+            unions.push(UnionIR {
+                op: br.op,
+                all: br.all,
+                branch: BranchIR {
+                    sources: b.sources,
+                    filter: b.filter,
+                    group_by: b.group_by,
+                    having: b.having.map(|h| h.e),
+                    distinct: br.query.select.distinct,
+                    select: columns_of(b.outputs),
+                },
+            });
+        }
+
+        // ordering and limits belong to the whole combination, and name its output columns
+        let mut order: Vec<(Typed, bool, Span)> = Vec::new();
+        for o in &q.order_by {
+            match &o.expr {
+                Expr::Column { qualifier: None, name } if first.outputs.iter().any(|x| x.name == name.name) => {
+                    let out = first.outputs.iter().find(|x| x.name == name.name).unwrap();
+                    order.push((
+                        Typed { e: QExpr::Column { source: String::new(), column: name.name.clone() }, t: out.typed.t.clone(), nullable: out.typed.nullable, agg: false },
+                        o.desc,
+                        o.expr.span(),
+                    ));
+                }
+                other => {
+                    self.fail("QL250", "with `union`, `intersect` or `except`, `order by` can only name an output column of the result", other.span());
+                    ok = false;
+                }
+            }
+        }
+        let limit = self.limit_expr(&q.limit, "limit").flatten();
+        let offset = self.limit_expr(&q.offset, "offset").flatten();
+        if !ok {
+            return None;
+        }
+        first.order = order;
+        first.limit = limit;
+        first.offset = offset;
+        first.unions = unions;
+        first.single_row = false;
+        Some(first)
+    }
+
+    /// One `select`. `tail`: also check its `order by` / `limit` / `offset` (a branch of a
+    /// set operation has none; the combination does).
+    fn branch_body(&mut self, q: &Query, named: bool, tail: bool) -> Option<Body> {
         let base = self.scope_start();
 
         // sources, each join's ON seeing the sources up to and including itself
@@ -492,7 +718,7 @@ impl<'a> Checker<'a> {
         };
 
         let mut order: Vec<(Typed, bool, Span)> = Vec::new();
-        for o in &q.order_by {
+        for o in q.order_by.iter().filter(|_| tail) {
             // a bare name that matches an output column refers to that column
             let by_alias = match &o.expr {
                 Expr::Column { qualifier: None, name } => outputs.iter().find(|x| x.name == name.name),
@@ -517,8 +743,8 @@ impl<'a> Checker<'a> {
             }
         }
 
-        let limit = self.limit_expr(&q.limit, "limit").flatten();
-        let offset = self.limit_expr(&q.offset, "offset").flatten();
+        let limit = if tail { self.limit_expr(&q.limit, "limit").flatten() } else { None };
+        let offset = if tail { self.limit_expr(&q.offset, "offset").flatten() } else { None };
 
         // once aggregates or `group by` are involved, every column must be grouped or aggregated
         let aggregates = outputs.iter().any(|o| o.typed.agg)
@@ -548,12 +774,25 @@ impl<'a> Checker<'a> {
             order,
             limit,
             offset,
+            unions: Vec::new(),
+            ctes: Vec::new(),
         })
     }
 
     // ---- mutations -------------------------------------------------------- //
 
     fn mutation(&mut self, m: &Mutation) -> Option<MutationIR> {
+        let mark = self.ctes.len();
+        let ctes = self.with_queries(&m.ctes);
+        let r = ctes.and_then(|ctes| self.mutation_inner(m).map(|mut ir| {
+            ir.ctes = ctes;
+            ir
+        }));
+        self.ctes.truncate(mark);
+        r
+    }
+
+    fn mutation_inner(&mut self, m: &Mutation) -> Option<MutationIR> {
         self.declare_params(&m.params);
         let Some(table) = self.schema.table(&m.table.table.name) else {
             self.fail("QL203", format!("unknown table `{}`", m.table.table.name), m.table.table.span);
@@ -639,6 +878,7 @@ impl<'a> Checker<'a> {
             all_rows: m.all_rows,
             conflict,
             returning,
+            ctes: Vec::new(),
         })
     }
 
@@ -739,7 +979,7 @@ impl<'a> Checker<'a> {
                     return None;
                 }
                 // the update may read the existing row and the row that was refused
-                self.sources.push(SourceInfo { alias: "excluded".into(), table, nullable: false });
+                self.sources.push(SourceInfo { alias: "excluded".into(), table: Cow::Borrowed(table), nullable: false });
                 let assignments = self.assignments(table, list);
                 self.sources.pop();
                 ConflictActionIR::Update { assignments }
@@ -865,9 +1105,15 @@ impl<'a> Checker<'a> {
     }
 
     fn add_source(&mut self, t: &TableRef, nullable: bool) -> Option<()> {
-        let Some(table) = self.schema.table(&t.table.name) else {
-            self.fail("QL203", format!("unknown table `{}`", t.table.name), t.table.span);
-            return None;
+        let table: Cow<'a, TableIR> = match self.ctes.iter().rev().find(|(n, _)| *n == t.table.name) {
+            Some((_, cte)) => Cow::Owned(cte.clone()),
+            None => match self.schema.table(&t.table.name) {
+                Some(table) => Cow::Borrowed(table),
+                None => {
+                    self.fail("QL203", format!("unknown table `{}`", t.table.name), t.table.span);
+                    return None;
+                }
+            },
         };
         let alias = t.alias.as_ref().map_or_else(|| t.table.name.clone(), |a| a.name.clone());
         if self.sources[self.scope_start()..].iter().any(|s| s.alias == alias) {
@@ -1123,7 +1369,7 @@ impl<'a> Checker<'a> {
                 };
                 Some(Typed { e: QExpr::Case { whens: ws, otherwise: other }, t: result, nullable, agg })
             }
-            Expr::Call { func, args, star, distinct, span } => self.call(func, args, *star, *distinct, *span, ctx),
+            Expr::Call { func, args, star, distinct, over, span } => self.call(func, args, *star, *distinct, over.as_ref(), *span, ctx),
             Expr::Exists(q, _) => {
                 let (ir, _) = self.subquery(q)?;
                 Some(Typed { e: QExpr::Exists { query: Box::new(ir) }, t: T::Known(builtin(Builtin::Bool)), nullable: false, agg: false })
@@ -1251,8 +1497,25 @@ impl<'a> Checker<'a> {
         Some(Typed { e: QExpr::Binary { op, lhs: Box::new(l.e), rhs: Box::new(r.e) }, t, nullable, agg })
     }
 
-    fn call(&mut self, func: &certo_sdl::Ident, args: &[Expr], star: bool, distinct: bool, span: Span, ctx: Ctx) -> Option<Typed> {
+    #[allow(clippy::too_many_arguments)]
+    fn call(
+        &mut self,
+        func: &certo_sdl::Ident,
+        args: &[Expr],
+        star: bool,
+        distinct: bool,
+        over: Option<&WindowSpec>,
+        span: Span,
+        ctx: Ctx,
+    ) -> Option<Typed> {
         let name = func.name.as_str();
+        if let Some(w) = over {
+            return self.window(name, args, star, distinct, w, span, ctx);
+        }
+        if matches!(name, "row_number" | "rank" | "dense_rank" | "ntile" | "percent_rank" | "cume_dist" | "lag" | "lead" | "first_value" | "last_value") {
+            self.fail("QL252", format!("`{name}` is a window function: add `over (...)`"), span);
+            return None;
+        }
         let is_agg = matches!(name, "count" | "sum" | "avg" | "min" | "max");
 
         if is_agg {
@@ -1336,6 +1599,133 @@ impl<'a> Checker<'a> {
             }
         };
         Some(Typed { e: QExpr::Call { func: name.to_string(), args: typed.into_iter().map(|t| t.e).collect() }, t: ret, nullable, agg })
+    }
+
+    /// `f(args) over (partition by ... order by ...)`.
+    #[allow(clippy::too_many_arguments)]
+    fn window(&mut self, name: &str, args: &[Expr], star: bool, distinct: bool, over: &WindowSpec, span: Span, ctx: Ctx) -> Option<Typed> {
+        if !ctx.allows_window() {
+            self.fail("QL251", "window functions are only allowed in `select` and `order by`", span);
+            return None;
+        }
+        if self.in_window {
+            self.fail("QL251", "window functions cannot be nested", span);
+            return None;
+        }
+        self.in_window = true;
+        let r = self.window_inner(name, args, star, distinct, over, span, ctx);
+        self.in_window = false;
+        r
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn window_inner(&mut self, name: &str, args: &[Expr], star: bool, distinct: bool, over: &WindowSpec, span: Span, ctx: Ctx) -> Option<Typed> {
+        if distinct {
+            self.fail("QL252", "`distinct` is not supported in a window function", span);
+            return None;
+        }
+
+        // the window's own expressions (they may use aggregates, which then make the query grouped)
+        let mut agg = false;
+        let mut partition_by = Vec::new();
+        let mut ok = true;
+        for p in &over.partition_by {
+            match self.expr(p, ctx) {
+                Some(t) => {
+                    agg |= t.agg;
+                    partition_by.push(t.e);
+                }
+                None => ok = false,
+            }
+        }
+        let mut order_by = Vec::new();
+        for o in &over.order_by {
+            match self.expr(&o.expr, ctx) {
+                Some(t) => {
+                    agg |= t.agg;
+                    order_by.push(OrderIR { expr: t.e, desc: o.desc });
+                }
+                None => ok = false,
+            }
+        }
+
+        let n = args.len();
+        let arity = |cx: &mut Self, want: &str| {
+            cx.fail("QL252", format!("`{name}` takes {want}, got {n}"), span);
+            None::<Typed>
+        };
+        let int_arg = |cx: &mut Self, e: &Expr, what: &str, min: i64| -> Option<QExpr> {
+            let t = cx.expr(e, Ctx::Limit)?;
+            let fine = match (&t.e, &t.t) {
+                (QExpr::Number { value }, _) => *value >= min,
+                (QExpr::Param { .. }, T::Known(TypeIR::Builtin(Builtin::SmallInt | Builtin::Int | Builtin::BigInt))) => true,
+                _ => false,
+            };
+            if !fine {
+                cx.fail("QL252", format!("{what} must be a whole number of at least {min}, or an integer parameter"), e.span());
+                return None;
+            }
+            Some(t.e)
+        };
+        let (call, t, nullable): (QExpr, T, bool) = match name {
+            "count" | "sum" | "avg" | "min" | "max" => {
+                // the aggregate's own typing, for its result type and nullability
+                let a = self.aggregate(name, args, star, false, span, Ctx::Select)?;
+                (a.e, a.t, a.nullable)
+            }
+            "row_number" | "rank" | "dense_rank" | "percent_rank" | "cume_dist" => {
+                if n != 0 { return arity(self, "no arguments"); }
+                let ty = if matches!(name, "percent_rank" | "cume_dist") { Builtin::Float } else { Builtin::BigInt };
+                (QExpr::Call { func: name.into(), args: vec![] }, T::Known(builtin(ty)), false)
+            }
+            "ntile" => {
+                if n != 1 { return arity(self, "one argument"); }
+                let a = int_arg(self, &args[0], "the number of buckets", 1)?;
+                (QExpr::Call { func: name.into(), args: vec![a] }, T::Known(builtin(Builtin::Int)), false)
+            }
+            "first_value" | "last_value" => {
+                if n != 1 { return arity(self, "one argument"); }
+                let a = self.expr(&args[0], Ctx::Select)?;
+                if a.agg {
+                    self.fail("QL252", "an aggregate cannot be the argument of a window function", args[0].span());
+                    return None;
+                }
+                (QExpr::Call { func: name.into(), args: vec![a.e] }, a.t, a.nullable)
+            }
+            "lag" | "lead" => {
+                if !(1..=3).contains(&n) { return arity(self, "one to three arguments"); }
+                let a = self.expr(&args[0], Ctx::Select)?;
+                if a.agg {
+                    self.fail("QL252", "an aggregate cannot be the argument of a window function", args[0].span());
+                    return None;
+                }
+                let mut parts = vec![a.e.clone()];
+                if n >= 2 {
+                    parts.push(int_arg(self, &args[1], "the offset", 0)?);
+                }
+                let mut nullable = a.nullable;
+                if n == 3 {
+                    let d = self.expr(&args[2], Ctx::Select)?;
+                    if !self.comparable(&a, &d, args[2].span()) {
+                        if !self.failed { self.fail("QL252", format!("the default must have the same type as the value ({})", describe_t(&a.t)), args[2].span()); }
+                        return None;
+                    }
+                    nullable |= d.nullable;
+                    parts.push(d.e);
+                } else {
+                    nullable = true; // no row that far back / ahead
+                }
+                (QExpr::Call { func: name.into(), args: parts }, a.t, nullable)
+            }
+            other => {
+                self.fail("QL252", format!("`{other}` is not a window function (use count, sum, avg, min, max, row_number, rank, dense_rank, ntile, lag, lead, first_value, last_value, percent_rank or cume_dist)"), span);
+                return None;
+            }
+        };
+        if !ok {
+            return None;
+        }
+        Some(Typed { e: QExpr::Window { call: Box::new(call), partition_by, order_by }, t, nullable, agg })
     }
 
     fn aggregate(&mut self, name: &str, args: &[Expr], star: bool, distinct: bool, span: Span, ctx: Ctx) -> Option<Typed> {
