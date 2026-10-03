@@ -34,6 +34,8 @@ pub struct Query {
 /// `name as (from ... select ...)`
 #[derive(Debug, Clone, PartialEq)]
 pub struct Cte {
+    /// Written `with recursive`: the query may read itself.
+    pub recursive: bool,
     pub name: Ident,
     pub query: Box<Query>,
     pub span: Span,

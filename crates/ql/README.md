@@ -136,7 +136,17 @@ query people() {
   branches. Columns merge their types and nullability; `order by` / `limit` at the end apply to
   the whole result and name its columns.
 - **`with`:** named queries used like tables by the body, later `with` queries, and subqueries;
-  also in front of `insert` / `update` / `delete`.
+  also in front of `insert` / `update` / `delete`. `with recursive` walks hierarchies: a starting
+  select, then `union [all]` steps that read the query itself (types must match the start; no
+  aggregates in a step; bound a cyclic graph with a depth limit or use `union`):
+
+  ```
+  with recursive tree as (
+      from categories c where c.parent_id is null select c.id, c.name, 0 as depth
+      union all
+      from categories c join tree t on c.parent_id == t.id select c.id, c.name, t.depth + 1 as depth)
+  from tree t select t.name, t.depth order by t.depth, t.name
+  ```
 
 All three run against PostgreSQL and SQLite in the live tests, and the generated C# (below)
 handles them.
@@ -166,7 +176,7 @@ generator is available to hosts as `certo_ql_codegen` in the C ABI.
 
 ## Not covered yet
 
-- No recursive `with`, named window definitions (`window w as (...)`), frame `exclude`
+- No named window definitions (`window w as (...)`), frame `exclude`
   clauses, or `intersect all` / `except all`; subqueries cannot appear in `limit` / `offset`; an `insert`
   cannot take a variable number of rows from one parameter.
 - Dialects: PostgreSQL and SQLite (`--dialect sqlite`; see `crates/sql/README.md` for the

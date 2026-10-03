@@ -387,8 +387,10 @@ fn with_queries_parse() {
     let m = mutation("update u() { with a as (from t select t.x) t set y = 1 where t.x in (from a select a.x) }");
     assert_eq!(m.ctes.len(), 1);
     assert!(mutation("update u() { t set y = 1 all rows }").ctes.is_empty());
-    let (_, d) = parse("query q() { with recursive a as (from t select t.x) from a select a.x }");
-    assert!(d.iter().any(|x| x.code == "QL254"), "{d:?}");
+    // `with recursive` marks every query of the list
+    let q = one("with recursive a as (from t select t.x union all from t join a on t.p == a.x select t.x), b as (from a select a.x) from b select b.x");
+    assert!(q.ctes.iter().all(|c| c.recursive) && q.ctes[0].query.compound.len() == 1);
+    assert!(!one("with a as (from t select t.x) from a select a.x").ctes[0].recursive);
 }
 
 // ---- window frames ---------------------------------------------------------------------- //

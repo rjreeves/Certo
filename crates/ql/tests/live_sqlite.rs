@@ -25,6 +25,12 @@ table orders {
     qty: smallint not null default 1
     paid: bool not null default false
 }
+table categories {
+    id: serial primary key
+    parent_id: int references categories
+    name: text not null
+    note: text
+}
 "#;
 
 struct Db {
@@ -44,7 +50,8 @@ fn db() -> Db {
         "INSERT INTO customers (name, email, role, balance) VALUES
             ('Ann', 'a@x.com', 'admin', 100.5), ('Bob', NULL, 'user', NULL), ('Cy', 'c@x.com', 'guest', 0);
          INSERT INTO orders (customer_id, total, status, qty, paid) VALUES
-            (1, 10, 'new', 2, 1), (1, 25.5, 'paid', 1, 0), (2, 5, 'new', 3, 0);",
+            (1, 10, 'new', 2, 1), (1, 25.5, 'paid', 1, 0), (2, 5, 'new', 3, 0);
+         INSERT INTO categories (parent_id, name, note) VALUES (NULL, 'root', NULL), (1, 'a', 'n'), (1, 'b', NULL), (2, 'a1', NULL);",
     )
     .unwrap();
     Db { c, schema }
@@ -348,4 +355,47 @@ fn window_frames_run_on_sqlite() {
     let q = db.stmt("query by_group() { from orders o select o.id,
         count(*) over (order by o.status groups between current row and current row) as peers order by o.id }");
     assert_eq!(db.run(&q, &[]), [["1", "2"], ["2", "1"], ["3", "2"]]);
+}
+
+#[test]
+fn recursive_queries_run_on_sqlite() {
+    let mut db = db();
+    // the whole tree below the root, with depths
+    let q = db.stmt("query tree() { with recursive tree as (
+            from categories c where c.parent_id is null select c.id, c.name, 0 as depth
+            union all
+            from categories c join tree t on c.parent_id == t.id select c.id, c.name, t.depth + 1 as depth)
+        from tree t select t.name, t.depth order by t.depth, t.name }");
+    assert_eq!(db.run(&q, &[]), [["root", "0"], ["a", "1"], ["b", "1"], ["a1", "2"]]);
+    // from a parameter: the subtree under a given category, and counting it
+    let q = db.stmt("query below(root: int) { with recursive sub as (
+            from categories c where c.id == :root select c.id
+            union all
+            from categories c join sub s on c.parent_id == s.id select c.id)
+        from sub select count(*) as n }");
+    assert_eq!(db.run(&q, &[("root", i(1))]), [["4"]]);
+    assert_eq!(db.run(&q, &[("root", i(2))]), [["2"]]);
+    // walking up: the ancestors of a node
+    let q = db.stmt("query ancestors(leaf: int) { with recursive up as (
+            from categories c where c.id == :leaf select c.id, c.parent_id, c.name
+            union
+            from categories c join up u on c.id == u.parent_id select c.id, c.parent_id, c.name)
+        from up u select u.name order by u.id }");
+    assert_eq!(db.run(&q, &[("leaf", i(4))]), [["root"], ["a"], ["a1"]]);
+    // a nullable column that only a step can make NULL is declared nullable, and is
+    let q = db.stmt("query labels() { with recursive t as (
+            from categories c where c.parent_id is null select c.id, c.name as label
+            union all
+            from categories c join t on c.parent_id == t.id select c.id, c.note as label)
+        from t select t.id, t.label order by t.id }");
+    assert!(q.columns()[1].nullable);
+    assert_eq!(db.run(&q, &[]), [["1", "root"], ["2", "n"], ["3", "NULL"], ["4", "NULL"]]);
+    // in a mutation
+    let m = db.stmt("delete prune(root: int) { with recursive sub as (
+            from categories c where c.id == :root select c.id
+            union all from categories c join sub s on c.parent_id == s.id select c.id)
+        from categories x where x.id in (from sub s select s.id) and x.id <> :root returning x.name }");
+    let mut gone: Vec<String> = db.run(&m, &[("root", i(2))]).into_iter().map(|r| r[0].clone()).collect();
+    gone.sort();
+    assert_eq!(gone, ["a1"]);
 }

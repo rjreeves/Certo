@@ -12,7 +12,7 @@
 //! Mutations: QL231 (unused), QL232 NULL into a NOT NULL column, QL233
 //! required column missing from an insert, QL234 generated-always column
 //! assigned, QL235 column assigned twice, QL236 conflict target is not a
-//! unique key. `with`: QL254 duplicate name (or recursion, which is not supported).
+//! unique key. `with`: QL254 duplicate name, QL256 a recursive query that is not well formed.
 //! Set operations: QL250 `order by` must name an output column, QL253
 //! the branches do not line up (columns, types, mixed or unsupported operators).
 //! Window functions: QL251 misplaced or nested, QL252 unknown
@@ -206,6 +206,71 @@ fn unify(a: &T, b: &T) -> Option<T> {
             }
         }
     }
+}
+
+/// Does a select of this query read table `name` directly (in its `from` or a `join`)?
+fn reads_table(q: &Query, name: &str) -> bool {
+    q.from.table.name == name || q.joins.iter().any(|j| j.table.table.name == name)
+}
+
+/// Is there a window function or an aggregate in `e` itself (not in a subquery of it)?
+fn has_window_or_agg(e: &QExpr) -> bool {
+    match e {
+        QExpr::Window { .. } | QExpr::Agg { .. } => true,
+        QExpr::Binary { lhs, rhs, .. } => has_window_or_agg(lhs) || has_window_or_agg(rhs),
+        QExpr::Not { expr } | QExpr::IsNull { expr, .. } | QExpr::InQuery { expr, .. } => has_window_or_agg(expr),
+        QExpr::In { expr, list, .. } => has_window_or_agg(expr) || list.iter().any(has_window_or_agg),
+        QExpr::Like { expr, pattern, .. } => has_window_or_agg(expr) || has_window_or_agg(pattern),
+        QExpr::Call { args, .. } => args.iter().any(has_window_or_agg),
+        QExpr::Case { whens, otherwise } => {
+            whens.iter().any(|w| has_window_or_agg(&w.when) || has_window_or_agg(&w.then))
+                || otherwise.as_ref().is_some_and(|o| has_window_or_agg(o))
+        }
+        _ => false,
+    }
+}
+
+/// Does `e` contain a subquery that reads table `name`?
+fn in_subquery(e: &QExpr, name: &str) -> bool {
+    let sub_reads = |sub: &SubqueryIR| subquery_reads(sub, name);
+    match e {
+        QExpr::Exists { query } | QExpr::Scalar { query } => sub_reads(query),
+        QExpr::InQuery { expr, query, .. } => in_subquery(expr, name) || sub_reads(query),
+        QExpr::Binary { lhs, rhs, .. } => in_subquery(lhs, name) || in_subquery(rhs, name),
+        QExpr::Not { expr } | QExpr::IsNull { expr, .. } => in_subquery(expr, name),
+        QExpr::In { expr, list, .. } => in_subquery(expr, name) || list.iter().any(|i| in_subquery(i, name)),
+        QExpr::Like { expr, pattern, .. } => in_subquery(expr, name) || in_subquery(pattern, name),
+        QExpr::Call { args, .. } => args.iter().any(|a| in_subquery(a, name)),
+        QExpr::Agg { arg, .. } => arg.as_ref().is_some_and(|a| in_subquery(a, name)),
+        QExpr::Window { call, partition_by, order_by, .. } => {
+            in_subquery(call, name)
+                || partition_by.iter().any(|p| in_subquery(p, name))
+                || order_by.iter().any(|o| in_subquery(&o.expr, name))
+        }
+        QExpr::Case { whens, otherwise } => {
+            whens.iter().any(|w| in_subquery(&w.when, name) || in_subquery(&w.then, name))
+                || otherwise.as_ref().is_some_and(|o| in_subquery(o, name))
+        }
+        _ => false,
+    }
+}
+
+/// Does this subquery (or one inside it) read table `name`?
+fn subquery_reads(sub: &SubqueryIR, name: &str) -> bool {
+    let mut exprs: Vec<&QExpr> = Vec::new();
+    exprs.extend(sub.filter.iter());
+    exprs.extend(sub.having.iter());
+    exprs.extend(sub.group_by.iter());
+    exprs.extend(sub.select.iter().map(|c| &c.expr));
+    exprs.extend(sub.sources.iter().filter_map(|s| s.on.as_ref()));
+    sub.sources.iter().any(|s| s.table == name)
+        || exprs.iter().any(|e| in_subquery(e, name))
+        || sub.ctes.iter().any(|c| subquery_reads(&c.query, name))
+        || sub.unions.iter().any(|u| {
+            u.branch.sources.iter().any(|s| s.table == name)
+                || u.branch.select.iter().any(|c| in_subquery(&c.expr, name))
+                || u.branch.filter.as_ref().is_some_and(|f| in_subquery(f, name))
+        })
 }
 
 /// Column references in `e` (and in any subquery inside it) whose table is not
@@ -513,6 +578,17 @@ impl<'a> Checker<'a> {
                 ok = false;
                 continue;
             }
+            // `with recursive` makes a query recursive only if one of its later selects reads it
+            if c.recursive && !c.query.compound.is_empty() && c.query.compound.iter().any(|b| reads_table(&b.query, &c.name.name)) {
+                match self.recursive_cte(c) {
+                    Some((ir, table)) => {
+                        self.ctes.push((c.name.name.clone(), table));
+                        out.push(CteIR { name: c.name.name.clone(), query: ir, recursive: true });
+                    }
+                    None => ok = false,
+                }
+                continue;
+            }
             // its columns are the query's named outputs
             let base = self.sources.len();
             self.scopes.push(base);
@@ -557,9 +633,173 @@ impl<'a> Checker<'a> {
                 c.name.name.clone(),
                 TableIR { name: c.name.name.clone(), columns, relationships: vec![], indexes: vec![], constraints: vec![] },
             ));
-            out.push(CteIR { name: c.name.name.clone(), query: ir });
+            out.push(CteIR { name: c.name.name.clone(), query: ir, recursive: false });
         }
         ok.then_some(out)
+    }
+
+    /// A `with recursive` query: a starting `select`, then `union [all]` steps that read the query
+    /// itself. The columns come from the starting select; each step must give the same types, and
+    /// the nullability is settled by repeating the steps until it stops changing.
+    fn recursive_cte(&mut self, c: &Cte) -> Option<(SubqueryIR, TableIR)> {
+        let name = c.name.name.as_str();
+        let q = &*c.query;
+        if self.schema.table(name).is_some() {
+            self.fail("QL256", format!("a recursive query cannot be named `{name}`: that is a table"), c.name.span);
+            return None;
+        }
+        if q.compound.iter().any(|b| b.op != SetOp::Union) {
+            self.fail("QL256", "a recursive query joins its selects with `union` or `union all`", q.compound[0].span);
+            return None;
+        }
+        if !q.order_by.is_empty() || q.limit.is_some() || q.offset.is_some() {
+            self.fail("QL256", "a recursive query cannot have `order by`, `limit` or `offset`: put them on the query that reads it", c.name.span);
+            return None;
+        }
+
+        // the starting rows decide the columns
+        let mut anchor_q = q.clone();
+        anchor_q.compound.clear();
+        let base = self.sources.len();
+        self.scopes.push(base);
+        let anchor = self.select_body(&anchor_q, true);
+        self.sources.truncate(base);
+        self.scopes.pop();
+        let anchor = anchor?;
+        if self.failed {
+            return None;
+        }
+        let mut cols: Vec<certo_sdl::ColumnIR> = anchor
+            .outputs
+            .iter()
+            .filter_map(|o| match &o.typed.t {
+                T::Known(ty) => Some(certo_sdl::ColumnIR {
+                    name: o.name.clone(),
+                    ty: ty.clone(),
+                    primary_key: false,
+                    unique: false,
+                    nullable: o.typed.nullable,
+                    default: None,
+                    references: None,
+                    generated: None,
+                }),
+                T::Null => None,
+            })
+            .collect();
+
+        loop {
+            let (failed_before, mark) = (self.failed, self.diags.len());
+            let table = TableIR { name: name.to_string(), columns: cols.clone(), relationships: vec![], indexes: vec![], constraints: vec![] };
+            self.ctes.push((name.to_string(), table));
+            let mut merged: Vec<bool> = cols.iter().map(|c| c.nullable).collect();
+            let mut unions = Vec::new();
+            for br in &q.compound {
+                let base = self.sources.len();
+                self.scopes.push(base);
+                let b = self.select_body(&br.query, false);
+                self.sources.truncate(base);
+                self.scopes.pop();
+                let Some(b) = b else { continue };
+                if self.check_recursive_step(name, br, &b, &cols) {
+                    for (m, o) in merged.iter_mut().zip(&b.outputs) {
+                        *m |= o.typed.nullable;
+                    }
+                    unions.push(UnionIR {
+                        op: SetOp::Union,
+                        all: br.all,
+                        branch: BranchIR {
+                            sources: b.sources,
+                            filter: b.filter,
+                            group_by: b.group_by,
+                            having: b.having.map(|h| h.e),
+                            distinct: false,
+                            select: columns_of(b.outputs),
+                        },
+                    });
+                }
+            }
+            self.ctes.pop();
+            if self.failed {
+                return None;
+            }
+            let current: Vec<bool> = cols.iter().map(|c| c.nullable).collect();
+            if merged != current {
+                // a step can make a column nullable, which the step itself reads: go round again
+                for (c, m) in cols.iter_mut().zip(&merged) {
+                    c.nullable = *m;
+                }
+                self.diags.truncate(mark);
+                self.failed = failed_before;
+                continue;
+            }
+            let mut select = columns_of(anchor.outputs.clone());
+            for (s, c) in select.iter_mut().zip(&cols) {
+                s.nullable = c.nullable;
+            }
+            let ir = SubqueryIR {
+                sources: anchor.sources.clone(),
+                filter: anchor.filter.clone(),
+                group_by: anchor.group_by.clone(),
+                having: anchor.having.as_ref().map(|h| h.e.clone()),
+                distinct: anchor_q.select.distinct,
+                select,
+                order_by: Vec::new(),
+                limit: None,
+                offset: None,
+                unions,
+                ctes: anchor.ctes.clone(),
+            };
+            let table = TableIR { name: name.to_string(), columns: cols, relationships: vec![], indexes: vec![], constraints: vec![] };
+            return Some((ir, table));
+        }
+    }
+
+    /// The rules for one repeated step of a recursive query.
+    fn check_recursive_step(&mut self, name: &str, br: &SetBranch, b: &Body, cols: &[certo_sdl::ColumnIR]) -> bool {
+        let span = br.span;
+        let mut ok = true;
+        let mut bad = |cx: &mut Self, msg: String| {
+            cx.fail("QL256", msg, span);
+            ok = false;
+        };
+        let reads = b.sources.iter().filter(|s| s.table == name).count();
+        if reads != 1 {
+            bad(self, format!("each step of a recursive query must read `{name}` exactly once, not {reads} times"));
+        }
+        if b.sources.iter().any(|s| s.table == name && s.join == Some(JoinKind::Left)) {
+            bad(self, format!("`{name}` cannot be on the nullable side of a left join in a recursive step"));
+        }
+        let q = &br.query;
+        if q.select.distinct || !q.group_by.is_empty() || q.having.is_some() {
+            bad(self, "a recursive step cannot use `distinct`, `group by` or `having` (use `union` to drop duplicates)".into());
+        }
+        if b.outputs.iter().any(|o| o.typed.agg || has_window_or_agg(&o.typed.e)) {
+            bad(self, "a recursive step cannot use aggregates or window functions".into());
+        }
+        let mut exprs: Vec<&QExpr> = b.outputs.iter().map(|o| &o.typed.e).collect();
+        exprs.extend(b.filter.iter());
+        exprs.extend(b.sources.iter().filter_map(|s| s.on.as_ref()));
+        if exprs.iter().any(|e| in_subquery(e, name)) {
+            bad(self, format!("`{name}` cannot be read inside a subquery of a recursive step"));
+        }
+        if b.outputs.len() != cols.len() {
+            bad(self, format!("this step returns {} column(s) but the starting select returns {}", b.outputs.len(), cols.len()));
+        } else {
+            for (i, (o, c)) in b.outputs.iter().zip(cols).enumerate() {
+                if let T::Known(t) = &o.typed.t
+                    && *t != c.ty
+                {
+                    bad(
+                        self,
+                        format!(
+                            "column {} (`{}`) is {} in the starting select but {} in this step; they must be the same type",
+                            i + 1, c.name, describe_type(&c.ty), describe_type(t)
+                        ),
+                    );
+                }
+            }
+        }
+        ok
     }
 
     fn select_body_inner(&mut self, q: &Query, named: bool) -> Option<Body> {
@@ -782,6 +1022,8 @@ impl<'a> Checker<'a> {
     // ---- mutations -------------------------------------------------------- //
 
     fn mutation(&mut self, m: &Mutation) -> Option<MutationIR> {
+        // parameters first: the `with` queries may use them
+        self.declare_params(&m.params);
         let mark = self.ctes.len();
         let ctes = self.with_queries(&m.ctes);
         let r = ctes.and_then(|ctes| self.mutation_inner(m).map(|mut ir| {
@@ -793,7 +1035,6 @@ impl<'a> Checker<'a> {
     }
 
     fn mutation_inner(&mut self, m: &Mutation) -> Option<MutationIR> {
-        self.declare_params(&m.params);
         let Some(table) = self.schema.table(&m.table.table.name) else {
             self.fail("QL203", format!("unknown table `{}`", m.table.table.name), m.table.table.span);
             return None;
