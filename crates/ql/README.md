@@ -151,6 +151,16 @@ query people() {
 All three run against PostgreSQL and SQLite in the live tests, and the generated C# (below)
 handles them.
 
+## Joining text
+
+`a || b || c` concatenates text (NULL if any part is). Besides text, whole numbers, enums and uuids may be
+joined (they print the same in PostgreSQL and SQLite); other types cannot. It binds like `+`. Together with
+recursive `with` it builds paths:
+
+```
+select t.path || "/" || c.name as path      -- inside the recursive step
+```
+
 ## Generated host code (C#)
 
 ```

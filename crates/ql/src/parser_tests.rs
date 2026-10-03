@@ -427,3 +427,23 @@ fn window_frames_parse() {
     let (_, d) = parse("query q() { from t select sum(t.a) over (order by t.b rows between 1 preceding) as s }");
     assert!(!d.is_empty());
 }
+
+// ---- `||` ------------------------------------------------------------------------------- //
+
+#[test]
+fn concat_parses_as_one_flat_join() {
+    let Expr::Concat(parts, _) = where_of("a || b || c") else { panic!() };
+    assert_eq!(parts.len(), 3);
+    // a parenthesised join stays one part, so the grouping survives
+    let Expr::Concat(parts, _) = where_of("a || (b || c)") else { panic!() };
+    assert_eq!(parts.len(), 2);
+    assert!(matches!(parts[1], Expr::Paren(..)));
+    // binds like `+`: after arithmetic on the left, before comparison on the right
+    let Expr::Binary { op: BinaryOp::Eq, lhs, .. } = where_of("a || b == c") else { panic!() };
+    assert!(matches!(*lhs, Expr::Concat(..)));
+    let Expr::Binary { op: BinaryOp::Add, lhs, .. } = where_of("a || b + c") else { panic!() };
+    assert!(matches!(*lhs, Expr::Concat(..)));
+    // a lone `|` is still not a token
+    let (_, d) = parse("query q() { from t where a | b select t.a }");
+    assert!(!d.is_empty());
+}

@@ -504,4 +504,21 @@ fn compiled_queries_run_and_their_declared_contract_is_true() {
             union all from categories c join sub s on c.parent_id == s.id select c.id)
         from categories x where x.id in (from sub s select s.id) and x.id <> :root returning x.name }");
     db.check_mutation(&m);
+
+    // ==== || ============================================================================
+    let q = db.query("query who() { from customers c select c.id,
+        c.name || \" <\" || c.email || \">\" as who,
+        c.name || \"#\" || c.id as tag,
+        c.name || \":\" || c.role as role_tag order by c.id }");
+    let rows = db.rows(&q, &[]);
+    assert!(!rows.is_empty());
+    assert!(rows.iter().any(|r| r["who"].is_null()), "NULL if any part is (Bob has no email)");
+    assert!(rows.iter().all(|r| !r["tag"].is_null()));
+    let q = db.query("query paths() { with recursive t as (
+            from categories c where c.parent_id is null select c.id, c.name as path
+            union all
+            from categories c join t on c.parent_id == t.id select c.id, t.path || \"/\" || c.name as path)
+        from t select t.path order by t.path }");
+    let rows = db.rows(&q, &[]);
+    assert_eq!(rows.iter().map(|r| r["path"].as_str().unwrap()).collect::<Vec<_>>(), ["root", "root/a", "root/a/a1", "root/b"]);
 }

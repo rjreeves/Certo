@@ -15,6 +15,8 @@ pub enum TokKind {
     Colon, Comma, Arrow, Dot, Eq,
     EqEq, NotEq, Lt, Le, Gt, Ge,
     Plus, Minus, Star, Slash,
+    /// `||`
+    Concat,
     Eof,
 }
 
@@ -99,6 +101,7 @@ pub fn lex(src: &str) -> (Vec<Token>, Vec<Diagnostic>) {
                     b'+' => (Some(TokKind::Plus), 1),
                     b'*' => (Some(TokKind::Star), 1),
                     b'/' => (Some(TokKind::Slash), 1),
+                    b'|' if two(b'|') => (Some(TokKind::Concat), 2),
                     b'-' if two(b'>') => (Some(TokKind::Arrow), 2),
                     b'-' => (Some(TokKind::Minus), 1),
                     b'=' if two(b'=') => (Some(TokKind::EqEq), 2),

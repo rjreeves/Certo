@@ -167,6 +167,8 @@ pub enum Expr {
     Call { func: Ident, args: Vec<Expr>, star: bool, distinct: bool, over: Option<WindowSpec>, span: Span },
     Case { whens: Vec<(Expr, Expr)>, otherwise: Option<Box<Expr>>, span: Span },
     Paren(Box<Expr>, Span),
+    /// `a || b || c`: text joined end to end (NULL if any part is).
+    Concat(Vec<Expr>, Span),
     /// `exists (from ... select ...)`
     Exists(Box<Query>, Span),
     /// `x in (from ... select col)`
@@ -179,7 +181,7 @@ impl Expr {
     pub fn span(&self) -> Span {
         match self {
             Expr::Number(_, s) | Expr::Decimal(_, s) | Expr::Str(_, s) | Expr::Bool(_, s) | Expr::Null(s)
-            | Expr::Not(_, s) | Expr::Paren(_, s) | Expr::Exists(_, s) | Expr::Scalar(_, s) => *s,
+            | Expr::Not(_, s) | Expr::Paren(_, s) | Expr::Exists(_, s) | Expr::Scalar(_, s) | Expr::Concat(_, s) => *s,
             Expr::Column { qualifier, name } => qualifier.as_ref().map_or(name.span, |q| q.span.to(name.span)),
             Expr::Param(i) => i.span,
             Expr::Binary { span, .. } | Expr::IsNull { span, .. } | Expr::In { span, .. } | Expr::Like { span, .. }
