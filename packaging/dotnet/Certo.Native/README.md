@@ -65,7 +65,7 @@ in `packaging/dotnet/nuget.config.sample`) and keep the token out of the file:
 ```
 dotnet nuget add source "https://nuget.pkg.github.com/rjreeves/index.json" \
     --name certo --username <your GitHub user> --password <token> --store-password-in-clear-text
-dotnet add package Certo.Native --version 0.4.0
+dotnet add package Certo.Native --version 0.5.0
 ```
 
 In CI, use the workflow's own `GITHUB_TOKEN` (give the job `packages: read`) as the password.
