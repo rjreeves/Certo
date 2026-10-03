@@ -32,7 +32,7 @@ use std::fmt::Write as _;
 use certo_ast::decl::{Decl, FnDecl};
 use certo_ast::module::Module;
 
-use crate::ty::{ty_to_c, ret_ty_to_c, c_ident};
+use crate::ty::{ty_to_c, ret_ty_to_c, c_ident, camel_to_snake};
 
 /// Generate a C header for all `pub fn` declarations in `module`.
 ///
@@ -89,9 +89,13 @@ fn c_prototype(f: &FnDecl) -> String {
     let ret = ret_ty_to_c(f.ret_ty.as_ref().map(|t| &t.node));
     // `@export("name")` overrides the default `certo_<name>` symbol — matches
     // the exported wrapper codegen emits (see `emit_module.rs`'s `export_wrappers`).
+    // The default case snake_cases the name first (`camel_to_snake`) to match
+    // what codegen's own `c_fn_name` actually exports for a multi-word
+    // camelCase pub fn — an explicit `@export(...)` name is used verbatim,
+    // same as codegen treats it, so no case conversion applies there.
     let name = match &f.export_name {
         Some(n) => c_ident(n),
-        None    => format!("certo_{}", c_ident(&f.name.node)),
+        None    => format!("certo_{}", c_ident(&camel_to_snake(&f.name.node))),
     };
     let params: Vec<String> = f.params.iter()
         .map(|p| format!("{} {}", ty_to_c(&p.ty.node), c_ident(&p.name.node)))
@@ -192,7 +196,19 @@ mod tests {
     fn unit_return_is_void() {
         let m = module("module M\npub fn doThing(): Unit = ()\n");
         let h = generate_header(&m, None);
-        assert!(h.contains("void certo_doThing(void);"), "Unit should map to void\n{}", h);
+        // Real codegen snake_cases a multi-word pub fn name for its exported
+        // symbol (c_fn_name) - certo_doThing (no conversion) was this tool's
+        // own previous, wrong prediction, confirmed live against a real
+        // compiled DLL's export table before fixing.
+        assert!(h.contains("void certo_do_thing(void);"), "Unit should map to void\n{}", h);
+    }
+
+    #[test]
+    fn multi_word_camel_case_name_is_snake_cased_to_match_real_codegen() {
+        let m = module("module M\npub fn lumeEmbedCall(source: Text): Text = source\n");
+        let h = generate_header(&m, None);
+        assert!(h.contains("certo_lume_embed_call("), "expected snake_cased symbol name\n{}", h);
+        assert!(!h.contains("certo_lumeEmbedCall("), "must not predict the unconverted name\n{}", h);
     }
 
     #[test]

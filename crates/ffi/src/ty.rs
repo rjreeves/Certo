@@ -51,3 +51,23 @@ pub fn ret_ty_to_c(ret: Option<&TypeExpr>) -> String {
 pub fn c_ident(s: &str) -> String {
     s.replace('.', "_").replace('-', "_")
 }
+
+/// Convert a camelCase function name to the snake_case the real `--emit-dll`
+/// codegen actually exports (`crates/codegen/src/emit_mir.rs`'s
+/// `camel_to_snake`/`c_fn_name`, private to that crate, so duplicated here
+/// rather than exposed as a new cross-crate dependency for one small, pure,
+/// already-stable algorithm — found live: this tool previously predicted
+/// `certo_lumeEmbedCall` for a real `pub fn lumeEmbedCall`, while the actual
+/// compiled DLL exported `certo_lume_embed_call`, confirmed via
+/// `llvm-readobj --coff-exports`). Keep in sync with the codegen original if
+/// either ever changes.
+pub fn camel_to_snake(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 4);
+    for (i, c) in s.char_indices() {
+        if c.is_uppercase() && i > 0 {
+            out.push('_');
+        }
+        out.extend(c.to_lowercase());
+    }
+    out
+}
