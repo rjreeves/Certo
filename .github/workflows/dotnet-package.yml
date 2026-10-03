@@ -60,6 +60,24 @@ jobs:
           CERTO_TEST_PG_URL: postgres://postgres:postgres@localhost:5432/postgres
         run: ./packaging/dotnet/codegen-check.ps1
 
+  reference-cli:
+    # the reference host (certo-db) driven end to end on SQLite
+    name: reference CLI (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+      - name: Build certo-db and run it through every command
+        shell: pwsh
+        run: ./packaging/dotnet/cli-check.ps1
+
   native:
     name: native (${{ matrix.rid }})
     strategy:

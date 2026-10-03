@@ -11,6 +11,7 @@ using Certo.Models;
 
 var schema = CertoSdl.Compile("table users { id: serial primary key  email: varchar(100) not null unique }");
 foreach (var d in schema.Diagnostics) Console.WriteLine(d);              // "error SDL100 at 1:19: ..."
+foreach (var t in schema.Schema!.Tables) Console.WriteLine(t.Name);     // the compiled schema as a typed model
 
 var qlResult = CertoQl.Compile(schema, """
     query by_email(e: varchar(100)) { from users u where u.email == :e select u.id, u.email }

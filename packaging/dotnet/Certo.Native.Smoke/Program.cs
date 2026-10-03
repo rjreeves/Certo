@@ -190,6 +190,17 @@ finally
         table users { id: serial primary key  name: varchar(100) not null  role: Role  balance: decimal(10,2) }
         """);
     Check(typedSchema.Ok && typedSchema.Diagnostics.Count == 0, "CertoSdl.Compile");
+    var users = typedSchema.Schema!.Table("users")!;
+    Check(users.Columns.Count == 4 && users.Columns[0] is { Name: "id", PrimaryKey: true, Generated: Generation.Serial }
+          && users.Columns[1] is { Name: "name", Nullable: false } && users.Columns[1].Type.ToString() == "varchar(100)"
+          && users.Columns[2].Type is { IsEnum: true, Name: "Role" } && users.Columns[3].Nullable,
+        "typed schema: tables, columns, types, nullability, generation");
+    Check(typedSchema.Schema!.Enums is [{ Name: "Role", Variants: ["admin", "user"] }], "typed schema: enums");
+    Check(users.Columns[0].ToString() == "id serial primary key" && users.Columns[1].ToString() == "name varchar(100) not null",
+        "a column describes itself in SDL's words");
+    var linked = CertoSdl.Compile("table a { id: serial primary key }\ntable b { id: serial primary key  a_id: int not null references a on delete cascade }");
+    Check(linked.Schema!.Table("b")!.Columns[1].References is { Table: "a", Column: "id", OnDelete: ReferentialAction.Cascade }, "typed schema: references and actions");
+    Check(!CertoSdl.Compile("table t { id: nope }").Ok && CertoSdl.Compile("table t { id: nope }").Schema is null, "no typed schema when there are errors");
     var typedBad = CertoSdl.Compile("table t { id: nope }");
     Check(!typedBad.Ok && typedBad.Diagnostics[0].Severity == DiagnosticSeverity.Error && typedBad.Diagnostics[0].Span is { Line: 1 },
         "typed diagnostics carry severity, code and a position");

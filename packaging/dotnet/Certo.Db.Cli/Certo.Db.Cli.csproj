@@ -1,0 +1,24 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- A reference host for Certo.Native: a command-line tool built only on the typed API.
+       It exists to show how a real CLI uses the library, and to find what the API is missing.
+       It references the Certo.Native project (not the package), so it always tests the current code;
+       stage the native library first (../stage-native.ps1). -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RollForward>Major</RollForward>
+    <AssemblyName>certo-db</AssemblyName>
+    <RootNamespace>Certo.Db.Cli</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Certo.Native\Certo.Native.csproj" />
+    <!-- a project reference does not carry the package's runtimes/ folder, so copy this machine's library next to the tool -->
+    <Content Include="..\Certo.Native\native\$(NETCoreSdkRuntimeIdentifier)\native\*"
+             Link="%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+</Project>

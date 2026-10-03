@@ -184,6 +184,13 @@ namespace Certo.Models
         [JsonPropertyName("rendered")] public string? Rendered { get; init; }
         [JsonPropertyName("error")] public CertoError? Error { get; init; }
 
+        private SchemaIr? _schema;
+
+        /// <summary>The compiled schema as a typed model (tables, columns, enums, ...); null if the schema had errors.</summary>
+        [JsonIgnore]
+        public SchemaIr? Schema =>
+            _schema ??= Ok && Ir.ValueKind == JsonValueKind.Object ? Wire.Parse<SchemaIr>(Ir.GetRawText(), "schema IR") : null;
+
         /// <summary>The IR as JSON text, or a <see cref="CertoException"/> carrying the diagnostics.</summary>
         public string EnsureOk()
         {
@@ -218,18 +225,31 @@ namespace Certo.Models
 
     // ---- JSON converters -------------------------------------------------------------------
 
-    /// <summary>Enums spelled in lower case on the wire (<c>query</c>, <c>warning</c>).</summary>
+    /// <summary>Enums spelled in snake case on the wire (<c>query</c>, <c>warning</c>, <c>no_action</c>).</summary>
     internal sealed class LowerEnumConverter<T> : JsonConverter<T> where T : struct, Enum
     {
+        private static string Normal(string s) => s.Replace("_", "").ToLowerInvariant();
+
         public override T Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
         {
             var s = reader.GetString();
-            if (s is not null && Enum.TryParse<T>(s, ignoreCase: true, out var v)) return v;
+            if (s is not null)
+                foreach (var v in Enum.GetValues(typeof(T)))
+                    if (Normal(v.ToString()!) == Normal(s)) return (T)v;
             throw new JsonException($"unknown {typeof(T).Name} `{s}`");
         }
 
-        public override void Write(Utf8JsonWriter writer, T value, JsonSerializerOptions options) =>
-            writer.WriteStringValue(value.ToString().ToLowerInvariant());
+        public override void Write(Utf8JsonWriter writer, T value, JsonSerializerOptions options)
+        {
+            var name = value.ToString();
+            var snake = new System.Text.StringBuilder();
+            for (int i = 0; i < name.Length; i++)
+            {
+                if (i > 0 && char.IsUpper(name[i])) snake.Append('_');
+                snake.Append(char.ToLowerInvariant(name[i]));
+            }
+            writer.WriteStringValue(snake.ToString());
+        }
     }
 
     /// <summary>
