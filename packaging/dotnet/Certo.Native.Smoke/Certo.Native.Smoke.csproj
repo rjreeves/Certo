@@ -7,7 +7,7 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <RollForward>Major</RollForward>
-    <CertoNativeVersion Condition="'$(CertoNativeVersion)' == ''">0.6.0</CertoNativeVersion>
+    <CertoNativeVersion Condition="'$(CertoNativeVersion)' == ''">0.7.0</CertoNativeVersion>
     <RestoreSources>$(MSBuildThisFileDirectory)..\feed;https://api.nuget.org/v3/index.json</RestoreSources>
   </PropertyGroup>
 
