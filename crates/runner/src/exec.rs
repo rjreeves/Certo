@@ -203,7 +203,12 @@ impl Executor for Box<dyn Executor> {
 /// Connect to the database `target` names, with the executor for the project's
 /// dialect: a `postgres://` URL, or for SQLite a file path / `sqlite:<path>`.
 pub fn connect(project: &crate::project::Project, target: &str) -> Result<Box<dyn Executor>, RunnerError> {
-    match project.config.dialect.as_str() {
+    connect_to(&project.config.dialect, target)
+}
+
+/// `connect` for a database of `dialect` (`"postgres"` or `"sqlite"`), with no project.
+pub fn connect_to(dialect: &str, target: &str) -> Result<Box<dyn Executor>, RunnerError> {
+    match dialect {
         "sqlite" => Ok(Box::new(crate::sqlite_exec::SqliteExecutor::open(target)?)),
         _ => Ok(Box::new(PgExecutor::connect(target)?)),
     }

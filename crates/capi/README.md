@@ -72,6 +72,7 @@ MigrateStatus(dir, {"url":...})                    -> applied / pending
 MigrateApply(dir, {"url":..., "dry_run":..., "to":..., "check_drift":...})
 MigrateDrift(dir, {"url":...})                     -> findings + optional repair SQL
 MigrateAdopt(dir, {"url":..., "dry_run":...})       -> schema.sdl + baseline from an existing database
+SchemaImport({"url":..., "dialect"?:...})           -> a database's schema as SDL (no project, read-only)
 ```
 
 Each call is self-contained (connect, work, disconnect), so there are no

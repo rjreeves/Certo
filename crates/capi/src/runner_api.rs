@@ -362,6 +362,58 @@ pub fn adopt(dir: &str, opts: Option<&str>) -> String {
     }
 }
 
+// ---- schema import ------------------------------------------------------
+
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct ImportOpts {
+    url: Option<String>,
+    /// `postgres` or `sqlite`; by default `postgres` for a `postgres://` URL and `sqlite` otherwise.
+    dialect: Option<String>,
+}
+
+/// Read a database's schema as SDL, with no project and without changing the database. options:
+/// `{"url": "...", "dialect"?: "postgres"|"sqlite"}`. Result: `schema_sdl`, `imported` (counts) and
+/// `omissions` (everything SDL cannot express, left out).
+pub fn import(opts: Option<&str>) -> String {
+    let o: ImportOpts = match parse_opts(opts) { Ok(o) => o, Err(e) => return e };
+    let Some(url) = o.url.as_deref().filter(|u| !u.is_empty()) else {
+        return error_json("missing_url", "options.url is required (a postgres:// URL, or a database file path for sqlite)", json!({}));
+    };
+    let dialect = match o.dialect.as_deref() {
+        Some(d @ ("postgres" | "sqlite")) => d,
+        Some(other) => return error_json("invalid_options", format!("unknown dialect `{other}` (postgres, sqlite)"), json!({})),
+        None if url.starts_with("postgres://") || url.starts_with("postgresql://") => "postgres",
+        None => "sqlite",
+    };
+    if dialect == "sqlite" {
+        // opening would create an empty database for a mistyped path; reading must not
+        let path = url.strip_prefix("sqlite://").or_else(|| url.strip_prefix("sqlite:")).unwrap_or(url);
+        if !Path::new(path).is_file() {
+            return error_json("connection", format!("the sqlite database `{path}` does not exist"), json!({}));
+        }
+    }
+    let mut db = match certo_runner::connect_to(dialect, url) { Ok(d) => d, Err(e) => return runner_error(&e) };
+    match certo_runner::import_schema(&mut db) {
+        Ok(p) => json!({
+            "ok": true,
+            "schema_sdl": p.sdl,
+            "imported": {
+                "tables": p.counts.tables,
+                "columns": p.counts.columns,
+                "enums": p.counts.enums,
+                "types": p.counts.types,
+                "sequences": p.counts.sequences,
+                "indexes": p.counts.indexes,
+                "constraints": p.counts.constraints,
+            },
+            "omissions": p.omissions,
+        })
+        .to_string(),
+        Err(e) => runner_error(&e),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -380,6 +432,18 @@ mod tests {
     fn set_schema(dir: &str, src: &str) { std::fs::write(Path::new(dir).join("schema.sdl"), src).unwrap(); }
 
     fn new_json(name: &str) -> String { json!({ "name": name }).to_string() }
+
+    #[test]
+    fn import_validates_its_options_and_never_creates_a_database() {
+        assert_eq!(code(&import(None)), "missing_url");
+        assert_eq!(code(&import(Some(r#"{"url":"x","dialect":"oracle"}"#))), "invalid_options");
+        assert_eq!(code(&import(Some(r#"{"url":"x","bogus":1}"#))), "invalid_options");
+        let d = tempfile::tempdir().unwrap();
+        let missing = d.path().join("nope.db");
+        let opts = json!({ "url": missing.to_str().unwrap() }).to_string();
+        assert_eq!(code(&import(Some(&opts))), "connection");
+        assert!(!missing.exists(), "a mistyped path must not become an empty database");
+    }
 
     #[test]
     fn init_new_list_without_a_database() {

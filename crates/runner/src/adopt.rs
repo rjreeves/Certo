@@ -329,6 +329,14 @@ pub fn prepare_for(dialect: Dialect, live: LiveSchema) -> Result<Prepared, Runne
     Ok(Prepared { ir, sdl, omissions: om, counts })
 }
 
+/// Read the schema of the database behind `exec` as SDL, changing nothing (no project, no history table):
+/// the tables, enums, types and sequences SDL can express, and a note for everything it cannot.
+pub fn import_schema(exec: &mut dyn Executor) -> Result<Prepared, RunnerError> {
+    let dialect = Dialect::from_name(exec.dialect()).unwrap_or(Dialect::Postgres);
+    let live = exec.introspect().map_err(|e| RunnerError::Connection(e.message))?;
+    prepare_for(dialect, live)
+}
+
 /// Adopt the database behind `exec` into `project` (which must be fresh).
 pub fn adopt(project: &Project, exec: &mut dyn Executor, opts: &AdoptOptions) -> Result<AdoptReport, RunnerError> {
     crate::runner::check_dialect(project, exec)?;

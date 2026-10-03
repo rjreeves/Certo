@@ -135,6 +135,12 @@ char *certo_migrate_drift(const char *project_dir, const char *options);
  * Only for a fresh project and an unmanaged database. */
 char *certo_migrate_adopt(const char *project_dir, const char *options);
 
+/* options: {"url", "dialect"?: "postgres"|"sqlite"}  (dialect defaults from the url)
+ *   -> {schema_sdl, imported:{tables,columns,enums,types,sequences,indexes,constraints}, omissions[]}
+ * Reads a database's schema as SDL with no project, changing nothing (a missing SQLite file is an error,
+ * not an empty database). `omissions` lists what SDL cannot express and was left out. */
+char *certo_schema_import(const char *options);
+
 /* Release a string returned by this library. NULL is ignored. */
 void certo_string_free(char *s);
 

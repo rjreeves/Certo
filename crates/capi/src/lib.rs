@@ -304,6 +304,20 @@ pub unsafe extern "C" fn certo_migrate_adopt(project_dir: *const c_char, options
     unsafe { runner_call(project_dir, options, runner_api::adopt) }
 }
 
+/// Read a database's schema as SDL without a project and without changing it. `options` is JSON:
+/// `{"url": "...", "dialect"?: "postgres"|"sqlite"}`. Result: `schema_sdl`, `imported` (counts),
+/// `omissions` (what SDL cannot express, left out).
+///
+/// # Safety
+/// `options` must be a valid NUL-terminated string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn certo_schema_import(options: *const c_char) -> *mut c_char {
+    match unsafe { arg(options, "options") } {
+        Ok(o) => respond(|| runner_api::import(Some(o))),
+        Err(e) => into_c(e),
+    }
+}
+
 /// Release a string returned by any `certo_*` function. NULL is ignored.
 ///
 /// # Safety
