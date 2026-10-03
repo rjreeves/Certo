@@ -1,6 +1,6 @@
 [package]
 name    = "certo-capi"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2024"
 description = "C ABI for the Certo database compiler (SDL / migration plan / SQL), for hosts such as the C# CLI"
 
