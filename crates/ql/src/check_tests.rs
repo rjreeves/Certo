@@ -1215,3 +1215,65 @@ fn recursive_queries_serialise() {
     let back: QueryIR = serde_json::from_value(j[0]["ir"].clone()).unwrap();
     assert!(back.ctes[0].recursive);
 }
+
+// ---- `||` ----------------------------------------------------------------------------- //
+
+#[test]
+fn concat_lowers_and_is_typed() {
+    let q = &ok("query q(n: text) { from customers c select c.name || \" <\" || c.email || \">\" as who, c.name || \"!\" as shout, \"hi \" || :n as greeting }")[0];
+    assert!(q.sql.contains("(\"c\".\"name\" || ' <' || \"c\".\"email\" || '>') AS \"who\""), "{}", q.sql);
+    assert!(q.sql.contains("('hi ' || ($1::text)) AS \"greeting\""), "{}", q.sql);
+    let c = &q.ir.select;
+    assert_eq!((c[0].ty.clone(), c[0].nullable), (b(Builtin::Text), true), "NULL if any part is: email is nullable");
+    assert_eq!((c[1].ty.clone(), c[1].nullable), (b(Builtin::Text), false));
+    assert_eq!((c[2].ty.clone(), c[2].nullable), (b(Builtin::Text), false));
+    // a nullable parameter makes the result nullable
+    let q = &ok("query q(n: text null) { from customers c select \"hi \" || :n as g }")[0];
+    assert!(q.ir.select[0].nullable);
+}
+
+#[test]
+fn concat_joins_text_with_whole_numbers_enums_and_uuids_only() {
+    ok("query q() { from customers c select c.name || c.id as a, c.name || c.role as b, c.name || c.token as c, \"n=\" || 5 as d }");
+    // nothing else prints the same in PostgreSQL and SQLite
+    assert_eq!(errors("query q() { from customers c select c.name || c.balance as x }"), ["QL257"]);
+    assert_eq!(errors("query q() { from customers c select c.name || c.born as x }"), ["QL257"]);
+    assert_eq!(errors("query q() { from customers c select c.name || (c.id == 1) as x }"), ["QL257"]);
+    assert_eq!(errors("query q() { from customers c select c.name || 1.5 as x }"), ["QL257"]);
+    // at least one side is text
+    assert_eq!(errors("query q() { from customers c select c.id || 5 as x }"), ["QL257"]);
+    assert_eq!(errors("query q() { from customers c select null || null as x }"), ["QL257"]);
+    // a NULL literal is fine next to text, and the result may be NULL
+    let q = &ok("query q() { from customers c select c.name || null as x }")[0];
+    assert!(q.ir.select[0].nullable);
+    // an error in a part is reported once
+    assert_eq!(errors("query q() { from customers c select c.name || c.nope as x }"), ["QL206"]);
+}
+
+#[test]
+fn concat_precedence_is_additive_and_left_to_right() {
+    // looser than nothing but comparison: `||` binds tighter than `==`
+    let s = sql_of("query q() { from customers c where c.name || \"x\" == \"ax\" select c.id }");
+    assert!(s.contains("((\"c\".\"name\" || 'x') = 'ax')"), "{s}");
+    // like `+`: arithmetic before it is finished first, after it is not
+    let s = sql_of("query q() { from customers c select (1 + 2) || \"a\" || c.name as x }");
+    assert!(s.contains("(((1 + 2)) || 'a' || \"c\".\"name\")") || s.contains("((1 + 2) || 'a' || \"c\".\"name\")"), "{s}");
+    assert_eq!(errors("query q() { from customers c select \"a\" || 1 + 2 as x }"), ["QL211"]);
+    // grouping, windows and aggregates see through it
+    ok("query q() { from customers c group by c.name || \"!\" select c.name || \"!\" as g, count(*) as n }");
+    ok("query q() { from customers c select max(c.name || \"x\") as m }");
+    assert_eq!(errors("query q() { from customers c group by c.id select c.name || \"!\" as g }"), ["QL214"]);
+}
+
+#[test]
+fn recursive_queries_can_build_paths() {
+    let q = &tree_ok(
+        "query q() { with recursive t as (
+            from categories c where c.parent_id is null select c.id, c.name as path
+            union all
+            from categories c join t on c.parent_id == t.id select c.id, t.path || \"/\" || c.name as path)
+          from t select t.path order by t.path }",
+    )[0];
+    assert!(q.sql.contains("(\"t\".\"path\" || '/' || \"c\".\"name\") AS \"path\""), "{}", q.sql);
+    assert!(!q.ir.select[0].nullable);
+}

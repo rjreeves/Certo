@@ -144,6 +144,8 @@ pub enum QExpr {
     /// An aggregate; `arg: None` is `count(*)`.
     Agg { func: String, arg: Option<Box<QExpr>>, distinct: bool },
     Case { whens: Vec<When>, otherwise: Option<Box<QExpr>> },
+    /// `a || b || c`: text joined end to end; NULL if any part is.
+    Concat { parts: Vec<QExpr> },
     /// A window function: `call` (an aggregate or a ranking / navigation function) over
     /// a partition of the rows, in an order.
     Window {

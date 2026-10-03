@@ -378,6 +378,7 @@ impl Q {
         1 + match e {
             Expr::Number(..) | Expr::Decimal(..) | Expr::Str(..) | Expr::Bool(..) | Expr::Null(_)
             | Expr::Column { .. } | Expr::Param(_) | Expr::Exists(..) | Expr::Scalar(..) => 0,
+            Expr::Concat(parts, _) => parts.iter().map(Self::depth).max().unwrap_or(0),
             Expr::InQuery { expr, .. } => Self::depth(expr),
             Expr::Binary { lhs, rhs, .. } => Self::depth(lhs).max(Self::depth(rhs)),
             Expr::Not(i, _) | Expr::Paren(i, _) => Self::depth(i),
@@ -507,6 +508,23 @@ impl Q {
                     self.check_depth(&lhs)?;
                     continue;
                 }
+            }
+            // `||` binds like `+`, left to right; a chain is one concatenation of several parts
+            if *self.p.peek() == TokKind::Concat {
+                if 5 < min { break; }
+                self.count()?;
+                self.p.bump();
+                let rhs = self.bp(6)?;
+                let span = lhs.span().to(rhs.span());
+                lhs = match lhs {
+                    Expr::Concat(mut parts, _) => {
+                        parts.push(rhs);
+                        Expr::Concat(parts, span)
+                    }
+                    other => Expr::Concat(vec![other, rhs], span),
+                };
+                self.check_depth(&lhs)?;
+                continue;
             }
             let Some(op) = self.binop() else { break };
             if op.precedence() < min { break; }

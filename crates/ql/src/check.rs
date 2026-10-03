@@ -15,7 +15,7 @@
 //! unique key. `with`: QL254 duplicate name, QL256 a recursive query that is not well formed.
 //! Set operations: QL250 `order by` must name an output column, QL253
 //! the branches do not line up (columns, types, mixed or unsupported operators).
-//! Window functions: QL251 misplaced or nested, QL252 unknown
+//! `||`: QL257 an operand that cannot be joined as text. Window functions: QL251 misplaced or nested, QL252 unknown
 //! function or wrong arguments, QL255 bad frame. Subqueries: QL240 must return one column, QL241 scalar
 //! subquery may return several rows, QL242 insert row/column count, QL243
 //! (parser) nested too deeply. QL290 (warning): unused parameter.
@@ -222,6 +222,7 @@ fn has_window_or_agg(e: &QExpr) -> bool {
         QExpr::In { expr, list, .. } => has_window_or_agg(expr) || list.iter().any(has_window_or_agg),
         QExpr::Like { expr, pattern, .. } => has_window_or_agg(expr) || has_window_or_agg(pattern),
         QExpr::Call { args, .. } => args.iter().any(has_window_or_agg),
+        QExpr::Concat { parts } => parts.iter().any(has_window_or_agg),
         QExpr::Case { whens, otherwise } => {
             whens.iter().any(|w| has_window_or_agg(&w.when) || has_window_or_agg(&w.then))
                 || otherwise.as_ref().is_some_and(|o| has_window_or_agg(o))
@@ -241,6 +242,7 @@ fn in_subquery(e: &QExpr, name: &str) -> bool {
         QExpr::In { expr, list, .. } => in_subquery(expr, name) || list.iter().any(|i| in_subquery(i, name)),
         QExpr::Like { expr, pattern, .. } => in_subquery(expr, name) || in_subquery(pattern, name),
         QExpr::Call { args, .. } => args.iter().any(|a| in_subquery(a, name)),
+        QExpr::Concat { parts } => parts.iter().any(|p| in_subquery(p, name)),
         QExpr::Agg { arg, .. } => arg.as_ref().is_some_and(|a| in_subquery(a, name)),
         QExpr::Window { call, partition_by, order_by, .. } => {
             in_subquery(call, name)
@@ -299,6 +301,7 @@ fn refs_expr(e: &QExpr, bound: &HashSet<String>, out: &mut Vec<QExpr>) {
             refs_expr(pattern, bound, out);
         }
         QExpr::Call { args, .. } => args.iter().for_each(|a| refs_expr(a, bound, out)),
+        QExpr::Concat { parts } => parts.iter().for_each(|p| refs_expr(p, bound, out)),
         QExpr::Window { call, partition_by, order_by, .. } => {
             refs_expr(call, bound, out);
             partition_by.iter().for_each(|p| refs_expr(p, bound, out));
@@ -396,6 +399,7 @@ fn uncovered(e: &QExpr, groups: &[QExpr], scope: &HashSet<String>) -> Option<Str
         }
         QExpr::Like { expr, pattern, .. } => uncovered(expr, groups, scope).or_else(|| uncovered(pattern, groups, scope)),
         QExpr::Call { args, .. } => args.iter().find_map(|a| uncovered(a, groups, scope)),
+        QExpr::Concat { parts } => parts.iter().find_map(|p| uncovered(p, groups, scope)),
         // a window function sees the grouped rows: its inputs follow the same rule as the select list
         QExpr::Window { call, partition_by, order_by, .. } => {
             let inner = match &**call {
@@ -1611,6 +1615,50 @@ impl<'a> Checker<'a> {
                 Some(Typed { e: QExpr::Case { whens: ws, otherwise: other }, t: result, nullable, agg })
             }
             Expr::Call { func, args, star, distinct, over, span } => self.call(func, args, *star, *distinct, over.as_ref(), *span, ctx),
+            Expr::Concat(parts, span) => {
+                let mut typed = Vec::new();
+                let mut ok = true;
+                for p in parts {
+                    match self.expr(p, ctx) {
+                        Some(t) => typed.push((t, p.span())),
+                        None => ok = false,
+                    }
+                }
+                if !ok {
+                    return None;
+                }
+                // PostgreSQL and SQLite agree on how text, whole numbers, enums and uuids print, and on
+                // nothing else (a bool is `true` in one and `1` in the other), so those are what joins
+                let mut has_text = false;
+                for (t, at) in &typed {
+                    match &t.t {
+                        T::Null => {}
+                        T::Known(k) if is_text(k) => has_text = true,
+                        T::Known(TypeIR::Builtin(Builtin::SmallInt | Builtin::Int | Builtin::BigInt | Builtin::Uuid) | TypeIR::Enum(_)) => {}
+                        other => {
+                            self.fail(
+                                "QL257",
+                                format!("`||` joins text: {} cannot be joined (whole numbers, enums and uuids may be joined to text, nothing else)", describe_t(other)),
+                                *at,
+                            );
+                            ok = false;
+                        }
+                    }
+                }
+                if ok && !has_text {
+                    self.fail("QL257", "`||` needs at least one text operand", *span);
+                    return None;
+                }
+                if !ok {
+                    return None;
+                }
+                Some(Typed {
+                    nullable: typed.iter().any(|(t, _)| t.nullable),
+                    agg: typed.iter().any(|(t, _)| t.agg),
+                    t: T::Known(builtin(Builtin::Text)),
+                    e: QExpr::Concat { parts: typed.into_iter().map(|(t, _)| t.e).collect() },
+                })
+            }
             Expr::Exists(q, _) => {
                 let (ir, _) = self.subquery(q)?;
                 Some(Typed { e: QExpr::Exists { query: Box::new(ir) }, t: T::Known(builtin(Builtin::Bool)), nullable: false, agg: false })

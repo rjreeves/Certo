@@ -347,6 +347,10 @@ impl Lowerer<'_> {
                 None => format!("{func}(*)"),
                 Some(a) => format!("{func}({}{})", if *distinct { "DISTINCT " } else { "" }, self.expr(a)),
             },
+            QExpr::Concat { parts } => {
+                let p: Vec<String> = parts.iter().map(|e| self.expr(e)).collect();
+                format!("({})", p.join(" || "))
+            }
             QExpr::Window { call, partition_by, order_by, frame } => {
                 let call = self.expr(call);
                 let mut spec = Vec::new();

@@ -399,3 +399,28 @@ fn recursive_queries_run_on_sqlite() {
     gone.sort();
     assert_eq!(gone, ["a1"]);
 }
+
+#[test]
+fn concatenation_runs_on_sqlite() {
+    let mut db = db();
+    // customers: (1, Ann, a@x.com, admin), (2, Bob, NULL, user), (3, Cy, c@x.com, guest)
+    let q = db.stmt("query who() { from customers c select c.id,
+        c.name || \" <\" || c.email || \">\" as who,
+        c.name || \"#\" || c.id as tag,
+        c.name || \":\" || c.role as role_tag order by c.id }");
+    let rows = db.run(&q, &[]);
+    assert_eq!(rows[0], ["1", "Ann <a@x.com>", "Ann#1", "Ann:admin"]);
+    assert_eq!(rows[1], ["2", "NULL", "Bob#2", "Bob:user"], "NULL if any part is: Bob has no email");
+    assert_eq!(rows[2], ["3", "Cy <c@x.com>", "Cy#3", "Cy:guest"]);
+    assert!(q.columns()[1].nullable && !q.columns()[2].nullable);
+    // a parameter, and in a filter
+    let q = db.stmt("query greet(who: text) { from customers c where c.name || \"!\" == :who select c.id }");
+    assert_eq!(db.run(&q, &[("who", t("Bob!"))]), [["2"]]);
+    // building paths through a hierarchy
+    let q = db.stmt("query paths() { with recursive t as (
+            from categories c where c.parent_id is null select c.id, c.name as path
+            union all
+            from categories c join t on c.parent_id == t.id select c.id, t.path || \"/\" || c.name as path)
+        from t select t.path order by t.path }");
+    assert_eq!(db.run(&q, &[]), [["root"], ["root/a"], ["root/a/a1"], ["root/b"]]);
+}

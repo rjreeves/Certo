@@ -667,6 +667,7 @@ fn symbol(k: &TokKind) -> &'static str {
         TokKind::EqEq => "==", TokKind::NotEq => "!=",
         TokKind::Lt => "<", TokKind::Le => "<=", TokKind::Gt => ">", TokKind::Ge => ">=",
         TokKind::Plus => "+", TokKind::Minus => "-", TokKind::Star => "*", TokKind::Slash => "/",
+        TokKind::Concat => "||",
         _ => "?",
     }
 }

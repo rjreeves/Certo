@@ -303,7 +303,7 @@ SelectItem      = "*" | Ident "." "*" | QExpr [ "as" Ident ] ;
 OrderItem       = QExpr [ "asc" | "desc" ] ;
 
 QExpr           = Literal | "null" | Column | Param | FunctionCall | CaseExpr
-                | QExpr BinaryOp QExpr | "not" QExpr
+                | QExpr BinaryOp QExpr | QExpr "||" QExpr | "not" QExpr
                 | QExpr "is" [ "not" ] "null"
                 | QExpr [ "not" ] "in" "(" QExpr { "," QExpr } ")"
                 | QExpr [ "not" ] "in" "(" SelectBody ")"      (* subquery, one column *)
@@ -347,6 +347,14 @@ from the nullable side of a `left join`, if an operand is a nullable parameter
 or column, for `sum`/`avg`/`min`/`max` (empty input), and for `case` without
 `else`.  `count` is never null; `x is null` is never null; `coalesce` is
 non-null as soon as one argument is.
+
+Concatenation: `a || b || c` joins text end to end and is NULL if any part is (as in both
+databases).  It binds like `+` (so `a || b == c` compares the joined text, and `a || b + c` is
+`(a || b) + c`); a chain is one join and a parenthesised join stays a unit.  The result is `text`.
+At least one part must be text; the others may be text, whole numbers, enums or uuids, which print
+the same in PostgreSQL and SQLite.  Decimals, bools, dates, timestamps, json and bytes cannot be
+joined (QL257), because their text differs between the databases.  A literal NULL is allowed beside
+text.  Recursive queries use it to build paths: `t.path || "/" || c.name`.
 
 Subqueries use a query's own clauses, in the same order, in parentheses: `x in (from t
 where ... select t.id)`, `exists (from ...)`, `(from ... select max(t.n))`.  A subquery sees
