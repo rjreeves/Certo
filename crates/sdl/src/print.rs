@@ -56,6 +56,13 @@ pub fn to_sdl(ir: &SchemaIR) -> Result<String, String> {
             trailing.push(format!("constraint {} on {} using {}", k.name, t.name, expr(&k.expr, 0, false)?));
         }
     }
+    for v in &ir.views {
+        let mut line = format!("view {} on {} ({})", v.name, v.from, v.columns.join(", "));
+        if let Some(f) = &v.filter {
+            line.push_str(&format!(" where {}", expr(f, 0, false)?));
+        }
+        trailing.push(line);
+    }
     if !trailing.is_empty() {
         blocks.push(trailing.join("\n"));
     }

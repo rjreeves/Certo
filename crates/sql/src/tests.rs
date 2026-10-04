@@ -445,3 +445,18 @@ fn removing_and_switching_generations() {
     assert_eq!(out[0], "ALTER TABLE \"t\" ALTER COLUMN \"n\" DROP IDENTITY;");
     assert!(out[1].starts_with("CREATE SEQUENCE \"t_n_seq\""), "{out:?}");
 }
+
+#[test]
+fn views_lower_to_create_and_drop_view() {
+    let t = "table users { id: uuid primary key  email: text not null  age: int }";
+    let with = format!("{t} view adults on users (id, email) where age >= 18 view all_mail on users (email)");
+    let out = sql("", &with);
+    assert_eq!(
+        &out[out.len() - 2..],
+        [
+            "CREATE VIEW \"adults\" AS SELECT \"id\", \"email\" FROM \"users\" WHERE (\"age\" >= 18);",
+            "CREATE VIEW \"all_mail\" AS SELECT \"email\" FROM \"users\";",
+        ]
+    );
+    assert_eq!(sql(&with, t), ["DROP VIEW \"adults\";", "DROP VIEW \"all_mail\";"]);
+}

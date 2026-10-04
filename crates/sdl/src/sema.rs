@@ -132,12 +132,23 @@ pub fn analyze(file: &SdlFile, diags: &mut Vec<Diagnostic>) -> SchemaIR {
         t.constraints.sort_by(|a, b| a.name.cmp(&b.name));
     }
 
+    // ---- views ------------------------------------------------------- //
+    let mut views: BTreeMap<String, ViewIR> = BTreeMap::new();
+    for d in &file.decls {
+        let Decl::View(v) = d else { continue };
+        if !sym.is_canonical(&v.name) { continue; }
+        if let Some(ir) = resolve_view(v, &sym, &col_types, &variants, &seq_names, diags) {
+            views.insert(ir.name.clone(), ir);
+        }
+    }
+
     SchemaIR {
         version: IR_VERSION,
         tables: tables.into_values().collect(),
         enums: enums.into_values().collect(),
         types: composites.into_values().collect(),
         sequences: sequences.into_values().collect(),
+        views: views.into_values().collect(),
     }
 }
 
@@ -180,6 +191,51 @@ fn resolve_sequence(s: &SequenceDecl, diags: &mut Vec<Diagnostic>) -> Option<Seq
         return None;
     }
     Some(SequenceIR { name: s.name.name.clone(), start, increment, min, max, cache, cycle })
+}
+
+/// A view reads columns of one table; its condition is checked like a constraint's.
+fn resolve_view(
+    v: &ViewDecl,
+    sym: &SymbolTable,
+    col_types: &HashMap<String, HashMap<String, TypeIR>>,
+    variants: &HashMap<String, Vec<String>>,
+    seq_names: &HashSet<String>,
+    diags: &mut Vec<Diagnostic>,
+) -> Option<ViewIR> {
+    if let Some(SymKind::View | SymKind::Enum | SymKind::Type | SymKind::Sequence) = sym.kind(&v.table.name) {
+        error(diags, "SDL213", format!("`{}` is not a table: a view reads one table", v.table.name), v.table.span);
+        return None;
+    }
+    let cols = table_cols(col_types, &v.table, diags)?;
+    let mut seen = HashSet::new();
+    let mut names = Vec::new();
+    for c in &v.columns {
+        if !cols.contains_key(&c.name) {
+            error(diags, "SDL206", format!("table `{}` has no column `{}`", v.table.name, c.name), c.span);
+        } else if !seen.insert(c.name.clone()) {
+            error(diags, "SDL206", format!("column `{}` listed twice in view `{}`", c.name, v.name.name), c.span);
+        } else {
+            names.push(c.name.clone());
+        }
+    }
+    if names.len() != v.columns.len() {
+        return None;
+    }
+    let filter = match &v.filter {
+        None => None,
+        Some(e) => {
+            let mut cx = ExprCx { enums: variants, columns: Some(cols), sequences: seq_names, diags };
+            let (expr, ty) = cx.check(e, None)?;
+            if ty != TypeIR::Builtin(Builtin::Bool) {
+                error(diags, "SDL211",
+                    format!("the condition of view `{}` must be a boolean expression, found {}", v.name.name, describe(&ty)),
+                    e.span());
+                return None;
+            }
+            Some(expr)
+        }
+    };
+    Some(ViewIR { name: v.name.name.clone(), from: v.table.name.clone(), columns: names, filter })
 }
 
 fn table_cols<'a>(
@@ -239,6 +295,10 @@ fn resolve_type(sym: &SymbolTable, ty: &TypeRef, diags: &mut Vec<Diagnostic>) ->
         Some(SymKind::Type) => Some(TypeIR::Composite(id.name.clone())),
         Some(SymKind::Sequence) => {
             error(diags, "SDL202", format!("`{}` is a sequence, not a type", id.name), id.span);
+            None
+        }
+        Some(SymKind::View) => {
+            error(diags, "SDL202", format!("`{}` is a view, not a type", id.name), id.span);
             None
         }
         Some(SymKind::Table) => {

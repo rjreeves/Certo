@@ -317,3 +317,23 @@ fn renaming_a_column_updates_every_expression_form_that_uses_it() {
                  constraint c on t using m is not null and not (m in (3))";
     assert_eq!(plan(before, after, "rename column t.n -> m"), ["~ rename column t.n -> m"]);
 }
+
+// ---- views over renames --------------------------------------------- //
+
+#[test]
+fn views_are_dropped_before_a_rename_and_created_after() {
+    let before = "table users { id: uuid primary key  email: text not null }
+                  view mails on users (email)";
+    let after = "table accounts { id: uuid primary key  email: text not null }
+                 view mails on accounts (email)";
+    assert_eq!(
+        plan(before, after, "rename table users -> accounts"),
+        ["- view mails", "~ rename table users -> accounts", "+ view mails"]
+    );
+    let after_col = "table users { id: uuid primary key  address: text not null }
+                     view mails on users (address)";
+    assert_eq!(
+        plan(before, after_col, "rename column users.email -> address"),
+        ["- view mails", "~ rename column users.email -> address", "+ view mails"]
+    );
+}

@@ -102,7 +102,11 @@ pub fn plan_migration(
     }
 
     // ---- assemble ---------------------------------------------------- //
-    let mut ops = before_ops;
+    // views that must go come before everything, the renames included
+    let lead = plan.ops.iter().take_while(|o| matches!(o, Op::DropView { .. })).count();
+    let rest = plan.ops.split_off(lead);
+    let mut ops = std::mem::replace(&mut plan.ops, rest);
+    ops.extend(before_ops);
     for (from, to) in &table_renames {
         let columns = before.tables.iter().find(|t| &t.name == from).map(|t| t.columns.clone()).unwrap_or_default();
         ops.push(Op::RenameTable { from: from.clone(), to: to.clone(), columns });
@@ -122,7 +126,39 @@ pub fn plan_migration(
     ops.extend(plan.ops);
     ops.extend(after_ops);
     plan.ops = ops;
+    recreate_views_over_renames(&mut plan, &renamed, after, &table_renames, &col_renames);
     Some(plan)
+}
+
+/// A rename, or an enum rebuilt under it, changes what a view reads without changing the view: it has to be dropped
+/// before and created after like any other view over a table being altered.
+fn recreate_views_over_renames(
+    plan: &mut MigrationPlan,
+    renamed: &SchemaIR,
+    after: &SchemaIR,
+    table_renames: &TableRenames,
+    col_renames: &ColRenames,
+) {
+    let mut touched: HashSet<String> = table_renames.iter().map(|(_, to)| to.clone()).collect();
+    for (table, _, _) in col_renames {
+        touched.insert(table_renames.iter().find(|(f, _)| f == table).map_or(table, |(_, t)| t).clone());
+    }
+    for op in &plan.ops {
+        if let Op::RecreateEnum { columns, .. } = op {
+            touched.extend(columns.iter().map(|c| c.table.clone()));
+        }
+    }
+    for v in &after.views {
+        if !touched.contains(&v.from) { continue; }
+        let drops = plan.ops.iter().any(|o| matches!(o, Op::DropView { name } if *name == v.name));
+        let creates = plan.ops.iter().any(|o| matches!(o, Op::CreateView { definition } if definition.name == v.name));
+        if !drops && renamed.view(&v.name).is_some() {
+            plan.ops.insert(0, Op::DropView { name: v.name.clone() });
+        }
+        if !creates {
+            plan.ops.push(Op::CreateView { definition: v.clone() });
+        }
+    }
 }
 
 // ---- renames --------------------------------------------------------- //
@@ -249,6 +285,21 @@ fn apply_renames(ir: &SchemaIR, tables: &TableRenames, cols: &ColRenames) -> Sch
             for rel in &mut table.relationships {
                 if rel.target == *from { rel.target = to.clone(); }
             }
+        }
+    }
+    for (t, from, to) in cols {
+        for v in out.views.iter_mut().filter(|v| v.from == *t) {
+            for c in &mut v.columns {
+                if c == from { *c = to.clone(); }
+            }
+            if let Some(f) = &mut v.filter {
+                rename_in_expr(f, from, to);
+            }
+        }
+    }
+    for (from, to) in tables {
+        for v in &mut out.views {
+            if v.from == *from { v.from = to.clone(); }
         }
     }
     out.tables.sort_by(|a, b| a.name.cmp(&b.name));

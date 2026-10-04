@@ -332,8 +332,15 @@ fn items(dialect: Dialect, plan: &MigrationPlan) -> Vec<DriftItem> {
 
 /// Compare `expected` with an introspected schema.
 pub fn compare(dialect: Dialect, expected: &SchemaIR, live: LiveSchema, expected_from: &str) -> Drift {
-    let LiveSchema { ir: mut live_ir, notes } = live;
+    let LiveSchema { ir: mut live_ir, mut notes, views } = live;
     align(dialect, expected, &mut live_ir);
+    // an SDL view is there or it is not; what a database says about its definition is not comparable with what was written
+    for v in &expected.views {
+        if views.contains(&v.name) {
+            live_ir.views.push(v.clone());
+            notes.retain(|n| *n != format!("view {} is not represented in the schema", v.name));
+        }
+    }
     let plan = diff(&live_ir, expected);
     Drift {
         expected_from: expected_from.to_string(),
@@ -404,7 +411,7 @@ mod tests {
     }
 
     fn drift(expected: &str, live: &str) -> Drift {
-        compare(Dialect::Postgres, &ir(expected), LiveSchema { ir: ir(live), notes: vec![] }, "test")
+        compare(Dialect::Postgres, &ir(expected), LiveSchema { ir: ir(live), notes: vec![], views: vec![] }, "test")
     }
 
     fn texts(d: &Drift) -> Vec<String> {
@@ -495,7 +502,7 @@ mod tests {
         let e = ir("sequence s table t { id: bigint primary key default nextval(s) }");
         let mut l = e.clone();
         l.tables[0].columns[0].default = Some(ExprIR::Raw { sql: "nextval('s'::regclass)".into() });
-        let d = compare(Dialect::Postgres, &e, LiveSchema { ir: l, notes: vec![] }, "test");
+        let d = compare(Dialect::Postgres, &e, LiveSchema { ir: l, notes: vec![], views: vec![] }, "test");
         assert!(d.in_sync(), "{:?}", texts(&d));
     }
 
@@ -537,7 +544,7 @@ mod tests {
         let mut l = e.clone();
         let t = l.tables.iter_mut().find(|t| t.name == table).unwrap();
         t.columns.iter_mut().find(|c| c.name == col).unwrap().default = Some(ExprIR::Raw { sql: raw.into() });
-        compare(Dialect::Postgres, &e, LiveSchema { ir: l, notes: vec![] }, "test")
+        compare(Dialect::Postgres, &e, LiveSchema { ir: l, notes: vec![], views: vec![] }, "test")
     }
 
     #[test]
@@ -560,10 +567,10 @@ mod tests {
         let e = ir("table t { id: int primary key  n: int } constraint c on t using n >= 18 and n != 99");
         let mut l = e.clone();
         l.tables[0].constraints[0].expr = ExprIR::Raw { sql: "((n >= 18) AND (n <> 99))".into() };
-        let d = compare(Dialect::Postgres, &e, LiveSchema { ir: l.clone(), notes: vec![] }, "t");
+        let d = compare(Dialect::Postgres, &e, LiveSchema { ir: l.clone(), notes: vec![], views: vec![] }, "t");
         assert!(d.in_sync(), "{:?}", texts(&d));
         l.tables[0].constraints[0].expr = ExprIR::Raw { sql: "((n >= 21) AND (n <> 99))".into() };
-        let d = compare(Dialect::Postgres, &e, LiveSchema { ir: l, notes: vec![] }, "t");
+        let d = compare(Dialect::Postgres, &e, LiveSchema { ir: l, notes: vec![], views: vec![] }, "t");
         assert_eq!(texts(&d), ["Different: check constraint c on t: definition differs"]);
     }
 
@@ -572,7 +579,7 @@ mod tests {
         let d = compare(
             Dialect::Postgres,
             &ir(BASE),
-            LiveSchema { ir: ir(BASE), notes: vec!["column t.c has type varchar(255)".into()] },
+            LiveSchema { ir: ir(BASE), notes: vec!["column t.c has type varchar(255)".into()], views: vec![] },
             "test",
         );
         assert!(d.in_sync());

@@ -5,7 +5,8 @@ Decl             = TableDecl
                  | TypeDecl
                  | IndexDecl
                  | ConstraintDecl
-                 | SequenceDecl ;
+                 | SequenceDecl
+                 | ViewDecl ;
 
 ──────────────────────────────────────────────────────────────
 TABLES
@@ -98,6 +99,18 @@ CONSTRAINTS
 ──────────────────────────────────────────────────────────────
 
 ConstraintDecl   = "constraint" Ident "on" Ident "using" Expr ;
+
+──────────────────────────────────────────────────────────────
+VIEWS
+──────────────────────────────────────────────────────────────
+
+ViewDecl         = "view" Ident "on" Ident "(" Ident { "," Ident } ")"
+                   [ "where" Expr ] ;
+
+A view reads ONE table (not another view): some of its columns, optionally only
+the rows `where` keeps (a boolean Expr over that table's columns, as in a
+constraint). Views share the namespace of tables, enums, types and sequences.
+QL-bodied views (richer queries) live in `views.ql`; see the QL README.
 
 ──────────────────────────────────────────────────────────────
 TYPE REFERENCES

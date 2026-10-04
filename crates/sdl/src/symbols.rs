@@ -1,6 +1,6 @@
 //! Symbol table: which top-level names exist and what they are.
 //!
-//! Tables, enums and composite types share one namespace (and may not
+//! Tables, views, enums and composite types share one namespace (and may not
 //! shadow a builtin type). Index and constraint names are global within
 //! their own namespaces. The first declaration of a name wins; later ones
 //! are reported and ignored by the semantic pass (see `is_canonical`).
@@ -17,6 +17,7 @@ pub enum SymKind {
     Table,
     Enum,
     Type,
+    View,
 }
 
 impl SymKind {
@@ -26,6 +27,7 @@ impl SymKind {
             SymKind::Table => "table",
             SymKind::Enum => "enum",
             SymKind::Type => "type",
+            SymKind::View => "view",
         }
     }
 }
@@ -46,6 +48,7 @@ impl SymbolTable {
                 Decl::Table(x) => t.declare(&x.name, SymKind::Table, diags),
                 Decl::Enum(x) => t.declare(&x.name, SymKind::Enum, diags),
                 Decl::Type(x) => t.declare(&x.name, SymKind::Type, diags),
+                Decl::View(x) => t.declare(&x.name, SymKind::View, diags),
                 Decl::Index(x) => dup_check(&mut t.indexes, &x.name, "index", diags),
                 Decl::Constraint(x) => dup_check(&mut t.constraints, &x.name, "constraint", diags),
             }

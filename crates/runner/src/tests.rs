@@ -458,7 +458,7 @@ mod adopt_tests {
 
     fn live_of(src: &str) -> LiveSchema {
         let (ir, d) = compile(src);
-        LiveSchema { ir: ir.unwrap_or_else(|| panic!("{d:?}")), notes: vec![] }
+        LiveSchema { ir: ir.unwrap_or_else(|| panic!("{d:?}")), notes: vec![], views: vec![] }
     }
 
     fn raw(sql: &str) -> Option<ExprIR> { Some(ExprIR::Raw { sql: sql.into() }) }
@@ -716,7 +716,7 @@ mod adopt_tests {
         assert!(p.counts.tables > 0 && !p.omissions.is_empty());
         assert!(db.recorded.is_empty() && db.ran.is_empty(), "nothing was written");
         // an empty database is an empty schema, not an error
-        let (_d, _p, mut empty) = fresh(LiveSchema { ir: SchemaIR::empty(), notes: vec![] });
+        let (_d, _p, mut empty) = fresh(LiveSchema { ir: SchemaIR::empty(), notes: vec![], views: vec![] });
         assert_eq!(import_schema(&mut empty).unwrap().counts.tables, 0);
     }
 
@@ -843,7 +843,7 @@ mod adopt_tests {
         assert!(matches!(adopt(&p, &mut db, &AdoptOptions::default()), Err(RunnerError::Project(m)) if m.contains("migration history")));
 
         // nothing there
-        let (_d, p, mut db) = fresh(LiveSchema { ir: SchemaIR::empty(), notes: vec![] });
+        let (_d, p, mut db) = fresh(LiveSchema { ir: SchemaIR::empty(), notes: vec![], views: vec![] });
         assert!(matches!(adopt(&p, &mut db, &AdoptOptions::default()), Err(RunnerError::Project(m)) if m.contains("nothing to adopt")));
     }
 

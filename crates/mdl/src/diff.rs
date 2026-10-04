@@ -11,6 +11,9 @@
 //!   5. add relationships, indexes, constraints
 //!   6. drop columns, tables, removed variants, types, enums, sequences
 //!
+//! Views bracket all of that: those that were removed or changed, or that read a table whose columns change, are dropped
+//! before phase 1 and (when still wanted) created again after phase 6.
+//!
 //! Sequences are created in phase 2 (before any table, since a column
 //! default may call `nextval`) and dropped last.
 
@@ -118,6 +121,29 @@ pub fn diff(before: &SchemaIR, after: &SchemaIR) -> MigrationPlan {
         btab.iter().filter(|(n, _)| !atab.contains_key(*n)).map(|(_, t)| *t).collect();
     for t in drop_order(&gone) {
         p.drop_tables.push(Op::DropTable { name: t.to_string() });
+    }
+
+    // ---- views ------------------------------------------------------- //
+    let bv = by_name(&before.views, |v| &v.name);
+    let av = by_name(&after.views, |v| &v.name);
+    let changes_columns = |p: &Phases, table: &str| {
+        p.columns
+            .iter()
+            .chain(&p.drop_columns)
+            .chain(&p.drop_tables)
+            .any(|o| matches!(o, Op::AlterColumn { table: t, .. } | Op::DropColumn { table: t, .. } | Op::DropTable { name: t } if t == table))
+    };
+    for (name, old) in &bv {
+        let wanted = av.get(name);
+        if wanted.is_none_or(|v| v != old) || changes_columns(&p, &old.from) {
+            p.drop_views.push(Op::DropView { name: name.to_string() });
+        }
+    }
+    for (name, v) in &av {
+        match bv.get(name) {
+            Some(old) if *old == *v && !changes_columns(&p, &v.from) => {}
+            _ => p.create_views.push(Op::CreateView { definition: (*v).clone() }),
+        }
     }
 
     p.finish()
@@ -284,6 +310,9 @@ struct Phases {
     drop_types: Vec<Op>,
     drop_enums: Vec<Op>,
     drop_sequences: Vec<Op>,
+    /// views dropped before everything, created again after everything
+    drop_views: Vec<Op>,
+    create_views: Vec<Op>,
 }
 
 impl Phases {
@@ -293,6 +322,7 @@ impl Phases {
         let (variants, early): (Vec<Op>, Vec<Op>) =
             self.drop.into_iter().partition(|o| matches!(o, Op::RemoveEnumVariant { .. }));
         let mut ops = Vec::new();
+        ops.extend(self.drop_views);
         ops.extend(early);
         ops.extend(self.create);
         ops.extend(self.types);
@@ -305,6 +335,7 @@ impl Phases {
         ops.extend(self.drop_types);
         ops.extend(self.drop_enums);
         ops.extend(self.drop_sequences);
+        ops.extend(self.create_views);
         MigrationPlan { version: PLAN_VERSION, ops }
     }
 }

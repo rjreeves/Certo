@@ -102,6 +102,17 @@ namespace Certo.Models
         [JsonPropertyName("cycle")] public bool Cycle { get; init; }
     }
 
+    /// <summary>A view declared in the schema (<c>view name on table (columns) where ...</c>): some of one table's columns and rows.</summary>
+    public sealed class SchemaView
+    {
+        [JsonPropertyName("name")] public string Name { get; init; } = "";
+        /// <summary>The table it reads.</summary>
+        [JsonPropertyName("from")] public string From { get; init; } = "";
+        [JsonPropertyName("columns")] public List<string> Columns { get; init; } = new();
+        /// <summary>The condition rows must meet, as JSON (absent: all rows).</summary>
+        [JsonPropertyName("filter")] public JsonElement? Filter { get; init; }
+    }
+
     /// <summary>The compiled schema: the canonical, sorted form every other call works from.</summary>
     public sealed class SchemaIr
     {
@@ -110,6 +121,7 @@ namespace Certo.Models
         [JsonPropertyName("enums")] public List<SchemaEnum> Enums { get; init; } = new();
         [JsonPropertyName("types")] public List<SchemaComposite> Types { get; init; } = new();
         [JsonPropertyName("sequences")] public List<SchemaSequence> Sequences { get; init; } = new();
+        [JsonPropertyName("views")] public List<SchemaView> Views { get; init; } = new();
 
         public SchemaTable? Table(string name) => Tables.Find(t => t.Name == name);
     }

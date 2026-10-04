@@ -142,6 +142,9 @@ pub fn compile_full(schema: &SchemaIR, src: &str, dialect: Dialect) -> Compiled 
     if has_errors(&diags) {
         return fail(diags);
     }
+    // views declared in the schema (SDL) are read like tables
+    let with_sdl_views = schema.with_views_as_tables();
+    let schema = &with_sdl_views;
     // fragments are checked once, then become `with` queries of the statements and views that use them
     let infos = fragments::expand(schema, &mut file, &mut diags);
     if has_errors(&diags) {

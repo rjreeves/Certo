@@ -240,7 +240,7 @@ pub fn prepare(live: LiveSchema) -> Result<Prepared, RunnerError> {
 
 /// `prepare` for a live database of `dialect`.
 pub fn prepare_for(dialect: Dialect, live: LiveSchema) -> Result<Prepared, RunnerError> {
-    let LiveSchema { mut ir, notes } = live;
+    let LiveSchema { mut ir, notes, .. } = live;
     let mut om = notes;
     let enums = ir.enums.clone();
 

@@ -1743,3 +1743,23 @@ fn views_parse_and_a_file_without_views_lists_none() {
     assert!(compile_full(&schema(), "query q() { from orders o select o.id }", Dialect::Postgres).views.is_empty());
 }
 
+
+#[test]
+fn views_declared_in_the_schema_are_read_like_tables_and_never_written() {
+    let (ir, d) = certo_sdl::compile("table people { id: serial primary key  name: text not null  age: int }
+        view adults on people (id, name) where age >= 18");
+    let ir = ir.unwrap_or_else(|| panic!("{d:?}"));
+    let c = compile_full(&ir, "query q() { from adults a select a.name }
+        view shout { from adults a select a.id, a.name }", Dialect::Postgres);
+    assert!(c.statements.is_some(), "{:?}", c.diagnostics);
+    let q = c.statements.unwrap().remove(0);
+    assert!(q.as_query().unwrap().sql.contains("FROM \"adults\" AS \"a\""));
+    assert_eq!(c.views[0].name, "shout");
+    // not writable, no column that is not in the view, and a QL view cannot reuse the name
+    let bad = compile_full(&ir, "update bump(n: text) { adults a set name = :n where a.id == 1 }", Dialect::Postgres);
+    assert!(bad.diagnostics.iter().any(|d| d.code == "QL263"), "{:?}", bad.diagnostics);
+    let bad = compile_full(&ir, "query q() { from adults a select a.age }", Dialect::Postgres);
+    assert!(bad.diagnostics.iter().any(|d| d.code == "QL206"), "{:?}", bad.diagnostics);
+    let bad = compile_full(&ir, "view adults { from people p select p.id }", Dialect::Postgres);
+    assert!(bad.diagnostics.iter().any(|d| d.code == "QL262"), "{:?}", bad.diagnostics);
+}

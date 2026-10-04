@@ -352,6 +352,16 @@ pub(crate) fn lower_op(op: &Op, out: &mut Vec<String>) -> Result<(), LowerError>
         Op::CreateTable { definition } => out.push(create_table(definition)),
         Op::DropTable { name } => out.push(format!("DROP TABLE {};", q(name))),
 
+        Op::CreateView { definition: v } => {
+            let cols: Vec<String> = v.columns.iter().map(|c| q(c)).collect();
+            let mut s = format!("CREATE VIEW {} AS SELECT {} FROM {}", q(&v.name), cols.join(", "), q(&v.from));
+            if let Some(f) = &v.filter {
+                s.push_str(&format!(" WHERE {}", expr(f)));
+            }
+            out.push(s + ";");
+        }
+        Op::DropView { name } => out.push(format!("DROP VIEW {};", q(name))),
+
         Op::AddColumn { table, column } => {
             out.push(format!("ALTER TABLE {} ADD COLUMN {};", q(table), column_def(column, true, true)));
         }
