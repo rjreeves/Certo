@@ -355,6 +355,7 @@ pub fn adopt(dir: &str, opts: Option<&str>) -> String {
             },
             "omissions": r.omissions,
             "migration": r.migration,
+            "recovered": r.recovered,
             "known_drift": r.known_drift.iter().map(|i| json!({ "kind": kind_str(i.kind), "text": i.text })).collect::<Vec<_>>(),
         })
         .to_string(),

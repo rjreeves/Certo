@@ -54,6 +54,8 @@ pub struct AdoptReport {
     /// Differences that remain between the database and the adopted schema
     /// (for example a default SDL cannot express). Empty when it matches.
     pub known_drift: Vec<DriftItem>,
+    /// What was found left over from an adopt that was killed part-way, and what was done about it.
+    pub recovered: Option<String>,
 }
 
 /// The result of `prepare`: the schema and what was left out.
@@ -337,9 +339,96 @@ pub fn import_schema(exec: &mut dyn Executor) -> Result<Prepared, RunnerError> {
     prepare_for(dialect, live)
 }
 
+/// The file an adopt keeps in the project while it works, from before its first write until the baseline is
+/// recorded. It holds the schema.sdl that was there, so an adopt that was killed part-way can be found and undone.
+const MARKER: &str = ".certo-adopt";
+
+/// An adopt that was killed after it began writing leaves `MARKER`. Settle it before doing anything else:
+/// - the database already has exactly this adopt's baseline: it had finished (only the marker was left), so
+///   nothing is changed;
+/// - the database has no history: what the adopt wrote is discarded (the project was fresh, so all of it is the
+///   adopt's) and `schema.sdl` is put back, and the adoption is then done from scratch, which gives the same
+///   result because it is computed from the database;
+/// - anything else: the history is not this adopt's, so nothing is touched.
+fn recover(project: &Project, exec: &mut dyn Executor) -> Result<Recovery, RunnerError> {
+    let marker = project.root.join(MARKER);
+    if !marker.exists() {
+        return Ok(Recovery::None);
+    }
+    let previous = fs::read_to_string(&marker).unwrap_or_default();
+    let applied = exec.applied().map_err(|e| RunnerError::Connection(e.message))?;
+    // a half-written migration may not load
+    let migrations = list(project).unwrap_or_default();
+    if let [row] = applied.as_slice()
+        && let Some(m) = migrations.iter().find(|m| m.seq == row.seq && m.checksum == row.checksum && m.seq == 1)
+    {
+        let _ = fs::remove_file(&marker);
+        return Ok(Recovery::Finished(m.label()));
+    }
+    if !applied.is_empty() {
+        return Err(RunnerError::Project(format!(
+            "an earlier `adopt` was interrupted (the project holds {}), and the database has a migration history that is not its baseline ({} applied): \
+             nothing was changed; if you are sure, delete {} and the migration folders by hand",
+            MARKER,
+            applied.len(),
+            marker.display()
+        )));
+    }
+    let dir = project.migrations_dir();
+    if let Ok(entries) = fs::read_dir(&dir) {
+        for e in entries.flatten() {
+            if e.path().is_dir() {
+                fs::remove_dir_all(e.path()).map_err(|er| io(e.path(), er))?;
+            }
+        }
+    }
+    project.write_state_ir(&SchemaIR::empty())?;
+    fs::write(project.schema_path(), &previous).map_err(|e| io(project.schema_path(), e))?;
+    fs::remove_file(&marker).map_err(|e| io(&marker, e))?;
+    Ok(Recovery::Discarded)
+}
+
+enum Recovery {
+    None,
+    /// The adopt had finished; only its marker was left.
+    Finished(String),
+    /// The adopt had not finished; its partial work was undone.
+    Discarded,
+}
+
 /// Adopt the database behind `exec` into `project` (which must be fresh).
 pub fn adopt(project: &Project, exec: &mut dyn Executor, opts: &AdoptOptions) -> Result<AdoptReport, RunnerError> {
     crate::runner::check_dialect(project, exec)?;
+    let marker = project.root.join(MARKER);
+    if opts.dry_run && marker.exists() {
+        return Err(RunnerError::Project(
+            "an earlier `adopt` was interrupted and left its work in this project; run `adopt` (not a dry run) to finish or undo it".into(),
+        ));
+    }
+    let mut recovered = None;
+    if !opts.dry_run {
+        match recover(project, exec)? {
+            Recovery::None => {}
+            Recovery::Discarded => {
+                recovered = Some("an earlier adopt was interrupted before it finished: its partial files were discarded and the adoption was redone".to_string());
+            }
+            Recovery::Finished(label) => {
+                // nothing to redo: report what is there
+                let live = exec.introspect().map_err(|e| RunnerError::Connection(e.message))?;
+                let prepared = prepare_for(project.dialect(), live)?;
+                let known_drift = drift::check(project, exec).map(|d| d.items).unwrap_or_default();
+                return Ok(AdoptReport {
+                    dry_run: false,
+                    schema_sdl: fs::read_to_string(project.schema_path()).unwrap_or_default(),
+                    adopted: prepared.counts,
+                    omissions: prepared.omissions,
+                    migration: Some(label),
+                    known_drift,
+                    recovered: Some("an earlier adopt had already recorded its baseline; only its marker was left, so nothing was changed".to_string()),
+                });
+            }
+        }
+    }
     // ---- preconditions: this is for a fresh project and an unmanaged database
     if !list(project)?.is_empty() || !is_empty_ir(&project.state_ir()?) {
         return Err(RunnerError::Project(
@@ -379,14 +468,18 @@ pub fn adopt(project: &Project, exec: &mut dyn Executor, opts: &AdoptOptions) ->
             omissions: prepared.omissions,
             migration: None,
             known_drift: Vec::new(),
+            recovered: None,
         });
     }
 
-    // ---- write schema.sdl, freeze the baseline, then record it as applied
+    // ---- write schema.sdl, freeze the baseline, then record it as applied. The marker comes first and goes last:
+    // if the process is killed in between, the next adopt finds it (see `recover`).
+    fs::write(&marker, &previous).map_err(|e| io(&marker, e))?;
     fs::write(&schema_path, &prepared.sdl).map_err(|e| io(&schema_path, e))?;
     let rollback = |project: &Project| {
         let _ = fs::write(project.schema_path(), &previous);
         let _ = project.write_state_ir(&SchemaIR::empty());
+        let _ = fs::remove_file(project.root.join(MARKER));
     };
     let created = match create(project, "baseline", None, false) {
         Ok(c) => c,
@@ -410,6 +503,7 @@ pub fn adopt(project: &Project, exec: &mut dyn Executor, opts: &AdoptOptions) ->
         return Err(RunnerError::Connection(format!("could not record the baseline migration: {}", e.message)));
     }
 
+    let _ = fs::remove_file(&marker);
     let known_drift = drift::check(project, exec).map(|d| d.items).unwrap_or_default();
     Ok(AdoptReport {
         dry_run: false,
@@ -418,6 +512,7 @@ pub fn adopt(project: &Project, exec: &mut dyn Executor, opts: &AdoptOptions) ->
         omissions: prepared.omissions,
         migration: Some(baseline.label()),
         known_drift,
+        recovered,
     })
 }
 

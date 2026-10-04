@@ -372,6 +372,11 @@ finally
         var again = CertoMigrations.Adopt(pdir, new AdoptOptions { Url = legacy });
         Check(again.Error?.Code == "project", "adopting twice is a typed error");
         Check(CertoSdl.Import(legacy).EnsureOk().SchemaSdl == adopted.SchemaSdl, "typed Import still reads a database that is now managed");
+        // an adopt that was killed after recording its baseline but before removing its marker is just acknowledged
+        File.WriteAllText(Path.Combine(pdir, ".certo-adopt"), "");
+        var acknowledged = CertoMigrations.Adopt(pdir, new AdoptOptions { Url = legacy });
+        Check(acknowledged.Ok && acknowledged.Recovered is { } r && r.Contains("already recorded") && !File.Exists(Path.Combine(pdir, ".certo-adopt")),
+            "typed Adopt: an interrupted adopt that had finished is acknowledged and its marker cleared");
     }
     finally { try { Directory.Delete(adoptProj, true); } catch { } }
 }
