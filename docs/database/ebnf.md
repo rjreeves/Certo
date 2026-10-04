@@ -256,7 +256,7 @@ nullability of each result column, and the type of each parameter.
 QL              = { Query | Mutation } ;
 
 Query           = "query" Ident "(" [ Param { "," Param } ] ")" "{" QueryBody "}" ;
-Fragment        = "fragment" Ident "(" ")" "{" QueryBody "}" ;       (* a named query used as a table *)
+Fragment        = "fragment" Ident "(" [ Param { "," Param } ] ")" "{" QueryBody "}" ;   (* a named query used as a table *)
 QueryBody       = [ With ] Branch { SetOp Branch }
                   [ "order" "by" OrderItem { "," OrderItem } ]
                   [ "limit" QExpr ] [ "offset" QExpr ] ;
@@ -310,7 +310,8 @@ Param           = Ident ":" TypeRef [ "null" ] ;
 
 FromClause      = "from" TableRef ;
 JoinClause      = [ "inner" | "left" ] "join" TableRef "on" QExpr ;
-TableRef        = Ident [ [ "as" ] Ident ] ;      (* alias defaults to the table name *)
+TableRef        = Ident [ "(" [ FragArg { "," FragArg } ] ")" ] [ [ "as" ] Ident ] ;   (* alias defaults to the table or fragment name *)
+FragArg         = Literal | Param ;                (* the arguments of a fragment: literals or the statement's :params, never columns *)
 
 SelectItem      = "*" | Ident "." "*" | QExpr [ "as" Ident ] ;
 OrderItem       = QExpr [ "asc" | "desc" ] ;
@@ -445,10 +446,18 @@ Fragments: `fragment active_customers() { from customers c where c.balance > 0 s
 declares a named query once, and `from active_customers a join orders o on o.customer_id == a.id` uses it as a table
 (in `from`, `join`, subqueries, and the source or filter of `insert`, `update` and `delete`).  It is not a database
 object: each statement that uses one gets it as a `with` query, so there is no migration and nothing to drift, and
-typing, nullability and the SQL are exactly those of `with`.  A fragment takes no parameters (it reads only the schema),
-may use other fragments but not itself, cannot be written to, and is checked on its own, so a mistake is reported once,
-where it is written (QL260 for a repeated or table-named fragment, a cycle, parameters, or a write).  A statement's own
-`with` of the same name takes precedence.
+typing, nullability and the SQL are exactly those of `with`.  A fragment may use other fragments but not itself, cannot be
+written to, and is checked on its own, so a mistake is reported once, where it is written (QL260 for a repeated or
+table-named fragment, a cycle, a wrong call, or a write).  A statement's own `with` of the same name takes precedence.
+
+Fragment parameters: `fragment since(cutoff: timestamp, min: int null) { from orders o where o.created >= :cutoff ... }` is
+called with arguments, `from since(:at, 5) r` or `join since("2026-01-01", null) r on ...`: literals or the statement's own
+`:params`, never columns or expressions, so a fragment still reads only the schema.  The arguments are substituted into a copy
+of the body and each distinct call becomes its own `with` query (`since#1`, `since#2`; equal calls share one; a fragment
+without parameters keeps its own name).  The alias defaults to the fragment's name.  A parameter passed on must have the
+fragment parameter's declared type and may be null only if the fragment's is declared `null` (so is the literal `null`);
+a wrong number of arguments or an argument that is not a literal or parameter is QL260, and a literal of the wrong kind is
+reported by the checker where it ends up in the body.  A fragment can pass its own parameters on to another fragment.
 
 Filtered aggregates and `string_agg`: `count(*) filter (where o.paid)` counts only the rows that meet the condition
 (any aggregate, also as a window function; the condition is boolean and has no aggregate of its own).

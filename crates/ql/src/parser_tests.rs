@@ -451,14 +451,20 @@ fn concat_parses_as_one_flat_join() {
 // ---- fragments, filter, string_agg ---------------------------------------------------------- //
 
 #[test]
-fn fragments_parse_and_take_no_parameters() {
+fn fragments_parse_with_parameters_and_are_called_with_arguments() {
     let f = ok("fragment f() { from orders o select o.id } query q() { from f x select x.id }");
     assert_eq!((f.fragments.len(), f.queries.len()), (1, 1));
     assert_eq!(f.fragments[0].name.name, "f");
-    // with parameters it is an error, and the next statement is still found
-    let (f, d) = parse("fragment f(n: int) { from orders o select o.id } query q() { from orders o select o.id }");
-    assert!(d.iter().any(|x| x.code == "QL260"), "{d:?}");
-    assert_eq!((f.fragments.len(), f.queries.len()), (0, 1));
+    let f = ok("fragment since(cutoff: timestamp, n: int null) { from orders o where o.created >= :cutoff select o.id }
+        query q(at: timestamp) { from since(:at, 5) s join since(\"x\", null) t on t.id == s.id select s.id }");
+    assert_eq!(f.fragments[0].query.params.len(), 2);
+    let q = &f.queries[0];
+    assert_eq!(q.from.args.len(), 2);
+    assert_eq!(q.joins[0].table.args.len(), 2);
+    assert_eq!(q.from.alias.as_ref().unwrap().name, "s");
+    // an insert target followed by its column list is not a call
+    let f = ok("insert add() { into customers (name) values (\"x\") }");
+    assert!(f.mutations[0].table.args.is_empty());
 }
 
 #[test]

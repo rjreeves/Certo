@@ -510,3 +510,24 @@ fn fragments_run_on_sqlite() {
     assert_eq!(db.exec(&by("gone"), &[]), 1, "a mutation that reads a fragment");
     assert_eq!(db.run(&by("q"), &[]), Vec::<Vec<String>>::new());
 }
+
+#[test]
+fn fragment_parameters_run_on_sqlite() {
+    let mut db = db();
+    // orders: (1: customer 1, 10), (2: customer 1, 25.5), (3: customer 2, 5)
+    let file = "fragment above(min: decimal(10,2)) { from orders o where o.total > :min select o.id, o.customer_id, o.total }
+        fragment big_customers(min: decimal(10,2)) { from customers c where c.id in (from above(:min) a select a.customer_id) select c.id, c.name }
+        query by_param(m: decimal(10,2)) { from above(:m) a join customers c on a.customer_id == c.id select c.name, a.total order by a.total }
+        query literal() { from above(20) a join customers c on a.customer_id == c.id select c.name, a.total }
+        query two(lo: decimal(10,2), hi: decimal(10,2)) { from above(:lo) a join above(:hi) b on b.id == a.id select a.id }
+        query nested(m: decimal(10,2)) { from big_customers(:m) b select b.name order by b.name }";
+    let (stmts, d) = certo_ql::compile(&db.schema, file, certo_sql::Dialect::Sqlite);
+    let stmts = stmts.unwrap_or_else(|| panic!("{d:?}"));
+    let by = |n: &str| stmts.iter().find(|s| s.name() == n).unwrap().clone();
+    assert_eq!(db.run(&by("by_param"), &[("m", Value::Real(8.0))]), [["Ann", "10"], ["Ann", "25.5"]]);
+    assert_eq!(db.run(&by("by_param"), &[("m", Value::Real(12.0))]), [["Ann", "25.5"]]);
+    assert_eq!(db.run(&by("literal"), &[]), [["Ann", "25.5"]]);
+    assert_eq!(db.run(&by("two"), &[("lo", Value::Real(8.0)), ("hi", Value::Real(20.0))]), [["2"]], "two calls, each its own values");
+    assert_eq!(db.run(&by("nested"), &[("m", Value::Real(3.0))]), [["Ann"], ["Bob"]], "a parameter passed on to another fragment");
+    assert_eq!(db.run(&by("nested"), &[("m", Value::Real(30.0))]), Vec::<Vec<String>>::new());
+}
