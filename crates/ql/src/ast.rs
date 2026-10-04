@@ -9,6 +9,16 @@ pub struct QlFile {
     pub mutations: Vec<Mutation>,
     /// `fragment name() { ... }`: named, parameter-free queries used as tables (see `fragments`).
     pub fragments: Vec<Fragment>,
+    /// `view name { ... }`: queries kept in the database as views (see `views`).
+    pub views: Vec<ViewDecl>,
+}
+
+/// `view name { from ... select ... }`: a query that is persisted as a database view, and read like a table.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ViewDecl {
+    pub name: Ident,
+    pub query: Query,
+    pub span: Span,
 }
 
 /// `fragment name() { from ... select ... }`

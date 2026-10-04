@@ -144,10 +144,23 @@ namespace Certo.Models
         public string Label => $"{Seq:D4}_{Name}";
     }
 
+    /// <summary>The project's views (<c>views.ql</c>) against what the database has recorded.</summary>
+    public sealed class ViewsStatus
+    {
+        /// <summary>Names, in the order they are created.</summary>
+        [JsonPropertyName("defined")] public List<string> Defined { get; init; } = new();
+        [JsonPropertyName("recorded")] public List<string> Recorded { get; init; } = new();
+        /// <summary>The database has exactly the views the project defines, with the same definitions.</summary>
+        [JsonPropertyName("in_sync")] public bool InSync { get; init; }
+        /// <summary>The views file does not compile: what the compiler said (the lists are then empty). Null otherwise.</summary>
+        [JsonPropertyName("error")] public string? Error { get; init; }
+    }
+
     public sealed class MigrateStatusResult : CertoResult
     {
         [JsonPropertyName("applied")] public List<AppliedMigration> Applied { get; init; } = new();
         [JsonPropertyName("pending")] public List<PendingMigration> Pending { get; init; } = new();
+        [JsonPropertyName("views")] public ViewsStatus Views { get; init; } = new();
     }
 
     public sealed class MigrationScript
@@ -163,6 +176,8 @@ namespace Certo.Models
         [JsonPropertyName("migrations")] public List<string> Migrations { get; init; } = new();
         /// <summary>For a dry run: the SQL each pending migration would execute.</summary>
         [JsonPropertyName("scripts")] public List<MigrationScript> Scripts { get; init; } = new();
+        /// <summary>The views this run created (again), in the order created.</summary>
+        [JsonPropertyName("views")] public List<string> Views { get; init; } = new();
     }
 
     public sealed class MigrateDriftResult : CertoResult

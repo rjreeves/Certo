@@ -46,6 +46,10 @@ pub struct TableIR {
     pub relationships: Vec<RelationshipIR>,
     pub indexes: Vec<IndexIR>,
     pub constraints: Vec<ConstraintIR>,
+    /// A persisted view (a QL `view`), not a table: it can be read like one but never written, and it is never part of a
+    /// schema diff. Only the query language's own copy of the schema has these.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub view: bool,
 }
 
 impl TableIR {

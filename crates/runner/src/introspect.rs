@@ -113,7 +113,7 @@ impl Types {
 pub fn introspect(client: &mut Client) -> Result<LiveSchema, postgres::Error> {
     let mut notes: Vec<String> = Vec::new();
     // certo's own tables are not part of the schema
-    let reserved: Vec<String> = vec![HISTORY_TABLE.to_string(), crate::journal::LOG_TABLE.to_string()];
+    let reserved: Vec<String> = vec![HISTORY_TABLE.to_string(), crate::journal::LOG_TABLE.to_string(), crate::views::VIEWS_TABLE.to_string()];
 
     // ---- enums ------------------------------------------------------------
     let mut enums: BTreeMap<String, Vec<String>> = BTreeMap::new();
@@ -356,6 +356,7 @@ pub fn introspect(client: &mut Client) -> Result<LiveSchema, postgres::Error> {
                 constraints: checks.remove(&name).unwrap_or_default(),
                 columns,
                 name,
+                view: false,
             })
             .collect(),
         enums: enums.into_iter().map(|(name, variants)| EnumIR { name, variants }).collect(),

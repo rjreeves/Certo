@@ -69,6 +69,12 @@ Hand-written steps belong in MDL (`--mdl`), not in `up.sql`.
 - **Destructive changes need consent:** `new` refuses a plan that can lose
   data unless `--allow-destructive` is given.
 
+- **Views:** `views.ql` (see the QL README) is part of the project. With migrations to run, `apply` drops the views certo
+  recorded in `_certo_views`, runs them, and creates the views again in one transaction; it also recreates views whose definition
+  changed or that were dropped by hand. `status` reports them (`views`: defined, recorded, in_sync) and a mistake in `views.ql`
+  as `views.error`; `apply` refuses to start with one. Drift reports a missing view, a changed one, and one no longer in the
+  file; views certo manages are not "left out" notes.
+
 ## Drift detection
 
 `certo sdl migrate drift` reads the live schema back from the PostgreSQL

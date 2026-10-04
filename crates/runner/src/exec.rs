@@ -3,6 +3,7 @@
 use crate::error::RunnerError;
 use crate::introspect::{self, LiveSchema};
 use crate::journal::{self, JournalContext};
+use crate::views::{ProjectView, RecordedView, VIEWS_TABLE};
 use crate::migration::Migration;
 use postgres::{Client, NoTls};
 use std::fmt;
@@ -54,6 +55,13 @@ pub trait Executor {
     /// Turn the journal on (`Some`) or off for the calls that follow: each `apply` and `record_applied` then also
     /// writes a row to `_certo_log`, inside the same transaction as the change. Off unless a host asks.
     fn set_journal(&mut self, _journal: Option<JournalContext>) {}
+    /// The views certo created, in the order it created them. Empty if it never created any.
+    fn recorded_views(&mut self) -> Result<Vec<RecordedView>, ExecError> { Ok(Vec::new()) }
+    /// In ONE transaction: drop the views named (in the order given), forget every recorded view, create `create` in order and
+    /// record each with its checksum. With a journal, a `views` row is written too.
+    fn replace_views(&mut self, _drop: &[String], _create: &[ProjectView]) -> Result<(), ExecError> { Ok(()) }
+    /// The names of the views the database has (current schema), whoever made them.
+    fn live_views(&mut self) -> Result<Vec<String>, ExecError> { Ok(Vec::new()) }
 }
 
 pub struct PgExecutor {
@@ -164,8 +172,69 @@ impl Executor for PgExecutor {
 
     fn set_journal(&mut self, journal: Option<JournalContext>) { self.journal = journal; }
 
+    fn recorded_views(&mut self) -> Result<Vec<RecordedView>, ExecError> {
+        let exists = self
+            .client
+            .query_one("SELECT to_regclass($1) IS NOT NULL", &[&format!("\"{VIEWS_TABLE}\"")])
+            .map_err(|e| pg_err(e, None))?
+            .get::<_, bool>(0);
+        if !exists {
+            return Ok(Vec::new());
+        }
+        let rows = self
+            .client
+            .query(&format!("SELECT name, checksum FROM \"{VIEWS_TABLE}\" ORDER BY ord"), &[])
+            .map_err(|e| pg_err(e, None))?;
+        Ok(rows.iter().map(|r| RecordedView { name: r.get(0), checksum: r.get(1) }).collect())
+    }
+
+    fn replace_views(&mut self, drop: &[String], create: &[ProjectView]) -> Result<(), ExecError> {
+        self.client
+            .batch_execute(&format!(
+                "CREATE TABLE IF NOT EXISTS \"{VIEWS_TABLE}\" (ord integer NOT NULL, name text PRIMARY KEY, checksum text NOT NULL, applied_at timestamptz NOT NULL DEFAULT now())"
+            ))
+            .map_err(|e| pg_err(e, None))?;
+        let journal = self.journal.clone();
+        if journal.is_some() {
+            self.client.batch_execute(&journal::pg_create()).map_err(|e| pg_err(e, Some("create the journal table")))?;
+        }
+        let mut tx = self.client.transaction().map_err(|e| pg_err(e, None))?;
+        for name in drop {
+            let sql = format!("DROP VIEW IF EXISTS {}", certo_sql::quote_ident(certo_sql::Dialect::Postgres, name));
+            tx.batch_execute(&sql).map_err(|e| pg_err(e, Some(&sql)))?;
+        }
+        tx.batch_execute(&format!("DELETE FROM \"{VIEWS_TABLE}\"")).map_err(|e| pg_err(e, None))?;
+        for (i, v) in create.iter().enumerate() {
+            tx.batch_execute(&v.create_sql).map_err(|e| pg_err(e, Some(&v.create_sql)))?;
+            tx.execute(&format!("INSERT INTO \"{VIEWS_TABLE}\" (ord, name, checksum) VALUES ($1, $2, $3)"), &[&(i as i32), &v.name, &v.checksum])
+                .map_err(|e| pg_err(e, Some("record the view")))?;
+        }
+        if let (Some(j), false) = (&journal, create.is_empty()) {
+            let detail = serde_json::json!({ "views": create.iter().map(|v| v.name.clone()).collect::<Vec<_>>() }).to_string();
+            tx.execute(&journal::pg_insert(), &[&"views", &format!("{} view(s)", create.len()), &j.actor, &j.environment, &j.tool, &detail])
+                .map_err(|e| pg_err(e, Some("write the journal")))?;
+        }
+        tx.commit().map_err(|e| pg_err(e, Some("COMMIT")))
+    }
+
+    fn live_views(&mut self) -> Result<Vec<String>, ExecError> {
+        let rows = self
+            .client
+            .query(
+                "SELECT c.relname::text FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+                 WHERE n.nspname = current_schema() AND c.relkind = 'v' ORDER BY c.relname",
+                &[],
+            )
+            .map_err(|e| pg_err(e, None))?;
+        Ok(rows.iter().map(|r| r.get(0)).collect())
+    }
+
     fn introspect(&mut self) -> Result<LiveSchema, ExecError> {
-        introspect::introspect(&mut self.client).map_err(|e| pg_err(e, None))
+        let mut live = introspect::introspect(&mut self.client).map_err(|e| pg_err(e, None))?;
+        // a view certo created is part of the project, not something the schema language failed to express
+        let managed = self.recorded_views()?;
+        live.notes.retain(|n| !managed.iter().any(|m| n.starts_with(&format!("view {} is not represented", m.name))));
+        Ok(live)
     }
 
     fn apply(&mut self, m: &Migration) -> Result<(), ExecError> {
@@ -227,6 +296,9 @@ impl Executor for Box<dyn Executor> {
     fn record_applied(&mut self, m: &Migration) -> Result<(), ExecError> { (**self).record_applied(m) }
     fn introspect(&mut self) -> Result<LiveSchema, ExecError> { (**self).introspect() }
     fn set_journal(&mut self, journal: Option<JournalContext>) { (**self).set_journal(journal) }
+    fn recorded_views(&mut self) -> Result<Vec<RecordedView>, ExecError> { (**self).recorded_views() }
+    fn replace_views(&mut self, drop: &[String], create: &[ProjectView]) -> Result<(), ExecError> { (**self).replace_views(drop, create) }
+    fn live_views(&mut self) -> Result<Vec<String>, ExecError> { (**self).live_views() }
 }
 
 /// Connect to the database `target` names, with the executor for the project's

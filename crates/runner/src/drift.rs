@@ -363,7 +363,34 @@ pub fn check(project: &Project, exec: &mut dyn Executor) -> Result<Drift, Runner
         (ir, format!("the schema after {}", m.label()))
     };
     let live = exec.introspect().map_err(connection_err)?;
-    Ok(compare(project.dialect(), &expected, live, &from))
+    let mut drift = compare(project.dialect(), &expected, live, &from);
+
+    // the project's views against the database: missing, changed since they were applied, or no longer wanted
+    let defined = match crate::views::load(project) {
+        Ok(v) => v,
+        Err(RunnerError::Compile { diagnostics, .. }) => {
+            let first = diagnostics.first().map(|d| d.message.clone()).unwrap_or_default();
+            drift.items.push(DriftItem { kind: DriftKind::Different, text: format!("the views file has errors ({first}): the views could not be compared") });
+            return Ok(drift);
+        }
+        Err(e) => return Err(e),
+    };
+    let recorded = exec.recorded_views().map_err(connection_err)?;
+    let present = exec.live_views().map_err(connection_err)?;
+    for v in &defined {
+        let rec = recorded.iter().find(|r| r.name == v.name);
+        if !present.contains(&v.name) {
+            drift.items.push(DriftItem { kind: DriftKind::Missing, text: format!("view {} (defined in the views file, not in the database: run apply)", v.name) });
+        } else if rec.is_none_or(|r| r.checksum != v.checksum) {
+            drift.items.push(DriftItem { kind: DriftKind::Different, text: format!("view {}: its definition changed since it was applied (run apply)", v.name) });
+        }
+    }
+    for r in &recorded {
+        if !defined.iter().any(|v| v.name == r.name) {
+            drift.items.push(DriftItem { kind: DriftKind::Unexpected, text: format!("view {} is no longer in the views file (run apply to drop it)", r.name) });
+        }
+    }
+    Ok(drift)
 }
 
 #[cfg(test)]

@@ -328,6 +328,7 @@ version = "0.1.0"
 dependencies = [
  "certo-diagnostics",
  "certo-mdl",
+ "certo-ql",
  "certo-sdl",
  "certo-sql",
  "native-tls",

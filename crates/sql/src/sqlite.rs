@@ -346,6 +346,7 @@ impl Lowerer<'_> {
                         relationships: vec![],
                         indexes: vec![],
                         constraints: vec![],
+                        view: false,
                     });
                     let def = Self::map(op, self.ctx.column_def(&holder, column))?;
                     self.out.push(format!("ALTER TABLE {} ADD COLUMN {def};", q(table)));

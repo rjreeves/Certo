@@ -643,7 +643,7 @@ impl<'a> Checker<'a> {
             };
             self.ctes.push((
                 c.name.name.clone(),
-                TableIR { name: c.name.name.clone(), columns, relationships: vec![], indexes: vec![], constraints: vec![] },
+                TableIR { name: c.name.name.clone(), columns, relationships: vec![], indexes: vec![], constraints: vec![], view: false },
             ));
             out.push(CteIR { name: c.name.name.clone(), query: ir, recursive: false });
         }
@@ -701,7 +701,7 @@ impl<'a> Checker<'a> {
 
         loop {
             let (failed_before, mark) = (self.failed, self.diags.len());
-            let table = TableIR { name: name.to_string(), columns: cols.clone(), relationships: vec![], indexes: vec![], constraints: vec![] };
+            let table = TableIR { name: name.to_string(), columns: cols.clone(), relationships: vec![], indexes: vec![], constraints: vec![], view: false };
             self.ctes.push((name.to_string(), table));
             let mut merged: Vec<bool> = cols.iter().map(|c| c.nullable).collect();
             let mut unions = Vec::new();
@@ -761,7 +761,7 @@ impl<'a> Checker<'a> {
                 unions,
                 ctes: anchor.ctes.clone(),
             };
-            let table = TableIR { name: name.to_string(), columns: cols, relationships: vec![], indexes: vec![], constraints: vec![] };
+            let table = TableIR { name: name.to_string(), columns: cols, relationships: vec![], indexes: vec![], constraints: vec![], view: false };
             return Some((ir, table));
         }
     }
@@ -1051,6 +1051,10 @@ impl<'a> Checker<'a> {
             self.fail("QL203", format!("unknown table `{}`", m.table.table.name), m.table.table.span);
             return None;
         };
+        if table.view {
+            self.fail("QL263", format!("`{}` is a view, which is read-only: it cannot be written to", m.table.table.name), m.table.table.span);
+            return None;
+        }
         let alias = m.table.alias.as_ref().map_or_else(|| m.table.table.name.clone(), |a| a.name.clone());
 
         // An insert's values cannot read the row being created, so its `set`

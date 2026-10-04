@@ -142,6 +142,17 @@ namespace Certo.Models
         [JsonPropertyName("columns")] public List<QlColumn> Columns { get; init; } = new();
     }
 
+    /// <summary>A persisted view of a QL file: its typed columns and the SQL to create and drop it.</summary>
+    public sealed class QlView
+    {
+        [JsonPropertyName("name")] public string Name { get; init; } = "";
+        [JsonPropertyName("columns")] public List<QlColumn> Columns { get; init; } = new();
+        [JsonPropertyName("create_sql")] public string CreateSql { get; init; } = "";
+        [JsonPropertyName("drop_sql")] public string DropSql { get; init; } = "";
+        /// <summary>What the query language reads (the view as a read-only table), as JSON: add it to a schema IR's <c>tables</c> to compile other files against this view.</summary>
+        [JsonPropertyName("table")] public JsonElement Table { get; init; }
+    }
+
     /// <summary>The result of compiling a QL file.</summary>
     public sealed class QlCompileResult
     {
@@ -153,6 +164,8 @@ namespace Certo.Models
         [JsonPropertyName("queries")] public List<QlStatement>? Queries { get; init; }
         /// <summary>The file's fragments (empty if it has none, or on failure).</summary>
         [JsonPropertyName("fragments")] public List<QlFragment> Fragments { get; init; } = new();
+        /// <summary>The file's persisted views, in the order they must be created (empty if it has none, or on failure).</summary>
+        [JsonPropertyName("views")] public List<QlView> Views { get; init; } = new();
         [JsonPropertyName("diagnostics")] public List<CertoDiagnostic> Diagnostics { get; init; } = new();
         /// <summary>The diagnostics as readable text with source excerpts.</summary>
         [JsonPropertyName("rendered")] public string? Rendered { get; init; }

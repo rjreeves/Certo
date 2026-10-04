@@ -15,6 +15,9 @@ pub struct Config {
     pub schema: String,
     #[serde(default = "default_migrations")]
     pub migrations: String,
+    /// The file of `view` declarations (QL), relative to the project; `views.ql` if not set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub views: Option<String>,
 }
 
 fn default_schema() -> String { "schema.sdl".into() }
@@ -36,7 +39,7 @@ impl Project {
         if config_path.exists() {
             return Err(RunnerError::Project(format!("{} already exists", config_path.display())));
         }
-        let config = Config { dialect: dialect.into(), schema: default_schema(), migrations: default_migrations() };
+        let config = Config { dialect: dialect.into(), schema: default_schema(), migrations: default_migrations(), views: None };
         fs::create_dir_all(root).map_err(|e| io(root, e))?;
         let project = Project { root: root.to_path_buf(), config };
         fs::create_dir_all(project.migrations_dir()).map_err(|e| io(project.migrations_dir(), e))?;
@@ -77,6 +80,8 @@ impl Project {
         Dialect::from_name(&self.config.dialect).expect("validated on open/init")
     }
 
+    /// The project's views file (it need not exist: no views).
+    pub fn views_path(&self) -> PathBuf { self.root.join(self.config.views.as_deref().unwrap_or("views.ql")) }
     pub fn schema_path(&self) -> PathBuf { self.root.join(&self.config.schema) }
     pub fn migrations_dir(&self) -> PathBuf { self.root.join(&self.config.migrations) }
     pub fn ir_path(&self) -> PathBuf { self.root.join(IR_FILE) }

@@ -106,6 +106,7 @@ pub fn diff(before: &SchemaIR, after: &SchemaIR) -> MigrationPlan {
                     relationships: Vec::new(),
                     indexes: Vec::new(),
                     constraints: Vec::new(),
+                    view: false,
                 };
                 p.tables.push(Op::CreateTable { definition: def.clone() });
                 diff_members(&mut p, name, &def, t);

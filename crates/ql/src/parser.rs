@@ -28,7 +28,7 @@ const MAX_SUBQUERY_DEPTH: usize = 6;
 
 pub fn parse(src: &str) -> (QlFile, Vec<Diagnostic>) {
     let mut q = Q { p: Parser::new(src), nodes: 0, nesting: 0, sub_depth: 0, windows: Vec::new() };
-    let (mut queries, mut mutations, mut fragments) = (Vec::new(), Vec::new(), Vec::new());
+    let (mut queries, mut mutations, mut fragments, mut views) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
     while !q.p.at_eof() {
         let start = q.p.pos();
         let result = if q.p.at_word("insert") {
@@ -39,6 +39,8 @@ pub fn parse(src: &str) -> (QlFile, Vec<Diagnostic>) {
             q.mutation(MutationKind::Delete).map(|m| mutations.push(m))
         } else if q.p.at_word("fragment") {
             q.fragment().map(|f| fragments.push(f))
+        } else if q.p.at_word("view") {
+            q.view().map(|v| views.push(v))
         } else {
             q.query().map(|x| queries.push(x))
         };
@@ -46,10 +48,10 @@ pub fn parse(src: &str) -> (QlFile, Vec<Diagnostic>) {
             if q.p.pos() == start {
                 q.p.bump();
             }
-            q.p.recover_to(&["query", "insert", "update", "delete", "fragment"]);
+            q.p.recover_to(&["query", "insert", "update", "delete", "fragment", "view"]);
         }
     }
-    (QlFile { queries, mutations, fragments }, q.p.into_diagnostics())
+    (QlFile { queries, mutations, fragments, views }, q.p.into_diagnostics())
 }
 
 struct Q {
@@ -100,6 +102,25 @@ impl Q {
         let end = self.p.expect(TokKind::RBrace)?;
         query.span = start.to(end);
         Ok(Fragment { name, query, span: start.to(end) })
+    }
+
+    /// `view name { from ... select ... }`: a query kept in the database as a view. It takes no parameters (`view name() { }` is
+    /// accepted too): a view is a table, and a table has none.
+    fn view(&mut self) -> PResult<ViewDecl> {
+        let start = self.p.span();
+        self.p.expect_word("view")?;
+        let name = self.p.ident("a view name")?;
+        if *self.p.peek() == TokKind::LParen {
+            let params = self.param_list()?;
+            if let Some(p) = params.first() {
+                return self.fail("QL262", "a view takes no parameters: it is kept in the database as a table (use a `query` for parameters)", p.name.span);
+            }
+        }
+        self.p.expect(TokKind::LBrace)?;
+        let mut query = self.query_body(name.clone(), Vec::new())?;
+        let end = self.p.expect(TokKind::RBrace)?;
+        query.span = start.to(end);
+        Ok(ViewDecl { name, query, span: start.to(end) })
     }
 
     /// `from ... select ... [union ...] [order by] [limit] [offset]`: a query's clauses, which
