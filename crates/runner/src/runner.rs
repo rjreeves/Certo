@@ -16,6 +16,8 @@ pub struct ApplyOptions {
     pub dry_run: bool,
     /// Stop after this migration number.
     pub to: Option<u32>,
+    /// Write each applied migration to the journal (`_certo_log`), inside its transaction.
+    pub journal: Option<crate::journal::JournalContext>,
 }
 
 #[derive(Debug, Clone)]
@@ -108,6 +110,7 @@ pub fn apply_with_progress(
     }
     if !opts.dry_run {
         exec.ensure_history().map_err(connection_err)?;
+        exec.set_journal(opts.journal.clone());
     }
     let applied = exec.applied().map_err(connection_err)?;
     let k = reconcile(&files, &applied)?;

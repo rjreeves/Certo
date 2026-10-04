@@ -29,6 +29,7 @@ pub mod drift;
 pub mod error;
 pub mod exec;
 pub mod introspect;
+pub mod journal;
 pub mod migration;
 pub mod pgexpr;
 pub mod project;
@@ -40,6 +41,7 @@ pub use adopt::{adopt, import_schema, AdoptOptions, AdoptReport, Counts, Prepare
 pub use drift::{Drift, DriftItem, DriftKind};
 pub use error::RunnerError;
 pub use exec::{connect, connect_to, AppliedRow, ExecError, Executor, PgExecutor};
+pub use journal::JournalContext;
 pub use migration::{Created, Migration, Script};
 pub use project::{Config, Project};
 pub use sqlite_exec::SqliteExecutor;

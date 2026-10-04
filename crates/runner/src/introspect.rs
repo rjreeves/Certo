@@ -112,6 +112,8 @@ impl Types {
 
 pub fn introspect(client: &mut Client) -> Result<LiveSchema, postgres::Error> {
     let mut notes: Vec<String> = Vec::new();
+    // certo's own tables are not part of the schema
+    let reserved: Vec<String> = vec![HISTORY_TABLE.to_string(), crate::journal::LOG_TABLE.to_string()];
 
     // ---- enums ------------------------------------------------------------
     let mut enums: BTreeMap<String, Vec<String>> = BTreeMap::new();
@@ -163,9 +165,9 @@ pub fn introspect(client: &mut Client) -> Result<LiveSchema, postgres::Error> {
          JOIN pg_namespace n ON n.oid = c.relnamespace
          JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum > 0 AND NOT a.attisdropped
          LEFT JOIN pg_attrdef d ON d.adrelid = c.oid AND d.adnum = a.attnum
-         WHERE n.nspname = current_schema() AND c.relkind IN ('r', 'p') AND c.relname <> $1
+         WHERE n.nspname = current_schema() AND c.relkind IN ('r', 'p') AND c.relname::text <> ALL($1)
          ORDER BY c.relname, a.attnum",
-        &[&HISTORY_TABLE],
+        &[&reserved],
     )? {
         let (table, col, ftype): (String, String, String) = (r.get(0), r.get(1), r.get(2));
         let (not_null, mut default): (bool, Option<String>) = (r.get(3), r.get(4));
@@ -228,9 +230,9 @@ pub fn introspect(client: &mut Client) -> Result<LiveSchema, postgres::Error> {
          JOIN pg_class t ON t.oid = con.conrelid
          JOIN pg_namespace n ON n.oid = t.relnamespace
          LEFT JOIN pg_class ft ON ft.oid = con.confrelid
-         WHERE n.nspname = current_schema() AND t.relname <> $1 AND con.contype IN ('p', 'u', 'f', 'c')
+         WHERE n.nspname = current_schema() AND t.relname::text <> ALL($1) AND con.contype IN ('p', 'u', 'f', 'c')
          ORDER BY t.relname, con.conname",
-        &[&HISTORY_TABLE],
+        &[&reserved],
     )? {
         let (table, name, kind): (String, String, String) = (r.get(0), r.get(1), r.get(2));
         let cols: Vec<String> = r.get(3);
@@ -282,10 +284,10 @@ pub fn introspect(client: &mut Client) -> Result<LiveSchema, postgres::Error> {
          JOIN pg_class t ON t.oid = ix.indrelid
          JOIN pg_namespace n ON n.oid = t.relnamespace
          JOIN pg_am am ON am.oid = i.relam
-         WHERE n.nspname = current_schema() AND t.relkind IN ('r', 'p') AND t.relname <> $1
+         WHERE n.nspname = current_schema() AND t.relkind IN ('r', 'p') AND t.relname::text <> ALL($1)
            AND NOT EXISTS (SELECT 1 FROM pg_constraint c WHERE c.conindid = ix.indexrelid)
          ORDER BY t.relname, i.relname",
-        &[&HISTORY_TABLE],
+        &[&reserved],
     )? {
         let (table, name, unique): (String, String, bool) = (r.get(0), r.get(1), r.get(2));
         let cols: Vec<String> = r.get(3);

@@ -88,7 +88,7 @@ fn adopting_a_legacy_database_is_faithful_reported_and_replayable() {
     let mut db = PgExecutor::connect(&url).unwrap();
 
     // ---- dry run: reports, changes nothing ------------------------------------
-    let dry = adopt(&project, &mut db, &AdoptOptions { dry_run: true, force: false }).unwrap();
+    let dry = adopt(&project, &mut db, &AdoptOptions { dry_run: true, ..Default::default() }).unwrap();
     assert!(dry.dry_run && dry.migration.is_none());
     assert!(certo_sdl::compile(&dry.schema_sdl).0.is_some(), "the SDL it would write must compile");
     assert!(project.state_ir().unwrap().tables.is_empty());

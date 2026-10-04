@@ -381,6 +381,28 @@ finally
     finally { try { Directory.Delete(adoptProj, true); } catch { } }
 }
 
+// ---- the journal (SQLite): an applied migration adds a row to _certo_log, in its own transaction ----
+{
+    var jdir = Path.Combine(Path.GetTempPath(), "certo-typed-journal-" + Guid.NewGuid().ToString("N"));
+    Directory.CreateDirectory(jdir);
+    try
+    {
+        CertoMigrations.Init(jdir, SqlDialect.Sqlite).EnsureOk();
+        File.WriteAllText(Path.Combine(jdir, "schema.sdl"), "table t { id: serial primary key  v: text not null }");
+        CertoMigrations.New(jdir, new NewMigrationOptions { Name = "init" }).EnsureOk();
+        var jdb = Path.Combine(jdir, "j.db");
+        var who = new JournalContext { Actor = "alice@build", Environment = "prod", Tool = "smoke 1.0" };
+        CertoMigrations.Apply(jdir, new ApplyOptions { Url = jdb, Journal = who }).EnsureOk();
+        using var jc = new Microsoft.Data.Sqlite.SqliteConnection($"Data Source={jdb};Pooling=False");
+        jc.Open();
+        using var jcmd = jc.CreateCommand();
+        jcmd.CommandText = "SELECT action || '|' || subject || '|' || actor || '|' || environment || '|' || tool FROM _certo_log";
+        Check((string?)jcmd.ExecuteScalar() == "apply|0001_init|alice@build|prod|smoke 1.0", "typed Apply with a journal writes a row to _certo_log");
+        Check(CertoMigrations.Drift(jdir, new DriftOptions { Url = jdb }).EnsureOk().InSync, "the journal table is not drift");
+    }
+    finally { try { Directory.Delete(jdir, true); } catch { } }
+}
+
 // ---- the typed runner on PostgreSQL (when CERTO_TEST_PG_URL is set: its `public` schema is reset) ----
 if (Environment.GetEnvironmentVariable("CERTO_TEST_PG_URL") is { Length: > 0 } pgUrl)
 {

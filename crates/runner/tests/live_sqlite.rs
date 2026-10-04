@@ -3,7 +3,7 @@
 
 use certo_runner::drift;
 use certo_runner::migration::create;
-use certo_runner::{adopt, apply, status, AdoptOptions, ApplyOptions, Project, RunnerError, SqliteExecutor};
+use certo_runner::{adopt, apply, status, AdoptOptions, ApplyOptions, JournalContext, Project, RunnerError, SqliteExecutor};
 use std::fs;
 use tempfile::TempDir;
 
@@ -246,5 +246,65 @@ fn a_table_rebuild_is_recorded_in_the_same_transaction_as_the_change() {
     assert_eq!(note_not_null(&ex), 1);
     assert_eq!(count(&ex, "SELECT count(*) FROM _certo_migrations WHERE seq = 2 AND name = 'v2'"), 1);
     assert_eq!(count(&ex, "PRAGMA foreign_keys"), 1);
+}
+
+fn who() -> JournalContext {
+    JournalContext { actor: "alice@build".into(), environment: Some("prod".into()), tool: "certo 9.9.9".into() }
+}
+
+fn text(e: &SqliteExecutor, sql: &str) -> String { e.connection().query_row(sql, [], |r| r.get::<_, String>(0)).unwrap() }
+
+#[test]
+fn the_journal_records_each_applied_migration_inside_its_transaction() {
+    use certo_runner::Executor;
+    let (_dir, p, db) = fixture(V1);
+    create(&p, "init", None, false).unwrap();
+    let mut ex = SqliteExecutor::open(&db).unwrap();
+    // off unless asked for: no table, no rows
+    apply(&p, &mut ex, &ApplyOptions::default()).unwrap();
+    assert_eq!(count(&ex, "SELECT count(*) FROM sqlite_master WHERE name = '_certo_log'"), 0);
+
+    // on: one row per migration, with who, where and what
+    let (_dir, p, db) = fixture(V1);
+    create(&p, "init", None, false).unwrap();
+    fs::write(p.schema_path(), V2).unwrap();
+    create(&p, "v2", None, true).unwrap();
+    let mut ex = SqliteExecutor::open(&db).unwrap();
+    apply(&p, &mut ex, &ApplyOptions { journal: Some(who()), ..Default::default() }).unwrap();
+    assert_eq!(count(&ex, "SELECT count(*) FROM _certo_log"), 2);
+    assert_eq!(text(&ex, "SELECT action || '|' || subject || '|' || actor || '|' || environment || '|' || tool FROM _certo_log WHERE id = 1"),
+        "apply|0001_init|alice@build|prod|certo 9.9.9");
+    assert_eq!(text(&ex, "SELECT subject FROM _certo_log WHERE id = 2"), "0002_v2");
+    assert!(text(&ex, "SELECT detail FROM _certo_log WHERE id = 2").contains("\"checksum\""));
+    assert_eq!(count(&ex, "SELECT count(*) FROM _certo_log WHERE at IS NOT NULL"), 2);
+
+    // it is certo's own table: not drift, and not part of what import or adopt would see
+    assert!(drift::check(&p, &mut ex).unwrap().in_sync());
+    let imported = certo_runner::import_schema(&mut ex).unwrap();
+    assert!(!imported.sdl.contains("_certo_log"), "{}", imported.sdl);
+    assert_eq!(imported.counts.tables, 2);
+
+    // a migration that rolls back leaves no row: a conflicting history row makes the migration fail inside the transaction
+    fs::write(p.schema_path(), format!("{V2}
+table extra {{ id: serial primary key }}")).unwrap();
+    create(&p, "extra", None, false).unwrap();
+    let m3 = certo_runner::migration::list(&p).unwrap().into_iter().find(|m| m.seq == 3).unwrap();
+    ex.connection().execute("INSERT INTO _certo_migrations (seq, name, checksum, compiler_version) VALUES (3, 'squatter', 'x', 'x')", []).unwrap();
+    ex.set_journal(Some(who()));
+    assert!(ex.apply(&m3).is_err());
+    assert_eq!(count(&ex, "SELECT count(*) FROM _certo_log"), 2, "no journal row for a change that did not happen");
+}
+
+#[test]
+fn the_journal_records_an_adopted_baseline_with_the_record_itself() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = Project::init(dir.path(), "sqlite").unwrap();
+    let db = dir.path().join("legacy.db").display().to_string();
+    let mut ex = SqliteExecutor::open(&db).unwrap();
+    ex.connection().execute_batch(LEGACY).unwrap();
+    adopt(&p, &mut ex, &AdoptOptions { journal: Some(who()), ..Default::default() }).unwrap();
+    assert_eq!(count(&ex, "SELECT count(*) FROM _certo_log"), 1);
+    assert_eq!(text(&ex, "SELECT action || '|' || subject FROM _certo_log"), "adopt|0001_baseline");
+    assert!(drift::check(&p, &mut ex).unwrap().in_sync());
 }
 

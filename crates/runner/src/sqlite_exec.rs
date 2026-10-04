@@ -12,6 +12,7 @@
 use crate::error::RunnerError;
 use crate::exec::{AppliedRow, ExecError, Executor};
 use crate::introspect::{LiveSchema, HISTORY_TABLE};
+use crate::journal::{self, JournalContext};
 use crate::migration::Migration;
 use crate::sqlite_introspect;
 use rusqlite::Connection;
@@ -22,6 +23,7 @@ pub struct SqliteExecutor {
     conn: Connection,
     /// Held for the executor's lifetime; unlocked when it is dropped.
     _lock: Option<File>,
+    journal: Option<JournalContext>,
 }
 
 /// Take the lock on `<path>.certo-lock` without waiting.
@@ -63,11 +65,11 @@ impl SqliteExecutor {
         conn.pragma_update(None, "foreign_keys", "ON").map_err(conn_err)?;
         conn.busy_timeout(std::time::Duration::from_secs(10)).map_err(conn_err)?;
         let lock = lock_beside(path)?;
-        Ok(SqliteExecutor { conn, _lock: lock })
+        Ok(SqliteExecutor { conn, _lock: lock, journal: None })
     }
 
     /// Wrap an already-open connection (tests, hosts that manage their own).
-    pub fn from_connection(conn: Connection) -> SqliteExecutor { SqliteExecutor { conn, _lock: None } }
+    pub fn from_connection(conn: Connection) -> SqliteExecutor { SqliteExecutor { conn, _lock: None, journal: None } }
 
     pub fn connection(&self) -> &Connection { &self.conn }
 
@@ -84,6 +86,11 @@ impl SqliteExecutor {
     fn run_batches(&mut self, m: &Migration) -> Result<(), ExecError> {
         let params = rusqlite::params![m.seq as i64, m.name, m.checksum, m.script.compiler_version];
         let last_tx = m.script.batches.iter().rposition(|b| b.transactional);
+        let journal = self.journal.clone();
+        let (label, detail) = (m.label(), journal::detail(m));
+        if journal.is_some() {
+            self.conn.execute_batch(&journal::sqlite_create()).map_err(|e| err(e, Some("create the journal table")))?;
+        }
 
         for (i, b) in m.script.batches.iter().enumerate() {
             if b.transactional {
@@ -94,6 +101,10 @@ impl SqliteExecutor {
                 if Some(i) == last_tx {
                     tx.execute(&Self::record_sql(), params)
                         .map_err(|e| err(e, Some("record migration in history")))?;
+                    if let Some(j) = &journal {
+                        tx.execute(&journal::sqlite_insert(), rusqlite::params!["apply", label, j.actor, j.environment, j.tool, detail])
+                            .map_err(|e| err(e, Some("write the journal")))?;
+                    }
                 }
                 tx.commit().map_err(|e| err(e, Some("COMMIT")))?;
             } else {
@@ -107,6 +118,11 @@ impl SqliteExecutor {
             self.conn
                 .execute(&Self::record_sql(), params)
                 .map_err(|e| err(e, Some("record migration in history")))?;
+            if let Some(j) = &journal {
+                self.conn
+                    .execute(&journal::sqlite_insert(), rusqlite::params!["apply", label, j.actor, j.environment, j.tool, detail])
+                    .map_err(|e| err(e, Some("write the journal")))?;
+            }
         }
         Ok(())
     }
@@ -151,11 +167,22 @@ impl Executor for SqliteExecutor {
 
     fn record_applied(&mut self, m: &Migration) -> Result<(), ExecError> {
         self.ensure_history()?;
-        self.conn
-            .execute(&Self::record_sql(), rusqlite::params![m.seq as i64, m.name, m.checksum, m.script.compiler_version])
-            .map_err(|e| err(e, Some("record migration in history")))?;
-        Ok(())
+        let params = rusqlite::params![m.seq as i64, m.name, m.checksum, m.script.compiler_version];
+        let Some(j) = self.journal.clone() else {
+            self.conn.execute(&Self::record_sql(), params).map_err(|e| err(e, Some("record migration in history")))?;
+            return Ok(());
+        };
+        // the baseline and its journal row commit together
+        self.conn.execute_batch(&journal::sqlite_create()).map_err(|e| err(e, Some("create the journal table")))?;
+        let (label, detail) = (m.label(), journal::detail(m));
+        let tx = self.conn.transaction().map_err(|e| err(e, None))?;
+        tx.execute(&Self::record_sql(), params).map_err(|e| err(e, Some("record migration in history")))?;
+        tx.execute(&journal::sqlite_insert(), rusqlite::params!["adopt", label, j.actor, j.environment, j.tool, detail])
+            .map_err(|e| err(e, Some("write the journal")))?;
+        tx.commit().map_err(|e| err(e, Some("COMMIT")))
     }
+
+    fn set_journal(&mut self, journal: Option<JournalContext>) { self.journal = journal; }
 
     fn introspect(&mut self) -> Result<LiveSchema, ExecError> {
         sqlite_introspect::introspect(&self.conn).map_err(|e| err(e, None))

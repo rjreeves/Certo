@@ -186,7 +186,7 @@ fn apply_cmd(root: &Path, o: &Opts) -> Result<(), RunnerError> {
             )));
         }
     }
-    let report = apply(&project, &mut db, &ApplyOptions { dry_run: o.dry_run, to: o.to })?;
+    let report = apply(&project, &mut db, &ApplyOptions { dry_run: o.dry_run, to: o.to, ..Default::default() })?;
     if report.migrations.is_empty() {
         println!("nothing to apply: database is up to date");
         return Ok(());
@@ -293,7 +293,7 @@ fn adopt_cmd(root: &Path, o: &Opts) -> Result<(), RunnerError> {
     let r = certo_runner::adopt(
         &project,
         &mut db,
-        &certo_runner::AdoptOptions { dry_run: o.dry_run, force: o.force },
+        &certo_runner::AdoptOptions { dry_run: o.dry_run, force: o.force, ..Default::default() },
     )?;
     let c = &r.adopted;
     let what = format!(

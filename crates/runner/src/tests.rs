@@ -338,7 +338,7 @@ fn dry_run_touches_nothing() {
     let (_d, p) = project();
     two_migrations(&p);
     let mut db = Fake::default();
-    let r = apply(&p, &mut db, &ApplyOptions { dry_run: true, to: None }).unwrap();
+    let r = apply(&p, &mut db, &ApplyOptions { dry_run: true, ..Default::default() }).unwrap();
     assert!(r.dry_run);
     assert_eq!(r.migrations, ["0001_init", "0002_add_age"]);
     assert_eq!(r.scripts.len(), 2);
@@ -696,7 +696,7 @@ mod adopt_tests {
     fn dry_run_changes_nothing() {
         let (_d, p, mut db) = fresh(legacy_live());
         let before = std::fs::read_to_string(p.schema_path()).unwrap();
-        let r = adopt(&p, &mut db, &AdoptOptions { dry_run: true, force: false }).unwrap();
+        let r = adopt(&p, &mut db, &AdoptOptions { dry_run: true, ..Default::default() }).unwrap();
         assert!(r.dry_run && r.migration.is_none());
         assert!(r.schema_sdl.contains("table users"));
         assert_eq!(std::fs::read_to_string(p.schema_path()).unwrap(), before);
