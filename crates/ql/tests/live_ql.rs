@@ -22,6 +22,7 @@ table customers {
     role: Role default user
     balance: decimal(10,2)
     born: date
+    meta: json
     token: uuid
 }
 table orders {
@@ -623,4 +624,24 @@ fn compiled_queries_run_and_their_declared_contract_is_true() {
             }
         }
     }
+
+    // ==== json_text / json_int / json_bool / json_has ====================================
+    db.client
+        .batch_execute(
+            "INSERT INTO customers (name, meta) VALUES
+               ('J1', '{\"plan\":\"pro\",\"limits\":{\"seats\":5},\"trial\":true,\"tags\":[\"a\",\"b\"]}'),
+               ('J2', '{\"plan\":7,\"limits\":{\"seats\":\"5\"},\"trial\":\"true\",\"tags\":[]}'),
+               ('J3', NULL)",
+        )
+        .unwrap();
+    let q = db.query("query j() { from customers c where c.name like \"J%\" select c.name, json_text(c.meta, \"plan\") as p,
+        json_int(c.meta, \"limits\", \"seats\") as seats, json_bool(c.meta, \"trial\") as trial, json_has(c.meta, \"plan\") as has,
+        json_text(c.meta, \"tags\", 0) as first order by c.name }");
+    let rows = db.rows(&q, &[]);
+    assert_eq!((rows[0]["p"].as_str(), rows[0]["seats"].as_i64(), rows[0]["trial"].as_bool(), rows[0]["has"].as_bool(), rows[0]["first"].as_str()),
+        (Some("pro"), Some(5), Some(true), Some(true), Some("a")));
+    assert!(rows[1]["p"].is_null() && rows[1]["seats"].is_null() && rows[1]["trial"].is_null() && rows[1]["first"].is_null());
+    assert_eq!(rows[1]["has"], true);
+    assert!(rows[2]["p"].is_null() && rows[2]["seats"].is_null());
+    assert_eq!(rows[2]["has"], false);
 }

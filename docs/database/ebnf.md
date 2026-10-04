@@ -159,6 +159,8 @@ Functions:  now() gen_uuid() today()                       no arguments
             position(text, find)                           -> int   (1-based, 0 if absent)
             date_part("year"|"month"|"day"|"hour"|"minute", date|timestamp) -> int
             string_agg(text, "sep" [ "order" "by" OrderItem { "," OrderItem } ])  -> text (aggregate)
+            json_text(json, key, ...)  json_int(json, key, ...)  json_bool(json, key, ...)  -> text | bigint | bool (NULL if not that kind)
+            json_has(json, key, ...)                       -> bool  (a key is a literal name or an array position, 1 to 4 of them)
             length(text)                                   -> int
             abs(number) round(number)                      -> same type
             coalesce(a, b, ...) nullif(a, b)               -> type of a
@@ -441,6 +443,15 @@ value), and `first_value` / `last_value`.  They are allowed only in `select` and
 The window's inputs follow the grouping rule: in a query with `group by` its columns must be
 grouped, but it may order by an aggregate (`rank() over (order by sum(o.total) desc)`).  A
 window function does not by itself make a query grouped.
+
+JSON keys: `json_text(c.meta, "plan")`, `json_int(c.meta, "limits", "seats")`, `json_bool(c.meta, "trial")` and `json_has(c.meta, "tags", 0)`
+read a `json` value along a path of keys.  A key is a literal name (letters, digits, `_`) or an array position, so nested values
+are written `json_text(j, "address", "city")` and elements `json_text(j, "tags", 0)`; one to four keys.  The two databases are
+made to agree by answering only what they agree on: `json_text` gives a JSON *string* as text, `json_int` a whole number below
+10^18 as `bigint`, `json_bool` `true` / `false`, and each is NULL for a missing key, a value of another kind (the number 7 asked
+for as text, the string "5" asked for as a number), JSON `null` and a NULL column.  `json_has` is false (never NULL) when the
+key is missing or the column is NULL, true when the key is there even with a JSON `null` value.  Text that is not valid JSON
+(a SQLite `json` column is plain text) reads as NULL, not an error.  A key from a parameter or column is not accepted (QL209).
 
 Fragments: `fragment active_customers() { from customers c where c.balance > 0 select c.id, c.name }`
 declares a named query once, and `from active_customers a join orders o on o.customer_id == a.id` uses it as a table

@@ -113,19 +113,25 @@ impl Statement {
 /// is `Some` only when there are no error diagnostics (warnings may accompany
 /// it). Queries come first, then mutations, each in source order.
 pub fn compile(schema: &SchemaIR, src: &str, dialect: Dialect) -> (Option<Vec<Statement>>, Vec<Diagnostic>) {
+    let (statements, _, diags) = compile_with_fragments(schema, src, dialect);
+    (statements, diags)
+}
+
+/// `compile`, and also what the file's fragments look like (name, parameters, columns), which are not statements.
+pub fn compile_with_fragments(schema: &SchemaIR, src: &str, dialect: Dialect) -> (Option<Vec<Statement>>, Vec<FragmentInfo>, Vec<Diagnostic>) {
     let (mut file, mut diags) = parse(src);
     if has_errors(&diags) {
-        return (None, diags);
+        return (None, Vec::new(), diags);
     }
     // fragments are checked once, then become `with` queries of the statements that use them
-    fragments::expand(schema, &mut file, &mut diags);
+    let infos = fragments::expand(schema, &mut file, &mut diags);
     if has_errors(&diags) {
-        return (None, diags);
+        return (None, Vec::new(), diags);
     }
     let queries = check(schema, &file, &mut diags);
     let mutations = check_mutations(schema, &file, &mut diags);
     if has_errors(&diags) {
-        return (None, diags);
+        return (None, Vec::new(), diags);
     }
     let mut out: Vec<Statement> = queries
         .into_iter()
@@ -138,7 +144,7 @@ pub fn compile(schema: &SchemaIR, src: &str, dialect: Dialect) -> (Option<Vec<St
         let Lowered { sql, param_order } = lower_mutation(dialect, &ir);
         Statement::Mutation(CompiledMutation { ir, sql, param_order })
     }));
-    (Some(out), diags)
+    (Some(out), infos, diags)
 }
 
 /// The host-facing form of compiled statements: one object per statement with

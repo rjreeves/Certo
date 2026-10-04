@@ -346,6 +346,7 @@ impl Lowerer<'_> {
                         }
                     }
                 }
+                "json_text" | "json_int" | "json_bool" | "json_has" => self.json_function(func, args),
                 "left" | "right" => {
                     let (s, QExpr::Number { value: n }) = (self.expr(&args[0]), &args[1]) else { unreachable!("checked") };
                     match (func.as_str(), self.dialect) {
@@ -462,6 +463,49 @@ impl Lowerer<'_> {
                 }
                 s.push_str(" END");
                 s
+            }
+        }
+    }
+}
+
+impl Lowerer<'_> {
+    /// `json_text` / `json_int` / `json_bool` / `json_has` over a json value and a literal path of keys. Both databases give
+    /// the same answers: a string as text, a whole number below 10^18 as `bigint`, `true` / `false` as a boolean, and NULL
+    /// for a missing key or a value of another kind (`json_has` is false instead of NULL).
+    fn json_function(&mut self, func: &str, args: &[QExpr]) -> String {
+        let j = self.expr(&args[0]);
+        let keys: Vec<(String, bool)> = args[1..]
+            .iter()
+            .map(|k| match k {
+                QExpr::String { value } => (value.clone(), false),
+                QExpr::Number { value } => (value.to_string(), true),
+                _ => unreachable!("checked"),
+            })
+            .collect();
+        match self.dialect {
+            Dialect::Postgres => {
+                let path = format!("'{{{}}}'", keys.iter().map(|(k, _)| k.as_str()).collect::<Vec<_>>().join(","));
+                let x = format!("(({j})::jsonb #> {path})");
+                match func {
+                    "json_text" => format!("(CASE WHEN jsonb_typeof{x} = 'string' THEN ({j})::jsonb #>> {path} END)"),
+                    "json_int" => format!("(CASE WHEN jsonb_typeof{x} = 'number' AND {x}::text ~ '^-?[0-9]{{1,18}}$' THEN {x}::text::bigint END)"),
+                    "json_bool" => format!("(CASE jsonb_typeof{x} WHEN 'boolean' THEN {x}::text = 'true' END)"),
+                    _ => format!("({x} IS NOT NULL)"),
+                }
+            }
+            Dialect::Sqlite => {
+                let mut path = String::from("$");
+                for (k, index) in &keys {
+                    if *index { path.push_str(&format!("[{k}]")) } else { path.push_str(&format!(".{k}")) }
+                }
+                let (ty, val) = (format!("json_type({j}, '{path}')"), format!("json_extract({j}, '{path}')"));
+                // the value may not be valid JSON (a SQLite json column is plain text): that reads as NULL, never an error
+                match func {
+                    "json_text" => format!("(CASE WHEN json_valid({j}) THEN CASE WHEN {ty} = 'text' THEN {val} END END)"),
+                    "json_int" => format!("(CASE WHEN json_valid({j}) THEN CASE WHEN {ty} = 'integer' AND abs({val}) < 1000000000000000000 THEN {val} END END)"),
+                    "json_bool" => format!("(CASE WHEN json_valid({j}) THEN CASE {ty} WHEN 'true' THEN TRUE WHEN 'false' THEN FALSE END END)"),
+                    _ => format!("(CASE WHEN json_valid({j}) THEN {ty} IS NOT NULL ELSE FALSE END)"),
+                }
             }
         }
     }

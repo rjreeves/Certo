@@ -59,6 +59,8 @@ char *certo_plan_migration(const char *old_ir, const char *new_ir, const char *m
  * -> {"ok", "statements":[{kind, name, params:[{name,type,nullable}], columns:[{name,type,nullable}],
  *                          sql, param_order:[...], ir}] | null,
  *     "queries": the same list restricted to kind "query" (kept for older hosts),
+ *     "fragments":[{name, params:[{name,type,nullable}], columns:[{name,type,nullable}]}]  (a QL file's fragments: not
+ *     statements, but what a call must give and what it yields; empty if none),
  *     "diagnostics":[...], "rendered"}
  * kind is query | insert | update | delete; a mutation's columns are its `returning` list
  * (empty: the host gets a row count). Each statement is a typed contract: bind parameters as $1, $2, ... in param_order; every

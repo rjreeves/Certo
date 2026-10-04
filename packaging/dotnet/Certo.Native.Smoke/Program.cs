@@ -237,6 +237,10 @@ finally
     Check(!qbad.Ok && qbad.Statements is null && qbad.Diagnostics[0].Code == "QL206", "typed QL diagnostics");
     var warned = CertoQl.Compile(typedSchema, "query q(unused: int) { from users u select u.id }");
     Check(warned.Ok && warned.Diagnostics[0].Severity == DiagnosticSeverity.Warning, "a warning accompanies a success");
+    var withFragment = CertoQl.Compile(typedSchema, "fragment named(prefix: text) { from users u where u.name like :prefix select u.id, u.name } query q(p: text) { from named(:p) n select n.name }");
+    Check(withFragment.Ok && withFragment.Fragments is [{ Name: "named" } f] && f.Params is [{ Name: "prefix" }] && f.Columns.Select(c => c.Name).SequenceEqual(new[] { "id", "name" }),
+        "typed QL lists a file's fragments with their parameters and columns");
+    Check(warned.Fragments.Count == 0, "a file without fragments lists none");
     var failed = CertoQl.Compile("nope", "query q() { from users u select u.id }");
     Check(!failed.Ok && failed.Error?.Code == "invalid_ir", "a failed call carries a typed error");
 

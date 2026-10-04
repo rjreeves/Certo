@@ -192,6 +192,14 @@ isn't, are `QL260`.
 c.id)` joins text values (NULLs skipped; `NULL` for an empty group; `group_concat` on SQLite). `filter` needs SQLite 3.30,
 and an `order by` inside `string_agg` SQLite 3.44. Misuse is `QL259`.
 
+## JSON keys
+
+`json_text(c.meta, "plan")`, `json_int(c.meta, "limits", "seats")`, `json_bool(c.meta, "trial")`, `json_has(c.meta, "tags", 0)`:
+read a `json` value along a literal path of one to four keys (names, or array positions). Each returns only what both databases
+agree on: a JSON string as text, a whole number below 10^18 as `bigint`, `true`/`false` as a boolean, and NULL for a missing key,
+a value of another kind, JSON `null` or a NULL column (`json_has` is false instead of NULL). Text that is not valid JSON reads as
+NULL. Keys are literals, not parameters or columns (`QL209`).
+
 ## Named windows
 
 ```

@@ -17,6 +17,7 @@ table customers {
     role: Role default user
     balance: decimal(10,2)
     born: date
+    meta: json
 }
 table orders {
     id: serial primary key
@@ -530,4 +531,29 @@ fn fragment_parameters_run_on_sqlite() {
     assert_eq!(db.run(&by("two"), &[("lo", Value::Real(8.0)), ("hi", Value::Real(20.0))]), [["2"]], "two calls, each its own values");
     assert_eq!(db.run(&by("nested"), &[("m", Value::Real(3.0))]), [["Ann"], ["Bob"]], "a parameter passed on to another fragment");
     assert_eq!(db.run(&by("nested"), &[("m", Value::Real(30.0))]), Vec::<Vec<String>>::new());
+}
+
+#[test]
+fn json_keys_run_on_sqlite() {
+    let mut db = db();
+    db.c.execute_batch(
+        "UPDATE customers SET meta = '{\"plan\":\"pro\",\"limits\":{\"seats\":5},\"trial\":true,\"tags\":[\"a\",\"b\"]}' WHERE id = 1;
+         UPDATE customers SET meta = '{\"plan\":7,\"limits\":{\"seats\":\"5\"},\"trial\":\"true\",\"tags\":[]}' WHERE id = 2;
+         UPDATE customers SET meta = 'not json' WHERE id = 3;
+         INSERT INTO customers (name) VALUES ('Dee');",
+    )
+    .unwrap();
+    let q = db.stmt("query j() { from customers c select c.id, json_text(c.meta, \"plan\") as p, json_int(c.meta, \"limits\", \"seats\") as seats,
+        json_bool(c.meta, \"trial\") as trial, json_has(c.meta, \"plan\") as has, json_text(c.meta, \"tags\", 0) as first order by c.id }");
+    let rows = db.run(&q, &[]);
+    // a string as text, a whole number, a boolean; the right kind only
+    assert_eq!(rows[0], ["1", "pro", "5", "1", "1", "a"]);
+    // wrong kinds (a number where text is wanted, a string where a number or boolean is), an empty array: NULL, not an error
+    assert_eq!(rows[1], ["2", "NULL", "NULL", "NULL", "1", "NULL"]);
+    // text that is not JSON, and no value at all: NULL (and `json_has` is false)
+    assert_eq!(rows[2], ["3", "NULL", "NULL", "NULL", "0", "NULL"]);
+    assert_eq!(rows[3], ["4", "NULL", "NULL", "NULL", "0", "NULL"]);
+    // in a filter
+    let q = db.stmt("query f() { from customers c where json_text(c.meta, \"plan\") == \"pro\" and json_has(c.meta, \"trial\") select c.name }");
+    assert_eq!(db.run(&q, &[]), [["Ann"]]);
 }

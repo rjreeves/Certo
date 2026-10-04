@@ -1902,6 +1902,36 @@ impl<'a> Checker<'a> {
                 // to - from, in whole days
                 (T::Known(builtin(Builtin::Int)), typed.iter().any(|t| t.nullable))
             }
+            "json_text" | "json_int" | "json_bool" | "json_has" => {
+                if !(2..=5).contains(&n) { return arity(self, "a json value and one to four keys (names, or array positions)"); }
+                if !matches!(&typed[0].t, T::Known(TypeIR::Builtin(Builtin::Json))) {
+                    self.fail("QL209", format!("`{name}` expects json, found {}", describe_t(&typed[0].t)), args[0].span());
+                    return None;
+                }
+                // a key is a literal: a name (letters, digits, `_`) or an array position; written the same way for both databases
+                for (t, src) in typed.iter().zip(args).skip(1) {
+                    let fine = match &t.e {
+                        QExpr::String { value } => {
+                            value.chars().next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+                                && value.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+                        }
+                        QExpr::Number { value } => *value >= 0,
+                        _ => false,
+                    };
+                    if !fine {
+                        self.fail("QL209", format!("a key of `{name}` must be a literal name (letters, digits and `_`) or an array position (0 or more)"), src.span());
+                        return None;
+                    }
+                }
+                // text only for JSON strings, whole numbers only below 10^18, booleans only for true/false: anything else is
+                // NULL, as is a missing key, in both databases (`json_has` is false for a missing key or a NULL value)
+                match name {
+                    "json_text" => (T::Known(builtin(Builtin::Text)), true),
+                    "json_int" => (T::Known(builtin(Builtin::BigInt)), true),
+                    "json_bool" => (T::Known(builtin(Builtin::Bool)), true),
+                    _ => (T::Known(builtin(Builtin::Bool)), false),
+                }
+            }
             "lower" | "upper" | "trim" => {
                 if n != 1 { return arity(self, "one argument"); }
                 if !text_arg(&typed[0].t) {

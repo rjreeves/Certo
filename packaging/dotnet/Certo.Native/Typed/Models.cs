@@ -134,6 +134,14 @@ namespace Certo.Models
         public bool ReturnsRows => Columns.Count > 0;
     }
 
+    /// <summary>A fragment of a QL file (a named query used as a table): not a statement, but what a call must give and what it yields.</summary>
+    public sealed class QlFragment
+    {
+        [JsonPropertyName("name")] public string Name { get; init; } = "";
+        [JsonPropertyName("params")] public List<QlParam> Params { get; init; } = new();
+        [JsonPropertyName("columns")] public List<QlColumn> Columns { get; init; } = new();
+    }
+
     /// <summary>The result of compiling a QL file.</summary>
     public sealed class QlCompileResult
     {
@@ -143,6 +151,8 @@ namespace Certo.Models
         [JsonPropertyName("statements")] public List<QlStatement>? Statements { get; init; }
         /// <summary>Just the read queries (kept for older hosts).</summary>
         [JsonPropertyName("queries")] public List<QlStatement>? Queries { get; init; }
+        /// <summary>The file's fragments (empty if it has none, or on failure).</summary>
+        [JsonPropertyName("fragments")] public List<QlFragment> Fragments { get; init; } = new();
         [JsonPropertyName("diagnostics")] public List<CertoDiagnostic> Diagnostics { get; init; } = new();
         /// <summary>The diagnostics as readable text with source excerpts.</summary>
         [JsonPropertyName("rendered")] public string? Rendered { get; init; }
