@@ -90,7 +90,26 @@ impl Project {
     }
 
     pub fn write_state_ir(&self, ir: &SchemaIR) -> Result<(), RunnerError> {
-        let path = self.ir_path();
-        fs::write(&path, ir.to_json() + "\n").map_err(|e| io(&path, e))
+        write_atomic(&self.ir_path(), &(ir.to_json() + "\n"))
     }
+}
+
+/// Write `content` to `path` so a reader (or a process killed half-way) sees the old file or the whole new one,
+/// never part of it: it goes to a sibling file, is flushed to disk, and replaces `path` in one step.
+pub(crate) fn write_atomic(path: &Path, content: &str) -> Result<(), RunnerError> {
+    let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+    let tmp = path.with_file_name(format!(".{name}.tmp"));
+    write_synced(&tmp, content)?;
+    fs::rename(&tmp, path).map_err(|e| {
+        let _ = fs::remove_file(&tmp);
+        io(path, e)
+    })
+}
+
+/// Write a file and flush it to disk before returning.
+pub(crate) fn write_synced(path: &Path, content: &str) -> Result<(), RunnerError> {
+    use std::io::Write;
+    let mut f = fs::File::create(path).map_err(|e| io(path, e))?;
+    f.write_all(content.as_bytes()).map_err(|e| io(path, e))?;
+    f.sync_all().map_err(|e| io(path, e))
 }
