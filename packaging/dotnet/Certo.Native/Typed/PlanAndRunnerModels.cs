@@ -209,6 +209,8 @@ namespace Certo.Models
         [JsonPropertyName("omissions")] public List<string> Omissions { get; init; } = new();
         /// <summary>Label of the baseline migration (null for a dry run).</summary>
         [JsonPropertyName("migration")] public string? Migration { get; init; }
+        /// <summary>Set when an earlier adopt was found interrupted: what was left over and what was done about it (null otherwise).</summary>
+        [JsonPropertyName("recovered")] public string? Recovered { get; init; }
         /// <summary>Differences that remain between the database and the adopted schema.</summary>
         [JsonPropertyName("known_drift")] public List<DriftItem> KnownDrift { get; init; } = new();
     }

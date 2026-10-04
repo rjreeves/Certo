@@ -127,12 +127,14 @@ char *certo_migrate_drift(const char *project_dir, const char *options);
 
 /* options: {"url", "dry_run"?, "force"?}
  *   -> {dry_run, schema_sdl, adopted:{tables,columns,enums,types,sequences,indexes,constraints},
- *       omissions[], migration|null, known_drift:[{kind,text}]}
+ *       omissions[], migration|null, recovered|null, known_drift:[{kind,text}]}
  * Turns an existing database into schema.sdl plus a baseline migration that is
  * RECORDED as applied but not run (the baseline holds real CREATE statements, so
  * an empty database can be rebuilt from the history). `omissions` lists what SDL
  * cannot express and was left out; `known_drift` what therefore still differs.
- * Only for a fresh project and an unmanaged database. */
+ * Only for a fresh project and an unmanaged database. While it works the project holds a `.certo-adopt`
+ * marker; an adopt that was killed part-way is found by the next one, which undoes the partial work and redoes
+ * it (or, if the baseline had already been recorded, only clears the marker); `recovered` says which. */
 char *certo_migrate_adopt(const char *project_dir, const char *options);
 
 /* options: {"url", "dialect"?: "postgres"|"sqlite"}  (dialect defaults from the url)

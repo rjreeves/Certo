@@ -42,6 +42,13 @@ Hand-written steps belong in MDL (`--mdl`), not in `up.sql`.
 - **Tamper-evident:** the SHA-256 of `up.json` is stored in the history table.
   Before anything runs, the history must be an exact prefix of the files on
   disk: an edited, renamed, missing or out-of-order migration is refused.
+- **Adopt survives being killed:** while `adopt` works, the project holds a `.certo-adopt` marker (it contains the
+  `schema.sdl` that was there), written before the first file and removed after the baseline is recorded. If the process
+  is killed in between, the next `adopt` finds the marker and settles it first: if the database already holds exactly this
+  adopt's baseline, only the marker is cleared; if the database has no history, the partial files are discarded, `schema.sdl`
+  is put back and the adoption is redone from scratch (it is computed from the database, so the result is the same);
+  if the history is something else, nothing is touched. The report's `recovered` says which. A dry run refuses while a marker
+  is there rather than guess.
 - **Serialised:** a session advisory lock (PostgreSQL) or a file lock on `<database>.certo-lock` (SQLite) stops two
   runners interleaving; the second fails at once instead of waiting.
 - **Read-only where it should be:** `status` and `apply --dry-run` never

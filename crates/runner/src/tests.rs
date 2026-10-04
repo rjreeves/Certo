@@ -28,6 +28,8 @@ struct Fake {
     live: Option<crate::introspect::LiveSchema>,
     recorded: Vec<u32>,
     fail_record: bool,
+    /// Simulates the process being killed while it records: a panic, so none of the cleanup code runs.
+    die_on_record: bool,
 }
 
 impl Executor for Fake {
@@ -36,6 +38,9 @@ impl Executor for Fake {
     fn record_applied(&mut self, m: &Migration) -> Result<(), ExecError> {
         if self.fail_record {
             return Err(ExecError { statement: None, message: "history table is read-only".into() });
+        }
+        if self.die_on_record {
+            panic!("killed");
         }
         self.recorded.push(m.seq);
         self.applied.push(AppliedRow { seq: m.seq, name: m.name.clone(), checksum: m.checksum.clone(), applied_at: "adopted".into() });
@@ -626,6 +631,107 @@ mod adopt_tests {
         // an empty database is an empty schema, not an error
         let (_d, _p, mut empty) = fresh(LiveSchema { ir: SchemaIR::empty(), notes: vec![] });
         assert_eq!(import_schema(&mut empty).unwrap().counts.tables, 0);
+    }
+
+    const MARKER: &str = ".certo-adopt";
+
+    fn state_matches_files(p: &Project) {
+        let sdl = std::fs::read_to_string(p.schema_path()).unwrap();
+        assert_eq!(p.state_ir().unwrap(), compile(&sdl).0.unwrap(), "IR.json is what schema.sdl compiles to");
+    }
+
+    #[test]
+    fn an_adopt_killed_before_recording_is_undone_and_redone_by_the_next_one() {
+        let (_d, p, mut db) = fresh(legacy_live());
+        let stub = std::fs::read_to_string(p.schema_path()).unwrap();
+        db.die_on_record = true;
+        let died = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| adopt(&p, &mut db, &AdoptOptions::default())));
+        assert!(died.is_err(), "the \"process\" was killed");
+        // what a killed process leaves: the baseline on disk, nothing in the database, and the marker
+        assert!(p.root.join(MARKER).exists());
+        assert_eq!(list(&p).unwrap().len(), 1);
+        assert!(db.applied.is_empty());
+
+        // a dry run does not touch it, and says so
+        db.die_on_record = false;
+        assert!(matches!(adopt(&p, &mut db, &AdoptOptions { dry_run: true, ..Default::default() }), Err(RunnerError::Project(m)) if m.contains("interrupted")));
+        assert!(p.root.join(MARKER).exists());
+
+        // the next adopt undoes the partial work and does it all again
+        let r = adopt(&p, &mut db, &AdoptOptions::default()).unwrap();
+        assert!(r.recovered.as_deref().is_some_and(|s| s.contains("redone")), "{:?}", r.recovered);
+        assert_eq!(r.migration.as_deref(), Some("0001_baseline"));
+        assert!(!p.root.join(MARKER).exists(), "the marker is gone");
+        assert_eq!(db.recorded, [1]);
+        assert_eq!(list(&p).unwrap().len(), 1, "exactly one baseline");
+        state_matches_files(&p);
+        assert_eq!(status(&p, &mut db).unwrap().pending.len(), 0);
+        assert_ne!(std::fs::read_to_string(p.schema_path()).unwrap(), stub);
+    }
+
+    #[test]
+    fn an_adopt_killed_after_recording_is_just_acknowledged() {
+        let (_d, p, mut db) = fresh(legacy_live());
+        let stub = std::fs::read_to_string(p.schema_path()).unwrap();
+        adopt(&p, &mut db, &AdoptOptions::default()).unwrap();
+        let (sdl, checksum) = (std::fs::read_to_string(p.schema_path()).unwrap(), list(&p).unwrap()[0].checksum.clone());
+        // the process died after the baseline was recorded and before the marker was removed
+        std::fs::write(p.root.join(MARKER), &stub).unwrap();
+
+        let r = adopt(&p, &mut db, &AdoptOptions::default()).unwrap();
+        assert!(r.recovered.as_deref().is_some_and(|s| s.contains("already recorded")), "{:?}", r.recovered);
+        assert_eq!(r.migration.as_deref(), Some("0001_baseline"));
+        assert!(!p.root.join(MARKER).exists());
+        // nothing was redone or recorded twice
+        assert_eq!(db.recorded, [1]);
+        assert_eq!(list(&p).unwrap()[0].checksum, checksum);
+        assert_eq!(std::fs::read_to_string(p.schema_path()).unwrap(), sdl);
+        assert_eq!(status(&p, &mut db).unwrap().pending.len(), 0);
+    }
+
+    #[test]
+    fn an_adopt_killed_while_writing_files_is_undone_too() {
+        let (_d, p, mut db) = fresh(legacy_live());
+        let stub = std::fs::read_to_string(p.schema_path()).unwrap();
+        // killed after schema.sdl and part of the baseline were written
+        std::fs::write(p.root.join(MARKER), &stub).unwrap();
+        set_schema(&p, "table half_written { id: int primary key }");
+        std::fs::create_dir_all(p.migrations_dir().join("0001_baseline")).unwrap();
+        std::fs::write(p.migrations_dir().join("0001_baseline").join("plan.json"), "{").unwrap();
+
+        let r = adopt(&p, &mut db, &AdoptOptions::default()).unwrap();
+        assert!(r.recovered.is_some());
+        assert_eq!(list(&p).unwrap().len(), 1);
+        assert!(!std::fs::read_to_string(p.schema_path()).unwrap().contains("half_written"));
+        state_matches_files(&p);
+        assert_eq!(db.recorded, [1]);
+    }
+
+    #[test]
+    fn an_interrupted_adopt_does_not_touch_a_database_with_someone_elses_history() {
+        let (_d, p, mut db) = fresh(legacy_live());
+        let stub = std::fs::read_to_string(p.schema_path()).unwrap();
+        std::fs::write(p.root.join(MARKER), &stub).unwrap();
+        set_schema(&p, "table kept { id: int primary key }");
+        db.applied.push(AppliedRow { seq: 1, name: "other".into(), checksum: "not-ours".into(), applied_at: "t".into() });
+        let r = adopt(&p, &mut db, &AdoptOptions::default());
+        assert!(matches!(r, Err(RunnerError::Project(m)) if m.contains("interrupted") && m.contains("nothing was changed")));
+        assert!(p.root.join(MARKER).exists());
+        assert!(std::fs::read_to_string(p.schema_path()).unwrap().contains("kept"), "untouched");
+        assert!(db.recorded.is_empty());
+    }
+
+    #[test]
+    fn a_normal_adopt_leaves_no_marker_and_a_failed_one_cleans_it_up() {
+        let (_d, p, mut db) = fresh(legacy_live());
+        adopt(&p, &mut db, &AdoptOptions::default()).unwrap();
+        assert!(!p.root.join(MARKER).exists());
+        // an ordinary failure (not a kill) rolls back everything, the marker included
+        let (_d, p, mut db) = fresh(legacy_live());
+        db.fail_record = true;
+        assert!(adopt(&p, &mut db, &AdoptOptions::default()).is_err());
+        assert!(!p.root.join(MARKER).exists());
+        assert!(list(&p).unwrap().is_empty());
     }
 
     #[test]
