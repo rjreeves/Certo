@@ -186,6 +186,93 @@ fn ir_json_must_match_the_last_migration() {
     assert!(m.contains("IR.json does not match"), "{m}");
 }
 
+// ---- `new` killed part-way --------------------------------------------- //
+
+#[test]
+fn a_migration_is_published_whole_and_leaves_no_temp_files() {
+    let (d, p) = project();
+    set_schema(&p, V1);
+    create(&p, "init", None, false).unwrap();
+    let names = |dir: std::path::PathBuf| {
+        let mut v: Vec<String> = fs::read_dir(dir).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().to_string()).collect();
+        v.sort();
+        v
+    };
+    assert_eq!(names(d.path().join("migrations")), ["0001_init"], "no hidden build folder is left");
+    assert_eq!(names(d.path().join("migrations/0001_init")), ["ir.json", "plan.json", "up.json", "up.sql"]);
+    assert!(!names(d.path().to_path_buf()).iter().any(|n| n.ends_with(".tmp")), "IR.json was replaced, not left beside a temp file");
+}
+
+#[test]
+fn a_folder_left_by_a_killed_new_while_building_is_ignored_and_cleaned_up() {
+    let (d, p) = project();
+    set_schema(&p, V1);
+    create(&p, "init", None, false).unwrap();
+    // a killed `new` that was still building its folder: some files, no up.json, hidden name
+    let stale = d.path().join("migrations/.0002_add_age.tmp");
+    fs::create_dir_all(&stale).unwrap();
+    fs::write(stale.join("plan.json"), "{").unwrap();
+    // it is not part of the history, so nothing trips over it
+    assert_eq!(list(&p).unwrap().len(), 1);
+    let mut db = Fake::default();
+    assert_eq!(status(&p, &mut db).unwrap().pending.len(), 1);
+    // and the next `new` carries on, removing it
+    set_schema(&p, V2);
+    let c = create(&p, "add_age", None, false).unwrap();
+    assert_eq!(c.seq, 2);
+    assert!(!stale.exists());
+    assert_eq!(list(&p).unwrap().len(), 2);
+}
+
+#[test]
+fn a_new_killed_before_ir_json_moved_forward_is_repaired_by_the_next_one() {
+    let (_d, p) = project();
+    set_schema(&p, V1);
+    create(&p, "init", None, false).unwrap();
+    set_schema(&p, V2);
+    create(&p, "add_age", None, false).unwrap();
+    let migrations = list(&p).unwrap();
+    let (first, second) = (read_ir_of(&migrations[0]), read_ir_of(&migrations[1]));
+    // the process died after the second migration was published and before IR.json followed
+    p.write_state_ir(&first).unwrap();
+    assert_ne!(p.state_ir().unwrap(), second);
+    // running `new` again: the migration is already there, so there is nothing new, and IR.json is brought forward
+    assert!(matches!(create(&p, "add_age", None, false), Err(RunnerError::NoChanges)));
+    assert_eq!(p.state_ir().unwrap(), second);
+    // a real change after that carries on from the repaired state
+    set_schema(&p, "table users { id: uuid primary key  email: text not null  age: int  nick: text }");
+    assert_eq!(create(&p, "nick", None, false).unwrap().seq, 3);
+
+    // the same for the very first migration: IR.json still empty
+    let (_d, p) = project();
+    set_schema(&p, V1);
+    create(&p, "init", None, false).unwrap();
+    let only = read_ir_of(&list(&p).unwrap()[0]);
+    p.write_state_ir(&certo_sdl::SchemaIR::empty()).unwrap();
+    assert!(matches!(create(&p, "init", None, false), Err(RunnerError::NoChanges)));
+    assert_eq!(p.state_ir().unwrap(), only);
+}
+
+#[test]
+fn only_that_one_state_is_repaired_other_edits_to_ir_json_are_still_refused() {
+    let (_d, p) = project();
+    set_schema(&p, V1);
+    create(&p, "init", None, false).unwrap();
+    set_schema(&p, V2);
+    create(&p, "add_age", None, false).unwrap();
+    // neither the last migration's schema nor the one before it
+    let mut odd = certo_sdl::compile("table other { id: uuid primary key }").0.unwrap();
+    odd.tables[0].name = "other".into();
+    p.write_state_ir(&odd).unwrap();
+    let Err(RunnerError::Project(m)) = create(&p, "x", None, true) else { panic!() };
+    assert!(m.contains("IR.json does not match"), "{m}");
+    assert_eq!(p.state_ir().unwrap(), odd, "an edit that is not the interrupted-new state is left alone");
+}
+
+fn read_ir_of(m: &Migration) -> certo_sdl::SchemaIR {
+    certo_sdl::SchemaIR::from_json(&fs::read_to_string(m.dir.join("ir.json")).unwrap()).unwrap()
+}
+
 // ---- list --------------------------------------------------------------- //
 
 #[test]

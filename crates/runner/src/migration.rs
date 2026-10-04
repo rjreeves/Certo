@@ -1,5 +1,5 @@
 use crate::error::{io, RunnerError};
-use crate::project::Project;
+use crate::project::{write_synced, Project};
 use certo_diagnostics::{render_all, Diagnostic, Severity};
 use certo_mdl::{compile_migration, diff, MigrationPlan};
 use certo_sdl::{compile, SchemaIR};
@@ -126,6 +126,24 @@ pub fn list(project: &Project) -> Result<Vec<Migration>, RunnerError> {
     Ok(out)
 }
 
+/// The schema a migration leaves behind (its `ir.json`).
+fn read_ir(dir: &std::path::Path) -> Result<SchemaIR, RunnerError> {
+    let path = dir.join("ir.json");
+    let text = fs::read_to_string(&path).map_err(|e| io(&path, e))?;
+    SchemaIR::from_json(&text).map_err(|e| RunnerError::Project(format!("{}: {e}", path.display())))
+}
+
+/// Folders a killed `new` left behind while building (`.0003_x.tmp`): never part of the history, so just removed.
+fn remove_stale_temp_folders(migrations: &std::path::Path) {
+    let Ok(entries) = fs::read_dir(migrations) else { return };
+    for e in entries.flatten() {
+        let name = e.file_name().to_string_lossy().to_string();
+        if name.starts_with('.') && name.ends_with(".tmp") && e.path().is_dir() {
+            let _ = fs::remove_dir_all(e.path());
+        }
+    }
+}
+
 fn errors_only(d: &[Diagnostic]) -> bool { d.iter().any(|x| x.severity == Severity::Error) }
 
 /// Compile `schema.sdl`, diff it against `IR.json` (steered by `mdl`, given as
@@ -152,18 +170,26 @@ pub fn create(
     let warnings = render_all(&diags, &src, &schema_label, false);
 
     // ---- chain check: IR.json must be exactly where the last migration left off
-    let state = project.state_ir()?;
+    let mut state = project.state_ir()?;
     let existing = list(project)?;
     if let Some(last) = existing.last() {
-        let path = last.dir.join("ir.json");
-        let text = fs::read_to_string(&path).map_err(|e| io(&path, e))?;
-        let last_ir = SchemaIR::from_json(&text)
-            .map_err(|e| RunnerError::Project(format!("{}: {e}", path.display())))?;
+        let last_ir = read_ir(&last.dir)?;
         if last_ir != state {
-            return Err(RunnerError::Project(format!(
-                "IR.json does not match {}/ir.json; restore IR.json from version control or delete the newer migration",
-                last.label()
-            )));
+            // A `new` that was killed after the migration was published but before IR.json was updated leaves IR.json
+            // exactly one step behind (the previous migration's schema, or empty for the first). That is the one
+            // state that is safe to repair; anything else is somebody's edit and is refused.
+            let before = match existing.len() {
+                1 => SchemaIR::empty(),
+                n => read_ir(&existing[n - 2].dir)?,
+            };
+            if state != before {
+                return Err(RunnerError::Project(format!(
+                    "IR.json does not match {}/ir.json; restore IR.json from version control or delete the newer migration",
+                    last.label()
+                )));
+            }
+            project.write_state_ir(&last_ir)?;
+            state = last_ir;
         }
     }
 
@@ -206,18 +232,19 @@ pub fn create(
             .collect(),
     };
 
-    // ---- write
+    // ---- write: the migration is built in a hidden folder and moved into place in one step, so nobody (a killed
+    // process included) ever sees a folder with some of its files; then IR.json moves forward, also in one step
     let seq = existing.len() as u32 + 1;
-    let dir = project.migrations_dir().join(format!("{seq:04}_{name}"));
+    let migrations = project.migrations_dir();
+    let dir = migrations.join(format!("{seq:04}_{name}"));
     if dir.exists() {
         return Err(RunnerError::Project(format!("{} already exists", dir.display())));
     }
-    fs::create_dir_all(&dir).map_err(|e| io(&dir, e))?;
-    let write = |file: &str, content: String| -> Result<(), RunnerError> {
-        let p = dir.join(file);
-        fs::write(&p, content).map_err(|e| io(&p, e))
-    };
-    let result = (|| {
+    let tmp = migrations.join(format!(".{seq:04}_{name}.tmp"));
+    remove_stale_temp_folders(&migrations);
+    fs::create_dir_all(&tmp).map_err(|e| io(&tmp, e))?;
+    let write = |file: &str, content: String| write_synced(&tmp.join(file), &content);
+    let built = (|| {
         write("plan.json", plan.to_json() + "\n")?;
         write("ir.json", new_ir.to_json() + "\n")?;
         if let Some((_, msrc)) = mdl {
@@ -225,10 +252,14 @@ pub fn create(
         }
         write("up.sql", format!("-- GENERATED from up.json for review; this file is never executed.\n{}\n", script.to_sql()))?;
         write("up.json", serde_json::to_string_pretty(&script).expect("script serializes") + "\n")?;
-        project.write_state_ir(&new_ir)
+        fs::rename(&tmp, &dir).map_err(|e| io(&dir, e))
     })();
-    if let Err(e) = result {
-        let _ = fs::remove_dir_all(&dir); // don't leave a half-written migration behind
+    if let Err(e) = built {
+        let _ = fs::remove_dir_all(&tmp);
+        return Err(e);
+    }
+    if let Err(e) = project.write_state_ir(&new_ir) {
+        let _ = fs::remove_dir_all(&dir); // not published after all
         return Err(e);
     }
 

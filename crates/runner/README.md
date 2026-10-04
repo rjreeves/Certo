@@ -42,6 +42,13 @@ Hand-written steps belong in MDL (`--mdl`), not in `up.sql`.
 - **Tamper-evident:** the SHA-256 of `up.json` is stored in the history table.
   Before anything runs, the history must be an exact prefix of the files on
   disk: an edited, renamed, missing or out-of-order migration is refused.
+- **`new` survives being killed:** a migration is built in a hidden folder (`migrations/.0003_x.tmp`) with each file flushed
+  to disk, then moved into place in one step; `IR.json` is likewise written beside itself and replaced in one step. So a
+  process killed part-way never leaves a folder with some of its files (which would make every command fail reading it):
+  a leftover hidden folder is not part of the history and is removed by the next `new`. A kill after the folder was
+  published but before `IR.json` followed leaves `IR.json` exactly one step behind; the next `new` recognises that one
+  state, brings `IR.json` forward (so it reports "no changes" rather than creating a duplicate), and still refuses any
+  other edit of `IR.json`.
 - **Adopt survives being killed:** while `adopt` works, the project holds a `.certo-adopt` marker (it contains the
   `schema.sdl` that was there), written before the first file and removed after the baseline is recorded. If the process
   is killed in between, the next `adopt` finds the marker and settles it first: if the database already holds exactly this
