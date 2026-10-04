@@ -201,6 +201,10 @@ finally
         "a column describes itself in SDL's words");
     var linked = CertoSdl.Compile("table a { id: serial primary key }\ntable b { id: serial primary key  a_id: int not null references a on delete cascade }");
     Check(linked.Schema!.Table("b")!.Columns[1].References is { Table: "a", Column: "id", OnDelete: ReferentialAction.Cascade }, "typed schema: references and actions");
+    var withSdlView = CertoSdl.Compile("table t { id: serial primary key  n: int } view big on t (id) where n > 10");
+    Check(withSdlView.Ok && withSdlView.Schema!.Views is [{ Name: "big", From: "t" } sv] && sv.Columns.SequenceEqual(new[] { "id" }) && sv.Filter is not null,
+        "typed schemas carry the views declared in SDL");
+    Check(typedSchema.Schema!.Views.Count == 0, "a schema without views lists none");
     Check(!CertoSdl.Compile("table t { id: nope }").Ok && CertoSdl.Compile("table t { id: nope }").Schema is null, "no typed schema when there are errors");
     var typedBad = CertoSdl.Compile("table t { id: nope }");
     Check(!typedBad.Ok && typedBad.Diagnostics[0].Severity == DiagnosticSeverity.Error && typedBad.Diagnostics[0].Span is { Line: 1 },

@@ -326,3 +326,39 @@ fn a_sequence_rides_the_plan_json() {
     assert_eq!(MigrationPlan::from_json(&plan.to_json()).unwrap(), plan);
     assert!(plan.to_json().contains("\"op\": \"create_sequence\""));
 }
+
+// ---- views -------------------------------------------------------------- //
+
+const WITH_VIEW: &str = "table users { id: uuid primary key  email: text not null  age: int }
+                         view adults on users (id, email) where age >= 18";
+
+#[test]
+fn views_are_created_last_and_dropped_first() {
+    // new view on an existing table; and a new table with a view on it
+    assert_eq!(ops(USERS, WITH_VIEW), ["+ column users.age", "+ view adults"]);
+    assert_eq!(
+        ops("", WITH_VIEW),
+        ["+ table users", "+ view adults"]
+    );
+    // removed
+    assert_eq!(ops(WITH_VIEW, "table users { id: uuid primary key  email: text not null  age: int }"), ["- view adults"]);
+    // changed: dropped before, created after
+    assert_eq!(
+        ops(WITH_VIEW, &WITH_VIEW.replace("age >= 18", "age >= 21")),
+        ["- view adults", "+ view adults"]
+    );
+    assert!(diff(&ir(WITH_VIEW), &ir(WITH_VIEW)).is_empty());
+}
+
+#[test]
+fn a_view_over_a_table_being_altered_is_recreated() {
+    let altered = WITH_VIEW.replace("email: text not null", "email: varchar(320) not null");
+    let got = ops(WITH_VIEW, &altered);
+    assert_eq!(got, ["- view adults", "~ column users.email", "+ view adults"]);
+    // a column dropped along with the view that used it
+    let gone = "table users { id: uuid primary key  email: text not null }";
+    assert_eq!(ops(WITH_VIEW, gone), ["- view adults", "- column users.age"]);
+    // unrelated table changes leave it alone
+    let other = format!("{WITH_VIEW}\ntable t {{ id: int primary key }}");
+    assert_eq!(ops(WITH_VIEW, &other), ["+ table t"]);
+}

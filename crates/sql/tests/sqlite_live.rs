@@ -249,3 +249,31 @@ fn defaults_and_types_map_to_sqlite() {
     assert_eq!(q(&c, "SELECT length(id), b, length(d), n, v FROM t"), ["36|1|10|1.5|hi"]);
     assert_eq!(q(&c, "SELECT substr(id, 15, 1) FROM t"), ["4"], "version-4 uuid");
 }
+
+#[test]
+fn views_survive_the_table_rebuilds_under_them() {
+    let v1 = ir("table users { id: serial primary key  email: text not null  age: int }
+                 view adults on users (id, email) where age >= 18");
+    let mut c = db();
+    apply(&mut c, &SchemaIR::empty(), &v1);
+    c.execute_batch("INSERT INTO users (email, age) VALUES ('a@x', 30), ('b@x', 5)").unwrap();
+    let rows = |c: &Connection| c.query_row("SELECT count(*) FROM adults", [], |r| r.get::<_, i64>(0)).unwrap();
+    assert_eq!(rows(&c), 1);
+
+    // a type change makes SQLite rebuild the table; the view is dropped first and comes back
+    let v2 = ir("table users { id: serial primary key  email: varchar(100) not null  age: int }
+                 view adults on users (id, email) where age >= 18");
+    apply(&mut c, &v1, &v2);
+    assert_eq!(rows(&c), 1);
+
+    // the condition changes
+    let v3 = ir("table users { id: serial primary key  email: varchar(100) not null  age: int }
+                 view adults on users (id, email) where age >= 1");
+    apply(&mut c, &v2, &v3);
+    assert_eq!(rows(&c), 2);
+
+    // and the view goes
+    let v4 = ir("table users { id: serial primary key  email: varchar(100) not null  age: int }");
+    apply(&mut c, &v3, &v4);
+    assert!(c.query_row("SELECT count(*) FROM adults", [], |r| r.get::<_, i64>(0)).is_err());
+}

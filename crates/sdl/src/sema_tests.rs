@@ -640,3 +640,55 @@ fn serial_identity_and_sequences_round_trip_through_print() {
     }
     assert!(!printed.contains("a: serial primary key not null"), "implied NOT NULL is not printed");
 }
+
+const WITH_VIEWS: &str = "
+table users { id: serial primary key  email: text not null  age: int  note: text }
+view adults on users (id, email) where age >= 18
+view everyone on users (email, age)
+";
+
+#[test]
+fn views_resolve_to_the_table_they_read() {
+    let ir = compile_ok(WITH_VIEWS);
+    assert_eq!(ir.tables.len(), 1, "a view is not a table in the schema");
+    let names: Vec<_> = ir.views.iter().map(|v| v.name.as_str()).collect();
+    assert_eq!(names, ["adults", "everyone"]);
+    let adults = ir.view("adults").unwrap();
+    assert_eq!((adults.from.as_str(), adults.columns.as_slice()), ("users", ["id".to_string(), "email".to_string()].as_slice()));
+    assert!(adults.filter.is_some() && ir.view("everyone").unwrap().filter.is_none());
+
+    // what a reader sees: the chosen columns, nothing that belongs to the table
+    let t = adults.as_table(&ir).unwrap();
+    assert!(t.view && t.columns.len() == 2);
+    let id = t.column("id").unwrap();
+    assert!(!id.primary_key && id.generated.is_none() && !id.nullable);
+    assert!(ir.view("everyone").unwrap().as_table(&ir).unwrap().column("age").unwrap().nullable);
+    let q = ir.with_views_as_tables();
+    assert!(q.views.is_empty() && q.table("adults").is_some_and(|t| t.view));
+}
+
+#[test]
+fn views_print_and_compile_back_to_the_same_schema() {
+    let ir = compile_ok(WITH_VIEWS);
+    let printed = to_sdl(&ir).unwrap();
+    assert!(printed.contains("view adults on users (id, email) where age >= 18"), "{printed}");
+    assert!(printed.contains("view everyone on users (email, age)\n") || printed.trim_end().ends_with("view everyone on users (email, age)"), "{printed}");
+    assert_eq!(compile_ok(&printed), ir);
+    // a schema with no views serializes as before
+    assert!(!compile_ok("table t { id: int primary key }").to_json().contains("views"));
+}
+
+#[test]
+fn view_mistakes() {
+    let t = "table users { id: serial primary key  email: text  age: int }\n";
+    assert_eq!(errors(&format!("{t}view v on nope (id)")), ["SDL206"]);
+    assert_eq!(errors(&format!("{t}view v on users (ghost)")), ["SDL206"]);
+    assert_eq!(errors(&format!("{t}view v on users (id, id)")), ["SDL206"]);
+    assert_eq!(errors(&format!("{t}view v on users (id) where age")), ["SDL211"]);
+    assert_eq!(errors(&format!("{t}view v on users (id) where ghost > 1")).len(), 1);
+    assert_eq!(errors(&format!("{t}view users on users (id)")), ["SDL200"]);
+    assert_eq!(errors(&format!("{t}view a on users (id)\nview b on a (id)")), ["SDL213"]);
+    assert_eq!(errors(&format!("{t}view v on users (id)\nview v on users (email)")), ["SDL200"]);
+    let (_, d) = compile(&format!("{t}view v on users"));
+    assert!(d.iter().any(|x| x.severity == certo_diagnostics::Severity::Error), "a view needs a column list");
+}

@@ -18,12 +18,15 @@ pub struct SchemaIR {
     pub types: Vec<CompositeIR>,
     #[serde(default)]
     pub sequences: Vec<SequenceIR>,
+    /// Views declared in SDL (`view name on table (...) where ...`), sorted by name.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub views: Vec<ViewIR>,
 }
 
 impl SchemaIR {
     /// A schema with nothing in it; the "before" side of an initial migration.
     pub fn empty() -> SchemaIR {
-        SchemaIR { version: IR_VERSION, tables: Vec::new(), enums: Vec::new(), types: Vec::new(), sequences: Vec::new() }
+        SchemaIR { version: IR_VERSION, tables: Vec::new(), enums: Vec::new(), types: Vec::new(), sequences: Vec::new(), views: Vec::new() }
     }
 
     pub fn to_json(&self) -> String {
@@ -36,6 +39,70 @@ impl SchemaIR {
 
     pub fn table(&self, name: &str) -> Option<&TableIR> {
         self.tables.iter().find(|t| t.name == name)
+    }
+
+    pub fn view(&self, name: &str) -> Option<&ViewIR> {
+        self.views.iter().find(|v| v.name == name)
+    }
+
+    /// The schema as the query language sees it: every SDL view added as a read-only table.
+    pub fn with_views_as_tables(&self) -> SchemaIR {
+        let mut out = self.clone();
+        for v in &self.views {
+            if let Some(t) = v.as_table(self) {
+                out.tables.push(t);
+            }
+        }
+        out.tables.sort_by(|a, b| a.name.cmp(&b.name));
+        out.views.clear();
+        out
+    }
+}
+
+/// A view declared in SDL: some of one table's columns, and optionally only the rows a condition keeps.
+/// Deliberately small: no joins, no computed columns, no other views, so every database means the same thing by it
+/// and a diff can tell exactly what changed.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ViewIR {
+    pub name: String,
+    /// The table it reads.
+    pub from: String,
+    /// Which of its columns, in the order shown.
+    pub columns: Vec<String>,
+    /// Rows kept; `None` keeps all.
+    #[serde(default)]
+    pub filter: Option<ExprIR>,
+}
+
+impl ViewIR {
+    /// What a reader of the view sees: the chosen columns with their types and nullability, and nothing that only
+    /// makes sense on a table (keys, defaults, generation). `None` if the table or a column is missing.
+    pub fn as_table(&self, schema: &SchemaIR) -> Option<TableIR> {
+        let base = schema.table(&self.from)?;
+        let columns = self
+            .columns
+            .iter()
+            .map(|c| {
+                base.column(c).map(|c| ColumnIR {
+                    name: c.name.clone(),
+                    ty: c.ty.clone(),
+                    primary_key: false,
+                    unique: false,
+                    nullable: c.nullable && !c.primary_key,
+                    default: None,
+                    references: None,
+                    generated: None,
+                })
+            })
+            .collect::<Option<Vec<_>>>()?;
+        Some(TableIR {
+            name: self.name.clone(),
+            columns,
+            relationships: Vec::new(),
+            indexes: Vec::new(),
+            constraints: Vec::new(),
+            view: true,
+        })
     }
 }
 

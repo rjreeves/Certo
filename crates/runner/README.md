@@ -75,6 +75,11 @@ Hand-written steps belong in MDL (`--mdl`), not in `up.sql`.
   as `views.error`; `apply` refuses to start with one. Drift reports a missing view, a changed one, and one no longer in the
   file; views certo manages are not "left out" notes.
 
+- **SDL views:** `view name on table (columns) where ...` in `schema.sdl` is part of the schema and so of the migrations:
+  a changed or removed view, or one over a table whose columns change (or are renamed), is dropped before the migration's
+  other changes and created again after them. Drift compares presence only (a database does not hand a view back as it was
+  written): a declared view that is missing is drift; one that is there is not "left out". `views.ql` views may read them.
+
 ## Drift detection
 
 `certo sdl migrate drift` reads the live schema back from the PostgreSQL

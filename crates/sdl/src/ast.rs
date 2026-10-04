@@ -15,6 +15,7 @@ pub enum Decl {
     Type(TypeDecl),
     Index(IndexDecl),
     Constraint(ConstraintDecl),
+    View(ViewDecl),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -169,6 +170,16 @@ pub struct ConstraintDecl {
     pub name: Ident,
     pub table: Ident,
     pub expr: Expr,
+    pub span: Span,
+}
+
+/// `view name on table (column, ...) [where expr]`: some of one table's columns and rows, kept in the database.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ViewDecl {
+    pub name: Ident,
+    pub table: Ident,
+    pub columns: Vec<Ident>,
+    pub filter: Option<Expr>,
     pub span: Span,
 }
 

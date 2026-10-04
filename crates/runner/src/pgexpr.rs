@@ -514,6 +514,7 @@ pub fn translate_default_for(
         enums: enums.to_vec(),
         types: vec![],
         sequences: sequences.iter().filter(|s| ident_ok(&s.name)).cloned().collect(),
+        views: vec![],
     };
     verify(dialect, raw, &e, &synth)?;
     Ok(e)
@@ -546,6 +547,7 @@ pub fn translate_check_for(dialect: Dialect, raw: &str, columns: &[ColumnIR], en
         enums: enums.to_vec(),
         types: vec![],
         sequences: vec![],
+        views: vec![],
     };
     verify(dialect, raw, &e, &synth)?;
     Ok(e)

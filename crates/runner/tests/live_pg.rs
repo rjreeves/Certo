@@ -254,3 +254,38 @@ fn views_follow_the_migrations_on_postgresql() {
     assert_eq!(raw.query_one("SELECT count(*) FROM adult_emails", &[]).unwrap().get::<_, i64>(0), 1);
 }
 
+
+#[test]
+fn sdl_views_follow_the_migrations_on_postgresql() {
+    let Some(url) = url() else {
+        eprintln!("CERTO_TEST_PG_URL not set; skipping live PostgreSQL test");
+        return;
+    };
+    let mut raw = Client::connect(&url, NoTls).expect("connect");
+    raw.batch_execute("DROP SCHEMA public CASCADE; CREATE SCHEMA public;").unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let project = Project::init(dir.path(), "postgres").unwrap();
+    let schema = "table people { id: serial primary key  name: text not null  age: int }
+                  view adults on people (id, name) where age >= 18";
+    std::fs::write(project.schema_path(), schema).unwrap();
+    create(&project, "init", None, false).unwrap();
+    let mut db = PgExecutor::connect(&url).unwrap();
+    apply(&project, &mut db, &ApplyOptions::default()).unwrap();
+    raw.batch_execute("INSERT INTO people (name, age) VALUES ('a', 30), ('b', 5)").unwrap();
+    let n = |raw: &mut Client| raw.query_one("SELECT count(*) FROM adults", &[]).unwrap().get::<_, i64>(0);
+    assert_eq!(n(&mut raw), 1);
+    let d = drift::check(&project, &mut db).unwrap();
+    assert!(d.in_sync(), "{:?} {:?}", d.items, d.notes);
+    assert!(d.notes.iter().all(|x| !x.contains("adults")));
+
+    // PostgreSQL refuses to change the type of a column a view reads: the view goes first and comes back
+    std::fs::write(project.schema_path(), schema.replace("name: text not null", "name: varchar(50) not null")).unwrap();
+    create(&project, "narrow", None, true).unwrap();
+    apply(&project, &mut db, &ApplyOptions::default()).unwrap();
+    assert_eq!(n(&mut raw), 1);
+    assert!(drift::check(&project, &mut db).unwrap().in_sync());
+
+    raw.batch_execute("DROP VIEW adults").unwrap();
+    let d = drift::check(&project, &mut db).unwrap();
+    assert!(d.items.iter().any(|i| i.text.contains("adults")), "{:?}", d.items);
+}

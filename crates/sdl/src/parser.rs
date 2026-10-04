@@ -24,7 +24,7 @@ pub fn parse(src: &str) -> (SdlFile, Vec<Diagnostic>) {
 /// `Err(())` means a diagnostic was already recorded.
 pub type PResult<T> = Result<T, ()>;
 
-const DECL_KEYWORDS: &[&str] = &["table", "enum", "type", "index", "constraint", "sequence"];
+const DECL_KEYWORDS: &[&str] = &["table", "enum", "type", "index", "constraint", "sequence", "view"];
 
 /// Largest expression (operands + operators) accepted. Bounds recursion depth
 /// in the parser, type checker and drop glue, so the compiler is safe to call
@@ -211,7 +211,7 @@ impl Parser {
     fn decl(&mut self) -> PResult<Decl> {
         let kw = match self.peek() {
             TokKind::Ident(s) if DECL_KEYWORDS.contains(&s.as_str()) => s.clone(),
-            _ => return self.err("a declaration (`table`, `enum`, `type`, `index`, `constraint` or `sequence`)"),
+            _ => return self.err("a declaration (`table`, `enum`, `type`, `index`, `constraint`, `sequence` or `view`)"),
         };
         let start = self.bump().span;
         match kw.as_str() {
@@ -220,6 +220,7 @@ impl Parser {
             "type" => self.type_decl(start).map(Decl::Type),
             "index" => self.index(start).map(Decl::Index),
             "sequence" => self.sequence(start).map(Decl::Sequence),
+            "view" => self.view(start).map(Decl::View),
             _ => self.constraint(start).map(Decl::Constraint),
         }
     }
@@ -439,6 +440,26 @@ impl Parser {
         }
         let end = self.expect(TokKind::RParen)?;
         Ok(IndexDecl { name, table, columns, span: start.to(end) })
+    }
+
+    fn view(&mut self, start: Span) -> PResult<ViewDecl> {
+        let name = self.ident("a view name")?;
+        self.expect_word("on")?;
+        let table = self.ident("a table name")?;
+        self.expect(TokKind::LParen)?;
+        let mut columns = vec![self.ident("a column name")?];
+        while self.eat(&TokKind::Comma) {
+            columns.push(self.ident("a column name")?);
+        }
+        let mut end = self.expect(TokKind::RParen)?;
+        let filter = if self.eat_word("where") {
+            let e = self.expr()?;
+            end = e.span();
+            Some(e)
+        } else {
+            None
+        };
+        Ok(ViewDecl { name, table, columns, filter, span: start.to(end) })
     }
 
     fn constraint(&mut self, start: Span) -> PResult<ConstraintDecl> {

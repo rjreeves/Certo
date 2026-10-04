@@ -251,10 +251,12 @@ pub fn introspect(conn: &Connection) -> rusqlite::Result<LiveSchema> {
             names.push((n, sql));
         }
     }
+    let mut live_views: Vec<String> = Vec::new();
     {
         let mut st = conn.prepare("SELECT type, name FROM sqlite_master WHERE type IN ('view', 'trigger') ORDER BY name")?;
         for r in st.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))? {
             let (t, n) = r?;
+            if t == "view" { live_views.push(n.clone()); }
             notes.push(format!("{t} {n} is not represented in the schema"));
         }
     }
@@ -452,8 +454,9 @@ pub fn introspect(conn: &Connection) -> rusqlite::Result<LiveSchema> {
 
     let enums: Vec<EnumIR> = enums.into_iter().map(|(name, variants)| EnumIR { name, variants }).collect();
     Ok(LiveSchema {
-        ir: SchemaIR { version: certo_sdl::IR_VERSION, tables, enums, types: vec![], sequences: vec![] },
+        ir: SchemaIR { version: certo_sdl::IR_VERSION, tables, enums, types: vec![], sequences: vec![], views: vec![] },
         notes,
+        views: live_views,
     })
 }
 

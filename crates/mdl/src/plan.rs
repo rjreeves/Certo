@@ -1,6 +1,6 @@
 use certo_sdl::{
     ColumnIR, Generation, CompositeIR, ConstraintIR, EnumIR, ExprIR, ForeignKeyIR, IndexIR, ReferentialAction,
-    RelationshipIR, SequenceIR, TableIR, TypeIR,
+    RelationshipIR, SequenceIR, TableIR, TypeIR, ViewIR,
 };
 use serde::{Deserialize, Serialize};
 
@@ -48,6 +48,10 @@ pub enum Op {
 
     CreateTable { definition: TableIR },
     DropTable { name: String },
+
+    /// Views come first (dropped) and last (created) in a plan: a view stops the table it reads from being changed.
+    CreateView { definition: ViewIR },
+    DropView { name: String },
 
     AddColumn { table: String, column: ColumnIR },
     AlterColumn { table: String, before: ColumnIR, after: ColumnIR },
@@ -149,6 +153,8 @@ impl Op {
             Op::DropType { name } => format!("- type {name}"),
             Op::CreateTable { definition } => format!("+ table {}", definition.name),
             Op::DropTable { name } => format!("- table {name}"),
+            Op::CreateView { definition } => format!("+ view {}", definition.name),
+            Op::DropView { name } => format!("- view {name}"),
             Op::AddColumn { table, column } => format!("+ column {table}.{}", column.name),
             Op::AlterColumn { table, after, .. } => format!("~ column {table}.{}", after.name),
             Op::DropColumn { table, name } => format!("- column {table}.{name}"),

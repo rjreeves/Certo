@@ -421,3 +421,52 @@ fn the_journal_notes_when_views_were_recreated() {
     assert!(text(&ex, "SELECT detail FROM _certo_log WHERE action = 'views'").contains("paid_orders"));
 }
 
+
+const WITH_SDL_VIEW: &str = r#"
+table people {
+    id: serial primary key
+    name: text not null
+    age: int
+}
+view adults on people (id, name) where age >= 18
+"#;
+
+#[test]
+fn sdl_views_are_part_of_the_migrations_and_the_drift_check() {
+    let (_dir, p, db) = fixture(WITH_SDL_VIEW);
+    create(&p, "init", None, false).unwrap();
+    let mut ex = SqliteExecutor::open(&db).unwrap();
+    let r = apply(&p, &mut ex, &ApplyOptions::default()).unwrap();
+    assert_eq!(r.migrations, ["0001_init"]);
+    ex.connection().execute_batch("INSERT INTO people (name, age) VALUES ('a', 30), ('b', 5)").unwrap();
+    assert_eq!(count(&ex, "SELECT count(*) FROM adults"), 1);
+    let d = drift::check(&p, &mut ex).unwrap();
+    assert!(d.in_sync(), "{:?}", d.items);
+    assert!(d.notes.iter().all(|n| !n.contains("adults")), "a view the schema declares is not 'left out': {:?}", d.notes);
+
+    // a view dropped by hand is missing
+    ex.connection().execute_batch("DROP VIEW adults").unwrap();
+    let d = drift::check(&p, &mut ex).unwrap();
+    assert!(!d.in_sync());
+    assert!(d.items.iter().any(|i| i.text.contains("adults")), "{:?}", d.items);
+
+    // changing the view, and the table under it, is one migration; the data stays
+    ex.connection().execute_batch("CREATE VIEW adults AS SELECT id, name FROM people WHERE age >= 18").unwrap();
+    fs::write(p.schema_path(), WITH_SDL_VIEW.replace("name: text not null", "name: varchar(50) not null").replace("age >= 18", "age >= 1")).unwrap();
+    create(&p, "wider", None, true).unwrap();
+    apply(&p, &mut ex, &ApplyOptions::default()).unwrap();
+    assert_eq!(count(&ex, "SELECT count(*) FROM adults"), 2);
+    assert!(drift::check(&p, &mut ex).unwrap().in_sync());
+
+    // a QL view can read an SDL view
+    views_file(&p, "view adult_names { from adults a select a.name }");
+    let r = apply(&p, &mut ex, &ApplyOptions::default()).unwrap();
+    assert_eq!(r.views, ["adult_names"]);
+    assert_eq!(count(&ex, "SELECT count(*) FROM adult_names"), 2);
+    // ...and survives a migration that drops and recreates the SDL view under it
+    fs::write(p.schema_path(), WITH_SDL_VIEW.replace("name: text not null", "name: varchar(50) not null").replace("age >= 18", "age >= 6")).unwrap();
+    create(&p, "narrow", None, true).unwrap();
+    apply(&p, &mut ex, &ApplyOptions::default()).unwrap();
+    assert_eq!(count(&ex, "SELECT count(*) FROM adult_names"), 1);
+    assert!(drift::check(&p, &mut ex).unwrap().in_sync());
+}

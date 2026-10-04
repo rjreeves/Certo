@@ -23,6 +23,8 @@ pub struct LiveSchema {
     pub ir: SchemaIR,
     /// Live objects SDL cannot represent, in words.
     pub notes: Vec<String>,
+    /// Names of the views the database has (SDL views are compared by presence: a database does not give a view back as written).
+    pub views: Vec<String>,
 }
 
 /// `character varying(255)`, `character(3)`, `numeric(10,2)`.
@@ -329,6 +331,7 @@ pub fn introspect(client: &mut Client) -> Result<LiveSchema, postgres::Error> {
     sequences.sort_by(|a, b| a.name.cmp(&b.name));
 
     // ---- objects SDL has no place for: said so, never silently dropped -----------
+    let mut live_views: Vec<String> = Vec::new();
     for r in client.query(
         "SELECT kind, name FROM (
              SELECT CASE c.relkind WHEN 'v' THEN 'view' ELSE 'materialized view' END AS kind, c.relname::text AS name
@@ -342,6 +345,7 @@ pub fn introspect(client: &mut Client) -> Result<LiveSchema, postgres::Error> {
         &[],
     )? {
         let (kind, name): (String, String) = (r.get(0), r.get(1));
+        if kind == "view" { live_views.push(name.clone()); }
         notes.push(format!("{kind} {name} is not represented in the schema"));
     }
 
@@ -362,6 +366,7 @@ pub fn introspect(client: &mut Client) -> Result<LiveSchema, postgres::Error> {
         enums: enums.into_iter().map(|(name, variants)| EnumIR { name, variants }).collect(),
         types: composites.into_iter().map(|(name, fields)| CompositeIR { name, fields }).collect(),
         sequences,
+        views: Vec::new(),
     };
-    Ok(LiveSchema { ir, notes })
+    Ok(LiveSchema { ir, notes, views: live_views })
 }
