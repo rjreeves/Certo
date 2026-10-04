@@ -88,21 +88,15 @@ impl Q {
         Ok(q)
     }
 
-    /// `fragment name() { from ... select ... }`: a named query with no parameters, used as a table.
+    /// `fragment name(p: type, ...) { from ... select ... }`: a named query used as a table; its parameters are given
+    /// as arguments where it is used.
     fn fragment(&mut self) -> PResult<Fragment> {
         let start = self.p.span();
         self.p.expect_word("fragment")?;
         let name = self.p.ident("a fragment name")?;
         let params = self.param_list()?;
-        if let Some(p) = params.first() {
-            return self.fail(
-                "QL260",
-                "a fragment takes no parameters: it is used as a table and reads only the schema (use a `query` for parameters)",
-                p.name.span,
-            );
-        }
         self.p.expect(TokKind::LBrace)?;
-        let mut query = self.query_body(name.clone(), Vec::new())?;
+        let mut query = self.query_body(name.clone(), params)?;
         let end = self.p.expect(TokKind::RBrace)?;
         query.span = start.to(end);
         Ok(Fragment { name, query, span: start.to(end) })
@@ -164,7 +158,7 @@ impl Q {
     fn branch(&mut self, name: certo_sdl::Ident, params: Vec<ParamDecl>) -> PResult<Query> {
         let start = self.p.span();
         self.p.expect_word("from")?;
-        let from = self.table_ref()?;
+        let from = self.table_ref(true)?;
         let mut joins = Vec::new();
         while self.word_is("inner") || self.word_is("left") || self.word_is("join") {
             let kind = if self.p.eat_word("left") {
@@ -174,7 +168,7 @@ impl Q {
                 JoinKind::Inner
             };
             self.p.expect_word("join")?;
-            let table = self.table_ref()?;
+            let table = self.table_ref(true)?;
             self.p.expect_word("on")?;
             let on = self.expr()?;
             joins.push(Join { kind, table, on });
@@ -314,9 +308,9 @@ impl Q {
         };
 
         let table = match kind {
-            MutationKind::Insert => { self.p.expect_word("into")?; self.table_ref()? }
-            MutationKind::Update => self.table_ref()?,
-            MutationKind::Delete => { self.p.expect_word("from")?; self.table_ref()? }
+            MutationKind::Insert => { self.p.expect_word("into")?; self.table_ref(false)? }
+            MutationKind::Update => self.table_ref(false)?,
+            MutationKind::Delete => { self.p.expect_word("from")?; self.table_ref(false)? }
         };
         let (mut assignments, mut insert_columns, mut rows, mut source) = (Vec::new(), Vec::new(), Vec::new(), None);
         if kind == MutationKind::Insert && *self.p.peek() == TokKind::LParen {
@@ -389,15 +383,25 @@ impl Q {
         Ok(Mutation { kind, name, params, table, assignments, insert_columns, rows, source, filter, all_rows, conflict, returning, ctes, span: start.to(end) })
     }
 
-    fn table_ref(&mut self) -> PResult<TableRef> {
+    /// A table (or fragment) and its alias. Only `from` and `join` take fragment arguments: after the target of
+    /// `insert`, a `(` starts the column list.
+    fn table_ref(&mut self, allow_args: bool) -> PResult<TableRef> {
         let table = self.p.ident("a table name")?;
+        let mut args = Vec::new();
+        if allow_args && self.p.eat(&TokKind::LParen) {
+            if *self.p.peek() != TokKind::RParen {
+                args.push(self.expr()?);
+                while self.p.eat(&TokKind::Comma) { args.push(self.expr()?); }
+            }
+            self.p.expect(TokKind::RParen)?;
+        }
         let explicit = self.p.eat_word("as");
         let alias = match self.p.peek() {
             TokKind::Ident(w) if explicit || !CLAUSE_WORDS.contains(&w.as_str()) => Some(self.p.ident("an alias")?),
             _ if explicit => return self.p.err("an alias"),
             _ => None,
         };
-        Ok(TableRef { table, alias })
+        Ok(TableRef { table, alias, args })
     }
 
     fn select_item(&mut self) -> PResult<SelectItem> {

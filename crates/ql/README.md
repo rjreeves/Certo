@@ -170,9 +170,21 @@ fragment paid_orders() { from orders o where o.paid select o.id, o.customer_id, 
 query q() { from paid_orders p join customers c on p.customer_id == c.id select c.name, p.total }
 ```
 
-A `fragment` is a named, parameter-free query used as a table, anywhere a table can be (including in subqueries and in the
+A `fragment` is a named query used as a table, anywhere a table can be (including in subqueries and in the
 source or filter of a mutation). It is inlined as a `with` query of each statement that uses it: no migration, no database
 object. Fragments can use other fragments, are checked once on their own, and cannot be written to (`QL260`).
+
+A fragment can take parameters, filled in where it is used with literals or the statement's own parameters (never columns):
+
+```
+fragment since(cutoff: timestamp) { from orders o where o.created >= :cutoff select o.id, o.customer_id, o.total }
+query recent(at: timestamp) { from since(:at) r join customers c on r.customer_id == c.id select c.name, r.total }
+query fixed() { from since("2026-01-01") r select count(*) as n }
+```
+
+Each distinct call becomes its own `with` query (equal calls share one). The alias defaults to the fragment's name. A wrong number
+of arguments, a column or expression as an argument, a parameter of another type or one that may be null where the fragment's
+isn't, are `QL260`.
 
 ## Filtered aggregates and `string_agg`
 

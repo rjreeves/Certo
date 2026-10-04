@@ -82,6 +82,8 @@ pub struct TableRef {
     pub table: Ident,
     /// Defaults to the table name.
     pub alias: Option<Ident>,
+    /// `from fragment_name(a, b)`: the arguments of a fragment (literals or the statement's parameters).
+    pub args: Vec<Expr>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

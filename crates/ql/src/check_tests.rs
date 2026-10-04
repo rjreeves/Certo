@@ -1530,11 +1530,10 @@ fn fragment_errors() {
     assert_eq!(errors("fragment orders() { from customers c select c.id }"), ["QL260"]);
     assert_eq!(errors("fragment a() { from b x select x.id } fragment b() { from a y select y.id }"), ["QL260"]);
     assert_eq!(errors("fragment a() { from a x select x.id }"), ["QL260"]);
-    assert_eq!(errors("fragment f(n: int) { from orders o where o.id == :n select o.id }"), ["QL260"]);
     assert_eq!(errors("fragment f() { from orders o select o.id } update bump() { f x set id = 1 where x.id == 1 }"), ["QL260"]);
     // a fragment's own rules apply: its output columns need names
     assert_eq!(errors("fragment f() { from orders o select o.id + 1 }"), ["QL215"]);
-    // a fragment cannot use the statement's parameters
+    // a fragment cannot use the statement's parameters: only its own
     assert!(!errors("fragment f() { from orders o where o.id == :n select o.id } query q(n: int) { from f x select x.id }").is_empty());
 }
 
@@ -1543,4 +1542,75 @@ fn fragments_are_part_of_the_file_not_the_result() {
     let out = ok("fragment f() { from orders o select o.id } query a() { from f x select x.id }");
     assert_eq!(out.len(), 1, "a fragment is not a statement");
     assert_eq!(out[0].ir.name, "a");
+}
+
+// ---- fragment parameters ------------------------------------------------------------------------ //
+
+#[test]
+fn fragments_take_parameters_as_arguments() {
+    let src = "fragment since(cutoff: timestamp) { from orders o where o.created >= :cutoff select o.id, o.customer_id, o.total }
+        query recent(at: timestamp) { from since(:at) r join customers c on r.customer_id == c.id select c.name, r.total }";
+    let q = &ok(src)[0];
+    // the statement's parameter takes the place of the fragment's, inside the generated `with` query
+    assert!(q.sql.starts_with("WITH \"since#1\" AS (SELECT"), "{}", q.sql);
+    assert!(q.sql.contains("(\"o\".\"created\" >= ($1::timestamptz))"), "{}", q.sql);
+    assert_eq!(q.param_order, ["at"]);
+    // the alias defaults to the fragment's name, and a literal works too
+    let q = &ok("fragment since(cutoff: timestamp) { from orders o where o.created >= :cutoff select o.id }
+        query fixed() { from since(\"2026-01-01\") select since.id }")[0];
+    assert!(q.sql.contains("'2026-01-01'"), "{}", q.sql);
+    // several parameters, in order, and a nullable one
+    let q = &ok("fragment between_totals(lo: decimal(10,2), hi: decimal(10,2) null) {
+            from orders o where o.total >= :lo and (:hi is null or o.total <= :hi) select o.id }
+        query q(low: decimal(10,2)) { from between_totals(:low, null) b select b.id }")[0];
+    assert!(q.sql.starts_with("WITH \"between_totals#1\""), "{}", q.sql);
+}
+
+#[test]
+fn each_distinct_call_is_its_own_with_query_and_equal_calls_share_one() {
+    let q = &ok("fragment since(cutoff: timestamp) { from orders o where o.created >= :cutoff select o.id }
+        query q(a: timestamp, b: timestamp) {
+            from since(:a) x join since(:b) y on y.id == x.id join since(:a) z on z.id == x.id select x.id }")[0];
+    assert_eq!(q.sql.matches("\"since#").count() - q.sql.matches("FROM \"since#").count() - q.sql.matches("JOIN \"since#").count(), 2, "{}", q.sql);
+    assert!(q.sql.contains("\"since#1\" AS") && q.sql.contains("\"since#2\" AS") && !q.sql.contains("\"since#3\" AS"), "{}", q.sql);
+    // a parameterless fragment keeps its own name
+    let q = &ok("fragment all_orders() { from orders o select o.id } query q() { from all_orders a select a.id }")[0];
+    assert!(q.sql.starts_with("WITH \"all_orders\" AS"), "{}", q.sql);
+}
+
+#[test]
+fn fragments_pass_their_parameters_on_to_other_fragments() {
+    let q = &ok("fragment since(cutoff: timestamp) { from orders o where o.created >= :cutoff select o.id, o.customer_id }
+        fragment active(cutoff: timestamp) { from customers c where c.id in (from since(:cutoff) s select s.customer_id) select c.id, c.name }
+        query q(at: timestamp) { from active(:at) a select a.name }")[0];
+    let (i_since, i_active) = (q.sql.find("\"since#1\" AS").unwrap(), q.sql.find("\"active#1\" AS").unwrap());
+    assert!(i_since < i_active, "what a fragment uses comes first: {}", q.sql);
+    assert_eq!(q.param_order, ["at"]);
+    // and in mutations
+    let m = mutation("fragment since(cutoff: timestamp) { from orders o where o.created >= :cutoff select o.id }
+        delete purge(at: timestamp) { from orders o where o.id in (from since(:at) s select s.id) }");
+    assert!(m.sql.starts_with("WITH \"since#1\" AS (SELECT"), "{}", m.sql);
+}
+
+#[test]
+fn fragment_argument_errors() {
+    let decl = "fragment since(cutoff: timestamp, min: int null) { from orders o where o.created >= :cutoff and (:min is null or o.qty >= :min) select o.id } ";
+    // the wrong number
+    assert_eq!(errors(&format!("{decl} query q() {{ from since(\"2026-01-01\") s select s.id }}")), ["QL260"]);
+    assert_eq!(errors(&format!("{decl} query q() {{ from since s select s.id }}")), ["QL260"]);
+    // a column or an expression is not an argument
+    assert_eq!(errors(&format!("{decl} query q() {{ from customers c join since(c.born, 1) s on s.id == c.id select s.id }}")), ["QL260"]);
+    assert_eq!(errors(&format!("{decl} query q(n: int) {{ from since(\"2026-01-01\", :n + 1) s select s.id }}")), ["QL260"]);
+    // a parameter of another type, or one that may be null, or a null for a parameter that cannot be
+    assert_eq!(errors(&format!("{decl} query q(d: date) {{ from since(:d, 1) s select s.id }}")), ["QL260"]);
+    assert_eq!(errors(&format!("{decl} query q(d: timestamp null) {{ from since(:d, 1) s select s.id }}")), ["QL260"]);
+    assert_eq!(errors(&format!("{decl} query q() {{ from since(null, 1) s select s.id }}")), ["QL260"]);
+    // an undeclared parameter, and a literal of the wrong kind (found where it is used in the body)
+    assert!(!errors(&format!("{decl} query q() {{ from since(:nope, 1) s select s.id }}")).is_empty());
+    assert!(!errors(&format!("{decl} query q() {{ from since(true, 1) s select s.id }}")).is_empty());
+    // only a fragment takes arguments
+    assert_eq!(errors("query q() { from orders(1) o select o.id }"), ["QL260"]);
+    // a fragment's own body is checked with its parameters, even when unused
+    assert!(!errors("fragment bad(n: int) { from orders o where o.id == :other select o.id }").is_empty());
+    ok("fragment good(n: int) { from orders o where o.id == :n select o.id }");
 }

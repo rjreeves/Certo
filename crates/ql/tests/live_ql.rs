@@ -605,4 +605,22 @@ fn compiled_queries_run_and_their_declared_contract_is_true() {
             certo_ql::Statement::Mutation(m) => db.check_mutation(m),
         }
     }
+
+    // ==== fragment parameters ================================================================
+    let file = "fragment above(min: decimal(10,2)) { from orders o where o.total > :min select o.id, o.customer_id, o.total }
+        fragment big_customers(min: decimal(10,2)) { from customers c where c.id in (from above(:min) a select a.customer_id) select c.id, c.name }
+        query by_param(m: decimal(10,2)) { from above(:m) a join customers c on a.customer_id == c.id select c.name, a.total order by a.total }
+        query literal() { from above(20) a join customers c on a.customer_id == c.id select c.name, a.total }
+        query two(lo: decimal(10,2), hi: decimal(10,2)) { from above(:lo) a join above(:hi) b on b.id == a.id select a.id }
+        query nested(m: decimal(10,2)) { from big_customers(:m) b select b.name order by b.name }";
+    let (stmts, d) = compile(&db.schema, file, Dialect::Postgres);
+    let stmts = stmts.unwrap_or_else(|| panic!("{d:?}"));
+    for s in &stmts {
+        if let certo_ql::Statement::Query(q) = s {
+            db.check_contract(q); // the server agrees with the declared types, parameters included
+            if q.ir.params.is_empty() {
+                db.rows(q, &[]);
+            }
+        }
+    }
 }
