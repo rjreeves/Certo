@@ -186,6 +186,20 @@ Each distinct call becomes its own `with` query (equal calls share one). The ali
 of arguments, a column or expression as an argument, a parameter of another type or one that may be null where the fragment's
 isn't, are `QL260`.
 
+## Views
+
+```
+view adult_customers { from customers c where c.age >= 18 select c.id, c.name }
+view big_spenders { from adult_customers a join orders o on o.customer_id == a.id group by a.id select a.id, sum(o.total) as spent }
+```
+
+A `view` is a fragment that is kept in the database as a `CREATE VIEW`. Put views in the project's `views.ql` (`"views"` in
+`certo.json` changes the path); `migrate apply` manages them. Queries read a view like a table, other views can read it (they are
+created in dependency order; a cycle is `QL262`), and a view cannot be written to (`QL263`). Views take no parameters. Fragments
+may be used inside views. Because a view stops a table it reads from being altered, `apply` drops the views before running
+migrations and creates them again afterwards; it records each view's checksum in `_certo_views`, so an `apply` that changes
+nothing leaves them alone. `ql_compile` lists them (`views`: name, columns, `create_sql`, `drop_sql`, and the view as a table).
+
 ## Filtered aggregates and `string_agg`
 
 `count(*) filter (where o.paid)` counts only matching rows (any aggregate, also over a window). `string_agg(c.name, ", " order by

@@ -308,3 +308,116 @@ fn the_journal_records_an_adopted_baseline_with_the_record_itself() {
     assert!(drift::check(&p, &mut ex).unwrap().in_sync());
 }
 
+fn views_file(p: &Project, text: &str) { fs::write(p.views_path(), text).unwrap(); }
+
+const VIEWS: &str = "view paid_orders { from orders o where o.paid select o.id, o.total }
+    view big { from paid_orders p where p.total > 20 select p.id }";
+
+const ORDERS: &str = "INSERT INTO customers (email) VALUES ('a@x.com');
+    INSERT INTO orders (customer_id, total, status, paid) VALUES (1, 10, 'new', 1), (1, 50, 'paid', 1), (1, 5, 'new', 0);";
+
+#[test]
+fn views_are_created_recorded_left_alone_and_recreated_when_they_change() {
+    let (_dir, p, db) = fixture(V1);
+    create(&p, "init", None, false).unwrap();
+    views_file(&p, VIEWS);
+    let mut ex = SqliteExecutor::open(&db).unwrap();
+
+    // a dry run shows what would happen to the views, last
+    let dry = apply(&p, &mut ex, &ApplyOptions { dry_run: true, ..Default::default() }).unwrap();
+    let (label, sql) = dry.scripts.last().unwrap();
+    assert_eq!(label, "views");
+    assert!(sql.contains("CREATE VIEW \"paid_orders\"") && sql.contains("CREATE VIEW \"big\""), "{sql}");
+    assert_eq!(count(&ex, "SELECT count(*) FROM sqlite_master WHERE type = 'view'"), 0, "a dry run touches nothing");
+
+    // created in dependency order, recorded, usable
+    let r = apply(&p, &mut ex, &ApplyOptions::default()).unwrap();
+    assert_eq!(r.views, ["paid_orders", "big"]);
+    ex.connection().execute_batch(ORDERS).unwrap();
+    assert_eq!(count(&ex, "SELECT count(*) FROM paid_orders"), 2);
+    assert_eq!(count(&ex, "SELECT count(*) FROM big"), 1);
+    let st = status(&p, &mut ex).unwrap();
+    assert!(st.views.in_sync && st.views.defined == ["paid_orders", "big"] && st.views.recorded == st.views.defined);
+    assert!(drift::check(&p, &mut ex).unwrap().in_sync());
+
+    // nothing changed: the views are left alone
+    assert!(apply(&p, &mut ex, &ApplyOptions::default()).unwrap().views.is_empty());
+
+    // views.ql edited: the next apply recreates them with the new definitions, and until then drift says so
+    views_file(&p, &VIEWS.replace("> 20", "> 5"));
+    let d = drift::check(&p, &mut ex).unwrap();
+    assert!(d.items.iter().any(|i| i.text.contains("view big") && i.text.contains("changed")), "{:?}", d.items);
+    assert!(!status(&p, &mut ex).unwrap().views.in_sync);
+    assert_eq!(apply(&p, &mut ex, &ApplyOptions::default()).unwrap().views, ["paid_orders", "big"]);
+    assert_eq!(count(&ex, "SELECT count(*) FROM big"), 2);
+    assert!(drift::check(&p, &mut ex).unwrap().in_sync());
+
+    // a view dropped by hand is created again, and a view no longer in the file is dropped
+    ex.connection().execute_batch("DROP VIEW big").unwrap();
+    let d = drift::check(&p, &mut ex).unwrap();
+    assert!(d.items.iter().any(|i| i.text.contains("view big") && i.text.contains("not in the database")), "{:?}", d.items);
+    apply(&p, &mut ex, &ApplyOptions::default()).unwrap();
+    assert_eq!(count(&ex, "SELECT count(*) FROM big"), 2);
+    views_file(&p, "view paid_orders { from orders o where o.paid select o.id, o.total }");
+    let d = drift::check(&p, &mut ex).unwrap();
+    assert!(d.items.iter().any(|i| i.text.contains("view big") && i.text.contains("no longer")), "{:?}", d.items);
+    apply(&p, &mut ex, &ApplyOptions::default()).unwrap();
+    assert_eq!(count(&ex, "SELECT count(*) FROM sqlite_master WHERE type = 'view' AND name = 'big'"), 0);
+    assert!(drift::check(&p, &mut ex).unwrap().in_sync());
+}
+
+#[test]
+fn a_migration_can_change_a_table_a_view_reads() {
+    let (_dir, p, db) = fixture(V1);
+    create(&p, "init", None, false).unwrap();
+    views_file(&p, VIEWS);
+    let mut ex = SqliteExecutor::open(&db).unwrap();
+    apply(&p, &mut ex, &ApplyOptions::default()).unwrap();
+    ex.connection().execute_batch(ORDERS).unwrap();
+
+    // V2 rebuilds `orders`, which both views read: the views go first and come back after
+    fs::write(p.schema_path(), V2).unwrap();
+    create(&p, "v2", None, true).unwrap();
+    let r = apply(&p, &mut ex, &ApplyOptions::default()).unwrap();
+    assert_eq!(r.migrations, ["0002_v2"]);
+    assert_eq!(r.views, ["paid_orders", "big"]);
+    assert_eq!(count(&ex, "SELECT count(*) FROM paid_orders"), 2, "the data and the views both survived");
+    assert!(drift::check(&p, &mut ex).unwrap().in_sync());
+}
+
+#[test]
+fn a_mistake_in_views_ql_stops_everything_and_unmanaged_views_stay_noted() {
+    let (_dir, p, db) = fixture(V1);
+    create(&p, "init", None, false).unwrap();
+    views_file(&p, "view v { from nope n select n.id }");
+    let mut ex = SqliteExecutor::open(&db).unwrap();
+    assert!(matches!(apply(&p, &mut ex, &ApplyOptions::default()), Err(RunnerError::Compile { .. })));
+    // status and drift say what is wrong instead of failing, so the pending migration is still visible
+    let st = status(&p, &mut ex).unwrap();
+    assert_eq!(st.pending.len(), 1, "nothing was applied");
+    assert!(st.views.error.as_deref().is_some_and(|e| e.contains("QL203")), "{:?}", st.views.error);
+    assert!(drift::check(&p, &mut ex).unwrap().items.iter().any(|i| i.text.contains("views file has errors")));
+
+    // a view somebody else made is still reported as not represented; one certo made is not
+    views_file(&p, "view mine { from customers c select c.id }");
+    apply(&p, &mut ex, &ApplyOptions::default()).unwrap();
+    ex.connection().execute_batch("CREATE VIEW stray AS SELECT 1 AS x").unwrap();
+    let d = drift::check(&p, &mut ex).unwrap();
+    assert!(d.notes.iter().any(|n| n.contains("view stray")), "{:?}", d.notes);
+    assert!(!d.notes.iter().any(|n| n.contains("view mine")), "{:?}", d.notes);
+    // certo's own tables are not part of the schema
+    let imported = certo_runner::import_schema(&mut ex).unwrap();
+    assert!(!imported.sdl.contains("_certo_views"));
+}
+
+#[test]
+fn the_journal_notes_when_views_were_recreated() {
+    let (_dir, p, db) = fixture(V1);
+    create(&p, "init", None, false).unwrap();
+    views_file(&p, VIEWS);
+    let mut ex = SqliteExecutor::open(&db).unwrap();
+    apply(&p, &mut ex, &ApplyOptions { journal: Some(who()), ..Default::default() }).unwrap();
+    assert_eq!(text(&ex, "SELECT action || '|' || subject FROM _certo_log WHERE action = 'views'"), "views|2 view(s)");
+    assert!(text(&ex, "SELECT detail FROM _certo_log WHERE action = 'views'").contains("paid_orders"));
+}
+

@@ -1674,3 +1674,72 @@ fn compile_lists_the_fragments_with_their_signatures() {
     assert!(compile_with_fragments(&schema(), "query q() { from orders o select o.id }", Dialect::Postgres).1.is_empty());
     assert!(compile_with_fragments(&schema(), "fragment f() { from nope n select n.id }", Dialect::Postgres).1.is_empty());
 }
+
+// ---- persisted views ---------------------------------------------------------------------------------- //
+
+#[test]
+fn a_view_is_created_from_its_query_and_read_like_a_table() {
+    let c = compile_full(&schema(), "view paid_orders { from orders o where o.paid select o.id, o.customer_id, o.total }
+        query q() { from paid_orders p join customers c on p.customer_id == c.id select c.name, p.total }", Dialect::Postgres);
+    assert!(c.statements.is_some(), "{:?}", c.diagnostics);
+    assert_eq!(c.views.len(), 1);
+    let v = &c.views[0];
+    assert_eq!(v.name, "paid_orders");
+    assert!(v.create_sql.starts_with("CREATE VIEW \"paid_orders\" AS
+SELECT"), "{}", v.create_sql);
+    assert_eq!(v.drop_sql, "DROP VIEW IF EXISTS \"paid_orders\"");
+    assert_eq!(v.columns.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(), ["id", "customer_id", "total"]);
+    assert!(v.table.view && v.table.columns.iter().all(|c| !c.primary_key && !c.nullable));
+    // the statement reads the real view: no inlined copy of its query
+    let q = c.statements.unwrap().remove(0);
+    let q = q.as_query().unwrap();
+    assert!(q.sql.contains("FROM \"paid_orders\" AS \"p\"") && !q.sql.contains("WITH"), "{}", q.sql);
+    assert_eq!((q.ir.select[1].ty.clone(), q.ir.select[1].nullable), (TypeIR::Builtin(Builtin::Numeric(10, 2)), false));
+    // the column types and nullability come through the view and a left join makes them nullable
+    let c = compile_full(&schema(), "view emails { from customers c select c.id, c.email }
+        query q() { from emails e select e.email }", Dialect::Sqlite);
+    assert!(c.statements.is_some());
+    assert!(c.statements.unwrap()[0].as_query().unwrap().ir.select[0].nullable);
+}
+
+#[test]
+fn views_may_read_other_views_in_any_order_and_are_created_after_what_they_read() {
+    let c = compile_full(&schema(), "view big { from paid p where p.total > 100 select p.id, p.total }
+        view paid { from orders o where o.paid select o.id, o.total }
+        view top { from big b select b.id }
+        query q() { from top t select t.id }", Dialect::Postgres);
+    assert!(c.statements.is_some(), "{:?}", c.diagnostics);
+    assert_eq!(c.views.iter().map(|v| v.name.as_str()).collect::<Vec<_>>(), ["paid", "big", "top"]);
+    // a view can use fragments (inlined into its own query)
+    let c = compile_full(&schema(), "fragment unpaid() { from orders o where not o.paid select o.id }
+        view open_orders { from unpaid u select u.id }", Dialect::Sqlite);
+    assert!(c.diagnostics.iter().all(|d| d.severity != Severity::Error), "{:?}", c.diagnostics);
+    assert!(c.views[0].create_sql.contains("WITH \"unpaid\" AS"), "{}", c.views[0].create_sql);
+}
+
+#[test]
+fn view_errors() {
+    assert_eq!(errors("view v { from orders o select o.id } view v { from orders o select o.id }"), ["QL262"]);
+    assert_eq!(errors("view orders { from customers c select c.id }"), ["QL262"]);
+    assert_eq!(errors("fragment f() { from orders o select o.id } view f { from orders o select o.id }"), ["QL262"]);
+    assert_eq!(errors("view a { from b x select x.id } view b { from a y select y.id }"), ["QL262"]);
+    assert_eq!(errors("view a { from a x select x.id }"), ["QL262"]);
+    assert_eq!(errors("view v(n: int) { from orders o select o.id }"), ["QL262"]);
+    // a view is a table: no parameters inside, named columns, known tables
+    assert_eq!(errors("view v { from orders o where o.id == :n select o.id }"), ["QL208"]);
+    assert_eq!(errors("view v { from orders o select o.id + 1 }"), ["QL215"]);
+    assert_eq!(errors("view v { from nope n select n.id }"), ["QL203"]);
+    // read-only
+    assert_eq!(errors("view v { from orders o select o.id } update bump() { v x set id = 1 where x.id == 1 }"), ["QL263"]);
+    assert_eq!(errors("view v { from orders o select o.id } delete gone() { from v x where x.id == 1 }"), ["QL263"]);
+    assert_eq!(errors("view v { from orders o select o.id } insert add() { into v set id = 1 }"), ["QL263"]);
+}
+
+#[test]
+fn views_parse_and_a_file_without_views_lists_none() {
+    let (f, d) = parse("view v { from orders o select o.id } view w() { from orders o select o.id } query q() { from orders o select o.id }");
+    assert!(d.is_empty(), "{d:?}");
+    assert_eq!((f.views.len(), f.queries.len()), (2, 1));
+    assert!(compile_full(&schema(), "query q() { from orders o select o.id }", Dialect::Postgres).views.is_empty());
+}
+

@@ -61,6 +61,9 @@ char *certo_plan_migration(const char *old_ir, const char *new_ir, const char *m
  *     "queries": the same list restricted to kind "query" (kept for older hosts),
  *     "fragments":[{name, params:[{name,type,nullable}], columns:[{name,type,nullable}]}]  (a QL file's fragments: not
  *     statements, but what a call must give and what it yields; empty if none),
+ *     "views":[{name, columns:[{name,type,nullable}], create_sql, drop_sql, table}]  (a QL file's `view`s, in the order
+ *     they must be created; `table` is the read-only table the language sees: add it to a schema's tables to compile
+ *     other files against the views),
  *     "diagnostics":[...], "rendered"}
  * kind is query | insert | update | delete; a mutation's columns are its `returning` list
  * (empty: the host gets a row count). Each statement is a typed contract: bind parameters as $1, $2, ... in param_order; every

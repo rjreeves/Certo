@@ -13,6 +13,7 @@ use crate::error::RunnerError;
 use crate::exec::{AppliedRow, ExecError, Executor};
 use crate::introspect::{LiveSchema, HISTORY_TABLE};
 use crate::journal::{self, JournalContext};
+use crate::views::{ProjectView, RecordedView, VIEWS_TABLE};
 use crate::migration::Migration;
 use crate::sqlite_introspect;
 use rusqlite::Connection;
@@ -184,8 +185,63 @@ impl Executor for SqliteExecutor {
 
     fn set_journal(&mut self, journal: Option<JournalContext>) { self.journal = journal; }
 
+    fn recorded_views(&mut self) -> Result<Vec<RecordedView>, ExecError> {
+        let exists: bool = self
+            .conn
+            .query_row("SELECT count(*) > 0 FROM sqlite_master WHERE type = 'table' AND name = ?1", [VIEWS_TABLE], |r| r.get(0))
+            .map_err(|e| err(e, None))?;
+        if !exists {
+            return Ok(Vec::new());
+        }
+        let mut st = self.conn.prepare(&format!("SELECT name, checksum FROM \"{VIEWS_TABLE}\" ORDER BY ord")).map_err(|e| err(e, None))?;
+        let rows = st
+            .query_map([], |r| Ok(RecordedView { name: r.get(0)?, checksum: r.get(1)? }))
+            .map_err(|e| err(e, None))?;
+        rows.collect::<rusqlite::Result<_>>().map_err(|e| err(e, None))
+    }
+
+    fn replace_views(&mut self, drop: &[String], create: &[ProjectView]) -> Result<(), ExecError> {
+        self.conn
+            .execute_batch(&format!(
+                "CREATE TABLE IF NOT EXISTS \"{VIEWS_TABLE}\" (ord INTEGER NOT NULL, name TEXT PRIMARY KEY, checksum TEXT NOT NULL, applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)"
+            ))
+            .map_err(|e| err(e, None))?;
+        let journal = self.journal.clone();
+        if journal.is_some() {
+            self.conn.execute_batch(&journal::sqlite_create()).map_err(|e| err(e, Some("create the journal table")))?;
+        }
+        let tx = self.conn.transaction().map_err(|e| err(e, None))?;
+        for name in drop {
+            let sql = format!("DROP VIEW IF EXISTS {}", certo_sql::quote_ident(certo_sql::Dialect::Sqlite, name));
+            tx.execute_batch(&sql).map_err(|e| err(e, Some(&sql)))?;
+        }
+        tx.execute_batch(&format!("DELETE FROM \"{VIEWS_TABLE}\"")).map_err(|e| err(e, None))?;
+        for (i, v) in create.iter().enumerate() {
+            tx.execute_batch(&v.create_sql).map_err(|e| err(e, Some(&v.create_sql)))?;
+            tx.execute(&format!("INSERT INTO \"{VIEWS_TABLE}\" (ord, name, checksum) VALUES (?1, ?2, ?3)"), rusqlite::params![i as i64, v.name, v.checksum])
+                .map_err(|e| err(e, Some("record the view")))?;
+        }
+        if let (Some(j), false) = (&journal, create.is_empty()) {
+            let detail = serde_json::json!({ "views": create.iter().map(|v| v.name.clone()).collect::<Vec<_>>() }).to_string();
+            let subject = format!("{} view(s)", create.len());
+            tx.execute(&journal::sqlite_insert(), rusqlite::params!["views", subject, j.actor, j.environment, j.tool, detail])
+                .map_err(|e| err(e, Some("write the journal")))?;
+        }
+        tx.commit().map_err(|e| err(e, Some("COMMIT")))
+    }
+
+    fn live_views(&mut self) -> Result<Vec<String>, ExecError> {
+        let mut st = self.conn.prepare("SELECT name FROM sqlite_master WHERE type = 'view' ORDER BY name").map_err(|e| err(e, None))?;
+        let rows = st.query_map([], |r| r.get::<_, String>(0)).map_err(|e| err(e, None))?;
+        rows.collect::<rusqlite::Result<_>>().map_err(|e| err(e, None))
+    }
+
     fn introspect(&mut self) -> Result<LiveSchema, ExecError> {
-        sqlite_introspect::introspect(&self.conn).map_err(|e| err(e, None))
+        let mut live = sqlite_introspect::introspect(&self.conn).map_err(|e| err(e, None))?;
+        // a view certo created is part of the project, not something the schema language failed to express
+        let managed = self.recorded_views()?;
+        live.notes.retain(|n| !managed.iter().any(|m| n.starts_with(&format!("view {} is not represented", m.name))));
+        Ok(live)
     }
 
     fn apply(&mut self, m: &Migration) -> Result<(), ExecError> {

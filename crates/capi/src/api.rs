@@ -49,7 +49,15 @@ pub fn ql_compile(schema_ir: &str, ql_source: &str, dialect: &str) -> String {
         return error("unknown_dialect", format!("unknown SQL dialect `{dialect}` (supported: postgres, sqlite)"));
     };
     let schema = match parse_ir(schema_ir, "schema") { Ok(v) => v, Err(e) => return e };
-    let (statements, fragments, diags) = certo_ql::compile_with_fragments(&schema, ql_source, dialect);
+    let compiled = certo_ql::compile_full(&schema, ql_source, dialect);
+    let (statements, fragments, diags) = (compiled.statements, compiled.fragments, compiled.diagnostics);
+    // persisted views, in the order they must be created; `table` is what the query language reads (add it to a schema's
+    // `tables` to compile other files against these views)
+    let views: Vec<_> = compiled
+        .views
+        .iter()
+        .map(|v| json!({ "name": v.name, "columns": v.columns.iter().map(|c| json!({ "name": c.name, "type": c.ty, "nullable": c.nullable })).collect::<Vec<_>>(), "create_sql": v.create_sql, "drop_sql": v.drop_sql, "table": v.table }))
+        .collect();
     let all = statements.as_deref().map(certo_ql::to_json);
     // fragments are not statements, but a host may want to show them: name, parameters and result columns
     let fragments: Vec<_> = fragments
@@ -66,6 +74,7 @@ pub fn ql_compile(schema_ir: &str, ql_source: &str, dialect: &str) -> String {
         "queries": queries,
         "statements": all,
         "fragments": fragments,
+        "views": views,
         "diagnostics": diagnostics_json(&diags, ql_source),
         "rendered": render_all(&diags, ql_source, "queries.ql", false),
     })

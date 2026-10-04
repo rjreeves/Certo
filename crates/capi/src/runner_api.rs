@@ -211,6 +211,7 @@ pub fn migration_status(dir: &str, opts: Option<&str>) -> String {
                 "seq": a.seq, "name": a.name, "checksum": a.checksum, "applied_at": a.applied_at,
             })).collect::<Vec<_>>(),
             "pending": s.pending.iter().map(|(seq, name)| json!({ "seq": seq, "name": name })).collect::<Vec<_>>(),
+            "views": { "defined": s.views.defined, "recorded": s.views.recorded, "in_sync": s.views.in_sync, "error": s.views.error },
         })
         .to_string(),
         Err(e) => runner_error(&e),
@@ -277,6 +278,7 @@ pub fn apply(dir: &str, opts: Option<&str>) -> String {
             "ok": true,
             "dry_run": r.dry_run,
             "migrations": r.migrations,
+            "views": r.views,
             "scripts": r.scripts.iter().map(|(l, s)| json!({ "label": l, "sql": s })).collect::<Vec<_>>(),
         })
         .to_string(),

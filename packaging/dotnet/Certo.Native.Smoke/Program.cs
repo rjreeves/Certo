@@ -241,6 +241,10 @@ finally
     Check(withFragment.Ok && withFragment.Fragments is [{ Name: "named" } f] && f.Params is [{ Name: "prefix" }] && f.Columns.Select(c => c.Name).SequenceEqual(new[] { "id", "name" }),
         "typed QL lists a file's fragments with their parameters and columns");
     Check(warned.Fragments.Count == 0, "a file without fragments lists none");
+    var withView = CertoQl.Compile(typedSchema, "view named { from users u select u.id, u.name } query q() { from named n select n.name }");
+    Check(withView.Ok && withView.Views is [{ Name: "named" } v] && v.CreateSql.StartsWith("CREATE VIEW") && v.Columns.Select(c => c.Name).SequenceEqual(new[] { "id", "name" }),
+        "typed QL lists a file's views with their SQL and columns");
+    Check(warned.Views.Count == 0, "a file without views lists none");
     var failed = CertoQl.Compile("nope", "query q() { from users u select u.id }");
     Check(!failed.Ok && failed.Error?.Code == "invalid_ir", "a failed call carries a typed error");
 
@@ -306,6 +310,7 @@ finally
         Check(applied.Migrations.SequenceEqual(new[] { "0001_init" }), "typed Apply lists the migrations it applied");
         var status = CertoMigrations.Status(proj, db).EnsureOk();
         Check(status.Applied is [{ Seq: 1, Name: "init" }] && status.Pending.Count == 0 && status.Applied[0].AppliedAt.Length > 0, "typed Status");
+        Check(status.Views.InSync && status.Views.Defined.Count == 0 && applied.Views.Count == 0, "typed Status: no views defined, none created");
         var driftNone = CertoMigrations.Drift(proj, new DriftOptions { Url = db }).EnsureOk();
         Check(driftNone.InSync && driftNone.Items.Count == 0 && driftNone.ExpectedFrom.Contains("0001_init"), "typed Drift: in sync");
 

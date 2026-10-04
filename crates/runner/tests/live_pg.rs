@@ -204,3 +204,53 @@ fn the_journal_records_applies_and_is_not_drift_on_postgresql() {
     assert_eq!(raw.query_one("SELECT count(*) FROM _certo_log", &[]).unwrap().get::<_, i64>(0), 1);
 }
 
+#[test]
+fn views_follow_the_migrations_on_postgresql() {
+    let Some(url) = url() else {
+        eprintln!("CERTO_TEST_PG_URL not set; skipping live PostgreSQL test");
+        return;
+    };
+    let mut raw = Client::connect(&url, NoTls).expect("connect");
+    raw.batch_execute("DROP SCHEMA public CASCADE; CREATE SCHEMA public;").unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let project = Project::init(dir.path(), "postgres").unwrap();
+    std::fs::write(project.schema_path(), SCHEMA).unwrap();
+    create(&project, "init", None, false).unwrap();
+    std::fs::write(
+        project.views_path(),
+        "view adults { from users u where u.age >= 25 select u.id, u.email, u.age }
+         view adult_emails { from adults a select a.email }",
+    )
+    .unwrap();
+    {
+        let mut db = PgExecutor::connect(&url).unwrap();
+        let r = apply(&project, &mut db, &ApplyOptions::default()).unwrap();
+        assert_eq!(r.views, ["adults", "adult_emails"]);
+        assert!(drift::check(&project, &mut db).unwrap().in_sync(), "views are part of the project, not drift or notes");
+        assert!(certo_runner::status(&project, &mut db).unwrap().views.in_sync);
+        // nothing changed: left alone
+        assert!(apply(&project, &mut db, &ApplyOptions::default()).unwrap().views.is_empty());
+    }
+    raw.batch_execute("INSERT INTO users (email, age) VALUES ('a@x.com', 30), ('young@x.com', 20)").unwrap();
+    assert_eq!(raw.query_one("SELECT count(*) FROM adult_emails", &[]).unwrap().get::<_, i64>(0), 1);
+
+    // PostgreSQL refuses to change the type of a column a view reads; the views go first and come back after
+    std::fs::write(project.schema_path(), SCHEMA.replace("email: text not null unique", "email: varchar(320) not null unique")).unwrap();
+    create(&project, "narrow_email", None, true).unwrap();
+    {
+        let mut db = PgExecutor::connect(&url).unwrap();
+        let r = apply(&project, &mut db, &ApplyOptions::default()).unwrap();
+        assert_eq!(r.migrations, ["0002_narrow_email"]);
+        assert_eq!(r.views, ["adults", "adult_emails"]);
+        assert!(drift::check(&project, &mut db).unwrap().in_sync());
+        // a view dropped by hand is noticed and created again
+        drop(db);
+    }
+    raw.batch_execute("DROP VIEW adult_emails").unwrap();
+    let mut db = PgExecutor::connect(&url).unwrap();
+    assert!(drift::check(&project, &mut db).unwrap().items.iter().any(|i| i.text.contains("view adult_emails")));
+    apply(&project, &mut db, &ApplyOptions::default()).unwrap();
+    assert!(drift::check(&project, &mut db).unwrap().in_sync());
+    assert_eq!(raw.query_one("SELECT count(*) FROM adult_emails", &[]).unwrap().get::<_, i64>(0), 1);
+}
+

@@ -39,6 +39,14 @@ pub fn expand(schema: &SchemaIR, file: &mut QlFile, diags: &mut Vec<Diagnostic>)
             );
         }
     }
+    // a view is read like a table, as a fragment is: the two share one namespace
+    for v in &file.views {
+        if by_name.contains_key(&v.name.name) {
+            diags.push(
+                Diagnostic::error("QL262", format!("`{}` is both a fragment and a view: pick another name for one", v.name.name)).with_span(v.name.span),
+            );
+        }
+    }
     if has_errors(diags) {
         return Vec::new();
     }
@@ -86,7 +94,7 @@ pub fn expand(schema: &SchemaIR, file: &mut QlFile, diags: &mut Vec<Diagnostic>)
     }
 
     // ---- each fragment on its own, with its parameters declared: a mistake is reported where it is written, once
-    let mut alone = QlFile { queries: Vec::new(), mutations: Vec::new(), fragments: Vec::new() };
+    let mut alone = QlFile { queries: Vec::new(), mutations: Vec::new(), fragments: Vec::new(), views: Vec::new() };
     for f in by_name.values() {
         let mut q = f.query.clone();
         let mut ex = Expander::new(&by_name, q.params.clone());
@@ -113,6 +121,12 @@ pub fn expand(schema: &SchemaIR, file: &mut QlFile, diags: &mut Vec<Diagnostic>)
         ex.query(q, &HashSet::new());
         diags.append(&mut ex.errors);
         ex.prepend_to(&mut q.ctes);
+    }
+    for v in &mut file.views {
+        let mut ex = Expander::new(&by_name, Vec::new());
+        ex.query(&mut v.query, &HashSet::new());
+        diags.append(&mut ex.errors);
+        ex.prepend_to(&mut v.query.ctes);
     }
     for m in &mut file.mutations {
         if names.contains(m.table.table.name.as_str()) {
@@ -470,7 +484,7 @@ fn walk_expr_mut(e: &mut Expr, on_expr: &mut dyn FnMut(&mut Expr), on_query: &mu
 
 // ---- which tables (or fragments) a query reads (for the dependencies between fragments) -----------------------
 
-fn tables_in_query(q: &Query, out: &mut BTreeSet<String>) {
+pub(crate) fn tables_in_query(q: &Query, out: &mut BTreeSet<String>) {
     out.insert(q.from.table.name.clone());
     for j in &q.joins {
         out.insert(j.table.table.name.clone());

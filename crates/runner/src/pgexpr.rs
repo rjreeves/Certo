@@ -412,7 +412,7 @@ fn verify(dialect: Dialect, raw: &str, e: &ExprIR, synthetic: &SchemaIR) -> Resu
 }
 
 fn base_table(columns: Vec<ColumnIR>, constraints: Vec<ConstraintIR>) -> TableIR {
-    TableIR { name: "t".into(), columns, relationships: vec![], indexes: vec![], constraints }
+    TableIR { name: "t".into(), columns, relationships: vec![], indexes: vec![], constraints, view: false }
 }
 
 fn plain(name: &str, ty: TypeIR) -> ColumnIR {

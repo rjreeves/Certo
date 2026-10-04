@@ -17,6 +17,7 @@ pub mod ast;
 pub mod check;
 pub mod csharp;
 pub mod fragments;
+pub mod views;
 pub mod ir;
 pub mod lower;
 pub mod parser;
@@ -25,6 +26,7 @@ pub use ast::*;
 pub use check::{check, check_mutations};
 pub use csharp::{generate_csharp, CSharpOptions};
 pub use ir::*;
+pub use views::ViewOut;
 pub use lower::{lower, lower_mutation, lower_mutation_with, lower_with, LowerOptions, Lowered};
 pub use parser::parse;
 
@@ -119,19 +121,42 @@ pub fn compile(schema: &SchemaIR, src: &str, dialect: Dialect) -> (Option<Vec<St
 
 /// `compile`, and also what the file's fragments look like (name, parameters, columns), which are not statements.
 pub fn compile_with_fragments(schema: &SchemaIR, src: &str, dialect: Dialect) -> (Option<Vec<Statement>>, Vec<FragmentInfo>, Vec<Diagnostic>) {
+    let c = compile_full(schema, src, dialect);
+    (c.statements, c.fragments, c.diagnostics)
+}
+
+/// Everything a compile produces: the statements, the file's fragments and its persisted views.
+pub struct Compiled {
+    /// `None` if there are errors.
+    pub statements: Option<Vec<Statement>>,
+    pub fragments: Vec<FragmentInfo>,
+    /// The file's `view`s in the order they must be created (empty on errors).
+    pub views: Vec<ViewOut>,
+    pub diagnostics: Vec<Diagnostic>,
+}
+
+/// `compile`, with the file's fragments and views too. A view is read as a table by every statement in the file.
+pub fn compile_full(schema: &SchemaIR, src: &str, dialect: Dialect) -> Compiled {
+    let fail = |diagnostics| Compiled { statements: None, fragments: Vec::new(), views: Vec::new(), diagnostics };
     let (mut file, mut diags) = parse(src);
     if has_errors(&diags) {
-        return (None, Vec::new(), diags);
+        return fail(diags);
     }
-    // fragments are checked once, then become `with` queries of the statements that use them
+    // fragments are checked once, then become `with` queries of the statements and views that use them
     let infos = fragments::expand(schema, &mut file, &mut diags);
     if has_errors(&diags) {
-        return (None, Vec::new(), diags);
+        return fail(diags);
     }
+    // views are checked in dependency order; the schema the statements see has them as (read-only) tables
+    let (schema, view_outs) = views::resolve(schema, &file, dialect, &mut diags);
+    if has_errors(&diags) {
+        return fail(diags);
+    }
+    let schema = &schema;
     let queries = check(schema, &file, &mut diags);
     let mutations = check_mutations(schema, &file, &mut diags);
     if has_errors(&diags) {
-        return (None, Vec::new(), diags);
+        return fail(diags);
     }
     let mut out: Vec<Statement> = queries
         .into_iter()
@@ -144,7 +169,7 @@ pub fn compile_with_fragments(schema: &SchemaIR, src: &str, dialect: Dialect) ->
         let Lowered { sql, param_order } = lower_mutation(dialect, &ir);
         Statement::Mutation(CompiledMutation { ir, sql, param_order })
     }));
-    (Some(out), infos, diags)
+    Compiled { statements: Some(out), fragments: infos, views: view_outs, diagnostics: diags }
 }
 
 /// The host-facing form of compiled statements: one object per statement with

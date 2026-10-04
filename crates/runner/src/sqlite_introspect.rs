@@ -245,7 +245,7 @@ pub fn introspect(conn: &Connection) -> rusqlite::Result<LiveSchema> {
         )?;
         for r in st.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?.unwrap_or_default())))? {
             let (n, sql) = r?;
-            if n == HISTORY_TABLE || n == crate::journal::LOG_TABLE {
+            if n == HISTORY_TABLE || n == crate::journal::LOG_TABLE || n == crate::views::VIEWS_TABLE {
                 continue;
             }
             names.push((n, sql));
@@ -447,7 +447,7 @@ pub fn introspect(conn: &Connection) -> rusqlite::Result<LiveSchema> {
 
         indexes.sort_by(|a: &IndexIR, b| a.name.cmp(&b.name));
         constraints.sort_by(|a: &ConstraintIR, b| a.name.cmp(&b.name));
-        tables.push(TableIR { name: tname.clone(), columns, relationships: vec![], indexes, constraints });
+        tables.push(TableIR { name: tname.clone(), columns, relationships: vec![], indexes, constraints, view: false });
     }
 
     let enums: Vec<EnumIR> = enums.into_iter().map(|(name, variants)| EnumIR { name, variants }).collect();

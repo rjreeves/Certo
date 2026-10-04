@@ -8,6 +8,19 @@ pub struct Status {
     pub applied: Vec<AppliedRow>,
     /// `(seq, name)` of migrations on disk that have not been applied.
     pub pending: Vec<(u32, String)>,
+    /// The project's views (`views.ql`) against what the database has recorded.
+    pub views: ViewsStatus,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ViewsStatus {
+    /// Names, in creation order.
+    pub defined: Vec<String>,
+    pub recorded: Vec<String>,
+    /// The database has exactly the views the project defines, with the same definitions.
+    pub in_sync: bool,
+    /// The views file does not compile: what the compiler said (the other fields are then empty).
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -25,8 +38,10 @@ pub struct ApplyReport {
     pub dry_run: bool,
     /// Labels (`0003_add_slug`) of migrations applied, or that would be.
     pub migrations: Vec<String>,
-    /// For dry runs: the SQL each pending migration would execute.
+    /// For dry runs: the SQL each pending migration would execute (and, last, what would happen to the views).
     pub scripts: Vec<(String, String)>,
+    /// The views this run created (again), in the order created.
+    pub views: Vec<String>,
 }
 
 /// Check that the history is a faithful prefix of the files on disk.
@@ -81,10 +96,25 @@ pub fn status(project: &Project, exec: &mut dyn Executor) -> Result<Status, Runn
     let files = list(project)?;
     let applied = exec.applied().map_err(connection_err)?;
     let k = reconcile(&files, &applied)?;
-    Ok(Status {
-        applied,
-        pending: files[k..].iter().map(|m| (m.seq, m.name.clone())).collect(),
-    })
+    let recorded = exec.recorded_views().map_err(connection_err)?;
+    let pending = files[k..].iter().map(|m| (m.seq, m.name.clone())).collect();
+    // a mistake in the views file is reported, not fatal: the migrations still say what they say
+    let views = match crate::views::load(project) {
+        Ok(defined) => ViewsStatus {
+            in_sync: crate::views::in_sync(&defined, &recorded),
+            defined: defined.iter().map(|v| v.name.clone()).collect(),
+            recorded: recorded.iter().map(|v| v.name.clone()).collect(),
+            error: None,
+        },
+        Err(RunnerError::Compile { rendered, .. }) => ViewsStatus {
+            defined: Vec::new(),
+            recorded: recorded.iter().map(|v| v.name.clone()).collect(),
+            in_sync: false,
+            error: Some(rendered),
+        },
+        Err(e) => return Err(e),
+    };
+    Ok(Status { applied, pending, views })
 }
 
 /// Apply pending migrations in order. Stops at the first failure; earlier
@@ -115,9 +145,20 @@ pub fn apply_with_progress(
     let applied = exec.applied().map_err(connection_err)?;
     let k = reconcile(&files, &applied)?;
 
-    let pending = files[k..].iter().filter(|m| opts.to.is_none_or(|to| m.seq <= to));
-    let mut report = ApplyReport { dry_run: opts.dry_run, migrations: Vec::new(), scripts: Vec::new() };
-    for m in pending {
+    let views = crate::views::load(project)?; // a mistake in views.ql stops everything before anything runs
+    let recorded = exec.recorded_views().map_err(connection_err)?;
+    let pending: Vec<&Migration> = files[k..].iter().filter(|m| opts.to.is_none_or(|to| m.seq <= to)).collect();
+    // A view stops a table it reads from being changed, so with migrations to run the views certo made go first and are
+    // created again afterwards. Stopping short with `to` leaves the views dropped: they are written against the latest schema.
+    let drop_first = !pending.is_empty() && !recorded.is_empty();
+    let complete = files.len() == k + pending.len();
+    let view_error = |e: crate::exec::ExecError| RunnerError::Database { seq: 0, name: "views".into(), statement: e.statement, message: e.message };
+    let mut report = ApplyReport { dry_run: opts.dry_run, migrations: Vec::new(), scripts: Vec::new(), views: Vec::new() };
+
+    if drop_first && !opts.dry_run {
+        exec.replace_views(&crate::views::drop_order(&recorded), &[]).map_err(view_error)?;
+    }
+    for m in &pending {
         if opts.dry_run {
             report.scripts.push((m.label(), m.script.to_sql()));
         } else {
@@ -130,6 +171,26 @@ pub fn apply_with_progress(
             progress(&m.label());
         }
         report.migrations.push(m.label());
+    }
+    let now: Vec<crate::views::RecordedView> = if drop_first { Vec::new() } else { recorded };
+    // also when a view certo made was dropped by hand: what is recorded is not what exists
+    let live_now = exec.live_views().map_err(connection_err)?;
+    let intact = views.iter().all(|v| live_now.contains(&v.name));
+    if complete && (!crate::views::in_sync(&views, &now) || !intact) {
+        if opts.dry_run {
+            let mut sql = String::new();
+            for name in crate::views::drop_order(&now) {
+                sql.push_str(&format!("DROP VIEW IF EXISTS {};\n", certo_sql::quote_ident(project.dialect(), &name)));
+            }
+            for v in &views {
+                sql.push_str(&v.create_sql);
+                sql.push_str(";\n");
+            }
+            report.scripts.push(("views".to_string(), sql));
+        } else {
+            exec.replace_views(&crate::views::drop_order(&now), &views).map_err(view_error)?;
+        }
+        report.views = views.iter().map(|v| v.name.clone()).collect();
     }
     Ok(report)
 }

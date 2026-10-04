@@ -322,6 +322,7 @@ fn build_table(
         relationships: rels,
         indexes: Vec::new(),
         constraints: Vec::new(),
+        view: false,
     };
     (ir, types)
 }
