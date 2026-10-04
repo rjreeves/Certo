@@ -36,6 +36,9 @@ Hand-written steps belong in MDL (`--mdl`), not in `up.sql`.
   not at all. The only exception is PostgreSQL's `ADD VALUE` for enums, which
   cannot share a transaction with code that uses the value; it runs first as
   a non-transactional batch and is idempotent (`IF NOT EXISTS`).
+  This holds on SQLite for a table rebuild too: its script ends with `PRAGMA foreign_keys = ON`, which cannot run in a
+  transaction, so the history row goes into the last transactional batch, not after the script (a failed migration also
+  puts that pragma back).
 - **Tamper-evident:** the SHA-256 of `up.json` is stored in the history table.
   Before anything runs, the history must be an exact prefix of the files on
   disk: an edited, renamed, missing or out-of-order migration is refused.

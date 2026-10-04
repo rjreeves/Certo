@@ -210,3 +210,41 @@ fn a_second_runner_on_the_same_database_is_refused_until_the_first_is_done() {
     drop(held);
 }
 
+#[test]
+fn a_table_rebuild_is_recorded_in_the_same_transaction_as_the_change() {
+    use certo_runner::Executor;
+    let (_dir, p, db) = fixture(V1);
+    create(&p, "init", None, false).unwrap();
+    let mut ex = SqliteExecutor::open(&db).unwrap();
+    apply(&p, &mut ex, &ApplyOptions::default()).unwrap();
+
+    // V2 makes `orders.note` NOT NULL, which SQLite cannot do in place: the table is rebuilt, and the script
+    // ends with `PRAGMA foreign_keys = ON`, which cannot be part of the transaction
+    fs::write(p.schema_path(), V2).unwrap();
+    create(&p, "v2", None, true).unwrap(); // narrowing a column is a destructive change
+    let migrations = certo_runner::migration::list(&p).unwrap();
+    let m2 = migrations.iter().find(|m| m.seq == 2).unwrap();
+    assert!(m2.script.batches.last().is_some_and(|b| !b.transactional), "the script ends outside the transaction");
+    let note_not_null = |ex: &SqliteExecutor| count(ex, "SELECT \"notnull\" FROM pragma_table_info('orders') WHERE name = 'note'");
+    assert_eq!(note_not_null(&ex), 0);
+
+    // make recording fail: a row for seq 2 is already there
+    ex.connection()
+        .execute("INSERT INTO _certo_migrations (seq, name, checksum, compiler_version) VALUES (2, 'squatter', 'x', 'x')", [])
+        .unwrap();
+    let tables = count(&ex, "SELECT count(*) FROM sqlite_master WHERE type = 'table'");
+    assert!(ex.apply(m2).is_err(), "the history insert fails");
+    // the history row is part of the transaction, so its failure took the rebuild with it: no change without a record
+    assert_eq!(note_not_null(&ex), 0, "the table is as it was");
+    assert_eq!(count(&ex, "SELECT count(*) FROM sqlite_master WHERE type = 'table'"), tables, "no half-built table is left behind");
+    // and foreign keys are enforced again
+    assert_eq!(count(&ex, "PRAGMA foreign_keys"), 1);
+
+    // without the squatter the migration applies, changes the table and is recorded
+    ex.connection().execute("DELETE FROM _certo_migrations WHERE seq = 2", []).unwrap();
+    ex.apply(m2).unwrap();
+    assert_eq!(note_not_null(&ex), 1);
+    assert_eq!(count(&ex, "SELECT count(*) FROM _certo_migrations WHERE seq = 2 AND name = 'v2'"), 1);
+    assert_eq!(count(&ex, "PRAGMA foreign_keys"), 1);
+}
+

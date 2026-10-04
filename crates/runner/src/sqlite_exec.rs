@@ -76,6 +76,42 @@ impl SqliteExecutor {
     }
 }
 
+impl SqliteExecutor {
+    /// Run every batch of `m` and record it in the history. The history row goes inside the last
+    /// transactional batch, so it commits (or rolls back) together with the schema change. A table-rebuild
+    /// script ends with `PRAGMA foreign_keys = ON`, which cannot run inside a transaction; recording after it
+    /// would leave a window in which the change is committed but unrecorded.
+    fn run_batches(&mut self, m: &Migration) -> Result<(), ExecError> {
+        let params = rusqlite::params![m.seq as i64, m.name, m.checksum, m.script.compiler_version];
+        let last_tx = m.script.batches.iter().rposition(|b| b.transactional);
+
+        for (i, b) in m.script.batches.iter().enumerate() {
+            if b.transactional {
+                let tx = self.conn.transaction().map_err(|e| err(e, None))?;
+                for s in &b.statements {
+                    tx.execute_batch(s).map_err(|e| err(e, Some(s)))?;
+                }
+                if Some(i) == last_tx {
+                    tx.execute(&Self::record_sql(), params)
+                        .map_err(|e| err(e, Some("record migration in history")))?;
+                }
+                tx.commit().map_err(|e| err(e, Some("COMMIT")))?;
+            } else {
+                for s in &b.statements {
+                    self.conn.execute_batch(s).map_err(|e| err(e, Some(s)))?;
+                }
+            }
+        }
+        if last_tx.is_none() {
+            // nothing transactional to hold the row (an empty script)
+            self.conn
+                .execute(&Self::record_sql(), params)
+                .map_err(|e| err(e, Some("record migration in history")))?;
+        }
+        Ok(())
+    }
+}
+
 impl Executor for SqliteExecutor {
     fn dialect(&self) -> &'static str { "sqlite" }
 
@@ -126,32 +162,11 @@ impl Executor for SqliteExecutor {
     }
 
     fn apply(&mut self, m: &Migration) -> Result<(), ExecError> {
-        let params = rusqlite::params![m.seq as i64, m.name, m.checksum, m.script.compiler_version];
-        let last = m.script.batches.len().checked_sub(1);
-        let record_inside = last.is_some_and(|i| m.script.batches[i].transactional);
-
-        for (i, b) in m.script.batches.iter().enumerate() {
-            if b.transactional {
-                let tx = self.conn.transaction().map_err(|e| err(e, None))?;
-                for s in &b.statements {
-                    tx.execute_batch(s).map_err(|e| err(e, Some(s)))?;
-                }
-                if record_inside && Some(i) == last {
-                    tx.execute(&Self::record_sql(), params)
-                        .map_err(|e| err(e, Some("record migration in history")))?;
-                }
-                tx.commit().map_err(|e| err(e, Some("COMMIT")))?;
-            } else {
-                for s in &b.statements {
-                    self.conn.execute_batch(s).map_err(|e| err(e, Some(s)))?;
-                }
-            }
+        let result = self.run_batches(m);
+        if result.is_err() {
+            // a failed rebuild may have left `PRAGMA foreign_keys = OFF` behind; this connection enforces them
+            let _ = self.conn.execute_batch("PRAGMA foreign_keys = ON;");
         }
-        if !record_inside {
-            self.conn
-                .execute(&Self::record_sql(), params)
-                .map_err(|e| err(e, Some("record migration in history")))?;
-        }
-        Ok(())
+        result
     }
 }

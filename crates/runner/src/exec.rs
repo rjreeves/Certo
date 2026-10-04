@@ -162,8 +162,8 @@ impl Executor for PgExecutor {
             m.checksum.clone(),
             m.script.compiler_version.clone(),
         );
-        let last = m.script.batches.len().checked_sub(1);
-        let record_inside = last.is_some_and(|i| m.script.batches[i].transactional);
+        // the history row goes inside the last transactional batch, so it commits with the change
+        let last_tx = m.script.batches.iter().rposition(|b| b.transactional);
 
         for (i, b) in m.script.batches.iter().enumerate() {
             if b.transactional {
@@ -171,7 +171,7 @@ impl Executor for PgExecutor {
                 for s in &b.statements {
                     tx.batch_execute(s).map_err(|e| pg_err(e, Some(s)))?;
                 }
-                if record_inside && Some(i) == last {
+                if Some(i) == last_tx {
                     tx.execute(&Self::record_sql(), &[&seq, &name, &sum, &ver])
                         .map_err(|e| pg_err(e, Some("record migration in history")))?;
                 }
@@ -182,7 +182,7 @@ impl Executor for PgExecutor {
                 }
             }
         }
-        if !record_inside {
+        if last_tx.is_none() {
             self.client
                 .execute(&Self::record_sql(), &[&seq, &name, &sum, &ver])
                 .map_err(|e| pg_err(e, Some("record migration in history")))?;
