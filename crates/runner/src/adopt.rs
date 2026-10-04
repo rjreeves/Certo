@@ -29,6 +29,8 @@ pub struct AdoptOptions {
     pub dry_run: bool,
     /// Overwrite a `schema.sdl` that already has declarations.
     pub force: bool,
+    /// Write the baseline to the journal (`_certo_log`), inside the transaction that records it.
+    pub journal: Option<crate::journal::JournalContext>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -497,6 +499,7 @@ pub fn adopt(project: &Project, exec: &mut dyn Executor, opts: &AdoptOptions) ->
         let _ = fs::write(&up_sql, format!("{note}{text}"));
     }
 
+    exec.set_journal(opts.journal.clone());
     if let Err(e) = exec.record_applied(&baseline) {
         let _ = fs::remove_dir_all(&created.dir); // don't leave a baseline the database does not know about
         rollback(project);

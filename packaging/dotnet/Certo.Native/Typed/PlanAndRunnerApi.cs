@@ -46,6 +46,23 @@ namespace Certo
         public bool AllowDestructive { get; init; }
     }
 
+    /// <summary>
+    /// Who is changing the database, for the optional journal: with it, each applied migration (and an adopted baseline) also
+    /// adds a row to the append-only table <c>_certo_log</c>, inside the transaction that makes the change, so the journal holds
+    /// exactly the changes that committed.
+    /// </summary>
+    public sealed class JournalContext
+    {
+        /// <summary>The person or service, for example <c>alice@build-host</c>.</summary>
+        public string Actor { get; init; } = "";
+        /// <summary>The named environment, if the host has one.</summary>
+        public string? Environment { get; init; }
+        /// <summary>The tool and its version, for example <c>certo 0.10.0</c>.</summary>
+        public string Tool { get; init; } = "";
+
+        internal System.Collections.Generic.Dictionary<string, string?> ToWire() => new() { ["actor"] = Actor, ["environment"] = Environment, ["tool"] = Tool };
+    }
+
     public sealed class ApplyOptions
     {
         /// <summary>The database: a <c>postgres://</c> URL, or a file path for a SQLite project.</summary>
@@ -56,6 +73,8 @@ namespace Certo
         public int? To { get; init; }
         /// <summary>Refuse to apply if the database has drifted from the last applied migration.</summary>
         public bool CheckDrift { get; init; }
+        /// <summary>Write each applied migration to the journal (<c>_certo_log</c>), inside its transaction.</summary>
+        public JournalContext? Journal { get; init; }
     }
 
     public sealed class DriftOptions
@@ -72,6 +91,8 @@ namespace Certo
         public bool DryRun { get; init; }
         /// <summary>Overwrite a <c>schema.sdl</c> that already has declarations.</summary>
         public bool Force { get; init; }
+        /// <summary>Write the baseline to the journal (<c>_certo_log</c>), inside the transaction that records it.</summary>
+        public JournalContext? Journal { get; init; }
     }
 
     /// <summary>
@@ -122,6 +143,7 @@ namespace Certo
                     ["dry_run"] = options.DryRun ? true : null,
                     ["to"] = options.To,
                     ["check_drift"] = options.CheckDrift ? true : null,
+                    ["journal"] = options.Journal?.ToWire(),
                 })),
                 "MigrateApply");
 
@@ -139,6 +161,7 @@ namespace Certo
                     ["url"] = options.Url,
                     ["dry_run"] = options.DryRun ? true : null,
                     ["force"] = options.Force ? true : null,
+                    ["journal"] = options.Journal?.ToWire(),
                 })),
                 "MigrateAdopt");
     }

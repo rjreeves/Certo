@@ -221,8 +221,22 @@ pub fn migration_status(dir: &str, opts: Option<&str>) -> String {
 
 #[derive(Deserialize, Default)]
 #[serde(deny_unknown_fields)]
+struct JournalOpts {
+    actor: String,
+    environment: Option<String>,
+    tool: String,
+}
+
+impl From<JournalOpts> for certo_runner::JournalContext {
+    fn from(j: JournalOpts) -> Self { certo_runner::JournalContext { actor: j.actor, environment: j.environment, tool: j.tool } }
+}
+
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 struct ApplyOpts {
     url: Option<String>,
+    /// `{"actor", "environment"?, "tool"}`: also write each applied migration to the journal table `_certo_log`.
+    journal: Option<JournalOpts>,
     #[serde(default)]
     dry_run: bool,
     to: Option<u32>,
@@ -255,7 +269,7 @@ pub fn apply(dir: &str, opts: Option<&str>) -> String {
     let result = apply_with_progress(
         &project,
         &mut db,
-        &ApplyOptions { dry_run: o.dry_run, to: o.to },
+        &ApplyOptions { dry_run: o.dry_run, to: o.to, journal: o.journal.map(Into::into) },
         &mut |label| done.push(label.to_string()),
     );
     match result {
@@ -330,6 +344,8 @@ struct AdoptOpts {
     /// Overwrite a schema.sdl that already has declarations.
     #[serde(default)]
     force: bool,
+    /// `{"actor", "environment"?, "tool"}`: also write the baseline to the journal table `_certo_log`.
+    journal: Option<JournalOpts>,
 }
 
 /// Turn an existing database into `schema.sdl` plus a baseline migration that
@@ -339,7 +355,7 @@ pub fn adopt(dir: &str, opts: Option<&str>) -> String {
     let o: AdoptOpts = match parse_opts(opts) { Ok(o) => o, Err(e) => return e };
     let project = match open(dir) { Ok(p) => p, Err(e) => return e };
     let mut db = match connect(&project, &o.url) { Ok(d) => d, Err(e) => return e };
-    match adopt_database(&project, &mut db, &AdoptOptions { dry_run: o.dry_run, force: o.force }) {
+    match adopt_database(&project, &mut db, &AdoptOptions { dry_run: o.dry_run, force: o.force, journal: o.journal.map(Into::into) }) {
         Ok(r) => json!({
             "ok": true,
             "dry_run": r.dry_run,

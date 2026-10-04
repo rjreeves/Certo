@@ -245,7 +245,7 @@ pub fn introspect(conn: &Connection) -> rusqlite::Result<LiveSchema> {
         )?;
         for r in st.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?.unwrap_or_default())))? {
             let (n, sql) = r?;
-            if n == HISTORY_TABLE {
+            if n == HISTORY_TABLE || n == crate::journal::LOG_TABLE {
                 continue;
             }
             names.push((n, sql));

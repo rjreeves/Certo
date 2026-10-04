@@ -42,6 +42,12 @@ Hand-written steps belong in MDL (`--mdl`), not in `up.sql`.
 - **Tamper-evident:** the SHA-256 of `up.json` is stored in the history table.
   Before anything runs, the history must be an exact prefix of the files on
   disk: an edited, renamed, missing or out-of-order migration is refused.
+- **The journal (opt-in):** with a `JournalContext` (`ApplyOptions::journal`, `AdoptOptions::journal`; `journal` in the C ABI
+  options), each applied migration and each adopted baseline adds a row to the append-only table `_certo_log` (id, at, action,
+  subject, actor, environment, tool, detail) INSIDE the transaction that makes the change, so the journal holds exactly the
+  changes that committed: a migration that rolled back leaves no row, and one that committed cannot be missing one. The table is
+  created on first use, is certo's own (ignored by introspection, so it is not drift and is not imported), and is off unless a
+  host asks. Drift repair scripts are only printed, never run by certo, so they are not journaled.
 - **`new` survives being killed:** a migration is built in a hidden folder (`migrations/.0003_x.tmp`) with each file flushed
   to disk, then moved into place in one step; `IR.json` is likewise written beside itself and replaced in one step. So a
   process killed part-way never leaves a folder with some of its files (which would make every command fail reading it):

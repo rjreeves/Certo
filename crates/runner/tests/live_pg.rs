@@ -171,3 +171,36 @@ fn a_database_with_no_migrations_applied_reports_everything_as_unexpected() {
     db.ensure_history().unwrap();
     assert_eq!(texts(&drift::check(&project, &mut db).unwrap()), ["Unexpected: table legacy"]);
 }
+
+#[test]
+fn the_journal_records_applies_and_is_not_drift_on_postgresql() {
+    let Some(url) = url() else {
+        eprintln!("CERTO_TEST_PG_URL not set; skipping live PostgreSQL test");
+        return;
+    };
+    let mut raw = Client::connect(&url, NoTls).expect("connect");
+    raw.batch_execute("DROP SCHEMA public CASCADE; CREATE SCHEMA public;").unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let project = Project::init(dir.path(), "postgres").unwrap();
+    std::fs::write(project.schema_path(), SCHEMA).unwrap();
+    create(&project, "init", None, false).unwrap();
+    {
+        let mut db = PgExecutor::connect(&url).unwrap();
+        let who = certo_runner::JournalContext { actor: "alice@build".into(), environment: Some("prod".into()), tool: "certo 9.9.9".into() };
+        apply(&project, &mut db, &ApplyOptions { journal: Some(who), ..Default::default() }).unwrap();
+        // certo's own tables are not part of the schema, so there is no drift and nothing extra to import
+        assert!(drift::check(&project, &mut db).unwrap().in_sync());
+        let imported = certo_runner::import_schema(&mut db).unwrap();
+        assert!(!imported.sdl.contains("_certo_log") && !imported.sdl.contains("_certo_migrations"));
+    }
+    let row = raw.query_one("SELECT action, subject, actor, environment, tool, detail, at IS NOT NULL FROM _certo_log", &[]).unwrap();
+    assert_eq!(row.get::<_, String>(0), "apply");
+    assert_eq!(row.get::<_, String>(1), "0001_init");
+    assert_eq!(row.get::<_, String>(2), "alice@build");
+    assert_eq!(row.get::<_, Option<String>>(3).as_deref(), Some("prod"));
+    assert_eq!(row.get::<_, String>(4), "certo 9.9.9");
+    assert!(row.get::<_, String>(5).contains("checksum"));
+    assert!(row.get::<_, bool>(6));
+    assert_eq!(raw.query_one("SELECT count(*) FROM _certo_log", &[]).unwrap().get::<_, i64>(0), 1);
+}
+

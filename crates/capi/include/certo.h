@@ -113,7 +113,11 @@ char *certo_migrate_list(const char *project_dir, const char *options);
  * Errors include history_drift (a migration was edited/removed/renamed). */
 char *certo_migrate_status(const char *project_dir, const char *options);
 
-/* options: {"url", "dry_run"?, "to"?, "check_drift"?} -> {dry_run, migrations[], scripts[]}
+/* options: {"url", "dry_run"?, "to"?, "check_drift"?, "journal"?: {"actor", "environment"?, "tool"}}
+ *   -> {dry_run, migrations[], scripts[]}
+ * With "journal", each applied migration also adds a row to the append-only table _certo_log (action, subject,
+ * actor, environment, tool, detail, at), INSIDE the transaction that makes the change: the journal holds exactly the
+ * changes that committed. The table is created on first use and is not part of the schema (no drift, not imported).
  * Failure: error.code "database" with error.applied[] = migrations that had
  * succeeded before the failing one (they stay applied). "schema_drift" if
  * check_drift found the database changed by hand (error.items[]). */
@@ -125,7 +129,7 @@ char *certo_migrate_apply(const char *project_dir, const char *options);
  * "ok" is true even when drift is found: the call worked. */
 char *certo_migrate_drift(const char *project_dir, const char *options);
 
-/* options: {"url", "dry_run"?, "force"?}
+/* options: {"url", "dry_run"?, "force"?, "journal"?: {"actor", "environment"?, "tool"}}
  *   -> {dry_run, schema_sdl, adopted:{tables,columns,enums,types,sequences,indexes,constraints},
  *       omissions[], migration|null, recovered|null, known_drift:[{kind,text}]}
  * Turns an existing database into schema.sdl plus a baseline migration that is

@@ -2,6 +2,7 @@
 
 use crate::error::RunnerError;
 use crate::introspect::{self, LiveSchema};
+use crate::journal::{self, JournalContext};
 use crate::migration::Migration;
 use postgres::{Client, NoTls};
 use std::fmt;
@@ -50,10 +51,14 @@ pub trait Executor {
     fn record_applied(&mut self, m: &Migration) -> Result<(), ExecError>;
     /// Read the live schema (current schema only) back into an IR. Read-only.
     fn introspect(&mut self) -> Result<LiveSchema, ExecError>;
+    /// Turn the journal on (`Some`) or off for the calls that follow: each `apply` and `record_applied` then also
+    /// writes a row to `_certo_log`, inside the same transaction as the change. Off unless a host asks.
+    fn set_journal(&mut self, _journal: Option<JournalContext>) {}
 }
 
 pub struct PgExecutor {
     client: Client,
+    journal: Option<JournalContext>,
 }
 
 fn pg_err(e: postgres::Error, statement: Option<&str>) -> ExecError {
@@ -88,7 +93,7 @@ impl PgExecutor {
                 "another migration run holds the lock on this database; wait for it to finish".into(),
             ));
         }
-        Ok(PgExecutor { client })
+        Ok(PgExecutor { client, journal: None })
     }
 
     fn record_sql() -> String {
@@ -142,14 +147,22 @@ impl Executor for PgExecutor {
 
     fn record_applied(&mut self, m: &Migration) -> Result<(), ExecError> {
         self.ensure_history()?;
-        self.client
-            .execute(
-                &Self::record_sql(),
-                &[&(m.seq as i32), &m.name, &m.checksum, &m.script.compiler_version],
-            )
-            .map_err(|e| pg_err(e, Some("record migration in history")))?;
-        Ok(())
+        let params: [&(dyn postgres::types::ToSql + Sync); 4] = [&(m.seq as i32), &m.name, &m.checksum, &m.script.compiler_version];
+        let Some(j) = self.journal.clone() else {
+            self.client.execute(&Self::record_sql(), &params).map_err(|e| pg_err(e, Some("record migration in history")))?;
+            return Ok(());
+        };
+        // the baseline and its journal row commit together
+        self.client.batch_execute(&journal::pg_create()).map_err(|e| pg_err(e, Some("create the journal table")))?;
+        let (label, detail) = (m.label(), journal::detail(m));
+        let mut tx = self.client.transaction().map_err(|e| pg_err(e, None))?;
+        tx.execute(&Self::record_sql(), &params).map_err(|e| pg_err(e, Some("record migration in history")))?;
+        tx.execute(&journal::pg_insert(), &[&"adopt", &label, &j.actor, &j.environment, &j.tool, &detail])
+            .map_err(|e| pg_err(e, Some("write the journal")))?;
+        tx.commit().map_err(|e| pg_err(e, Some("COMMIT")))
     }
+
+    fn set_journal(&mut self, journal: Option<JournalContext>) { self.journal = journal; }
 
     fn introspect(&mut self) -> Result<LiveSchema, ExecError> {
         introspect::introspect(&mut self.client).map_err(|e| pg_err(e, None))
@@ -162,8 +175,14 @@ impl Executor for PgExecutor {
             m.checksum.clone(),
             m.script.compiler_version.clone(),
         );
-        // the history row goes inside the last transactional batch, so it commits with the change
+        // the history row (and the journal row, if the journal is on) goes inside the last transactional batch, so
+        // it commits with the change
         let last_tx = m.script.batches.iter().rposition(|b| b.transactional);
+        let journal = self.journal.clone();
+        let (label, detail) = (m.label(), journal::detail(m));
+        if journal.is_some() {
+            self.client.batch_execute(&journal::pg_create()).map_err(|e| pg_err(e, Some("create the journal table")))?;
+        }
 
         for (i, b) in m.script.batches.iter().enumerate() {
             if b.transactional {
@@ -174,6 +193,10 @@ impl Executor for PgExecutor {
                 if Some(i) == last_tx {
                     tx.execute(&Self::record_sql(), &[&seq, &name, &sum, &ver])
                         .map_err(|e| pg_err(e, Some("record migration in history")))?;
+                    if let Some(j) = &journal {
+                        tx.execute(&journal::pg_insert(), &[&"apply", &label, &j.actor, &j.environment, &j.tool, &detail])
+                            .map_err(|e| pg_err(e, Some("write the journal")))?;
+                    }
                 }
                 tx.commit().map_err(|e| pg_err(e, Some("COMMIT")))?;
             } else {
@@ -186,6 +209,11 @@ impl Executor for PgExecutor {
             self.client
                 .execute(&Self::record_sql(), &[&seq, &name, &sum, &ver])
                 .map_err(|e| pg_err(e, Some("record migration in history")))?;
+            if let Some(j) = &journal {
+                self.client
+                    .execute(&journal::pg_insert(), &[&"apply", &label, &j.actor, &j.environment, &j.tool, &detail])
+                    .map_err(|e| pg_err(e, Some("write the journal")))?;
+            }
         }
         Ok(())
     }
@@ -198,6 +226,7 @@ impl Executor for Box<dyn Executor> {
     fn apply(&mut self, m: &Migration) -> Result<(), ExecError> { (**self).apply(m) }
     fn record_applied(&mut self, m: &Migration) -> Result<(), ExecError> { (**self).record_applied(m) }
     fn introspect(&mut self) -> Result<LiveSchema, ExecError> { (**self).introspect() }
+    fn set_journal(&mut self, journal: Option<JournalContext>) { (**self).set_journal(journal) }
 }
 
 /// Connect to the database `target` names, with the executor for the project's
