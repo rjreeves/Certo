@@ -8,7 +8,7 @@
 
     <PackageId>Certo.Native</PackageId>
     <!-- keep in step with crates/capi/Cargo.toml; the smoke test checks they agree -->
-    <Version Condition="'$(Version)' == ''">0.15.1</Version>
+    <Version Condition="'$(Version)' == ''">0.15.2</Version>
     <Description>In-process Certo database compiler for .NET: SDL schemas, migrations, QL queries, SQL lowering and a migration runner (PostgreSQL, SQLite), as a P/Invoke binding plus the native library for each platform.</Description>
     <Authors>rjreeves</Authors>
     <Company>rjreeves</Company>
