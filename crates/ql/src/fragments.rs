@@ -22,7 +22,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 /// Check the fragments of `file` and expand them into the statements that use them. Afterwards `file.fragments`
 /// is empty and every statement is self-contained. Errors go to `diags`; the caller stops if there are any.
-pub fn expand(schema: &SchemaIR, file: &mut QlFile, diags: &mut Vec<Diagnostic>) {
+pub fn expand(schema: &SchemaIR, file: &mut QlFile, diags: &mut Vec<Diagnostic>) -> Vec<crate::ir::FragmentInfo> {
     // (with no fragments there is nothing to expand, but a table written with arguments is still an error)
     let frags = std::mem::take(&mut file.fragments);
 
@@ -40,7 +40,7 @@ pub fn expand(schema: &SchemaIR, file: &mut QlFile, diags: &mut Vec<Diagnostic>)
         }
     }
     if has_errors(diags) {
-        return;
+        return Vec::new();
     }
 
     // ---- which fragments each fragment uses, and cycles ----------------------------------------------
@@ -81,7 +81,7 @@ pub fn expand(schema: &SchemaIR, file: &mut QlFile, diags: &mut Vec<Diagnostic>)
                 Diagnostic::error("QL260", format!("fragments cannot use themselves, directly or through others: {}", cycle.join(" -> ")))
                     .with_span(by_name[&cycle[0]].name.span),
             );
-            return;
+            return Vec::new();
         }
     }
 
@@ -95,15 +95,17 @@ pub fn expand(schema: &SchemaIR, file: &mut QlFile, diags: &mut Vec<Diagnostic>)
         ex.prepend_to(&mut q.ctes);
         alone.queries.push(q);
     }
-    if !has_errors(diags) {
-        crate::check::check(schema, &alone, diags);
-    }
+    let checked = if has_errors(diags) { Vec::new() } else { crate::check::check(schema, &alone, diags) };
     // a broken fragment is reported again by every fragment that uses it: once is enough
     let mut seen = HashSet::new();
     diags.retain(|d| seen.insert(format!("{d:?}")));
     if has_errors(diags) {
-        return;
+        return Vec::new();
     }
+    let infos: Vec<crate::ir::FragmentInfo> = checked
+        .into_iter()
+        .map(|q| crate::ir::FragmentInfo { name: q.name, params: q.params, columns: q.select })
+        .collect();
 
     // ---- the statements -----------------------------------------------------------------------------------
     for q in &mut file.queries {
@@ -125,6 +127,7 @@ pub fn expand(schema: &SchemaIR, file: &mut QlFile, diags: &mut Vec<Diagnostic>)
         diags.append(&mut ex.errors);
         ex.prepend_to(&mut m.ctes);
     }
+    infos
 }
 
 fn has_errors(d: &[Diagnostic]) -> bool { d.iter().any(|x| x.severity == Severity::Error) }

@@ -49,8 +49,13 @@ pub fn ql_compile(schema_ir: &str, ql_source: &str, dialect: &str) -> String {
         return error("unknown_dialect", format!("unknown SQL dialect `{dialect}` (supported: postgres, sqlite)"));
     };
     let schema = match parse_ir(schema_ir, "schema") { Ok(v) => v, Err(e) => return e };
-    let (statements, diags) = certo_ql::compile(&schema, ql_source, dialect);
+    let (statements, fragments, diags) = certo_ql::compile_with_fragments(&schema, ql_source, dialect);
     let all = statements.as_deref().map(certo_ql::to_json);
+    // fragments are not statements, but a host may want to show them: name, parameters and result columns
+    let fragments: Vec<_> = fragments
+        .iter()
+        .map(|f| json!({ "name": f.name, "params": f.params, "columns": f.columns.iter().map(|c| json!({ "name": c.name, "type": c.ty, "nullable": c.nullable })).collect::<Vec<_>>() }))
+        .collect();
     // `queries` keeps its original meaning (read queries only); `statements`
     // holds everything, each tagged with its `kind`.
     let queries = all.as_ref().and_then(|a| a.as_array()).map(|a| {
@@ -60,6 +65,7 @@ pub fn ql_compile(schema_ir: &str, ql_source: &str, dialect: &str) -> String {
         "ok": statements.is_some(),
         "queries": queries,
         "statements": all,
+        "fragments": fragments,
         "diagnostics": diagnostics_json(&diags, ql_source),
         "rendered": render_all(&diags, ql_source, "queries.ql", false),
     })

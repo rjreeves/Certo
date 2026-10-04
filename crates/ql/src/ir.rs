@@ -240,3 +240,11 @@ pub enum ConflictActionIR {
     Nothing,
     Update { assignments: Vec<AssignIR> },
 }
+
+/// What a fragment looks like from outside: its name, the parameters a call must give, and the columns it yields.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FragmentInfo {
+    pub name: String,
+    pub params: Vec<ParamIR>,
+    pub columns: Vec<ColumnOut>,
+}

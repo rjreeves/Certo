@@ -14,6 +14,7 @@ table customers {
     born: date
     token: uuid
     note: text
+    meta: json
 }
 table orders {
     id: serial primary key
@@ -140,7 +141,7 @@ fn aggregate_types_follow_postgres() {
 fn star_expansion() {
     let q = ok("query t() { from customers select * }");
     let names: Vec<_> = q[0].ir.select.iter().map(|c| c.name.as_str()).collect();
-    assert_eq!(names, ["id", "name", "email", "role", "balance", "born", "token", "note"]);
+    assert_eq!(names, ["id", "name", "email", "role", "balance", "born", "token", "note", "meta"]);
     let q = ok("query t() { from orders o join customers c on o.customer_id == c.id select o.*, c.name as customer }");
     assert_eq!(q[0].ir.select.len(), 10);
     assert_eq!(q[0].ir.select[9].name, "customer");
@@ -1613,4 +1614,63 @@ fn fragment_argument_errors() {
     // a fragment's own body is checked with its parameters, even when unused
     assert!(!errors("fragment bad(n: int) { from orders o where o.id == :other select o.id }").is_empty());
     ok("fragment good(n: int) { from orders o where o.id == :n select o.id }");
+}
+
+// ---- json_text / json_int / json_bool / json_has -------------------------------------------- //
+
+#[test]
+fn json_keys_are_typed_and_lowered_for_both_databases() {
+    let q = &ok("query q() { from customers c select json_text(c.meta, \"plan\") as p, json_int(c.meta, \"limits\", \"seats\") as n,
+        json_bool(c.meta, \"trial\") as t, json_has(c.meta, \"plan\") as h, json_text(c.meta, \"tags\", 0) as first }")[0];
+    let c = &q.ir.select;
+    assert_eq!((c[0].ty.clone(), c[0].nullable), (b(Builtin::Text), true));
+    assert_eq!((c[1].ty.clone(), c[1].nullable), (b(Builtin::BigInt), true));
+    assert_eq!((c[2].ty.clone(), c[2].nullable), (b(Builtin::Bool), true));
+    assert_eq!((c[3].ty.clone(), c[3].nullable), (b(Builtin::Bool), false), "json_has is false, never NULL");
+    assert!(q.sql.contains("jsonb_typeof((\"c\".\"meta\")::jsonb #> '{plan}') = 'string' THEN (\"c\".\"meta\")::jsonb #>> '{plan}' END"), "{}", q.sql);
+    assert!(q.sql.contains("'{limits,seats}'") && q.sql.contains("'{tags,0}'"), "{}", q.sql);
+    assert!(q.sql.contains("^-?[0-9]{1,18}$"), "{}", q.sql);
+    let (s, d) = compile(&schema(), "query q() { from customers c select json_text(c.meta, \"plan\") as p, json_int(c.meta, \"limits\", \"seats\") as n,
+        json_bool(c.meta, \"trial\") as t, json_has(c.meta, \"plan\") as h, json_text(c.meta, \"tags\", 0) as first }", Dialect::Sqlite);
+    let sql = &s.unwrap_or_else(|| panic!("{d:?}"))[0].as_query().unwrap().sql.clone();
+    assert!(sql.contains("json_type(\"c\".\"meta\", '$.plan') = 'text'"), "{sql}");
+    assert!(sql.contains("'$.limits.seats'") && sql.contains("'$.tags[0]'"), "{sql}");
+    assert!(sql.contains("json_valid(\"c\".\"meta\")"), "malformed text reads as NULL, not an error: {sql}");
+    // usable anywhere an expression is
+    ok("query q() { from customers c where json_text(c.meta, \"plan\") == \"pro\" and json_has(c.meta, \"trial\") select c.id order by json_int(c.meta, \"seats\") }");
+}
+
+#[test]
+fn json_key_errors() {
+    assert_eq!(errors("query q() { from customers c select json_text(c.name, \"a\") as x }"), ["QL209"]);
+    assert_eq!(errors("query q() { from customers c select json_text(c.meta) as x }"), ["QL209"]);
+    assert_eq!(errors("query q() { from customers c select json_text(c.meta, \"a\", \"b\", \"c\", \"d\", \"e\") as x }"), ["QL209"]);
+    // a key is a plain name or an array position, written as a literal
+    assert_eq!(errors("query q(k: text) { from customers c select json_text(c.meta, :k) as x }"), ["QL209"]);
+    assert_eq!(errors("query q() { from customers c select json_text(c.meta, \"a b\") as x }"), ["QL209"]);
+    assert_eq!(errors("query q() { from customers c select json_text(c.meta, \"a.b\") as x }"), ["QL209"]);
+    assert_eq!(errors("query q() { from customers c select json_text(c.meta, \"\") as x }"), ["QL209"]);
+    assert_eq!(errors("query q() { from customers c select json_text(c.meta, -1) as x }"), ["QL209"]);
+    assert_eq!(errors("query q() { from customers c select json_text(c.meta, c.name) as x }"), ["QL209"]);
+}
+
+// ---- fragments are listed ---------------------------------------------------------------------------- //
+
+#[test]
+fn compile_lists_the_fragments_with_their_signatures() {
+    let (s, infos, d) = compile_with_fragments(&schema(),
+        "fragment since(cutoff: timestamp, min: int null) { from orders o where o.created >= :cutoff select o.id, o.total }
+         fragment all_customers() { from customers c select c.id, c.email }
+         query q(at: timestamp) { from since(:at, 1) r select r.id }", Dialect::Postgres);
+    assert!(s.is_some(), "{d:?}");
+    assert_eq!(infos.iter().map(|f| f.name.as_str()).collect::<Vec<_>>(), ["all_customers", "since"]);
+    let since = infos.iter().find(|f| f.name == "since").unwrap();
+    assert_eq!(since.params.iter().map(|p| (p.name.as_str(), p.nullable)).collect::<Vec<_>>(), [("cutoff", false), ("min", true)]);
+    assert_eq!(since.columns.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(), ["id", "total"]);
+    let all = infos.iter().find(|f| f.name == "all_customers").unwrap();
+    assert!(all.params.is_empty());
+    assert!(all.columns[1].nullable, "email is nullable");
+    // none in a file without fragments, and none when there are errors
+    assert!(compile_with_fragments(&schema(), "query q() { from orders o select o.id }", Dialect::Postgres).1.is_empty());
+    assert!(compile_with_fragments(&schema(), "fragment f() { from nope n select n.id }", Dialect::Postgres).1.is_empty());
 }
