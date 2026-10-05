@@ -6,7 +6,7 @@
 
 use certo_runner::drift;
 use certo_runner::migration::create;
-use certo_runner::{adopt, apply, status, AdoptOptions, ApplyOptions, DriftKind, JournalContext, MysqlExecutor, Project, RunnerError};
+use certo_runner::{adopt, apply, import_schema, status, AdoptOptions, ApplyOptions, DriftKind, JournalContext, MysqlExecutor, Project, RunnerError};
 use mysql::prelude::Queryable;
 use mysql::{Conn, Opts, OptsBuilder};
 use std::fs;
@@ -134,6 +134,15 @@ fn apply_status_and_drift_round_trip() {
     }
     raw.query_drop("INSERT INTO users (email, age) VALUES ('a@x.com', 30), ('A@x.com', 30)").unwrap();
     raw.query_drop("INSERT INTO posts (author, title) VALUES (1, 't')").unwrap();
+
+    // a schema Certo made reads back as SDL that is the very schema it was made from: nothing left out, nothing changed
+    {
+        let mut db = MysqlExecutor::connect(&url).unwrap();
+        let prepared = import_schema(&mut db).unwrap();
+        assert!(prepared.omissions.is_empty(), "{:?}", prepared.omissions);
+        let (expected, d) = certo_sdl::compile(V1);
+        assert_eq!(prepared.ir, expected.unwrap_or_else(|| panic!("{d:?}")), "{}", prepared.sdl);
+    }
 
     // a change to tables with rows in them: a new enum value, a new column, a changed default, key and constraint
     fs::write(p.schema_path(), V2).unwrap();
