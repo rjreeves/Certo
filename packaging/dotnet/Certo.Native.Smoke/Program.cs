@@ -255,6 +255,10 @@ finally
     var gen = CertoQl.GenerateCSharp(typedSchema.EnsureOk(), "query by_id(id: int) { from users u where u.id == :id select u.id }",
         SqlDialect.Sqlite, "My.Db", "Q");
     Check(gen.Ok && gen.EnsureOk().Contains("namespace My.Db;") && gen.Code!.Contains("public static partial class Q"), "typed code generation");
+    var myQl = CertoQl.Compile(typedSchema.EnsureOk(), "query q(id: int) { from users u where u.id == :id select u.id }", SqlDialect.Mysql);
+    Check(myQl.Ok && myQl.EnsureOk()[0].Sql.Contains("`u`.`id` = ?") && myQl.EnsureOk()[0].ParamOrder.SequenceEqual(new[] { "id" }), "typed QL compiles for MySQL");
+    var myRefused = CertoQl.Compile(typedSchema.EnsureOk(), "insert add(n: text) { into users set name = :n returning id }", SqlDialect.Mysql);
+    Check(!myRefused.Ok && myRefused.Diagnostics[0].Code == "QL270", "MySQL refuses `returning` with a reason");
     var genRs = CertoQl.GenerateRust(typedSchema.EnsureOk(), "query by_id(id: int) { from users u where u.id == :id select u.id }", SqlDialect.Sqlite);
     Check(genRs.Ok && genRs.Code!.Contains("pub fn by_id(conn: &rusqlite::Connection, id: i32)") && genRs.Code.Contains("pub struct ByIdRow"), "typed Rust code generation");
     // round trip: the type converter writes what it reads

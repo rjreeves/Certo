@@ -125,7 +125,7 @@ namespace Certo.Models
         /// <summary>Result columns (a mutation's are its <c>returning</c> list; empty means a row count).</summary>
         [JsonPropertyName("columns")] public List<QlColumn> Columns { get; init; } = new();
         [JsonPropertyName("sql")] public string Sql { get; init; } = "";
-        /// <summary><c>ParamOrder[i]</c> is the declared parameter bound to placeholder <c>$(i+1)</c> (PostgreSQL) or <c>?(i+1)</c> (SQLite).</summary>
+        /// <summary><c>ParamOrder[i]</c> is the declared parameter bound to placeholder <c>$(i+1)</c> (PostgreSQL) or <c>?(i+1)</c> (SQLite). For MySQL, which has only positional <c>?</c>, a parameter is listed once per use, in the order the placeholders appear.</summary>
         [JsonPropertyName("param_order")] public List<string> ParamOrder { get; init; } = new();
         /// <summary>The full checked IR (expressions, sources, ...), for tooling that needs more than the contract.</summary>
         [JsonPropertyName("ir")] public JsonElement Ir { get; init; }

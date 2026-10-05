@@ -6,7 +6,7 @@ using Certo.Models;
 
 namespace Certo
 {
-    public enum SqlDialect { Postgres, Sqlite }
+    public enum SqlDialect { Postgres, Sqlite, Mysql }
 
     internal static class Wire
     {
@@ -16,6 +16,7 @@ namespace Certo
         {
             SqlDialect.Postgres => "postgres",
             SqlDialect.Sqlite => "sqlite",
+            SqlDialect.Mysql => "mysql",
             _ => throw new ArgumentOutOfRangeException(nameof(d)),
         };
 
