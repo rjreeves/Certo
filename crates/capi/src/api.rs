@@ -154,9 +154,6 @@ pub fn ql_codegen(schema_ir: &str, ql_source: &str, options: &str) -> String {
     let Some(dialect) = Dialect::from_name(dialect_name) else {
         return error("unknown_dialect", format!("unknown SQL dialect `{dialect_name}` (supported: postgres, sqlite)"));
     };
-    if dialect == Dialect::Mysql {
-        return error("unsupported_dialect", "code generation for MySQL is not available yet (supported: postgres, sqlite)");
-    }
     let schema = match parse_ir(schema_ir, "schema") { Ok(v) => v, Err(e) => return e };
     let (statements, diags) = certo_ql::compile(&schema, ql_source, dialect);
     let mut cs = certo_ql::CSharpOptions { dialect, ..Default::default() };
@@ -315,6 +312,11 @@ mod tests {
         let bad = v(&ql_codegen(&ir, "query q() { from t select t.ghost }", opts));
         assert_eq!(bad["ok"], false);
         assert!(bad["code"].is_null() && bad["diagnostics"][0]["code"] == "QL206");
+        // MySQL generates too (C# and Rust), over its own drivers
+        let my = v(&ql_codegen(&ir, "query by_n(n: int) { from t where t.n == :n select t.id, t.n }", r#"{"language":"rust","dialect":"mysql"}"#));
+        assert!(my["code"].as_str().unwrap().contains("conn: &mut C"), "{my}");
+        let my_cs = v(&ql_codegen(&ir, "query by_n(n: int) { from t where t.n == :n select t.id, t.n }", r#"{"language":"csharp","dialect":"mysql"}"#));
+        assert!(my_cs["code"].as_str().unwrap().contains("ByNAsync(this DbConnection connection, int n"), "{my_cs}");
         // Rust: the driver follows the dialect
         let rs = v(&ql_codegen(&ir, "query by_n(n: int) { from t where t.n == :n select t.id, t.n }", r#"{"language":"rust","dialect":"sqlite"}"#));
         let rs_code = rs["code"].as_str().unwrap();

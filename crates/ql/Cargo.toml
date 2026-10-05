@@ -20,4 +20,4 @@ rusqlite = { version = "0.32", features = ["bundled", "chrono"] }
 chrono    = "0.4"
 uuid      = "1"
 rust_decimal = { version = "1", features = ["db-postgres"] }
-mysql     = "25"
+mysql     = { version = "25", features = ["chrono"] }

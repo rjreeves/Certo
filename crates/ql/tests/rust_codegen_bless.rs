@@ -9,7 +9,8 @@ use certo_sql::Dialect;
 pub fn generate(dialect: Dialect) -> String {
     let (ir, d) = certo_sdl::compile(cases::SCHEMA);
     let schema = ir.unwrap_or_else(|| panic!("{d:?}"));
-    let (s, d) = certo_ql::compile(&schema, cases::QUERIES, dialect);
+    let queries = if dialect == Dialect::Mysql { cases::QUERIES_MYSQL } else { cases::QUERIES };
+    let (s, d) = certo_ql::compile(&schema, queries, dialect);
     let s = s.unwrap_or_else(|| panic!("{d:?}"));
     certo_ql::generate_rust(&schema, &s, &certo_ql::RustOptions { dialect })
 }
@@ -21,4 +22,5 @@ fn write_the_fixtures() {
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join("pg.rs"), generate(Dialect::Postgres)).unwrap();
     std::fs::write(dir.join("sqlite.rs"), generate(Dialect::Sqlite)).unwrap();
+    std::fs::write(dir.join("mysql.rs"), generate(Dialect::Mysql)).unwrap();
 }

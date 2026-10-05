@@ -19,12 +19,13 @@ $queries = Join-Path $proj 'sample\queries.ql'
 $empty = Join-Path $gen 'empty.sdl'
 Set-Content -Path $empty -Value ''
 
-foreach ($d in @(@{ name = 'Sqlite'; dialect = 'sqlite' }, @{ name = 'Pg'; dialect = 'postgres' })) {
-    & $exe ql codegen $queries --schema $schema --lang csharp --dialect $d.dialect --namespace "Sample.$($d.name)" -o (Join-Path $gen "Queries.$($d.name).cs")
+foreach ($d in @(@{ name = 'Sqlite'; dialect = 'sqlite' }, @{ name = 'Pg'; dialect = 'postgres' }, @{ name = 'Mysql'; dialect = 'mysql' })) {
+    $q = if ($d.dialect -eq 'mysql') { Join-Path $proj 'sample\queries.mysql.ql' } else { $queries }
+    & $exe ql codegen $q --schema $schema --lang csharp --dialect $d.dialect --namespace "Sample.$($d.name)" -o (Join-Path $gen "Queries.$($d.name).cs")
     if ($LASTEXITCODE) { throw "codegen failed for $($d.dialect)" }
     & $exe sdl diff $empty $schema --sql $d.dialect | Set-Content -Path (Join-Path $gen "schema.$($d.dialect -replace 'postgres','pg').sql")
     if ($LASTEXITCODE) { throw "schema SQL failed for $($d.dialect)" }
-    (Get-Content (Join-Path $proj 'Scenario.cs.template') -Raw) -replace '@NS@', "Sample.$($d.name)" -replace '@NAME@', $d.name |
+    (Get-Content (Join-Path $proj $(if ($d.dialect -eq 'mysql') { 'Scenario.mysql.cs.template' } else { 'Scenario.cs.template' })) -Raw) -replace '@NS@', "Sample.$($d.name)" -replace '@NAME@', $d.name |
         Set-Content -Path (Join-Path $gen "Scenario.$($d.name).cs")
 }
 Remove-Item $empty

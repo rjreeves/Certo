@@ -267,7 +267,8 @@ certo ql codegen queries.ql --schema schema.sdl --lang rust --dialect sqlite -o 
 
 Plain, synchronous driver code, one driver per dialect: `--dialect postgres` (the default) calls the `postgres` crate and takes
 any `postgres::GenericClient` (a `Client` or a `Transaction`); `--dialect sqlite` calls `rusqlite` and takes a `&Connection`
-(which a `Transaction` derefs to). Each statement is a function named after it in `snake_case`, with one Rust parameter per QL
+(which a `Transaction` derefs to); `--dialect mysql` calls the `mysql` crate and takes anything `Queryable` (a `Conn`, a
+`PooledConn` or a `Transaction`). Each statement is a function named after it in `snake_case`, with one Rust parameter per QL
 parameter (`Option<T>` for `null` ones; text and bytes are borrowed as `&str` and `&[u8]`; a parameter the statement never uses
 keeps its place and gets a leading `_`). A statement that returns rows gives `Vec<<Name>Row>`, a struct with one field per column;
 any other mutation gives the affected-row count (`u64`). The SQL is also a constant (`<NAME>_SQL`). Enums become Rust enums with
@@ -292,6 +293,8 @@ any unique key), and an `update` / `delete` that reads the table it changes in a
 differences that are not refused: a foreign key is checked row by row (a self-referencing `delete` of a parent and its child in one
 statement fails on MySQL), division by zero in a `select` is NULL, and `order by` puts NULLs first for ascending (as SQLite does).
 The tests run 32 queries over the same data on SQLite and MySQL and compare the rows (`tests/live_mysql.rs`).
+Generated host code works for MySQL too (`--lang csharp` over MySqlConnector, `--lang rust` over the `mysql` crate, both compiled and
+run against a live server in the tests); with no `returning`, an insert gives its row count and the rows are read back with a query.
 
 ## Not covered yet
 
