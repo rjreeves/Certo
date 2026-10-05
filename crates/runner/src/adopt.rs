@@ -42,6 +42,7 @@ pub struct Counts {
     pub sequences: usize,
     pub indexes: usize,
     pub constraints: usize,
+    pub views: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -240,7 +241,7 @@ pub fn prepare(live: LiveSchema) -> Result<Prepared, RunnerError> {
 
 /// `prepare` for a live database of `dialect`.
 pub fn prepare_for(dialect: Dialect, live: LiveSchema) -> Result<Prepared, RunnerError> {
-    let LiveSchema { mut ir, notes, .. } = live;
+    let LiveSchema { mut ir, notes, view_sql, .. } = live;
     let mut om = notes;
     let enums = ir.enums.clone();
 
@@ -308,6 +309,38 @@ pub fn prepare_for(dialect: Dialect, live: LiveSchema) -> Result<Prepared, Runne
     // 3. drop what SDL cannot express
     sanitize(&mut ir, &mut om);
 
+    // 3b. the views that are a plain select of one table's columns become SDL views (the others stay a note, with the reason)
+    let taken: HashSet<String> = ir
+        .tables
+        .iter()
+        .map(|t| t.name.clone())
+        .chain(ir.enums.iter().map(|e| e.name.clone()))
+        .chain(ir.types.iter().map(|t| t.name.clone()))
+        .chain(ir.sequences.iter().map(|s| s.name.clone()))
+        .collect();
+    let mut views = Vec::new();
+    for (name, sql) in &view_sql {
+        let note = format!("view {name} is not represented in the schema");
+        let why = if !usable_name(name) || taken.contains(name) {
+            Err("its name is not a valid SDL identifier or is already used by another object".to_string())
+        } else {
+            crate::viewparse::parse_view(dialect, name, sql, &ir.tables, &ir.enums)
+        };
+        match why {
+            Ok(v) => {
+                om.retain(|n| *n != note);
+                views.push(v);
+            }
+            Err(why) => {
+                if let Some(n) = om.iter_mut().find(|n| **n == note) {
+                    *n = format!("{note}: {why}");
+                }
+            }
+        }
+    }
+    views.sort_by(|a: &certo_sdl::ViewIR, b| a.name.cmp(&b.name));
+    ir.views = views;
+
     // 4. print, recompile, and require the same IR
     let sdl = to_sdl(&ir).map_err(|e| RunnerError::Project(format!("internal error: cannot print the adopted schema: {e}")))?;
     let (compiled, diags) = compile(&sdl);
@@ -329,6 +362,7 @@ pub fn prepare_for(dialect: Dialect, live: LiveSchema) -> Result<Prepared, Runne
         sequences: ir.sequences.len(),
         indexes: ir.tables.iter().map(|t| t.indexes.len()).sum(),
         constraints: ir.tables.iter().map(|t| t.constraints.len()).sum(),
+        views: ir.views.len(),
     };
     Ok(Prepared { ir, sdl, omissions: om, counts })
 }

@@ -30,6 +30,7 @@ pub mod error;
 pub mod exec;
 pub mod introspect;
 pub mod journal;
+pub mod viewparse;
 pub mod views;
 pub mod migration;
 pub mod mysql_exec;

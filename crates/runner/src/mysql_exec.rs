@@ -206,6 +206,7 @@ impl Executor for MysqlExecutor {
         // a view certo created is part of the project, not something the schema language failed to express
         let managed = self.recorded_views()?;
         live.notes.retain(|n| !managed.iter().any(|m| n.starts_with(&format!("view {} is not represented", m.name))));
+        live.view_sql.retain(|(n, _)| !managed.iter().any(|m| &m.name == n));
         Ok(live)
     }
 

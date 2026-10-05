@@ -134,6 +134,7 @@ pub fn introspect(conn: &mut Conn) -> Result<LiveSchema, mysql::Error> {
     )?;
     let mut table_names: Vec<String> = Vec::new();
     let mut views: Vec<String> = Vec::new();
+    let view_sql: Vec<(String, String)> = conn.query("SELECT table_name, view_definition FROM information_schema.views WHERE table_schema = DATABASE() ORDER BY table_name")?;
     for (name, kind) in objects {
         if reserved.contains(name.as_str()) {
             continue;
@@ -294,7 +295,7 @@ pub fn introspect(conn: &mut Conn) -> Result<LiveSchema, mysql::Error> {
         sequences: Vec::new(),
         views: Vec::new(),
     };
-    Ok(LiveSchema { ir, notes, views })
+    Ok(LiveSchema { ir, notes, views, view_sql })
 }
 
 #[cfg(test)]

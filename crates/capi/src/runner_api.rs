@@ -15,7 +15,7 @@
 //!   list    {migrations: [{seq, name, label, dir, checksum, batches, statements}]}
 //!   status  {applied: [{seq, name, checksum, applied_at}], pending: [{seq, name}]}
 //!   apply   {dry_run, migrations[] (labels), scripts: [{label, sql}]}
-//!   adopt   {dry_run, schema_sdl, adopted: {tables, columns, enums, types, sequences, indexes, constraints},
+//!   adopt   {dry_run, schema_sdl, adopted: {tables, columns, enums, types, sequences, views, indexes, constraints},
 //!            omissions[], migration (label|null), known_drift: [{kind, text}]}
 //!   drift   {in_sync, expected_from, items: [{kind, text}], notes[], repair_sql, repair_error}
 //!           `ok` is true even when there is drift: the call worked and found it.
@@ -369,6 +369,7 @@ pub fn adopt(dir: &str, opts: Option<&str>) -> String {
                 "enums": r.adopted.enums,
                 "types": r.adopted.types,
                 "sequences": r.adopted.sequences,
+                "views": r.adopted.views,
                 "indexes": r.adopted.indexes,
                 "constraints": r.adopted.constraints,
             },
@@ -425,6 +426,7 @@ pub fn import(opts: Option<&str>) -> String {
                 "enums": p.counts.enums,
                 "types": p.counts.types,
                 "sequences": p.counts.sequences,
+                "views": p.counts.views,
                 "indexes": p.counts.indexes,
                 "constraints": p.counts.constraints,
             },
