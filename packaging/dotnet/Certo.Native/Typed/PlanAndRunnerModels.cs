@@ -156,11 +156,21 @@ namespace Certo.Models
         [JsonPropertyName("error")] public string? Error { get; init; }
     }
 
+    /// <summary>A migration that began and did not finish (MySQL commits DDL as it goes): <see cref="Done"/> of its <see cref="Total"/> statements ran.</summary>
+    public sealed class PartialMigration
+    {
+        [JsonPropertyName("seq")] public int Seq { get; init; }
+        [JsonPropertyName("done")] public int Done { get; init; }
+        [JsonPropertyName("total")] public int Total { get; init; }
+    }
+
     public sealed class MigrateStatusResult : CertoResult
     {
         [JsonPropertyName("applied")] public List<AppliedMigration> Applied { get; init; } = new();
         [JsonPropertyName("pending")] public List<PendingMigration> Pending { get; init; } = new();
         [JsonPropertyName("views")] public ViewsStatus Views { get; init; } = new();
+        /// <summary>Migrations begun and not finished: apply again to resume them.</summary>
+        [JsonPropertyName("partial")] public List<PartialMigration> Partial { get; init; } = new();
     }
 
     public sealed class MigrationScript

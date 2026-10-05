@@ -21,6 +21,14 @@ pub struct AppliedRow {
     pub applied_at: String,
 }
 
+/// A migration MySQL started and did not finish (it commits DDL as it goes): `done` of its `total` statements ran.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PartialRow {
+    pub seq: u32,
+    pub done: u32,
+    pub total: u32,
+}
+
 #[derive(Debug)]
 pub struct ExecError {
     /// The statement that failed, when known.
@@ -55,6 +63,8 @@ pub trait Executor {
     /// Turn the journal on (`Some`) or off for the calls that follow: each `apply` and `record_applied` then also
     /// writes a row to `_certo_log`, inside the same transaction as the change. Off unless a host asks.
     fn set_journal(&mut self, _journal: Option<JournalContext>) {}
+    /// Migrations begun and not finished (only a database without transactional DDL, MySQL, can have them).
+    fn partial(&mut self) -> Result<Vec<PartialRow>, ExecError> { Ok(Vec::new()) }
     /// The views certo created, in the order it created them. Empty if it never created any.
     fn recorded_views(&mut self) -> Result<Vec<RecordedView>, ExecError> { Ok(Vec::new()) }
     /// In ONE transaction: drop the views named (in the order given), forget every recorded view, create `create` in order and
@@ -296,13 +306,14 @@ impl Executor for Box<dyn Executor> {
     fn record_applied(&mut self, m: &Migration) -> Result<(), ExecError> { (**self).record_applied(m) }
     fn introspect(&mut self) -> Result<LiveSchema, ExecError> { (**self).introspect() }
     fn set_journal(&mut self, journal: Option<JournalContext>) { (**self).set_journal(journal) }
+    fn partial(&mut self) -> Result<Vec<PartialRow>, ExecError> { (**self).partial() }
     fn recorded_views(&mut self) -> Result<Vec<RecordedView>, ExecError> { (**self).recorded_views() }
     fn replace_views(&mut self, drop: &[String], create: &[ProjectView]) -> Result<(), ExecError> { (**self).replace_views(drop, create) }
     fn live_views(&mut self) -> Result<Vec<String>, ExecError> { (**self).live_views() }
 }
 
 /// Connect to the database `target` names, with the executor for the project's
-/// dialect: a `postgres://` URL, or for SQLite a file path / `sqlite:<path>`.
+/// dialect: a `postgres://` or `mysql://` URL, or for SQLite a file path / `sqlite:<path>`.
 pub fn connect(project: &crate::project::Project, target: &str) -> Result<Box<dyn Executor>, RunnerError> {
     connect_to(&project.config.dialect, target)
 }
@@ -311,6 +322,7 @@ pub fn connect(project: &crate::project::Project, target: &str) -> Result<Box<dy
 pub fn connect_to(dialect: &str, target: &str) -> Result<Box<dyn Executor>, RunnerError> {
     match dialect {
         "sqlite" => Ok(Box::new(crate::sqlite_exec::SqliteExecutor::open(target)?)),
+        "mysql" => Ok(Box::new(crate::mysql_exec::MysqlExecutor::connect(target)?)),
         _ => Ok(Box::new(PgExecutor::connect(target)?)),
     }
 }

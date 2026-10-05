@@ -10,6 +10,8 @@ pub struct Status {
     pub pending: Vec<(u32, String)>,
     /// The project's views (`views.ql`) against what the database has recorded.
     pub views: ViewsStatus,
+    /// Migrations begun and not finished (MySQL commits DDL as it goes): how far each got.
+    pub partial: Vec<crate::exec::PartialRow>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -83,8 +85,8 @@ pub(crate) fn connection_err(e: crate::exec::ExecError) -> RunnerError {
 pub(crate) fn check_dialect(project: &Project, exec: &dyn Executor) -> Result<(), RunnerError> {
     if project.config.dialect != exec.dialect() {
         return Err(RunnerError::Project(format!(
-            "the project dialect is `{}` but this executor talks `{}` (the built-in executor is PostgreSQL only;              a `{}` project can still write migrations with `migrate new` and run the scripts with your own driver)",
-            project.config.dialect, exec.dialect(), project.config.dialect
+            "the project dialect is `{}` but this executor talks `{}` (connect with a URL for the project's database: postgres://, mysql://, or a file for SQLite)",
+            project.config.dialect, exec.dialect()
         )));
     }
     Ok(())
@@ -114,7 +116,8 @@ pub fn status(project: &Project, exec: &mut dyn Executor) -> Result<Status, Runn
         },
         Err(e) => return Err(e),
     };
-    Ok(Status { applied, pending, views })
+    let partial = exec.partial().map_err(connection_err)?;
+    Ok(Status { applied, pending, views, partial })
 }
 
 /// Apply pending migrations in order. Stops at the first failure; earlier
