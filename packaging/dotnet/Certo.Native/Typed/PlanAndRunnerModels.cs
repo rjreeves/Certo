@@ -211,6 +211,8 @@ namespace Certo.Models
         [JsonPropertyName("enums")] public int Enums { get; init; }
         [JsonPropertyName("types")] public int Types { get; init; }
         [JsonPropertyName("sequences")] public int Sequences { get; init; }
+        /// <summary>Views read back as SDL views (a plain select of one table's columns); the others are left out and said so.</summary>
+        [JsonPropertyName("views")] public int Views { get; init; }
         [JsonPropertyName("indexes")] public int Indexes { get; init; }
         [JsonPropertyName("constraints")] public int Constraints { get; init; }
     }

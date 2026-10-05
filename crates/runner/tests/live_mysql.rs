@@ -231,6 +231,23 @@ fn views_follow_the_migrations_on_mysql() {
     assert!(d.notes.iter().all(|n| !n.contains("adults") && !n.contains("adult_names")), "{:?}", d.notes);
     assert!(status(&p, &mut db).unwrap().views.in_sync);
 
+    // what was made reads back as the SDL view it was made from; a definition changed by hand is drift
+    let prepared = certo_runner::import_schema(&mut db).unwrap();
+    assert!(prepared.sdl.contains("view adults on people (id, name) where age >= 18"), "{}
+{:?}", prepared.sdl, prepared.omissions);
+    assert!(prepared.omissions.iter().all(|o| !o.contains("view adult_names") && !o.contains("view adults")), "{:?}", prepared.omissions);
+    raw.query_drop("DROP VIEW adult_names").unwrap();
+    raw.query_drop("DROP VIEW adults").unwrap();
+    raw.query_drop("CREATE VIEW adults AS SELECT id, name FROM people WHERE age >= 21").unwrap();
+    let d = drift::check(&p, &mut db).unwrap();
+    assert!(d.items.iter().any(|i| i.text.contains("view adults") && i.text.contains("differs")), "{:?}", d.items);
+    apply(&p, &mut db, &ApplyOptions::default()).unwrap(); // the migrations do not change, but the views file is applied again
+    raw.query_drop("DROP VIEW adult_names").unwrap();
+    raw.query_drop("DROP VIEW adults").unwrap();
+    raw.query_drop("CREATE VIEW adults AS SELECT id, name FROM people WHERE age >= 18").unwrap();
+    apply(&p, &mut db, &ApplyOptions::default()).unwrap();
+    assert!(drift::check(&p, &mut db).unwrap().in_sync());
+
     // a type change under both views: they go first and come back
     fs::write(p.schema_path(), schema.replace("name: varchar(50)", "name: varchar(80)")).unwrap();
     create(&p, "wider", None, true).unwrap();
@@ -299,7 +316,9 @@ fn an_existing_mysql_database_can_be_adopted() {
     ] {
         assert!(sdl.contains(expected), "expected `{expected}` in:\n{sdl}\nomissions: {:?}", report.omissions);
     }
-    assert!(report.omissions.iter().any(|o| o.contains("big_invoices")), "the view is said to be left out: {:?}", report.omissions);
+    // a plain select of one table's columns is an SDL view; the view is not left out
+    assert!(sdl.contains("view big_invoices on invoices (id, total) where total > 100") && report.adopted.views == 1, "{sdl}
+{:?}", report.omissions);
     // the baseline is recorded, and the database matches it
     let s = status(&p, &mut db).unwrap();
     assert_eq!((s.applied.len(), s.pending.len()), (1, 0));

@@ -22,7 +22,7 @@ use crate::migration::list;
 use crate::project::Project;
 use crate::runner::{connection_err, reconcile};
 use certo_mdl::{diff, MigrationPlan, Op};
-use certo_sdl::{ColumnIR, ExprIR, SchemaIR};
+use certo_sdl::{ColumnIR, ExprIR, SchemaIR, ViewIR};
 use certo_sql::{render_expr, Dialect};
 use std::collections::HashSet;
 use std::fs;
@@ -340,11 +340,13 @@ fn items(dialect: Dialect, plan: &MigrationPlan) -> Vec<DriftItem> {
             Op::AddConstraint { table, constraint } => Some(("check constraint", table.clone(), constraint.name.clone())),
             Op::DropForeignKey { table, name } => Some(("foreign key", table.clone(), name.clone())),
             Op::AddForeignKey { table, column, .. } => Some(("foreign key", table.clone(), column.clone())),
+            Op::DropView { name } => Some(("view", String::new(), name.clone())),
+            Op::CreateView { definition } => Some(("view", String::new(), definition.name.clone())),
             _ => None,
         }
     };
-    let dropped: HashSet<_> = plan.ops.iter().filter(|o| matches!(o, Op::DropIndex { .. } | Op::DropConstraint { .. } | Op::DropForeignKey { .. })).filter_map(key).collect();
-    let added: HashSet<_> = plan.ops.iter().filter(|o| matches!(o, Op::CreateIndex { .. } | Op::AddConstraint { .. } | Op::AddForeignKey { .. })).filter_map(key).collect();
+    let dropped: HashSet<_> = plan.ops.iter().filter(|o| matches!(o, Op::DropIndex { .. } | Op::DropConstraint { .. } | Op::DropForeignKey { .. } | Op::DropView { .. })).filter_map(key).collect();
+    let added: HashSet<_> = plan.ops.iter().filter(|o| matches!(o, Op::CreateIndex { .. } | Op::AddConstraint { .. } | Op::AddForeignKey { .. } | Op::CreateView { .. })).filter_map(key).collect();
     let both: HashSet<_> = dropped.intersection(&added).cloned().collect();
 
     let mut out = Vec::new();
@@ -357,7 +359,11 @@ fn items(dialect: Dialect, plan: &MigrationPlan) -> Vec<DriftItem> {
             && both.contains(&k)
         {
             if emitted.insert(k.clone()) {
-                let what = if k.0 == "foreign key" { format!("{} on {}.{}", k.0, k.1, k.2) } else { format!("{} {} on {}", k.0, k.2, k.1) };
+                let what = match k.0 {
+                    "foreign key" => format!("{} on {}.{}", k.0, k.1, k.2),
+                    "view" => format!("view {}", k.2),
+                    _ => format!("{} {} on {}", k.0, k.2, k.1),
+                };
                 out.push(DriftItem { kind: DriftKind::Different, text: format!("{what}: definition differs") });
             }
             continue;
@@ -379,14 +385,21 @@ fn items(dialect: Dialect, plan: &MigrationPlan) -> Vec<DriftItem> {
 
 /// Compare `expected` with an introspected schema.
 pub fn compare(dialect: Dialect, expected: &SchemaIR, live: LiveSchema, expected_from: &str) -> Drift {
-    let LiveSchema { ir: mut live_ir, mut notes, views } = live;
+    let LiveSchema { ir: mut live_ir, mut notes, views, view_sql } = live;
     align(dialect, expected, &mut live_ir);
-    // an SDL view is there or it is not; what a database says about its definition is not comparable with what was written
+    // an SDL view the database has is read back from the SQL it keeps: the same view, a changed one, or (when what it keeps is
+    // not a plain select of the table) a different one. With no SQL to read, it is taken to be as declared.
     for v in &expected.views {
-        if views.contains(&v.name) {
-            live_ir.views.push(v.clone());
-            notes.retain(|n| *n != format!("view {} is not represented in the schema", v.name));
+        if !views.contains(&v.name) {
+            continue;
         }
+        let read = match view_sql.iter().find(|(n, _)| *n == v.name) {
+            None => v.clone(),
+            Some((_, sql)) => crate::viewparse::parse_view(dialect, &v.name, sql, &live_ir.tables, &live_ir.enums)
+                .unwrap_or_else(|_| ViewIR { name: v.name.clone(), from: v.from.clone(), columns: Vec::new(), filter: None }),
+        };
+        live_ir.views.push(read);
+        notes.retain(|n| *n != format!("view {} is not represented in the schema", v.name));
     }
     let plan = diff(&live_ir, expected);
     Drift {
@@ -458,7 +471,7 @@ mod tests {
     }
 
     fn drift(expected: &str, live: &str) -> Drift {
-        compare(Dialect::Postgres, &ir(expected), LiveSchema { ir: ir(live), notes: vec![], views: vec![] }, "test")
+        compare(Dialect::Postgres, &ir(expected), LiveSchema { ir: ir(live), notes: vec![], views: vec![], view_sql: vec![] }, "test")
     }
 
     fn texts(d: &Drift) -> Vec<String> {
@@ -549,7 +562,7 @@ mod tests {
         let e = ir("sequence s table t { id: bigint primary key default nextval(s) }");
         let mut l = e.clone();
         l.tables[0].columns[0].default = Some(ExprIR::Raw { sql: "nextval('s'::regclass)".into() });
-        let d = compare(Dialect::Postgres, &e, LiveSchema { ir: l, notes: vec![], views: vec![] }, "test");
+        let d = compare(Dialect::Postgres, &e, LiveSchema { ir: l, notes: vec![], views: vec![], view_sql: vec![] }, "test");
         assert!(d.in_sync(), "{:?}", texts(&d));
     }
 
@@ -591,7 +604,7 @@ mod tests {
         let mut l = e.clone();
         let t = l.tables.iter_mut().find(|t| t.name == table).unwrap();
         t.columns.iter_mut().find(|c| c.name == col).unwrap().default = Some(ExprIR::Raw { sql: raw.into() });
-        compare(Dialect::Postgres, &e, LiveSchema { ir: l, notes: vec![], views: vec![] }, "test")
+        compare(Dialect::Postgres, &e, LiveSchema { ir: l, notes: vec![], views: vec![], view_sql: vec![] }, "test")
     }
 
     #[test]
@@ -614,10 +627,10 @@ mod tests {
         let e = ir("table t { id: int primary key  n: int } constraint c on t using n >= 18 and n != 99");
         let mut l = e.clone();
         l.tables[0].constraints[0].expr = ExprIR::Raw { sql: "((n >= 18) AND (n <> 99))".into() };
-        let d = compare(Dialect::Postgres, &e, LiveSchema { ir: l.clone(), notes: vec![], views: vec![] }, "t");
+        let d = compare(Dialect::Postgres, &e, LiveSchema { ir: l.clone(), notes: vec![], views: vec![], view_sql: vec![] }, "t");
         assert!(d.in_sync(), "{:?}", texts(&d));
         l.tables[0].constraints[0].expr = ExprIR::Raw { sql: "((n >= 21) AND (n <> 99))".into() };
-        let d = compare(Dialect::Postgres, &e, LiveSchema { ir: l, notes: vec![], views: vec![] }, "t");
+        let d = compare(Dialect::Postgres, &e, LiveSchema { ir: l, notes: vec![], views: vec![], view_sql: vec![] }, "t");
         assert_eq!(texts(&d), ["Different: check constraint c on t: definition differs"]);
     }
 
@@ -626,7 +639,7 @@ mod tests {
         let d = compare(
             Dialect::Postgres,
             &ir(BASE),
-            LiveSchema { ir: ir(BASE), notes: vec!["column t.c has type varchar(255)".into()], views: vec![] },
+            LiveSchema { ir: ir(BASE), notes: vec!["column t.c has type varchar(255)".into()], views: vec![], view_sql: vec![] },
             "test",
         );
         assert!(d.in_sync());

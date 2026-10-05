@@ -166,7 +166,9 @@ fn an_existing_sqlite_database_can_be_adopted() {
     // what SDL has no word for is reported, not guessed
     assert!(all.contains("DATETIME"), "unknown column type reported:\n{all}");
     assert!(all.contains("customers_name_uq"), "unique index reported:\n{all}");
-    assert!(all.contains("view v"), "{all}");
+    // a plain select of one table's columns is an SDL view now, not a note
+    assert!(r.schema_sdl.contains("view v on customers (id)") && r.adopted.views == 1 && !all.contains("view v"), "{}
+{all}", r.schema_sdl);
 
     // the baseline is recorded, not run, and what remains differs only by what was left out
     assert_eq!(status(&p, &mut ex).unwrap().applied.len(), 1);
@@ -469,4 +471,55 @@ fn sdl_views_are_part_of_the_migrations_and_the_drift_check() {
     apply(&p, &mut ex, &ApplyOptions::default()).unwrap();
     assert_eq!(count(&ex, "SELECT count(*) FROM adult_names"), 1);
     assert!(drift::check(&p, &mut ex).unwrap().in_sync());
+}
+
+#[test]
+fn views_are_read_back_and_a_changed_definition_is_drift() {
+    let (_dir, p, db) = fixture(WITH_SDL_VIEW);
+    create(&p, "init", None, false).unwrap();
+    let mut ex = SqliteExecutor::open(&db).unwrap();
+    apply(&p, &mut ex, &ApplyOptions::default()).unwrap();
+
+    // what certo made reads back as the view it was made from
+    let prepared = certo_runner::import_schema(&mut ex).unwrap();
+    assert_eq!(prepared.ir.views, certo_sdl::compile(WITH_SDL_VIEW).0.unwrap().views, "{}
+{:?}", prepared.sdl, prepared.omissions);
+    assert!(prepared.sdl.contains("view adults on people (id, name) where age >= 18"), "{}", prepared.sdl);
+    assert!(prepared.omissions.iter().all(|o| !o.contains("adults")), "{:?}", prepared.omissions);
+    assert_eq!(prepared.counts.views, 1);
+
+    // a view that is more than a plain select stays a note, with the reason
+    ex.connection().execute_batch("CREATE VIEW totals AS SELECT age, count(*) AS n FROM people GROUP BY age").unwrap();
+    let prepared = certo_runner::import_schema(&mut ex).unwrap();
+    assert_eq!(prepared.ir.views.len(), 1);
+    assert!(prepared.omissions.iter().any(|o| o.starts_with("view totals is not represented in the schema:") && o.contains("group")), "{:?}", prepared.omissions);
+    ex.connection().execute_batch("DROP VIEW totals").unwrap();
+
+    // a definition changed by hand is drift, not just a view that is there
+    assert!(drift::check(&p, &mut ex).unwrap().in_sync());
+    ex.connection().execute_batch("DROP VIEW adults; CREATE VIEW adults AS SELECT id, name FROM people WHERE age >= 21").unwrap();
+    let d = drift::check(&p, &mut ex).unwrap();
+    assert!(!d.in_sync());
+    assert!(d.items.iter().any(|i| i.text.contains("view adults") && i.text.contains("differs")), "{:?}", d.items);
+    // and the repair puts it right
+    let sql = d.repair_sql(certo_sql::Dialect::Sqlite).unwrap();
+    ex.connection().execute_batch(&sql).unwrap();
+    assert!(drift::check(&p, &mut ex).unwrap().in_sync());
+
+    // adopting a database with such a view makes it an SDL view of the new project
+    drop(ex);
+    let (dir2, p2, db2) = fixture("");
+    {
+        let legacy = SqliteExecutor::open(&db2).unwrap();
+        legacy
+            .connection()
+            .execute_batch("CREATE TABLE people (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, age INTEGER); CREATE VIEW adults AS SELECT id, name FROM people WHERE age >= 18")
+            .unwrap();
+    }
+    let _keep = &dir2;
+    let mut ex2 = SqliteExecutor::open(&db2).unwrap();
+    let report = adopt(&p2, &mut ex2, &AdoptOptions::default()).unwrap();
+    assert_eq!(report.adopted.views, 1);
+    assert!(fs::read_to_string(p2.schema_path()).unwrap().contains("view adults on people (id, name) where age >= 18"));
+    assert!(drift::check(&p2, &mut ex2).unwrap().in_sync());
 }

@@ -25,6 +25,8 @@ pub struct LiveSchema {
     pub notes: Vec<String>,
     /// Names of the views the database has (SDL views are compared by presence: a database does not give a view back as written).
     pub views: Vec<String>,
+    /// The SQL the database keeps for each of those views (`(name, definition)`), as the dialect writes it: what `viewparse` reads.
+    pub view_sql: Vec<(String, String)>,
 }
 
 /// `character varying(255)`, `character(3)`, `numeric(10,2)`.
@@ -332,6 +334,14 @@ pub fn introspect(client: &mut Client) -> Result<LiveSchema, postgres::Error> {
 
     // ---- objects SDL has no place for: said so, never silently dropped -----------
     let mut live_views: Vec<String> = Vec::new();
+    let mut view_sql: Vec<(String, String)> = Vec::new();
+    for r in client.query(
+        "SELECT c.relname::text, pg_get_viewdef(c.oid, true) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+         WHERE n.nspname = current_schema() AND c.relkind = 'v' ORDER BY c.relname",
+        &[],
+    )? {
+        view_sql.push((r.get(0), r.get(1)));
+    }
     for r in client.query(
         "SELECT kind, name FROM (
              SELECT CASE c.relkind WHEN 'v' THEN 'view' ELSE 'materialized view' END AS kind, c.relname::text AS name
@@ -368,5 +378,5 @@ pub fn introspect(client: &mut Client) -> Result<LiveSchema, postgres::Error> {
         sequences,
         views: Vec::new(),
     };
-    Ok(LiveSchema { ir, notes, views: live_views })
+    Ok(LiveSchema { ir, notes, views: live_views, view_sql })
 }

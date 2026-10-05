@@ -285,6 +285,15 @@ fn sdl_views_follow_the_migrations_on_postgresql() {
     assert_eq!(n(&mut raw), 1);
     assert!(drift::check(&project, &mut db).unwrap().in_sync());
 
+    // what was made reads back as the SDL view it was made from; a definition changed by hand is drift
+    let prepared = certo_runner::import_schema(&mut db).unwrap();
+    assert!(prepared.sdl.contains("view adults on people (id, name) where age >= 18"), "{}
+{:?}", prepared.sdl, prepared.omissions);
+    assert!(prepared.omissions.iter().all(|o| !o.contains("adults")), "{:?}", prepared.omissions);
+    raw.batch_execute("DROP VIEW adults; CREATE VIEW adults AS SELECT id, name FROM people WHERE age >= 21").unwrap();
+    let d = drift::check(&project, &mut db).unwrap();
+    assert!(d.items.iter().any(|i| i.text.contains("view adults") && i.text.contains("differs")), "{:?}", d.items);
+
     raw.batch_execute("DROP VIEW adults").unwrap();
     let d = drift::check(&project, &mut db).unwrap();
     assert!(d.items.iter().any(|i| i.text.contains("adults")), "{:?}", d.items);
