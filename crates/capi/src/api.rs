@@ -130,7 +130,7 @@ fn plan_json(plan: MigrationPlan) -> String {
 /// `{"language": "csharp" | "rust", "dialect": "postgres" | "sqlite" | "mysql", "namespace"?, "class_name"?, "async"?}`
 /// (`dialect` defaults to postgres; `namespace` and `class_name` are for C#; Rust code calls the
 /// `postgres` crate, `rusqlite` or `mysql` according to the dialect, or with `"async": true` the async
-/// drivers `tokio-postgres` and `mysql_async` (SQLite has none)). On success `code` holds one source file; QL errors come back
+/// drivers `tokio-postgres`, `mysql_async` and `tokio-rusqlite`). On success `code` holds one source file; QL errors come back
 /// as `diagnostics` exactly as for `ql_compile`, with `ok: false`.
 pub fn ql_codegen(schema_ir: &str, ql_source: &str, options: &str) -> String {
     #[derive(serde::Deserialize, Default)]
@@ -160,9 +160,6 @@ pub fn ql_codegen(schema_ir: &str, ql_source: &str, options: &str) -> String {
     let asynchronous = opts.asynchronous.unwrap_or(false);
     if asynchronous && !rust {
         return error("invalid_options", "options.async is for Rust code (C# methods are already async)");
-    }
-    if asynchronous && !certo_ql::async_supported(dialect) {
-        return error("unsupported_option", "there is no async driver for SQLite (rusqlite is synchronous): generate the sync code, or run it on a blocking thread");
     }
     let schema = match parse_ir(schema_ir, "schema") { Ok(v) => v, Err(e) => return e };
     let (statements, diags) = certo_ql::compile(&schema, ql_source, dialect);
@@ -322,12 +319,13 @@ mod tests {
         let bad = v(&ql_codegen(&ir, "query q() { from t select t.ghost }", opts));
         assert_eq!(bad["ok"], false);
         assert!(bad["code"].is_null() && bad["diagnostics"][0]["code"] == "QL206");
-        // async Rust: tokio-postgres and mysql_async; SQLite has no async driver, and C# has no such option
+        // async Rust: tokio-postgres, mysql_async and tokio-rusqlite; C# has no such option
         let a = v(&ql_codegen(&ir, "query by_n(n: int) { from t where t.n == :n select t.id, t.n }", r#"{"language":"rust","async":true}"#));
         assert!(a["code"].as_str().unwrap().contains("pub async fn by_n<C: tokio_postgres::GenericClient>(client: &C, n: i32)"), "{a}");
         let a = v(&ql_codegen(&ir, "query by_n(n: int) { from t where t.n == :n select t.id, t.n }", r#"{"language":"rust","dialect":"mysql","async":true}"#));
         assert!(a["code"].as_str().unwrap().contains("pub async fn by_n<C: mysql_async::prelude::Queryable>(conn: &mut C, n: i32)"), "{a}");
-        assert_eq!(v(&ql_codegen(&ir, "", r#"{"language":"rust","dialect":"sqlite","async":true}"#))["error"]["code"], "unsupported_option");
+        let a = v(&ql_codegen(&ir, "query by_n(n: int) { from t where t.n == :n select t.id, t.n }", r#"{"language":"rust","dialect":"sqlite","async":true}"#));
+        assert!(a["code"].as_str().unwrap().contains("pub async fn by_n(conn: &tokio_rusqlite::Connection, n: i32)"), "{a}");
         assert_eq!(v(&ql_codegen(&ir, "", r#"{"language":"csharp","async":true}"#))["error"]["code"], "invalid_options");
         // MySQL generates too (C# and Rust), over its own drivers
         let my = v(&ql_codegen(&ir, "query by_n(n: int) { from t where t.n == :n select t.id, t.n }", r#"{"language":"rust","dialect":"mysql"}"#));

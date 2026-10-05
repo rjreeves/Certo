@@ -29,4 +29,5 @@ fn write_the_fixtures() {
     std::fs::write(dir.join("mysql.rs"), generate(Dialect::Mysql)).unwrap();
     std::fs::write(dir.join("pg_async.rs"), generate_with(Dialect::Postgres, true)).unwrap();
     std::fs::write(dir.join("mysql_async.rs"), generate_with(Dialect::Mysql, true)).unwrap();
+    std::fs::write(dir.join("sqlite_async.rs"), generate_with(Dialect::Sqlite, true)).unwrap();
 }

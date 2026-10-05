@@ -20,6 +20,9 @@ mod gen_pg_async;
 #[path = "generated/mysql_async.rs"]
 #[allow(dead_code)]
 mod gen_mysql_async;
+#[path = "generated/sqlite_async.rs"]
+#[allow(dead_code)]
+mod gen_sqlite_async;
 
 use certo_sql::Dialect;
 use chrono::{DateTime, NaiveDate, TimeZone, Utc};
@@ -47,6 +50,7 @@ fn the_fixtures_are_current() {
         ("mysql.rs", Dialect::Mysql, false),
         ("pg_async.rs", Dialect::Postgres, true),
         ("mysql_async.rs", Dialect::Mysql, true),
+        ("sqlite_async.rs", Dialect::Sqlite, true),
     ] {
         let (ir, _) = certo_sdl::compile(cases::SCHEMA);
         let schema = ir.unwrap();
@@ -329,4 +333,60 @@ async fn generated_async_mysql_code_runs() {
     tx.rollback().await.unwrap();
     assert!(blobs(&mut conn).await.unwrap().is_empty());
     assert_eq!(purge_orders(&mut conn).await.unwrap(), 2);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn generated_async_sqlite_code_runs() {
+    use gen_sqlite_async::*;
+    let conn = tokio_rusqlite::Connection::open_in_memory().await.unwrap();
+    let ddl = ddl(Dialect::Sqlite);
+    conn.call(move |c| {
+        c.pragma_update(None, "foreign_keys", "ON")?;
+        c.execute_batch(&ddl)?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+    let token = uuid::Uuid::parse_str("11111111-2222-3333-4444-555555555555").unwrap();
+    let meta = Json(r#"{"plan":"pro"}"#.into());
+
+    let a = add_customer(&conn, "Ann", Some("a@x.com"), Role::Admin, Some(dec("100.50")), Some(day(1990, 1, 1)), Some(&meta), Some(token)).await.unwrap();
+    let b = add_customer(&conn, "Bob", None, Role::User, None, None, None, None).await.unwrap();
+    assert_eq!((a[0].id, b[0].id), (1, 2));
+    let all = customers_by_role(&conn, None).await.unwrap();
+    assert_eq!(
+        all[0],
+        CustomersByRoleRow {
+            id: 1,
+            name: "Ann".into(),
+            email: Some("a@x.com".into()),
+            role: Role::Admin,
+            balance: Some(dec("100.50")),
+            born: Some(day(1990, 1, 1)),
+            meta: Some(meta.clone()),
+            token: Some(token),
+        }
+    );
+    assert_eq!((all[1].email.clone(), all[1].balance, all[1].born, all[1].meta.clone(), all[1].token), (None, None, None, None, None));
+    assert_eq!(customers_by_role(&conn, Some(Role::User)).await.unwrap().len(), 1);
+    assert_eq!(rename_customer(&conn, 2, "Robert").await.unwrap(), 1);
+    assert_eq!(rename_customer(&conn, 99, "Nobody").await.unwrap(), 0);
+
+    let early = at(2026, 1, 2, 3);
+    let seen = day(2026, 1, 2).and_hms_opt(4, 5, 6).unwrap();
+    place_order(&conn, 1, dec("10.00"), 2, true, Some(early), Some(seen)).await.unwrap();
+    let o2 = place_order(&conn, 1, dec("25.50"), 1, false, None, None).await.unwrap();
+    let orders = orders_since(&conn, at(2000, 1, 1, 0), None).await.unwrap();
+    assert_eq!((orders[0].total, orders[0].qty, orders[0].paid, orders[0].shipped, orders[0].seen), (dec("10.00"), 2, true, Some(early), Some(seen)));
+    assert_eq!((orders[1].shipped, orders[1].seen, orders[1].created), (None, None, o2[0].created));
+    assert!(orders_since(&conn, at(2999, 1, 1, 0), None).await.unwrap().is_empty());
+
+    // bytes, and several calls at once (the connection's thread takes them in turn)
+    add_blob(&conn, Some(&[0, 1, 2, 255]), 2.5, 0.25).await.unwrap();
+    add_blob(&conn, None, -1.0, 0.0).await.unwrap();
+    let (rows, count) = tokio::join!(blobs(&conn), purge_orders(&conn));
+    let rows = rows.unwrap();
+    assert_eq!((rows[0].data.clone(), rows[0].ratio, rows[0].score), (Some(vec![0, 1, 2, 255]), Some(2.5), Some(0.25)));
+    assert_eq!(rows[1].data, None);
+    assert_eq!(count.unwrap(), 2);
 }
