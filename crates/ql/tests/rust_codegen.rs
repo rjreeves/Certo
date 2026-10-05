@@ -14,6 +14,12 @@ mod gen_sqlite;
 #[path = "generated/mysql.rs"]
 #[allow(dead_code)]
 mod gen_mysql;
+#[path = "generated/pg_async.rs"]
+#[allow(dead_code)]
+mod gen_pg_async;
+#[path = "generated/mysql_async.rs"]
+#[allow(dead_code)]
+mod gen_mysql_async;
 
 use certo_sql::Dialect;
 use chrono::{DateTime, NaiveDate, TimeZone, Utc};
@@ -35,12 +41,18 @@ fn ddl(dialect: Dialect) -> String {
 #[test]
 fn the_fixtures_are_current() {
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/generated");
-    for (file, dialect) in [("pg.rs", Dialect::Postgres), ("sqlite.rs", Dialect::Sqlite), ("mysql.rs", Dialect::Mysql)] {
+    for (file, dialect, async_) in [
+        ("pg.rs", Dialect::Postgres, false),
+        ("sqlite.rs", Dialect::Sqlite, false),
+        ("mysql.rs", Dialect::Mysql, false),
+        ("pg_async.rs", Dialect::Postgres, true),
+        ("mysql_async.rs", Dialect::Mysql, true),
+    ] {
         let (ir, _) = certo_sdl::compile(cases::SCHEMA);
         let schema = ir.unwrap();
         let queries = if dialect == Dialect::Mysql { cases::QUERIES_MYSQL } else { cases::QUERIES };
         let (s, d) = certo_ql::compile(&schema, queries, dialect);
-        let fresh = certo_ql::generate_rust(&schema, &s.unwrap_or_else(|| panic!("{d:?}")), &certo_ql::RustOptions { dialect });
+        let fresh = certo_ql::generate_rust(&schema, &s.unwrap_or_else(|| panic!("{d:?}")), &certo_ql::RustOptions { dialect, async_ });
         let on_disk = std::fs::read_to_string(dir.join(file)).unwrap();
         assert_eq!(on_disk.replace("\r\n", "\n"), fresh, "{file} is out of date: rewrite it with the rust_codegen_bless test");
     }
@@ -225,4 +237,96 @@ fn generated_mysql_code_runs() {
     assert!(blobs(&mut conn).unwrap().is_empty());
 
     assert_eq!(purge_orders(&mut conn).unwrap(), 2);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn generated_async_postgres_code_runs() {
+    use gen_pg_async::*;
+    let Ok(url) = std::env::var("CERTO_TEST_PG_URL") else {
+        eprintln!("CERTO_TEST_PG_URL not set; skipping live PostgreSQL test");
+        return;
+    };
+    let (mut client, connection) = tokio_postgres::connect(&url, tokio_postgres::NoTls).await.expect("connect");
+    tokio::spawn(connection);
+    client.batch_execute("DROP SCHEMA public CASCADE; CREATE SCHEMA public;").await.unwrap();
+    client.batch_execute(&ddl(Dialect::Postgres)).await.unwrap();
+    let token = uuid::Uuid::parse_str("11111111-2222-3333-4444-555555555555").unwrap();
+    let meta = Json(r#"{"plan": "pro"}"#.into());
+
+    let a = add_customer(&client, "Ann", Some("a@x.com"), Role::Admin, Some(dec("100.50")), Some(day(1990, 1, 1)), Some(&meta), Some(token)).await.unwrap();
+    let b = add_customer(&client, "Bob", None, Role::User, None, None, None, None).await.unwrap();
+    assert_eq!((a[0].id, b[0].id), (1, 2));
+    let all = customers_by_role(&client, None).await.unwrap();
+    assert_eq!((all[0].role, all[0].balance, all[0].born, all[0].token), (Role::Admin, Some(dec("100.50")), Some(day(1990, 1, 1)), Some(token)));
+    assert_eq!(all[0].meta.as_ref().map(|j| j.0.replace(' ', "")), Some(r#"{"plan":"pro"}"#.to_string()));
+    assert_eq!((all[1].email.clone(), all[1].balance, all[1].meta.clone(), all[1].token), (None, None, None, None));
+    assert_eq!(customers_by_role(&client, Some(Role::User)).await.unwrap().len(), 1);
+    assert_eq!(rename_customer(&client, 2, "Robert").await.unwrap(), 1);
+    assert_eq!(rename_customer(&client, 99, "Nobody").await.unwrap(), 0);
+
+    let early = at(2026, 1, 2, 3);
+    let seen = day(2026, 1, 2).and_hms_opt(4, 5, 6).unwrap();
+    place_order(&client, 1, dec("10.00"), 2, true, Some(early), Some(seen)).await.unwrap();
+    let o2 = place_order(&client, 1, dec("25.50"), 1, false, None, None).await.unwrap();
+    let orders = orders_since(&client, at(2000, 1, 1, 0), None).await.unwrap();
+    assert_eq!((orders[0].total, orders[0].qty, orders[0].paid, orders[0].shipped, orders[0].seen), (dec("10.00"), 2, true, Some(early), Some(seen)));
+    assert_eq!((orders[1].shipped, orders[1].seen, orders[1].created), (None, None, o2[0].created));
+
+    // inside a transaction, which is a GenericClient too
+    let tx = client.transaction().await.unwrap();
+    add_blob(&tx, Some(&[0, 1, 2, 255]), 2.5, 0.25).await.unwrap();
+    assert_eq!(blobs(&tx).await.unwrap().len(), 1);
+    tx.rollback().await.unwrap();
+    assert!(blobs(&client).await.unwrap().is_empty());
+    assert_eq!(purge_orders(&client).await.unwrap(), 2);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn generated_async_mysql_code_runs() {
+    use gen_mysql_async::*;
+    use mysql_async::prelude::Queryable;
+    let Ok(url) = std::env::var("CERTO_TEST_MYSQL_URL") else {
+        eprintln!("CERTO_TEST_MYSQL_URL not set; skipping live MySQL test");
+        return;
+    };
+    let opts = mysql_async::Opts::from_url(&url).expect("url");
+    let mut admin = mysql_async::Conn::new(mysql_async::OptsBuilder::from_opts(opts.clone()).db_name(Some("mysql"))).await.expect("connect");
+    admin.query_drop("DROP DATABASE IF EXISTS certo_rust_async").await.unwrap();
+    admin.query_drop("CREATE DATABASE certo_rust_async").await.unwrap();
+    let mut conn = mysql_async::Conn::new(mysql_async::OptsBuilder::from_opts(opts).db_name(Some("certo_rust_async"))).await.expect("connect");
+    let (ir, d) = certo_sdl::compile(cases::SCHEMA);
+    let schema = ir.unwrap_or_else(|| panic!("{d:?}"));
+    let empty = certo_sdl::SchemaIR::empty();
+    let plan = certo_mdl::diff(&empty, &schema);
+    for s in certo_sql::lower_with(&plan, Dialect::Mysql, certo_sql::Schemas { old: &empty, new: &schema }).unwrap() {
+        conn.query_drop(&s).await.unwrap_or_else(|e| panic!("{e}\n{s}"));
+    }
+    let token = uuid::Uuid::parse_str("11111111-2222-3333-4444-555555555555").unwrap();
+    let meta = Json(r#"{"plan":"pro"}"#.into());
+
+    assert_eq!(add_customer(&mut conn, "Ann", Some("a@x.com"), Role::Admin, Some(dec("100.50")), Some(day(1990, 1, 1)), Some(&meta), Some(token)).await.unwrap(), 1);
+    assert_eq!(add_customer(&mut conn, "Bob", None, Role::User, None, None, None, None).await.unwrap(), 1);
+    let all = customers_by_role(&mut conn, None).await.unwrap();
+    assert_eq!((all[0].id, all[0].name.as_str(), all[0].role), (1, "Ann", Role::Admin));
+    assert_eq!((all[0].balance, all[0].born, all[0].token), (Some(dec("100.50")), Some(day(1990, 1, 1)), Some(token)));
+    assert_eq!(all[0].meta.as_ref().map(|j| j.0.replace(' ', "")), Some(r#"{"plan":"pro"}"#.to_string()));
+    assert_eq!((all[1].email.clone(), all[1].balance, all[1].born, all[1].meta.clone(), all[1].token), (None, None, None, None, None));
+    assert_eq!(rename_customer(&mut conn, 2, "Robert").await.unwrap(), 1);
+    assert_eq!(rename_customer(&mut conn, 99, "Nobody").await.unwrap(), 0);
+
+    let early = at(2026, 1, 2, 3);
+    let seen = day(2026, 1, 2).and_hms_opt(4, 5, 6).unwrap();
+    assert_eq!(place_order(&mut conn, 1, dec("10.00"), 2, true, Some(early), Some(seen)).await.unwrap(), 1);
+    assert_eq!(place_order(&mut conn, 1, dec("25.50"), 1, false, None, None).await.unwrap(), 1);
+    let orders = orders_since(&mut conn, at(2000, 1, 1, 0), None).await.unwrap();
+    assert_eq!((orders[0].total, orders[0].qty, orders[0].paid, orders[0].shipped, orders[0].seen), (dec("10.00"), 2, true, Some(early), Some(seen)));
+    assert_eq!((orders[1].shipped, orders[1].seen), (None, None));
+
+    // inside a transaction (anything Queryable)
+    let mut tx = conn.start_transaction(mysql_async::TxOpts::default()).await.unwrap();
+    assert_eq!(add_blob(&mut tx, Some(&[0, 1, 2, 255]), 2.5, 0.25).await.unwrap(), 1);
+    assert_eq!(blobs(&mut tx).await.unwrap().len(), 1);
+    tx.rollback().await.unwrap();
+    assert!(blobs(&mut conn).await.unwrap().is_empty());
+    assert_eq!(purge_orders(&mut conn).await.unwrap(), 2);
 }

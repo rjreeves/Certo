@@ -263,6 +263,8 @@ finally
     Check(genRs.Ok && genRs.Code!.Contains("pub fn by_id(conn: &rusqlite::Connection, id: i32)") && genRs.Code.Contains("pub struct ByIdRow"), "typed Rust code generation");
     var genMy = CertoQl.GenerateRust(typedSchema.EnsureOk(), "query by_id(id: int) { from users u where u.id == :id select u.id }", SqlDialect.Mysql);
     Check(genMy.Ok && genMy.Code!.Contains("pub fn by_id<C: mysql::prelude::Queryable>(conn: &mut C, id: i32)"), "typed Rust code generation for MySQL");
+    var genAsync = CertoQl.GenerateRust(typedSchema.EnsureOk(), "query by_id(id: int) { from users u where u.id == :id select u.id }", SqlDialect.Postgres, asyncCode: true);
+    Check(genAsync.Ok && genAsync.Code!.Contains("pub async fn by_id<C: tokio_postgres::GenericClient>(client: &C, id: i32)"), "typed async Rust code generation");
     // round trip: the type converter writes what it reads
     var rt = System.Text.Json.JsonSerializer.Serialize(find.Params[0].Type);
     Check(System.Text.Json.JsonSerializer.Deserialize<SchemaType>(rt)!.ToString() == "decimal(10,2)", "SchemaType round-trips through JSON");

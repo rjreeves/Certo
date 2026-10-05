@@ -21,3 +21,6 @@ chrono    = "0.4"
 uuid      = "1"
 rust_decimal = { version = "1", features = ["db-postgres"] }
 mysql     = { version = "25", features = ["chrono"] }
+tokio     = { version = "1", features = ["rt", "macros"] }
+tokio-postgres = { version = "0.7", features = ["with-chrono-0_4", "with-uuid-1"] }
+mysql_async = { version = "0.37", default-features = false, features = ["minimal", "chrono", "rust_decimal"] }

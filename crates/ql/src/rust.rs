@@ -7,6 +7,9 @@
 //! `Transaction` derefs to), MySQL uses the `mysql` crate (anything `Queryable`: a `Conn`, a `PooledConn` or a
 //! `Transaction`). MySQL has no `RETURNING`, so a statement that returns rows there is a query.
 //!
+//! With `async_` the functions are `async fn`s over `tokio-postgres` (any `GenericClient`, taken by `&`) and
+//! `mysql_async` (anything `Queryable`, taken by `&mut`); SQLite has no async driver.
+//!
 //! * One `pub struct <Name>Row` per statement with result columns and one function per statement
 //!   (`snake_case` of its name). A mutation without `returning` returns the affected-row count.
 //! * Nullable parameters and columns are `Option<T>`. Text and bytes are taken as `&str` / `&[u8]`.
@@ -27,11 +30,19 @@ use std::fmt::Write;
 pub struct RustOptions {
     /// The dialect the statements were compiled for: it decides which driver the code calls.
     pub dialect: Dialect,
+    /// `async fn`s over the async drivers: `tokio-postgres` for PostgreSQL, `mysql_async` for MySQL. SQLite has none
+    /// (rusqlite is synchronous), see [`async_supported`].
+    pub async_: bool,
+}
+
+/// Is there an async driver for `dialect`?
+pub fn async_supported(dialect: Dialect) -> bool {
+    matches!(dialect, Dialect::Postgres | Dialect::Mysql)
 }
 
 impl Default for RustOptions {
     fn default() -> Self {
-        RustOptions { dialect: Dialect::Postgres }
+        RustOptions { dialect: Dialect::Postgres, async_: false }
     }
 }
 
@@ -240,6 +251,7 @@ pub fn generate_rust(schema: &SchemaIR, statements: &[Statement], opts: &RustOpt
     let pg = opts.dialect == Dialect::Postgres;
     let my = opts.dialect == Dialect::Mysql;
     let sqlite = !pg && !my;
+    let asy = opts.async_ && !sqlite;
     let u = uses(statements);
     let mut o = String::new();
     let w = &mut o;
@@ -250,12 +262,23 @@ pub fn generate_rust(schema: &SchemaIR, statements: &[Statement], opts: &RustOpt
         let mut features = Vec::new();
         if u.chrono { features.push("\"with-chrono-0_4\""); }
         if u.uuid { features.push("\"with-uuid-1\""); }
+        let (name, version) = if asy { ("tokio-postgres", "0.7") } else { ("postgres", "0.19") };
         if features.is_empty() {
-            let _ = writeln!(w, "//   postgres = \"0.19\"");
+            let _ = writeln!(w, "//   {name} = \"{version}\"");
         } else {
-            let _ = writeln!(w, "//   postgres = {{ version = \"0.19\", features = [{}] }}", features.join(", "));
+            let _ = writeln!(w, "//   {name} = {{ version = \"{version}\", features = [{}] }}", features.join(", "));
         }
         if u.decimal { let _ = writeln!(w, "//   rust_decimal = {{ version = \"1\", features = [\"db-postgres\"] }}"); }
+    } else if my && asy {
+        let mut features = Vec::new();
+        if u.chrono { features.push("\"chrono\""); }
+        if u.decimal { features.push("\"rust_decimal\""); }
+        if features.is_empty() {
+            let _ = writeln!(w, "//   mysql_async = \"0.37\"");
+        } else {
+            let _ = writeln!(w, "//   mysql_async = {{ version = \"0.37\", features = [{}] }}", features.join(", "));
+        }
+        if u.decimal { let _ = writeln!(w, "//   rust_decimal = \"1\""); }
     } else if my {
         if u.chrono {
             let _ = writeln!(w, "//   mysql = {{ version = \"25\", features = [\"chrono\"] }}");
@@ -271,6 +294,7 @@ pub fn generate_rust(schema: &SchemaIR, statements: &[Statement], opts: &RustOpt
         }
         if u.decimal { let _ = writeln!(w, "//   rust_decimal = \"1\""); }
     }
+    if asy { let _ = writeln!(w, "//   tokio = \"1\"  (or whichever runtime drives the futures)"); }
     if u.chrono { let _ = writeln!(w, "//   chrono = \"0.4\""); }
     if u.uuid { let _ = writeln!(w, "//   uuid = \"1\""); }
     let _ = writeln!(w);
@@ -396,6 +420,9 @@ impl rusqlite::types::FromSql for Json {{
 }}
 ");
         }
+    }
+    if my && asy {
+        let _ = writeln!(w, "fn bad_value(value: mysql::Value) -> mysql::Error {{\n    mysql::Error::Driver(mysql::DriverError::FromValue {{ value }})\n}}\n");
     }
     if my {
         let _ = writeln!(w, "fn col<T: mysql::prelude::FromValue>(row: &mut mysql::Row, i: usize) -> Result<T, mysql::Error> {{\n    row.take_opt(i)\n        .ok_or_else(|| mysql::Error::FromValueError(mysql::Value::NULL))?\n        .map_err(|e| mysql::Error::FromValueError(e.0))\n}}\n");
@@ -528,7 +555,15 @@ impl rusqlite::types::FromSql for SqlTimestamp {{
             })
             .collect();
         let mut sig: Vec<String> = Vec::new();
-        sig.push(if pg { "client: &mut C".into() } else if my { "conn: &mut C".into() } else { "conn: &rusqlite::Connection".into() });
+        sig.push(if pg && asy {
+            "client: &C".into()
+        } else if pg {
+            "client: &mut C".into()
+        } else if my {
+            "conn: &mut C".into()
+        } else {
+            "conn: &rusqlite::Connection".into()
+        });
         for (name, p, rs, _) in &params {
             sig.push(format!("{name}: {}", opt(&rs.param, p.nullable)));
         }
@@ -545,7 +580,7 @@ impl rusqlite::types::FromSql for SqlTimestamp {{
         if sig.len() > 7 {
             let _ = writeln!(w, "#[allow(clippy::too_many_arguments)]");
         }
-        let _ = writeln!(w, "pub fn {}{generics}({}) -> Result<{ret}, {ret_err}> {{", n.func, sig.join(", "));
+        let _ = writeln!(w, "pub {}fn {}{generics}({}) -> Result<{ret}, {ret_err}> {{", if asy { "async " } else { "" }, n.func, sig.join(", "));
 
         // binding, in placeholder order
         let bound: Vec<String> = s
@@ -557,7 +592,7 @@ impl rusqlite::types::FromSql for SqlTimestamp {{
         if pg {
             let _ = writeln!(w, "    let params: &[&(dyn postgres::types::ToSql + Sync)] = &[{}];", bound.join(", "));
             if has_rows {
-                let _ = writeln!(w, "    let rows = client.query({}, params)?;", n.konst);
+                let _ = writeln!(w, "    let rows = client.query({}, params){}?;", n.konst, if asy { ".await" } else { "" });
                 let _ = writeln!(w, "    rows.iter()\n        .map(|row| {{\n            Ok({} {{", n.row);
                 let mut taken = HashSet::new();
                 for (i, c) in s.columns().iter().enumerate() {
@@ -566,12 +601,12 @@ impl rusqlite::types::FromSql for SqlTimestamp {{
                 }
                 let _ = writeln!(w, "            }})\n        }})\n        .collect()");
             } else {
-                let _ = writeln!(w, "    client.execute({}, params)", n.konst);
+                let _ = writeln!(w, "    client.execute({}, params){}", n.konst, if asy { ".await" } else { "" });
             }
         } else if my {
             let _ = writeln!(w, "    let params = mysql::Params::Positional(vec![{}]);", bound.join(", "));
             if has_rows {
-                let _ = writeln!(w, "    let rows: Vec<mysql::Row> = conn.exec({}, params)?;", n.konst);
+                let _ = writeln!(w, "    let rows: Vec<mysql::Row> = conn.exec({}, params){}?;", n.konst, if asy { ".await" } else { "" });
                 let _ = writeln!(w, "    rows.into_iter()\n        .map(|mut row| {{\n            Ok({} {{", n.row);
                 let mut taken = HashSet::new();
                 for (i, c) in s.columns().iter().enumerate() {
@@ -580,7 +615,11 @@ impl rusqlite::types::FromSql for SqlTimestamp {{
                 }
                 let _ = writeln!(w, "            }})\n        }})\n        .collect()");
             } else {
-                let _ = writeln!(w, "    Ok(conn.exec_iter({}, params)?.affected_rows())", n.konst);
+                if asy {
+                    let _ = writeln!(w, "    let result = conn.exec_iter({}, params).await?;\n    let affected = result.affected_rows();\n    result.drop_result().await?;\n    Ok(affected)", n.konst);
+                } else {
+                    let _ = writeln!(w, "    Ok(conn.exec_iter({}, params)?.affected_rows())", n.konst);
+                }
             }
         } else {
             let list = bound.join(", ");
@@ -601,6 +640,12 @@ impl rusqlite::types::FromSql for SqlTimestamp {{
     }
     while o.ends_with("\n\n") {
         o.pop();
+    }
+    if asy && pg {
+        o = o.replace("postgres::", "tokio_postgres::");
+    }
+    if asy && my {
+        o = o.replace("mysql::Error::FromValueError(", "bad_value(").replace("mysql::", "mysql_async::");
     }
     o
 }
@@ -682,7 +727,7 @@ mod tests {
         let schema = ir.unwrap_or_else(|| panic!("{d:?}"));
         let (s, d) = compile(&schema, ql, dialect);
         let s = s.unwrap_or_else(|| panic!("{d:?}"));
-        generate_rust(&schema, &s, &RustOptions { dialect })
+        generate_rust(&schema, &s, &RustOptions { dialect, ..Default::default() })
     }
 
     #[test]
@@ -761,6 +806,29 @@ mod tests {
         let code = gen_for("query a_b() { from users u select u.id } query aB() { from users u select u.id }", Dialect::Postgres);
         assert!(code.contains("pub fn a_b<") && code.contains("pub fn a_b2<"), "{code}");
         assert!(code.contains("pub struct ABRow") && code.contains("pub struct ABRow2"), "{code}");
+    }
+
+    #[test]
+    fn async_code_uses_the_async_drivers() {
+        let gen_async = |ql: &str, dialect| {
+            let (ir, d) = certo_sdl::compile(SCHEMA);
+            let schema = ir.unwrap_or_else(|| panic!("{d:?}"));
+            let (s, d) = compile(&schema, ql, dialect);
+            generate_rust(&schema, &s.unwrap_or_else(|| panic!("{d:?}")), &RustOptions { dialect, async_: true })
+        };
+        let q = "query by_role(r: Role null) { from users u where :r is null or u.role == :r select u.id, u.role }
+                 update rename(id: int, n: text) { users u set name = :n where u.id == :id }";
+        let pg = gen_async(q, Dialect::Postgres);
+        assert!(pg.contains("pub async fn by_role<C: tokio_postgres::GenericClient>(client: &C, r: Option<Role>) -> Result<Vec<ByRoleRow>, tokio_postgres::Error>"), "{pg}");
+        assert!(pg.contains("client.query(BY_ROLE_SQL, params).await?") && pg.contains("client.execute(RENAME_SQL, params).await"), "{pg}");
+        assert!(pg.contains("impl tokio_postgres::types::ToSql for Role") && !pg.contains(" postgres::"), "{pg}");
+        assert!(pg.contains("//   tokio-postgres = \"0.7\"") && pg.contains("//   tokio = \"1\""), "{pg}");
+        let my = gen_async(q, Dialect::Mysql);
+        assert!(my.contains("pub async fn by_role<C: mysql_async::prelude::Queryable>(conn: &mut C, r: Option<Role>) -> Result<Vec<ByRoleRow>, mysql_async::Error>"), "{my}");
+        assert!(my.contains("conn.exec(BY_ROLE_SQL, params).await?") && my.contains("result.drop_result().await?"), "{my}");
+        assert!(my.contains("fn bad_value(value: mysql_async::Value) -> mysql_async::Error") && !my.contains("FromValueError"), "{my}");
+        assert!(my.contains("//   mysql_async = \"0.37\"") || my.contains("mysql_async = {"), "{my}");
+        assert!(async_supported(Dialect::Postgres) && async_supported(Dialect::Mysql) && !async_supported(Dialect::Sqlite));
     }
 
     #[test]

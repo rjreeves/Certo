@@ -84,15 +84,17 @@ namespace Certo
         /// <summary>
         /// Generate a Rust source file (a struct per result, a function per statement) from QL. It calls the
         /// <c>postgres</c> crate for <see cref="SqlDialect.Postgres"/> and <c>rusqlite</c> for <see cref="SqlDialect.Sqlite"/>;
-        /// the file's first lines say which crates and features it needs.
+        /// the file's first lines say which crates and features it needs. With <paramref name="asyncCode"/> the functions are
+        /// <c>async fn</c>s over <c>tokio-postgres</c> and <c>mysql_async</c> (SQLite has no async driver: that call fails).
         /// </summary>
-        public static QlCodegenResult GenerateRust(string schemaIrJson, string qlSource, SqlDialect dialect = SqlDialect.Postgres)
+        public static QlCodegenResult GenerateRust(string schemaIrJson, string qlSource, SqlDialect dialect = SqlDialect.Postgres, bool asyncCode = false)
         {
-            var options = new System.Collections.Generic.Dictionary<string, string>
+            var options = new System.Collections.Generic.Dictionary<string, object>
             {
                 ["language"] = "rust",
                 ["dialect"] = dialect.Name(),
             };
+            if (asyncCode) options["async"] = true;
             return Wire.Parse<QlCodegenResult>(
                 CertoNative.CodegenQl(schemaIrJson, qlSource, JsonSerializer.Serialize(options)), "CodegenQl");
         }
