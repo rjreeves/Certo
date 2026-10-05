@@ -4,7 +4,8 @@
 //!
 //! Plain driver code, synchronous, one driver per dialect: PostgreSQL uses the `postgres` crate (any
 //! `GenericClient`: a `Client` or a `Transaction`), SQLite uses `rusqlite` (a `Connection`, which a
-//! `Transaction` derefs to).
+//! `Transaction` derefs to), MySQL uses the `mysql` crate (anything `Queryable`: a `Conn`, a `PooledConn` or a
+//! `Transaction`). MySQL has no `RETURNING`, so a statement that returns rows there is a query.
 //!
 //! * One `pub struct <Name>Row` per statement with result columns and one function per statement
 //!   (`snake_case` of its name). A mutation without `returning` returns the affected-row count.
@@ -237,6 +238,8 @@ fn uses(statements: &[Statement]) -> Uses {
 /// Generate one Rust source file for `statements` (compiled against `schema`).
 pub fn generate_rust(schema: &SchemaIR, statements: &[Statement], opts: &RustOptions) -> String {
     let pg = opts.dialect == Dialect::Postgres;
+    let my = opts.dialect == Dialect::Mysql;
+    let sqlite = !pg && !my;
     let u = uses(statements);
     let mut o = String::new();
     let w = &mut o;
@@ -253,6 +256,13 @@ pub fn generate_rust(schema: &SchemaIR, statements: &[Statement], opts: &RustOpt
             let _ = writeln!(w, "//   postgres = {{ version = \"0.19\", features = [{}] }}", features.join(", "));
         }
         if u.decimal { let _ = writeln!(w, "//   rust_decimal = {{ version = \"1\", features = [\"db-postgres\"] }}"); }
+    } else if my {
+        if u.chrono {
+            let _ = writeln!(w, "//   mysql = {{ version = \"25\", features = [\"chrono\"] }}");
+        } else {
+            let _ = writeln!(w, "//   mysql = \"25\"");
+        }
+        if u.decimal { let _ = writeln!(w, "//   rust_decimal = \"1\""); }
     } else {
         if u.chrono || u.timestamp {
             let _ = writeln!(w, "//   rusqlite = {{ version = \"0.32\", features = [\"chrono\"] }}");
@@ -318,6 +328,13 @@ impl<'a> postgres::types::FromSql<'a> for {rs_name} {{
     }}
 }}
 ");
+        } else if my {
+            let _ = writeln!(w, "impl {rs_name} {{
+    fn parse(text: String) -> Result<{rs_name}, mysql::Error> {{
+        {rs_name}::from_db(&text).ok_or_else(|| mysql::Error::FromValueError(mysql::Value::from(text)))
+    }}
+}}
+");
         } else {
             let _ = writeln!(w, "impl rusqlite::types::ToSql for {rs_name} {{
     fn to_sql(&self) -> rusqlite::Result<rusqlite::types::ToSqlOutput<'_>> {{
@@ -363,6 +380,8 @@ impl<'a> postgres::types::FromSql<'a> for Json {{
     }}
 }}
 ");
+        } else if my {
+            // MySQL reads and binds JSON as its text: see the conversions in each function
         } else {
             let _ = writeln!(w, "impl rusqlite::types::ToSql for Json {{
     fn to_sql(&self) -> rusqlite::Result<rusqlite::types::ToSqlOutput<'_>> {{
@@ -378,7 +397,13 @@ impl rusqlite::types::FromSql for Json {{
 ");
         }
     }
-    if !pg {
+    if my {
+        let _ = writeln!(w, "fn col<T: mysql::prelude::FromValue>(row: &mut mysql::Row, i: usize) -> Result<T, mysql::Error> {{\n    row.take_opt(i)\n        .ok_or_else(|| mysql::Error::FromValueError(mysql::Value::NULL))?\n        .map_err(|e| mysql::Error::FromValueError(e.0))\n}}\n");
+        if u.uuid {
+            let _ = writeln!(w, "fn parse_uuid(text: String) -> Result<uuid::Uuid, mysql::Error> {{\n    uuid::Uuid::parse_str(&text).map_err(|_| mysql::Error::FromValueError(mysql::Value::from(text)))\n}}\n");
+        }
+    }
+    if sqlite {
         // SQLite keeps these as text (decimals as numbers); rusqlite has no impls for them, or a different one
         if u.decimal {
             let _ = writeln!(w, "struct SqlDecimal(rust_decimal::Decimal);
@@ -503,11 +528,17 @@ impl rusqlite::types::FromSql for SqlTimestamp {{
             })
             .collect();
         let mut sig: Vec<String> = Vec::new();
-        sig.push(if pg { "client: &mut C".into() } else { "conn: &rusqlite::Connection".into() });
+        sig.push(if pg { "client: &mut C".into() } else if my { "conn: &mut C".into() } else { "conn: &rusqlite::Connection".into() });
         for (name, p, rs, _) in &params {
             sig.push(format!("{name}: {}", opt(&rs.param, p.nullable)));
         }
-        let (generics, ret_err) = if pg { ("<C: postgres::GenericClient>", "postgres::Error") } else { ("", "rusqlite::Error") };
+        let (generics, ret_err) = if pg {
+            ("<C: postgres::GenericClient>", "postgres::Error")
+        } else if my {
+            ("<C: mysql::prelude::Queryable>", "mysql::Error")
+        } else {
+            ("", "rusqlite::Error")
+        };
         let ret = if has_rows { format!("Vec<{}>", n.row) } else { "u64".to_string() };
         let _ = writeln!(w, "/// Runs `{kind} {}`{}.", s.name(),
             if has_rows || kind == "query" { "" } else { "; returns the number of rows affected" });
@@ -521,7 +552,7 @@ impl rusqlite::types::FromSql for SqlTimestamp {{
             .param_order()
             .iter()
             .filter_map(|placeholder| params.iter().find(|(_, p, _, _)| &p.name == placeholder))
-            .map(|(name, p, rs, _)| bind_expr(name, rs, p.nullable, pg))
+            .map(|(name, p, rs, _)| bind_expr(name, rs, p.nullable, opts.dialect))
             .collect();
         if pg {
             let _ = writeln!(w, "    let params: &[&(dyn postgres::types::ToSql + Sync)] = &[{}];", bound.join(", "));
@@ -536,6 +567,20 @@ impl rusqlite::types::FromSql for SqlTimestamp {{
                 let _ = writeln!(w, "            }})\n        }})\n        .collect()");
             } else {
                 let _ = writeln!(w, "    client.execute({}, params)", n.konst);
+            }
+        } else if my {
+            let _ = writeln!(w, "    let params = mysql::Params::Positional(vec![{}]);", bound.join(", "));
+            if has_rows {
+                let _ = writeln!(w, "    let rows: Vec<mysql::Row> = conn.exec({}, params)?;", n.konst);
+                let _ = writeln!(w, "    rows.into_iter()\n        .map(|mut row| {{\n            Ok({} {{", n.row);
+                let mut taken = HashSet::new();
+                for (i, c) in s.columns().iter().enumerate() {
+                    let field = unique(snake(&c.name), &mut taken);
+                    let _ = writeln!(w, "                {field}: {},", mysql_read_expr(i, &rs_type(&c.ty, &enum_names), c.nullable));
+                }
+                let _ = writeln!(w, "            }})\n        }})\n        .collect()");
+            } else {
+                let _ = writeln!(w, "    Ok(conn.exec_iter({}, params)?.affected_rows())", n.konst);
             }
         } else {
             let list = bound.join(", ");
@@ -561,9 +606,23 @@ impl rusqlite::types::FromSql for SqlTimestamp {{
 }
 
 /// The expression bound as a parameter's value.
-fn bind_expr(name: &str, rs: &Rs, nullable: bool, pg: bool) -> String {
-    if pg {
+fn bind_expr(name: &str, rs: &Rs, nullable: bool, dialect: Dialect) -> String {
+    if dialect == Dialect::Postgres {
         return format!("&{name}");
+    }
+    if dialect == Dialect::Mysql {
+        // a `mysql::Value`: text for what MySQL keeps as text (enum values, uuids, json), UTC for timestamps
+        return match (rs.kind, nullable) {
+            (Kind::Uuid, false) => format!("mysql::Value::from({name}.to_string())"),
+            (Kind::Uuid, true) => format!("mysql::Value::from({name}.map(|v| v.to_string()))"),
+            (Kind::Timestamp, false) => format!("mysql::Value::from({name}.naive_utc())"),
+            (Kind::Timestamp, true) => format!("mysql::Value::from({name}.map(|v| v.naive_utc()))"),
+            (Kind::Json, false) => format!("mysql::Value::from({name}.0.as_str())"),
+            (Kind::Json, true) => format!("mysql::Value::from({name}.map(|v| v.0.as_str()))"),
+            (Kind::Enum, false) => format!("mysql::Value::from({name}.as_db())"),
+            (Kind::Enum, true) => format!("mysql::Value::from({name}.map(|v| v.as_db()))"),
+            _ => format!("mysql::Value::from({name})"),
+        };
     }
     let wrapper = match rs.kind {
         Kind::Decimal => Some("SqlDecimal"),
@@ -575,6 +634,22 @@ fn bind_expr(name: &str, rs: &Rs, nullable: bool, pg: bool) -> String {
         (Some(wr), false) => format!("&{wr}({name})"),
         (Some(wr), true) => format!("&{name}.map({wr})"),
         (None, _) => format!("&{name}"),
+    }
+}
+
+/// The expression reading column `i` of the current MySQL row (`row` is a `mysql::Row`, taken from).
+fn mysql_read_expr(i: usize, rs: &Rs, nullable: bool) -> String {
+    let get = |ty: &str| format!("col::<{ty}>(&mut row, {i})?");
+    match (rs.kind, nullable) {
+        (Kind::Uuid, false) => format!("parse_uuid({})?", get("String")),
+        (Kind::Uuid, true) => format!("{}.map(parse_uuid).transpose()?", get("Option<String>")),
+        (Kind::Timestamp, false) => format!("{}.and_utc()", get("chrono::NaiveDateTime")),
+        (Kind::Timestamp, true) => format!("{}.map(|v| v.and_utc())", get("Option<chrono::NaiveDateTime>")),
+        (Kind::Json, false) => format!("Json({})", get("String")),
+        (Kind::Json, true) => format!("{}.map(Json)", get("Option<String>")),
+        (Kind::Enum, false) => format!("{}::parse({})?", rs.owned, get("String")),
+        (Kind::Enum, true) => format!("{}.map({}::parse).transpose()?", get("Option<String>"), rs.owned),
+        _ => format!("col(&mut row, {i})?"),
     }
 }
 

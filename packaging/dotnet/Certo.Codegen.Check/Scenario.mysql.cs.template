@@ -1,0 +1,57 @@
+// The MySQL scenario: the same checks as Scenario.cs.template, with ids read back by queries (MySQL has no `returning`).
+using System.Data.Common;
+using Sample.Mysql;
+
+namespace Check;
+
+public static class Scenario_Mysql
+{
+    public static async Task Run(DbConnection c, Action<bool, string> check)
+    {
+        var token = Guid.Parse("11111111-2222-3333-4444-555555555555");
+        check(await c.AddCustomerAsync("Ann", "a@x.com", new DateOnly(1990, 1, 2), token) == 1, "an insert without returning gives the row count");
+        await c.AddCustomerAsync("Bob", null, null, null);
+        var people = await c.CustomerStatsAsync();
+        var annId = people[0].Id;
+        check(people.Count == 2 && people[0].Name == "Ann" && people[1].Name == "Bob" && annId != people[1].Id, "rows are read back by a query");
+
+        check(await c.AddOrdersAsync(annId, 10.00m, 25.50m) == 2, "a multi-row insert gives the row count");
+        var over = await c.OrdersOverAsync(20m, null);
+        check(over.Count == 1 && over[0].Customer == "Ann" && over[0].Total == 25.50m, "OrdersOverAsync with a null enum parameter");
+        check(over[0].Shipped is null && over[0].Note is null && !over[0].Paid && over[0].Status == Status.New, "nullable columns come back as null, bool as bool, the enum default as an enum");
+
+        var ranked = await c.RankedOrdersAsync();
+        check(ranked.Count == 2 && ranked[0].Rn == 2 && ranked[1].Rn == 1 && ranked.All(r => r.CustomerTotal == 35.50m), "window functions");
+        var names = await c.AllNamesAsync();
+        check(names.Count == 4 && names.Any(n => n.Name is null) && names.Any(n => n.Name == "Ann"), "union all");
+        var top = await c.TopSpenderAsync();
+        check(top.Count == 1 && top[0].Name == "Ann" && top[0].Total == 35.50m, "a with query joined like a table");
+
+        var secondOrder = (await c.OrdersOverAsync(0m, null))[1].Id;
+        check(await c.SetStatusAsync(secondOrder, Status.Paid) == 1, "an update gives the affected row count");
+        var paid = await c.OrdersOverAsync(0m, Status.Paid);
+        check(paid.Count == 1 && paid[0].Id == secondOrder && paid[0].Status == Status.Paid, "enum parameter and enum column round-trip");
+
+        var stats = await c.CustomerStatsAsync();
+        check(stats.Count == 2 && stats[0].Orders == 2 && stats[0].Spent == 35.50m, "aggregates: count as long, sum as decimal?");
+        check(stats[1].Name == "Bob" && stats[1].Orders == 0 && stats[1].Spent is null, "sum over no rows is null");
+
+        var found = await c.FindByTokenAsync(token);
+        check(found.Count == 1 && found[0].Id == annId && found[0].Born == new DateOnly(1990, 1, 2), "uuid parameter, date column");
+        check((await c.FindByTokenAsync(Guid.NewGuid())).Count == 0, "no match is an empty list");
+
+        var spenders = await c.BigSpendersAsync(30m);
+        check(spenders.Count == 1 && spenders[0] == new BigSpendersRow("Ann"), "a query with a subquery");
+
+        check(await c.RemoveByStatusAsync(Status.Paid) == 1, "delete returns the affected row count");
+        check((await c.OrdersOverAsync(0m, null)).Count == 1, "...and the row is gone");
+
+        await using (var tx = await c.BeginTransactionAsync())
+        {
+            await c.AddCustomerAsync("Temp", null, null, null, tx);
+            await tx.RollbackAsync();
+        }
+        check((await c.CustomerStatsAsync()).Count == 2, "the transaction argument is used (rollback undid the insert)");
+        check(CertoQueries.OrdersOverSql.Contains("orders"), "the SQL is exposed as a constant");
+    }
+}

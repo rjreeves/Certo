@@ -68,6 +68,13 @@ jobs:
         ports: ["5432:5432"]
         options: >-
           --health-cmd "pg_isready -U postgres" --health-interval 5s --health-timeout 5s --health-retries 10
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_ALLOW_EMPTY_PASSWORD: "yes"
+        ports: ["3306:3306"]
+        options: >-
+          --health-cmd "mysqladmin ping -h 127.0.0.1" --health-interval 5s --health-timeout 5s --health-retries 20
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -78,6 +85,7 @@ jobs:
         shell: pwsh
         env:
           CERTO_TEST_PG_URL: postgres://postgres:postgres@localhost:5432/postgres
+          CERTO_TEST_MYSQL_URL: mysql://root@127.0.0.1:3306/mysql
         run: ./packaging/dotnet/codegen-check.ps1
 
   reference-cli:

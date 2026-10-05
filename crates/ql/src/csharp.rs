@@ -4,8 +4,9 @@
 //! `List<RecentOrdersRow>` instead of binding `$1` and reading columns by hand.
 //!
 //! The output is plain ADO.NET (`System.Data.Common`), so it runs on any
-//! provider; it is written for Npgsql (PostgreSQL) and Microsoft.Data.Sqlite
-//! (SQLite), which the generated code is tested against.
+//! provider; it is written for Npgsql (PostgreSQL), Microsoft.Data.Sqlite
+//! (SQLite) and MySqlConnector (MySQL, which has no `returning`: its inserts give a row
+//! count), which the generated code is tested against.
 //!
 //! * One `sealed record <Name>Row` per statement with result columns, and one
 //!   extension method `<Name>Async` on `DbConnection` per statement.
@@ -272,7 +273,7 @@ pub fn generate_csharp(schema: &SchemaIR, statements: &[Statement], opts: &CShar
             let pname = match opts.dialect {
                 Dialect::Sqlite => format!("\n            p.ParameterName = \"?{}\";", i + 1),
                 Dialect::Postgres => String::new(), // Npgsql binds unnamed parameters by position ($1, $2, ...)
-                Dialect::Mysql => unreachable!("QL does not support MySQL yet"),
+                Dialect::Mysql => String::new(), // MySqlConnector binds unnamed `?` parameters by position
             };
             let _ = writeln!(w, "        {{\n            var p = command.CreateParameter();{pname}\n            p.Value = {value};\n            command.Parameters.Add(p);\n        }}");
         }

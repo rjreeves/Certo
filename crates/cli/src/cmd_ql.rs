@@ -24,7 +24,7 @@ Options:
   --schema <file>   the schema: a .sdl file, or an IR.json
   --json            (compile) machine-readable output: params, columns, sql, param_order, ir
   --dialect <name>  (compile, codegen) postgres (default) or sqlite
-  --lang <name>     (codegen) csharp, or rust (the postgres crate for --dialect postgres, rusqlite for sqlite)
+  --lang <name>     (codegen) csharp, or rust (the postgres crate for --dialect postgres, rusqlite for sqlite, mysql for mysql)
   --namespace <ns>  (codegen) C# namespace (default Certo.Generated)
   --class <name>    (codegen) the static class holding the methods (default CertoQueries)
   -o <file>         (codegen) write here instead of standard output
@@ -87,9 +87,6 @@ pub fn cmd_ql(args: &[String]) {
     };
 
     if sub == "codegen" {
-        if dialect == certo_sql::Dialect::Mysql {
-            die("code generation for MySQL is not available yet (supported: postgres, sqlite)", 2);
-        }
         let rust = match lang.as_deref() {
             Some("csharp" | "cs" | "c#") => false,
             Some("rust" | "rs") => true,

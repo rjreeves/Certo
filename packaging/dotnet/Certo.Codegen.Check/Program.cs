@@ -2,6 +2,7 @@
 // and Npgsql when CERTO_TEST_PG_URL is set (postgres://user@host:port/db; its `public` schema is reset).
 
 using Microsoft.Data.Sqlite;
+using MySqlConnector;
 using Npgsql;
 
 int failures = 0;
@@ -48,9 +49,35 @@ else
     Console.WriteLine("-- PostgreSQL skipped (CERTO_TEST_PG_URL not set)");
 }
 
+var mysqlUrl = Environment.GetEnvironmentVariable("CERTO_TEST_MYSQL_URL");
+if (!string.IsNullOrEmpty(mysqlUrl))
+{
+    Console.WriteLine("-- MySQL (MySqlConnector)");
+    var m = new Uri(mysqlUrl);
+    var mb = new MySqlConnectionStringBuilder
+    {
+        Server = m.Host, Port = (uint)(m.Port > 0 ? m.Port : 3306), Database = "mysql", UserID = Uri.UnescapeDataString(m.UserInfo.Split(':')[0]),
+        DateTimeKind = MySqlDateTimeKind.Utc, AllowUserVariables = true,
+    };
+    if (m.UserInfo.Contains(':')) mb.Password = Uri.UnescapeDataString(m.UserInfo.Split(':', 2)[1]);
+    await using var my = new MySqlConnection(mb.ConnectionString);
+    await my.OpenAsync();
+    using var cmd = my.CreateCommand();
+    cmd.CommandText = "DROP DATABASE IF EXISTS certo_codegen; CREATE DATABASE certo_codegen; USE certo_codegen; SET SESSION time_zone = '+00:00'; "
+        + File.ReadAllText(Path.Combine(dir, "schema.mysql.sql"));
+    cmd.ExecuteNonQuery();
+    try { await Check_Mysql.Run(my, Report); }
+    catch (Exception e) { Report(false, "MySQL scenario threw: " + e); }
+}
+else
+{
+    Console.WriteLine("-- MySQL skipped (CERTO_TEST_MYSQL_URL not set)");
+}
+
 Console.WriteLine(failures == 0 ? "\nall checks passed" : $"\n{failures} check(s) FAILED");
 return failures == 0 ? 0 : 1;
 
 // the scenarios are the same source compiled against each provider's generated code
 static class Check_Sqlite { public static Task Run(System.Data.Common.DbConnection c, Action<bool, string> k) => global::Check.Scenario_Sqlite.Run(c, k); }
 static class Check_Pg { public static Task Run(System.Data.Common.DbConnection c, Action<bool, string> k) => global::Check.Scenario_Pg.Run(c, k); }
+static class Check_Mysql { public static Task Run(System.Data.Common.DbConnection c, Action<bool, string> k) => global::Check.Scenario_Mysql.Run(c, k); }
