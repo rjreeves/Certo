@@ -16,6 +16,7 @@
 pub mod ast;
 pub mod check;
 pub mod csharp;
+pub mod rust;
 pub mod fragments;
 pub mod views;
 pub mod ir;
@@ -25,6 +26,7 @@ pub mod parser;
 pub use ast::*;
 pub use check::{check, check_mutations};
 pub use csharp::{generate_csharp, CSharpOptions};
+pub use rust::{generate_rust, RustOptions};
 pub use ir::*;
 pub use views::ViewOut;
 pub use lower::{lower, lower_mutation, lower_mutation_with, lower_with, LowerOptions, Lowered};

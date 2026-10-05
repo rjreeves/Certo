@@ -2,7 +2,7 @@
 //!
 //!   certo ql check   <file.ql> --schema <schema.sdl|IR.json>
 //!   certo ql compile <file.ql> --schema <schema.sdl|IR.json> [--json] [--dialect postgres|sqlite]
-//!   certo ql codegen <file.ql> --schema <schema.sdl|IR.json> --lang csharp [--dialect ..] [--namespace N] [--class C] [-o out.cs]
+//!   certo ql codegen <file.ql> --schema <schema.sdl|IR.json> --lang csharp|rust [--dialect ..] [--namespace N] [--class C] [-o out.cs|out.rs]
 
 use certo_diagnostics::{render_all, Severity};
 use certo_sdl::{describe_type, SchemaIR};
@@ -18,13 +18,13 @@ Usage: certo ql <subcommand> <file.ql> --schema <schema> [options]
 Subcommands:
   check     Type-check the queries and show each one's parameters and typed result columns
   compile   Print the SQL for each query (with its parameter placeholders)
-  codegen   Generate typed host code: a record per result, a method per statement (--lang csharp)
+  codegen   Generate typed host code: a record per result, a method per statement (--lang csharp|rust)
 
 Options:
   --schema <file>   the schema: a .sdl file, or an IR.json
   --json            (compile) machine-readable output: params, columns, sql, param_order, ir
   --dialect <name>  (compile, codegen) postgres (default) or sqlite
-  --lang <name>     (codegen) csharp
+  --lang <name>     (codegen) csharp, or rust (the postgres crate for --dialect postgres, rusqlite for sqlite)
   --namespace <ns>  (codegen) C# namespace (default Certo.Generated)
   --class <name>    (codegen) the static class holding the methods (default CertoQueries)
   -o <file>         (codegen) write here instead of standard output
@@ -87,15 +87,20 @@ pub fn cmd_ql(args: &[String]) {
     };
 
     if sub == "codegen" {
-        match lang.as_deref() {
-            Some("csharp" | "cs" | "c#") => {}
-            Some(other) => die(&format!("unknown language `{other}` (supported: csharp)"), 2),
-            None => die("--lang is required (supported: csharp)", 2),
-        }
-        let mut opts = certo_ql::CSharpOptions { dialect, ..Default::default() };
-        if let Some(n) = namespace { opts.namespace = n; }
-        if let Some(c) = class { opts.class_name = c; }
-        let code = certo_ql::generate_csharp(&schema, &queries, &opts);
+        let rust = match lang.as_deref() {
+            Some("csharp" | "cs" | "c#") => false,
+            Some("rust" | "rs") => true,
+            Some(other) => die(&format!("unknown language `{other}` (supported: csharp, rust)"), 2),
+            None => die("--lang is required (supported: csharp, rust)", 2),
+        };
+        let code = if rust {
+            certo_ql::generate_rust(&schema, &queries, &certo_ql::RustOptions { dialect })
+        } else {
+            let mut opts = certo_ql::CSharpOptions { dialect, ..Default::default() };
+            if let Some(n) = namespace { opts.namespace = n; }
+            if let Some(c) = class { opts.class_name = c; }
+            certo_ql::generate_csharp(&schema, &queries, &opts)
+        };
         match out {
             Some(path) => {
                 std::fs::write(&path, code).unwrap_or_else(|e| die(&format!("cannot write {}: {e}", path.display()), 2));

@@ -79,5 +79,21 @@ namespace Certo
             return Wire.Parse<QlCodegenResult>(
                 CertoNative.CodegenQl(schemaIrJson, qlSource, JsonSerializer.Serialize(options)), "CodegenQl");
         }
+
+        /// <summary>
+        /// Generate a Rust source file (a struct per result, a function per statement) from QL. It calls the
+        /// <c>postgres</c> crate for <see cref="SqlDialect.Postgres"/> and <c>rusqlite</c> for <see cref="SqlDialect.Sqlite"/>;
+        /// the file's first lines say which crates and features it needs.
+        /// </summary>
+        public static QlCodegenResult GenerateRust(string schemaIrJson, string qlSource, SqlDialect dialect = SqlDialect.Postgres)
+        {
+            var options = new System.Collections.Generic.Dictionary<string, string>
+            {
+                ["language"] = "rust",
+                ["dialect"] = dialect.Name(),
+            };
+            return Wire.Parse<QlCodegenResult>(
+                CertoNative.CodegenQl(schemaIrJson, qlSource, JsonSerializer.Serialize(options)), "CodegenQl");
+        }
     }
 }

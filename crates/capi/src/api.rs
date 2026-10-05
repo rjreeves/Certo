@@ -126,9 +126,10 @@ fn plan_json(plan: MigrationPlan) -> String {
     .to_string()
 }
 
-/// Generate typed host code from QL (see `certo_ql::csharp`). `options`: `{"language":
-/// "csharp", "dialect": "postgres" | "sqlite", "namespace"?, "class_name"?}` (`dialect`
-/// defaults to postgres). On success `code` holds one source file; QL errors come back
+/// Generate typed host code from QL (see `certo_ql::csharp` and `certo_ql::rust`). `options`:
+/// `{"language": "csharp" | "rust", "dialect": "postgres" | "sqlite", "namespace"?, "class_name"?}`
+/// (`dialect` defaults to postgres; `namespace` and `class_name` are for C#; Rust code calls the
+/// `postgres` crate or `rusqlite` according to the dialect). On success `code` holds one source file; QL errors come back
 /// as `diagnostics` exactly as for `ql_compile`, with `ok: false`.
 pub fn ql_codegen(schema_ir: &str, ql_source: &str, options: &str) -> String {
     #[derive(serde::Deserialize, Default)]
@@ -143,11 +144,12 @@ pub fn ql_codegen(schema_ir: &str, ql_source: &str, options: &str) -> String {
         Ok(o) => o,
         Err(e) => return error("invalid_options", format!("options are invalid: {e}")),
     };
-    match opts.language.as_deref() {
-        Some("csharp" | "cs") => {}
-        Some(other) => return error("unknown_language", format!("unknown language `{other}` (supported: csharp)")),
-        None => return error("invalid_options", "options.language is required (supported: csharp)"),
-    }
+    let rust = match opts.language.as_deref() {
+        Some("csharp" | "cs") => false,
+        Some("rust" | "rs") => true,
+        Some(other) => return error("unknown_language", format!("unknown language `{other}` (supported: csharp, rust)")),
+        None => return error("invalid_options", "options.language is required (supported: csharp, rust)"),
+    };
     let dialect_name = opts.dialect.as_deref().unwrap_or("postgres");
     let Some(dialect) = Dialect::from_name(dialect_name) else {
         return error("unknown_dialect", format!("unknown SQL dialect `{dialect_name}` (supported: postgres, sqlite)"));
@@ -159,7 +161,11 @@ pub fn ql_codegen(schema_ir: &str, ql_source: &str, options: &str) -> String {
     if let Some(c) = opts.class_name { cs.class_name = c; }
     json!({
         "ok": statements.is_some(),
-        "code": statements.as_deref().map(|s| certo_ql::generate_csharp(&schema, s, &cs)),
+        "code": statements.as_deref().map(|s| if rust {
+            certo_ql::generate_rust(&schema, s, &certo_ql::RustOptions { dialect })
+        } else {
+            certo_ql::generate_csharp(&schema, s, &cs)
+        }),
         "diagnostics": diagnostics_json(&diags, ql_source),
         "rendered": render_all(&diags, ql_source, "queries.ql", false),
     })
@@ -306,7 +312,13 @@ mod tests {
         let bad = v(&ql_codegen(&ir, "query q() { from t select t.ghost }", opts));
         assert_eq!(bad["ok"], false);
         assert!(bad["code"].is_null() && bad["diagnostics"][0]["code"] == "QL206");
-        assert_eq!(v(&ql_codegen(&ir, "", r#"{"language":"rust"}"#))["error"]["code"], "unknown_language");
+        // Rust: the driver follows the dialect
+        let rs = v(&ql_codegen(&ir, "query by_n(n: int) { from t where t.n == :n select t.id, t.n }", r#"{"language":"rust","dialect":"sqlite"}"#));
+        let rs_code = rs["code"].as_str().unwrap();
+        assert!(rs_code.contains("pub struct ByNRow") && rs_code.contains("pub fn by_n(conn: &rusqlite::Connection, n: i32)"), "{rs_code}");
+        let pg = v(&ql_codegen(&ir, "query by_n(n: int) { from t where t.n == :n select t.id, t.n }", r#"{"language":"rust"}"#));
+        assert!(pg["code"].as_str().unwrap().contains("client: &mut C"));
+        assert_eq!(v(&ql_codegen(&ir, "", r#"{"language":"cobol"}"#))["error"]["code"], "unknown_language");
         assert_eq!(v(&ql_codegen(&ir, "", "{}"))["error"]["code"], "invalid_options");
         assert_eq!(v(&ql_codegen(&ir, "", r#"{"language":"csharp","bogus":1}"#))["error"]["code"], "invalid_options");
     }
