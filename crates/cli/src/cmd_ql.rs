@@ -25,7 +25,7 @@ Options:
   --json            (compile) machine-readable output: params, columns, sql, param_order, ir
   --dialect <name>  (compile, codegen) postgres (default) or sqlite
   --lang <name>     (codegen) csharp, or rust (the postgres crate for --dialect postgres, rusqlite for sqlite, mysql for mysql)
-  --async           (codegen, rust) async fn over tokio-postgres (postgres) or mysql_async (mysql); SQLite has no async driver
+  --async           (codegen, rust) async fn over tokio-postgres (postgres), mysql_async (mysql) or tokio-rusqlite (sqlite)
   --namespace <ns>  (codegen) C# namespace (default Certo.Generated)
   --class <name>    (codegen) the static class holding the methods (default CertoQueries)
   -o <file>         (codegen) write here instead of standard output
@@ -98,9 +98,6 @@ pub fn cmd_ql(args: &[String]) {
         };
         if async_code && !rust {
             die("--async is for --lang rust (C# methods are already async)", 2);
-        }
-        if async_code && !certo_ql::async_supported(dialect) {
-            die("there is no async driver for SQLite (rusqlite is synchronous): leave out --async", 2);
         }
         let code = if rust {
             certo_ql::generate_rust(&schema, &queries, &certo_ql::RustOptions { dialect, async_: async_code })

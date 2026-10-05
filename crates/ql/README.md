@@ -276,8 +276,10 @@ any other mutation gives the affected-row count (`u64`). The SQL is also a const
 `rust_decimal::Decimal`, `uuid` is `uuid::Uuid`, `timestamp` is `chrono::DateTime<Utc>`, `timestamp naive` and `date` are chrono's
 naive types. The first lines of the file list the crates and features it needs. With `--async` the functions are `async fn`s over
 `tokio-postgres` (any `GenericClient`, taken by `&`) for `--dialect postgres` and `mysql_async` (anything `Queryable`, taken by
-`&mut`) for `--dialect mysql`; SQLite has no async driver (rusqlite is synchronous), so `--async` with it is refused. The async
-code is compiled and run against live PostgreSQL and MySQL in the tests, including inside a transaction. Under SQLite, timestamps are written the way
+`&mut`) for `--dialect mysql`, and `tokio-rusqlite` (a `&tokio_rusqlite::Connection`) for `--dialect sqlite`. SQLite is
+synchronous underneath, so that one runs each statement on the connection's own thread and copies the borrowed arguments
+(`&str`, `&[u8]`, `&Json`) before it is sent there; several calls at once are taken in turn. The async code is compiled and run
+against live PostgreSQL, MySQL and SQLite in the tests (PostgreSQL and MySQL also inside a transaction). Under SQLite, timestamps are written the way
 `CURRENT_TIMESTAMP` is (UTC, no offset), decimals are bound as text and read from whichever number or text SQLite holds, and
 uuids are text. The generated code is compiled and run against live SQLite and PostgreSQL in `tests/rust_codegen.rs`.
 

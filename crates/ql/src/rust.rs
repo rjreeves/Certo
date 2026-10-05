@@ -7,8 +7,9 @@
 //! `Transaction` derefs to), MySQL uses the `mysql` crate (anything `Queryable`: a `Conn`, a `PooledConn` or a
 //! `Transaction`). MySQL has no `RETURNING`, so a statement that returns rows there is a query.
 //!
-//! With `async_` the functions are `async fn`s over `tokio-postgres` (any `GenericClient`, taken by `&`) and
-//! `mysql_async` (anything `Queryable`, taken by `&mut`); SQLite has no async driver.
+//! With `async_` the functions are `async fn`s over `tokio-postgres` (any `GenericClient`, taken by `&`),
+//! `mysql_async` (anything `Queryable`, taken by `&mut`) and `tokio-rusqlite` (a `tokio_rusqlite::Connection`, taken by `&`:
+//! its work runs on the connection's own thread, so the borrowed arguments are copied first).
 //!
 //! * One `pub struct <Name>Row` per statement with result columns and one function per statement
 //!   (`snake_case` of its name). A mutation without `returning` returns the affected-row count.
@@ -30,14 +31,8 @@ use std::fmt::Write;
 pub struct RustOptions {
     /// The dialect the statements were compiled for: it decides which driver the code calls.
     pub dialect: Dialect,
-    /// `async fn`s over the async drivers: `tokio-postgres` for PostgreSQL, `mysql_async` for MySQL. SQLite has none
-    /// (rusqlite is synchronous), see [`async_supported`].
+    /// `async fn`s over the async drivers: `tokio-postgres` for PostgreSQL, `mysql_async` for MySQL, `tokio-rusqlite` for SQLite.
     pub async_: bool,
-}
-
-/// Is there an async driver for `dialect`?
-pub fn async_supported(dialect: Dialect) -> bool {
-    matches!(dialect, Dialect::Postgres | Dialect::Mysql)
 }
 
 impl Default for RustOptions {
@@ -251,7 +246,7 @@ pub fn generate_rust(schema: &SchemaIR, statements: &[Statement], opts: &RustOpt
     let pg = opts.dialect == Dialect::Postgres;
     let my = opts.dialect == Dialect::Mysql;
     let sqlite = !pg && !my;
-    let asy = opts.async_ && !sqlite;
+    let asy = opts.async_;
     let u = uses(statements);
     let mut o = String::new();
     let w = &mut o;
@@ -293,6 +288,7 @@ pub fn generate_rust(schema: &SchemaIR, statements: &[Statement], opts: &RustOpt
             let _ = writeln!(w, "//   rusqlite = \"0.32\"");
         }
         if u.decimal { let _ = writeln!(w, "//   rust_decimal = \"1\""); }
+        if asy { let _ = writeln!(w, "//   tokio-rusqlite = \"0.6\""); }
     }
     if asy { let _ = writeln!(w, "//   tokio = \"1\"  (or whichever runtime drives the futures)"); }
     if u.chrono { let _ = writeln!(w, "//   chrono = \"0.4\""); }
@@ -561,6 +557,8 @@ impl rusqlite::types::FromSql for SqlTimestamp {{
             "client: &mut C".into()
         } else if my {
             "conn: &mut C".into()
+        } else if asy {
+            "conn: &tokio_rusqlite::Connection".into()
         } else {
             "conn: &rusqlite::Connection".into()
         });
@@ -571,6 +569,8 @@ impl rusqlite::types::FromSql for SqlTimestamp {{
             ("<C: postgres::GenericClient>", "postgres::Error")
         } else if my {
             ("<C: mysql::prelude::Queryable>", "mysql::Error")
+        } else if asy {
+            ("", "tokio_rusqlite::Error")
         } else {
             ("", "rusqlite::Error")
         };
@@ -623,17 +623,56 @@ impl rusqlite::types::FromSql for SqlTimestamp {{
             }
         } else {
             let list = bound.join(", ");
+            // the work, as it reads for a rusqlite::Connection called `conn`
+            let mut b = String::new();
             if has_rows {
-                let _ = writeln!(w, "    let mut stmt = conn.prepare({})?;", n.konst);
-                let _ = writeln!(w, "    let rows = stmt.query_map(rusqlite::params![{list}], |row| {{\n        Ok({} {{", n.row);
+                let _ = writeln!(b, "let mut stmt = conn.prepare({})?;", n.konst);
+                let _ = writeln!(b, "let rows = stmt.query_map(rusqlite::params![{list}], |row| {{\n    Ok({} {{", n.row);
                 let mut taken = HashSet::new();
                 for (i, c) in s.columns().iter().enumerate() {
                     let field = unique(snake(&c.name), &mut taken);
-                    let _ = writeln!(w, "            {field}: {},", read_expr(i, &rs_type(&c.ty, &enum_names), c.nullable));
+                    let _ = writeln!(b, "        {field}: {},", read_expr(i, &rs_type(&c.ty, &enum_names), c.nullable));
                 }
-                let _ = writeln!(w, "        }})\n    }})?;\n    rows.collect()");
+                if asy {
+                    let _ = writeln!(b, "    }})\n}})?;\nrows.collect::<Result<Vec<_>, rusqlite::Error>>().map_err(tokio_rusqlite::Error::from)");
+                } else {
+                    let _ = writeln!(b, "    }})\n}})?;\nrows.collect()");
+                }
+            } else if asy {
+                let _ = writeln!(b, "conn.execute({}, rusqlite::params![{list}]).map(|n| n as u64).map_err(tokio_rusqlite::Error::from)", n.konst);
             } else {
-                let _ = writeln!(w, "    conn.execute({}, rusqlite::params![{list}]).map(|n| n as u64)", n.konst);
+                let _ = writeln!(b, "conn.execute({}, rusqlite::params![{list}]).map(|n| n as u64)", n.konst);
+            }
+            if asy {
+                // the connection's thread runs the work, so what it uses has to be owned
+                for (name, p, rs, used) in &params {
+                    if !used {
+                        continue;
+                    }
+                    let n = name.trim_start_matches("r#");
+                    let copy = match (rs.param.as_str(), p.nullable) {
+                        ("&str", false) => Some(format!("{name}.to_owned()")),
+                        ("&str", true) => Some(format!("{name}.map(str::to_owned)")),
+                        ("&[u8]", false) => Some(format!("{name}.to_vec()")),
+                        ("&[u8]", true) => Some(format!("{name}.map(<[u8]>::to_vec)")),
+                        ("&Json", false) => Some(format!("{name}.clone()")),
+                        ("&Json", true) => Some(format!("{name}.cloned()")),
+                        _ => None,
+                    };
+                    if let Some(copy) = copy {
+                        let _ = writeln!(w, "    let {name} = {copy};");
+                        let _ = n;
+                    }
+                }
+                let _ = writeln!(w, "    conn.call(move |conn| {{");
+                for line in b.lines() {
+                    let _ = writeln!(w, "        {line}");
+                }
+                let _ = writeln!(w, "    }})\n    .await");
+            } else {
+                for line in b.lines() {
+                    let _ = writeln!(w, "    {line}");
+                }
             }
         }
         let _ = writeln!(w, "}}\n");
@@ -828,7 +867,10 @@ mod tests {
         assert!(my.contains("conn.exec(BY_ROLE_SQL, params).await?") && my.contains("result.drop_result().await?"), "{my}");
         assert!(my.contains("fn bad_value(value: mysql_async::Value) -> mysql_async::Error") && !my.contains("FromValueError"), "{my}");
         assert!(my.contains("//   mysql_async = \"0.37\"") || my.contains("mysql_async = {"), "{my}");
-        assert!(async_supported(Dialect::Postgres) && async_supported(Dialect::Mysql) && !async_supported(Dialect::Sqlite));
+        let lite = gen_async(q, Dialect::Sqlite);
+        assert!(lite.contains("pub async fn rename(conn: &tokio_rusqlite::Connection, id: i32, n: &str) -> Result<u64, tokio_rusqlite::Error>"), "{lite}");
+        assert!(lite.contains("let n = n.to_owned();") && lite.contains("conn.call(move |conn| {"), "{lite}");
+        assert!(lite.contains("//   tokio-rusqlite = \"0.6\""), "{lite}");
     }
 
     #[test]
