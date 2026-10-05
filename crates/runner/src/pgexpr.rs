@@ -396,6 +396,45 @@ fn parse(
     Ok(e)
 }
 
+/// A string compared with (or listed against) an enum column is one of its values.
+fn mysql_enum_values(e: ExprIR, types: &HashMap<String, TypeIR>) -> ExprIR {
+    let enum_of = |x: &ExprIR| match x {
+        ExprIR::Column { name } => match types.get(name) {
+            Some(TypeIR::Enum(n)) => Some(n.clone()),
+            _ => None,
+        },
+        _ => None,
+    };
+    let variant = |x: ExprIR, n: &str| match x {
+        ExprIR::String { value } => ExprIR::EnumVariant { enum_name: n.to_string(), variant: value },
+        other => other,
+    };
+    match e {
+        ExprIR::Binary { op, lhs, rhs } => {
+            let (lhs, rhs) = (mysql_enum_values(*lhs, types), mysql_enum_values(*rhs, types));
+            let (lhs, rhs) = match (enum_of(&lhs), enum_of(&rhs)) {
+                (Some(n), _) => (lhs, variant(rhs, &n)),
+                (_, Some(n)) => (variant(lhs, &n), rhs),
+                _ => (lhs, rhs),
+            };
+            ExprIR::Binary { op, lhs: Box::new(lhs), rhs: Box::new(rhs) }
+        }
+        ExprIR::In { expr, list, negated } => {
+            let expr = mysql_enum_values(*expr, types);
+            let list: Vec<ExprIR> = list.into_iter().map(|x| mysql_enum_values(x, types)).collect();
+            let list = match enum_of(&expr) {
+                Some(n) => list.into_iter().map(|x| variant(x, &n)).collect(),
+                None => list,
+            };
+            ExprIR::In { expr: Box::new(expr), list, negated }
+        }
+        ExprIR::Not { expr } => ExprIR::Not { expr: Box::new(mysql_enum_values(*expr, types)) },
+        ExprIR::IsNull { expr, negated } => ExprIR::IsNull { expr: Box::new(mysql_enum_values(*expr, types)), negated },
+        ExprIR::Call { func, args } => ExprIR::Call { func, args: args.into_iter().map(|x| mysql_enum_values(x, types)).collect() },
+        other => other,
+    }
+}
+
 /// Both safety checks: same meaning as the server's text, and valid SDL.
 fn verify(dialect: Dialect, raw: &str, e: &ExprIR, synthetic: &SchemaIR) -> Result<(), String> {
     let rendered = render_expr(dialect, e);
@@ -510,6 +549,11 @@ pub fn translate_default_for(
         Some(e) => e,
         None => parse(raw, enums, None, &seq_names)?,
     };
+    // MySQL writes an enum value as a plain string
+    let e = match (dialect, col_ty, e) {
+        (Dialect::Mysql, TypeIR::Enum(n), ExprIR::String { value }) => ExprIR::EnumVariant { enum_name: n.clone(), variant: value },
+        (_, _, e) => e,
+    };
     let mut id = plain("id", TypeIR::Builtin(certo_sdl::Builtin::Int));
     id.primary_key = true;
     id.nullable = false;
@@ -548,6 +592,8 @@ pub fn translate_check_for(dialect: Dialect, raw: &str, columns: &[ColumnIR], en
         .collect();
     let types: HashMap<String, TypeIR> = usable.iter().map(|c| (c.name.clone(), c.ty.clone())).collect();
     let e = parse(raw, enums, Some(&types), &[])?;
+    // MySQL writes an enum value as a plain string: where one meets an enum column, it is the value
+    let e = if dialect == Dialect::Mysql { mysql_enum_values(e, &types) } else { e };
     let synth = SchemaIR {
         version: certo_sdl::IR_VERSION,
         tables: vec![base_table(usable, vec![ConstraintIR { name: "chk".into(), expr: e.clone() }])],
