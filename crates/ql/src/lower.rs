@@ -29,6 +29,9 @@ pub struct LowerOptions {
     pub enums_as_text: bool,
 }
 
+/// QL has no MySQL lowering yet: `compile` refuses the dialect before anything is lowered.
+const MYSQL_NOT_YET: &str = "QL does not lower to MySQL yet (compile rejects it first)";
+
 pub fn lower(dialect: Dialect, q: &QueryIR) -> Lowered { lower_with(dialect, q, LowerOptions::default()) }
 
 pub fn lower_with(dialect: Dialect, q: &QueryIR, opts: LowerOptions) -> Lowered {
@@ -286,6 +289,7 @@ impl Lowerer<'_> {
             (Dialect::Postgres, None) => format!("${idx}"),
             (Dialect::Sqlite, Some(t)) => format!("CAST(?{idx} AS {t})"),
             (Dialect::Sqlite, None) => format!("?{idx}"),
+            (Dialect::Mysql, _) => unreachable!("{MYSQL_NOT_YET}"),
         }
     }
 
@@ -340,6 +344,7 @@ impl Lowerer<'_> {
                     match self.dialect {
                         Dialect::Postgres if func == "date_part_utc" => format!("CAST(EXTRACT({} FROM ({x} AT TIME ZONE 'UTC')) AS integer)", part.to_uppercase()),
                         Dialect::Postgres => format!("CAST(EXTRACT({} FROM {x}) AS integer)", part.to_uppercase()),
+                        Dialect::Mysql => unreachable!("{MYSQL_NOT_YET}"),
                         Dialect::Sqlite => {
                             let f = match part.as_str() { "year" => "%Y", "month" => "%m", "day" => "%d", "hour" => "%H", _ => "%M" };
                             format!("CAST(strftime('{f}', {x}) AS INTEGER)")
@@ -365,6 +370,7 @@ impl Lowerer<'_> {
                     match self.dialect {
                         Dialect::Postgres => format!("({d} + CAST({n} AS integer))"),
                         Dialect::Sqlite => format!("date({d}, CAST({n} AS TEXT) || ' days')"),
+                        Dialect::Mysql => unreachable!("{MYSQL_NOT_YET}"),
                     }
                 }
                 "days_between" => {
@@ -372,6 +378,7 @@ impl Lowerer<'_> {
                     match self.dialect {
                         Dialect::Postgres => format!("({to} - {from})"),
                         Dialect::Sqlite => format!("CAST(julianday({to}) - julianday({from}) AS INTEGER)"),
+                        Dialect::Mysql => unreachable!("{MYSQL_NOT_YET}"),
                     }
                 }
                 "position" => {
@@ -483,6 +490,7 @@ impl Lowerer<'_> {
             })
             .collect();
         match self.dialect {
+            Dialect::Mysql => unreachable!("{MYSQL_NOT_YET}"),
             Dialect::Postgres => {
                 let path = format!("'{{{}}}'", keys.iter().map(|(k, _)| k.as_str()).collect::<Vec<_>>().join(","));
                 let x = format!("(({j})::jsonb #> {path})");

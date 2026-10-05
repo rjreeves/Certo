@@ -460,3 +460,72 @@ fn views_lower_to_create_and_drop_view() {
     );
     assert_eq!(sql(&with, t), ["DROP VIEW \"adults\";", "DROP VIEW \"all_mail\";"]);
 }
+
+// ---- MySQL ---------------------------------------------------------------- //
+
+fn mysql_sql(before: &str, after: &str) -> Vec<String> {
+    let b = if before.is_empty() { SchemaIR::empty() } else { ir(before) };
+    let a = ir(after);
+    lower_with(&diff(&b, &a), Dialect::Mysql, Schemas { old: &b, new: &a }).unwrap_or_else(|e| panic!("{e}"))
+}
+
+#[test]
+fn mysql_tables_use_the_binary_collation_and_tag_ambiguous_types() {
+    let out = mysql_sql(
+        "",
+        "enum Role { admin, user_ }
+         table users {
+             id: serial primary key
+             token: uuid default gen_uuid()
+             email: varchar(100) not null unique
+             role: Role not null default user_
+             at: timestamp
+             on_: timestamp_naive
+             price: decimal
+         }",
+    );
+    assert_eq!(out.len(), 1);
+    let t = &out[0];
+    for expected in [
+        "CREATE TABLE `users` (",
+        "`id` INT NOT NULL AUTO_INCREMENT",
+        "`token` CHAR(36) NULL DEFAULT (LOWER(CONCAT(HEX(RANDOM_BYTES(4))",
+        "COMMENT 'certo:uuid'",
+        "`email` VARCHAR(100) NOT NULL",
+        "`role` ENUM('admin','user_') NOT NULL DEFAULT ('user_') COMMENT 'certo:enum Role'",
+        "`at` DATETIME(6) NULL COMMENT 'certo:timestamptz'",
+        "`on_` DATETIME(6) NULL,",
+        "`price` DECIMAL(65,30) NULL",
+        "PRIMARY KEY (`id`)",
+        "CONSTRAINT `users_email_key` UNIQUE (`email`)",
+        ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;",
+    ] {
+        assert!(t.contains(expected), "expected `{expected}` in:\n{t}");
+    }
+}
+
+#[test]
+fn mysql_alters_restate_the_whole_column() {
+    let before = "table t { id: int primary key  n: int  s: varchar(10) }";
+    let out = mysql_sql(before, "table t { id: int primary key  n: bigint not null default 0  s: varchar(10) unique }");
+    assert_eq!(
+        out,
+        [
+            "UPDATE `t` SET `n` = 0 WHERE `n` IS NULL;",
+            "ALTER TABLE `t` MODIFY COLUMN `n` BIGINT NOT NULL DEFAULT (0);",
+            "ALTER TABLE `t` ADD CONSTRAINT `t_s_key` UNIQUE (`s`);",
+        ]
+    );
+    assert_eq!(mysql_sql(before, "table t { id: int primary key  n: int }"), ["ALTER TABLE `t` DROP COLUMN `s`;"]);
+    // a new enum value redefines the columns that use it
+    let e1 = "enum E { a } table t { id: int primary key  e: E }";
+    let out = mysql_sql(e1, "enum E { a, b } table t { id: int primary key  e: E }");
+    assert_eq!(out, ["ALTER TABLE `t` MODIFY COLUMN `e` ENUM('a','b') NULL COMMENT 'certo:enum E';"]);
+}
+
+#[test]
+fn mysql_strings_escape_backslashes() {
+    use certo_sdl::ExprIR;
+    assert_eq!(render_expr(Dialect::Mysql, &ExprIR::String { value: r"a\b'c".into() }), r"'a\\b''c'");
+    assert_eq!(quote_ident(Dialect::Mysql, "we`ird"), "`we``ird`");
+}

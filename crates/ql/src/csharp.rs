@@ -272,6 +272,7 @@ pub fn generate_csharp(schema: &SchemaIR, statements: &[Statement], opts: &CShar
             let pname = match opts.dialect {
                 Dialect::Sqlite => format!("\n            p.ParameterName = \"?{}\";", i + 1),
                 Dialect::Postgres => String::new(), // Npgsql binds unnamed parameters by position ($1, $2, ...)
+                Dialect::Mysql => unreachable!("QL does not support MySQL yet"),
             };
             let _ = writeln!(w, "        {{\n            var p = command.CreateParameter();{pname}\n            p.Value = {value};\n            command.Parameters.Add(p);\n        }}");
         }
