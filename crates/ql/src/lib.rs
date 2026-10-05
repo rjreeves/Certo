@@ -140,6 +140,9 @@ pub struct Compiled {
 /// `compile`, with the file's fragments and views too. A view is read as a table by every statement in the file.
 pub fn compile_full(schema: &SchemaIR, src: &str, dialect: Dialect) -> Compiled {
     let fail = |diagnostics| Compiled { statements: None, fragments: Vec::new(), views: Vec::new(), diagnostics };
+    if dialect == Dialect::Mysql {
+        return fail(vec![Diagnostic::error("QL099", "QL does not support MySQL yet: use postgres or sqlite")]);
+    }
     let (mut file, mut diags) = parse(src);
     if has_errors(&diags) {
         return fail(diags);

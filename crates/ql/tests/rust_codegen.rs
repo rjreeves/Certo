@@ -24,7 +24,7 @@ fn ddl(dialect: Dialect) -> String {
     let plan = certo_mdl::diff(&empty, &schema);
     match dialect {
         Dialect::Postgres => certo_sql::render(&plan, dialect).unwrap(),
-        Dialect::Sqlite => certo_sql::render_with(&plan, dialect, certo_sql::Schemas { old: &empty, new: &schema }).unwrap(),
+        Dialect::Sqlite | Dialect::Mysql => certo_sql::render_with(&plan, dialect, certo_sql::Schemas { old: &empty, new: &schema }).unwrap(),
     }
 }
 

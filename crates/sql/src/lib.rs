@@ -4,6 +4,7 @@
 //! (each ending in `;`), in plan order, or an error naming the op it cannot
 //! express so the user can write that step by hand.
 
+mod mysql;
 mod postgres;
 mod sqlite;
 
@@ -15,6 +16,7 @@ use std::fmt;
 pub enum Dialect {
     Postgres,
     Sqlite,
+    Mysql,
 }
 
 impl Dialect {
@@ -22,6 +24,7 @@ impl Dialect {
         match s {
             "postgres" | "postgresql" | "pg" => Some(Dialect::Postgres),
             "sqlite" | "sqlite3" => Some(Dialect::Sqlite),
+            "mysql" => Some(Dialect::Mysql),
             _ => None,
         }
     }
@@ -51,6 +54,7 @@ pub fn render_type(dialect: Dialect, t: &certo_sdl::TypeIR) -> String {
     match dialect {
         Dialect::Postgres => postgres::ty(t),
         Dialect::Sqlite => sqlite::ty(t),
+        Dialect::Mysql => mysql::ty(t, None),
     }
 }
 
@@ -59,6 +63,7 @@ pub fn quote_ident(dialect: Dialect, s: &str) -> String {
     match dialect {
         Dialect::Postgres => postgres::q(s),
         Dialect::Sqlite => sqlite::q(s),
+        Dialect::Mysql => mysql::q(s),
     }
 }
 
@@ -67,6 +72,7 @@ pub fn quote_literal(dialect: Dialect, s: &str) -> String {
     match dialect {
         Dialect::Postgres => postgres::lit(s),
         Dialect::Sqlite => sqlite::lit(s),
+        Dialect::Mysql => mysql::lit(s),
     }
 }
 
@@ -76,11 +82,13 @@ pub fn render_expr(dialect: Dialect, e: &certo_sdl::ExprIR) -> String {
     match dialect {
         Dialect::Postgres => postgres::expr(e),
         Dialect::Sqlite => sqlite::expr(e).unwrap_or_else(|why| format!("/* {why} */")),
+        Dialect::Mysql => mysql::expr(e).unwrap_or_else(|why| format!("/* {why} */")),
     }
 }
 
 /// The schemas a plan was made between. SQLite needs them: it rebuilds tables
 /// (whose final shape comes from `new`), and writes enums as CHECK constraints.
+/// MySQL needs them too: an enum is part of each column that uses it, and changing a column restates it in full.
 /// PostgreSQL lowers from the plan alone and ignores them.
 #[derive(Debug, Clone, Copy)]
 pub struct Schemas<'a> {
@@ -91,7 +99,7 @@ pub struct Schemas<'a> {
 fn needs_schemas(dialect: Dialect) -> LowerError {
     LowerError {
         op: format!("(the whole plan, for {dialect:?})"),
-        reason: "SQLite lowering needs the schemas the plan was made between (use the `_with` functions)".into(),
+        reason: "SQLite and MySQL lowering need the schemas the plan was made between (use the `_with` functions)".into(),
     }
 }
 
@@ -111,14 +119,14 @@ pub fn lower(plan: &MigrationPlan, dialect: Dialect) -> Result<Vec<String>, Lowe
 pub fn lower_with(plan: &MigrationPlan, dialect: Dialect, schemas: Schemas) -> Result<Vec<String>, LowerError> {
     match dialect {
         Dialect::Postgres => lower(plan, dialect),
-        Dialect::Sqlite => Ok(lower_batches_with(plan, dialect, schemas)?.into_iter().flat_map(|b| b.statements).collect()),
+        Dialect::Sqlite | Dialect::Mysql => Ok(lower_batches_with(plan, dialect, schemas)?.into_iter().flat_map(|b| b.statements).collect()),
     }
 }
 
 fn lower_op(op: &Op, dialect: Dialect, out: &mut Vec<String>) -> Result<(), LowerError> {
     match dialect {
         Dialect::Postgres => postgres::lower_op(op, out),
-        Dialect::Sqlite => Err(needs_schemas(dialect)),
+        Dialect::Sqlite | Dialect::Mysql => Err(needs_schemas(dialect)),
     }
 }
 
@@ -137,7 +145,7 @@ pub struct Batch {
 /// leading non-transactional batch; everything else is one atomic batch.
 /// (SQLite: see [`lower_batches_with`].)
 pub fn lower_batches(plan: &MigrationPlan, dialect: Dialect) -> Result<Vec<Batch>, LowerError> {
-    if dialect == Dialect::Sqlite {
+    if dialect != Dialect::Postgres {
         return Err(needs_schemas(dialect));
     }
     let (mut early, mut main) = (Vec::new(), Vec::new());
@@ -165,6 +173,7 @@ pub fn lower_batches_with(plan: &MigrationPlan, dialect: Dialect, schemas: Schem
     match dialect {
         Dialect::Postgres => lower_batches(plan, dialect),
         Dialect::Sqlite => sqlite::lower_batches(plan, &schemas),
+        Dialect::Mysql => mysql::lower_batches(plan, &schemas),
     }
 }
 
