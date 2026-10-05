@@ -190,7 +190,7 @@ pub fn lower_sql_with_schemas(plan_json: &str, dialect: &str, old_ir: &str, new_
 
 fn lower_sql_impl(plan_json: &str, dialect: &str, schemas: Option<(&SchemaIR, &SchemaIR)>) -> String {
     let Some(dialect) = Dialect::from_name(dialect) else {
-        return error("unknown_dialect", format!("unknown SQL dialect `{dialect}` (supported: postgres, sqlite)"));
+        return error("unknown_dialect", format!("unknown SQL dialect `{dialect}` (supported: postgres, sqlite, mysql)"));
     };
     let plan: MigrationPlan = match serde_json::from_str(plan_json) {
         Ok(p) => p,
@@ -219,7 +219,7 @@ fn lower_sql_impl(plan_json: &str, dialect: &str, schemas: Option<(&SchemaIR, &S
                 .collect();
             json!({ "ok": true, "batches": batches, "script": script }).to_string()
         }
-        Err(LowerError { op, reason }) if schemas.is_none() && dialect == Dialect::Sqlite => json!({
+        Err(LowerError { op, reason }) if schemas.is_none() && dialect != Dialect::Postgres => json!({
             "ok": false,
             "error": {
                 "code": "needs_schemas",
