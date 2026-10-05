@@ -2,7 +2,7 @@
 //!
 //!   certo ql check   <file.ql> --schema <schema.sdl|IR.json>
 //!   certo ql compile <file.ql> --schema <schema.sdl|IR.json> [--json] [--dialect postgres|sqlite]
-//!   certo ql codegen <file.ql> --schema <schema.sdl|IR.json> --lang csharp|rust [--dialect ..] [--namespace N] [--class C] [-o out.cs|out.rs]
+//!   certo ql codegen <file.ql> --schema <schema.sdl|IR.json> --lang csharp|rust [--dialect ..] [--namespace N] [--class C] [--async] [-o out.cs|out.rs]
 
 use certo_diagnostics::{render_all, Severity};
 use certo_sdl::{describe_type, SchemaIR};
@@ -25,6 +25,7 @@ Options:
   --json            (compile) machine-readable output: params, columns, sql, param_order, ir
   --dialect <name>  (compile, codegen) postgres (default) or sqlite
   --lang <name>     (codegen) csharp, or rust (the postgres crate for --dialect postgres, rusqlite for sqlite, mysql for mysql)
+  --async           (codegen, rust) async fn over tokio-postgres (postgres) or mysql_async (mysql); SQLite has no async driver
   --namespace <ns>  (codegen) C# namespace (default Certo.Generated)
   --class <name>    (codegen) the static class holding the methods (default CertoQueries)
   -o <file>         (codegen) write here instead of standard output
@@ -47,6 +48,7 @@ pub fn cmd_ql(args: &[String]) {
     let (mut file, mut schema, mut json) = (None::<PathBuf>, None::<PathBuf>, false);
     let mut dialect = Dialect::Postgres;
     let (mut lang, mut namespace, mut class, mut out) = (None::<String>, None::<String>, None::<String>, None::<PathBuf>);
+    let mut async_code = false;
     let mut it = args[1..].iter();
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -57,6 +59,7 @@ pub fn cmd_ql(args: &[String]) {
                 dialect = Dialect::from_name(n)
                     .unwrap_or_else(|| die(&format!("unknown SQL dialect `{n}` (supported: postgres, sqlite)"), 2));
             }
+            "--async" => async_code = true,
             "--lang" => lang = Some(it.next().unwrap_or_else(|| die("--lang requires a name", 2)).clone()),
             "--namespace" => namespace = Some(it.next().unwrap_or_else(|| die("--namespace requires a name", 2)).clone()),
             "--class" => class = Some(it.next().unwrap_or_else(|| die("--class requires a name", 2)).clone()),
@@ -93,8 +96,14 @@ pub fn cmd_ql(args: &[String]) {
             Some(other) => die(&format!("unknown language `{other}` (supported: csharp, rust)"), 2),
             None => die("--lang is required (supported: csharp, rust)", 2),
         };
+        if async_code && !rust {
+            die("--async is for --lang rust (C# methods are already async)", 2);
+        }
+        if async_code && !certo_ql::async_supported(dialect) {
+            die("there is no async driver for SQLite (rusqlite is synchronous): leave out --async", 2);
+        }
         let code = if rust {
-            certo_ql::generate_rust(&schema, &queries, &certo_ql::RustOptions { dialect })
+            certo_ql::generate_rust(&schema, &queries, &certo_ql::RustOptions { dialect, async_: async_code })
         } else {
             let mut opts = certo_ql::CSharpOptions { dialect, ..Default::default() };
             if let Some(n) = namespace { opts.namespace = n; }
