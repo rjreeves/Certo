@@ -460,6 +460,7 @@ dependencies = [
  "certo-ql",
  "certo-sdl",
  "certo-sql",
+ "mysql",
  "native-tls",
  "openssl",
  "postgres",

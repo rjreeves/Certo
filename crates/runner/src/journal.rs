@@ -51,6 +51,25 @@ pub(crate) fn sqlite_create() -> String {
     )
 }
 
+pub(crate) fn mysql_create() -> String {
+    format!(
+        "CREATE TABLE IF NOT EXISTS `{LOG_TABLE}` (
+            id BIGINT AUTO_INCREMENT PRIMARY KEY,
+            at DATETIME(6) NOT NULL DEFAULT (UTC_TIMESTAMP(6)),
+            action VARCHAR(64) NOT NULL,
+            subject VARCHAR(255) NOT NULL,
+            actor VARCHAR(255) NOT NULL,
+            environment VARCHAR(255),
+            tool VARCHAR(255) NOT NULL,
+            detail TEXT
+        )"
+    )
+}
+
+pub(crate) fn mysql_insert() -> String {
+    format!("INSERT INTO `{LOG_TABLE}` (action, subject, actor, environment, tool, detail) VALUES (?, ?, ?, ?, ?, ?)")
+}
+
 pub(crate) fn pg_insert() -> String {
     format!("INSERT INTO \"{LOG_TABLE}\" (action, subject, actor, environment, tool, detail) VALUES ($1, $2, $3, $4, $5, $6)")
 }

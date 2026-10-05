@@ -399,6 +399,7 @@ fn parse(
 /// Both safety checks: same meaning as the server's text, and valid SDL.
 fn verify(dialect: Dialect, raw: &str, e: &ExprIR, synthetic: &SchemaIR) -> Result<(), String> {
     let rendered = render_expr(dialect, e);
+    let rendered = if dialect == Dialect::Mysql { crate::mysqlexpr::from_render(&rendered) } else { rendered };
     if normalize(&rendered) != normalize(raw) {
         return Err(format!("translation `{rendered}` is not equivalent to the original"));
     }
@@ -452,6 +453,12 @@ fn spellable(enums: &[EnumIR]) -> Vec<EnumIR> {
 /// SQLite spells some defaults in ways PostgreSQL never does: booleans are 0/1
 /// and `gen_uuid()` is a long `randomblob` expression.
 fn sqlite_shortcut(dialect: Dialect, raw: &str, col_ty: &TypeIR) -> Option<ExprIR> {
+    if dialect == Dialect::Mysql {
+        // the one default SDL names that MySQL spells as a long expression
+        let uuid = ExprIR::Call { func: "gen_uuid".into(), args: vec![] };
+        let rendered = crate::mysqlexpr::from_render(&render_expr(dialect, &uuid));
+        return (matches!(col_ty, TypeIR::Builtin(certo_sdl::Builtin::Uuid)) && normalize(raw) == normalize(&rendered)).then_some(uuid);
+    }
     if dialect != Dialect::Sqlite {
         return None;
     }

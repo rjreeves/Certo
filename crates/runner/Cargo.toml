@@ -19,6 +19,7 @@ postgres             = "0.19"
 postgres-native-tls  = "0.5"
 native-tls           = "0.2"
 rusqlite             = { version = "0.32", features = ["bundled"] }
+mysql                = "25"
 
 [dev-dependencies]
 tempfile = "3"

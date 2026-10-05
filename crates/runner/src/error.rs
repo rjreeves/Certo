@@ -42,7 +42,9 @@ impl fmt::Display for RunnerError {
             RunnerError::Drift(m) => write!(f, "migration history problem: {m}"),
             RunnerError::SchemaDrift(m) => write!(f, "database drift: {m}"),
             RunnerError::Database { seq, name, statement, message } => {
-                write!(f, "migration {seq:04}_{name} failed and was rolled back: {message}")?;
+                // MySQL cannot roll DDL back: its message says how to resume instead
+                let outcome = if message.contains(crate::mysql_exec::RESUME_HINT) { "failed" } else { "failed and was rolled back" };
+                write!(f, "migration {seq:04}_{name} {outcome}: {message}")?;
                 if let Some(s) = statement {
                     write!(f, "\n  statement: {s}")?;
                 }

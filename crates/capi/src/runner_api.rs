@@ -102,7 +102,7 @@ fn connect(project: &Project, url: &Option<String>) -> Result<Box<dyn Executor>,
     let Some(url) = url.as_deref().filter(|u| !u.is_empty()) else {
         return Err(error_json(
             "missing_url",
-            "options.url is required (a postgres:// URL, or a database file path for a sqlite project)",
+            "options.url is required (a postgres:// or mysql:// URL, or a database file path for a sqlite project)",
             json!({}),
         ));
     };
@@ -212,6 +212,7 @@ pub fn migration_status(dir: &str, opts: Option<&str>) -> String {
             })).collect::<Vec<_>>(),
             "pending": s.pending.iter().map(|(seq, name)| json!({ "seq": seq, "name": name })).collect::<Vec<_>>(),
             "views": { "defined": s.views.defined, "recorded": s.views.recorded, "in_sync": s.views.in_sync, "error": s.views.error },
+            "partial": s.partial.iter().map(|p| json!({ "seq": p.seq, "done": p.done, "total": p.total })).collect::<Vec<_>>(),
         })
         .to_string(),
         Err(e) => runner_error(&e),
@@ -387,22 +388,23 @@ pub fn adopt(dir: &str, opts: Option<&str>) -> String {
 #[serde(deny_unknown_fields)]
 struct ImportOpts {
     url: Option<String>,
-    /// `postgres` or `sqlite`; by default `postgres` for a `postgres://` URL and `sqlite` otherwise.
+    /// `postgres`, `sqlite` or `mysql`; by default taken from the URL (`postgres://`, `mysql://`), else `sqlite`.
     dialect: Option<String>,
 }
 
 /// Read a database's schema as SDL, with no project and without changing the database. options:
-/// `{"url": "...", "dialect"?: "postgres"|"sqlite"}`. Result: `schema_sdl`, `imported` (counts) and
+/// `{"url": "...", "dialect"?: "postgres"|"sqlite"|"mysql"}`. Result: `schema_sdl`, `imported` (counts) and
 /// `omissions` (everything SDL cannot express, left out).
 pub fn import(opts: Option<&str>) -> String {
     let o: ImportOpts = match parse_opts(opts) { Ok(o) => o, Err(e) => return e };
     let Some(url) = o.url.as_deref().filter(|u| !u.is_empty()) else {
-        return error_json("missing_url", "options.url is required (a postgres:// URL, or a database file path for sqlite)", json!({}));
+        return error_json("missing_url", "options.url is required (a postgres:// or mysql:// URL, or a database file path for sqlite)", json!({}));
     };
     let dialect = match o.dialect.as_deref() {
-        Some(d @ ("postgres" | "sqlite")) => d,
-        Some(other) => return error_json("invalid_options", format!("unknown dialect `{other}` (postgres, sqlite)"), json!({})),
+        Some(d @ ("postgres" | "sqlite" | "mysql")) => d,
+        Some(other) => return error_json("invalid_options", format!("unknown dialect `{other}` (postgres, sqlite, mysql)"), json!({})),
         None if url.starts_with("postgres://") || url.starts_with("postgresql://") => "postgres",
+        None if url.starts_with("mysql://") => "mysql",
         None => "sqlite",
     };
     if dialect == "sqlite" {

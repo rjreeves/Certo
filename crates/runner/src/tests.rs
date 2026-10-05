@@ -883,6 +883,6 @@ fn a_sqlite_project_freezes_sqlite_scripts_but_the_postgres_executor_refuses_it(
 
     let mut fake = Fake::default();
     let err = apply(&p, &mut fake, &ApplyOptions::default()).unwrap_err();
-    assert!(matches!(&err, RunnerError::Project(m) if m.contains("PostgreSQL only")), "{err}");
+    assert!(matches!(&err, RunnerError::Project(m) if m.contains("the project dialect is `sqlite` but this executor talks `postgres`")), "{err}");
     assert!(fake.ran.is_empty() && !fake.ensured);
 }
