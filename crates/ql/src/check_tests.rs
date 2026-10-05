@@ -1763,3 +1763,47 @@ fn views_declared_in_the_schema_are_read_like_tables_and_never_written() {
     let bad = compile_full(&ir, "view adults { from people p select p.id }", Dialect::Postgres);
     assert!(bad.diagnostics.iter().any(|d| d.code == "QL262"), "{:?}", bad.diagnostics);
 }
+
+// ---- MySQL --------------------------------------------------------------- //
+
+fn my(src: &str) -> String {
+    let c = compile_full(&schema(), src, Dialect::Mysql);
+    let s = c.statements.unwrap_or_else(|| panic!("{:?}", c.diagnostics)).remove(0);
+    s.sql().to_string()
+}
+
+#[test]
+fn mysql_placeholders_are_positional_one_per_use() {
+    let c = compile_full(&schema(), "query q(n: int) { from orders o where o.qty >= :n and o.id >= :n select o.id, :n + 1 as next limit :n }", Dialect::Mysql);
+    let s = &c.statements.unwrap()[0];
+    assert_eq!(s.param_order(), ["n", "n", "n", "n"], "listed once per use, in the order they appear");
+    assert!(s.sql().contains("`o`.`qty` >= ?") && !s.sql().contains("$1") && !s.sql().contains("?1"), "{}", s.sql());
+}
+
+#[test]
+fn mysql_spells_things_its_own_way() {
+    let sql = my("query q() { from orders o group by o.status select o.status, count(*) filter (where o.paid) as n, string_agg(o.status, \",\" order by o.id) as s }");
+    assert!(sql.contains("count(CASE WHEN `o`.`paid` THEN 1 END)"), "{sql}");
+    assert!(sql.contains("GROUP_CONCAT(`o`.`status` ORDER BY `o`.`id` SEPARATOR ',')"), "{sql}");
+    assert!(my("query q() { from orders o select o.qty / 2 as half }").contains("(`o`.`qty` DIV 2)"));
+    assert!(my("query q() { from orders o select o.total / 2 as half }").contains("(`o`.`total` / 2)"), "a decimal division stays a division");
+    assert!(my("query q() { from customers c select c.name || \"x\" as n }").contains("CONCAT(`c`.`name`, 'x')"));
+    assert!(my("query q() { from orders o select o.id order by o.id offset 2 }").contains("LIMIT 18446744073709551615\nOFFSET 2"));
+    let json = my("query q() { from customers c select json_text(c.meta, \"a\", 0) as t }");
+    assert!(json.contains("JSON_UNQUOTE(JSON_EXTRACT(`c`.`meta`, '$.\"a\"[0]'))"), "{json}");
+    // an integer result column has the integer type, whatever MySQL would call its sum
+    assert!(my("query q() { from orders o select sum(o.qty) as s }").contains("CAST(sum(`o`.`qty`) AS SIGNED) AS `s`"));
+}
+
+#[test]
+fn mysql_upsert_and_inserts() {
+    let sql = my("insert up(n: int) { into items set id = 1, order_id = 1, sku = \"x\", price = 1, qty = :n on conflict (id) do update set qty = excluded.qty + items.qty }");
+    assert!(
+        sql.starts_with("INSERT INTO `items` (`id`, `order_id`, `sku`, `price`, `qty`)
+VALUES (1, 1, 'x', 1, ?) AS `excluded`
+ON DUPLICATE KEY UPDATE `qty` = (`excluded`.`qty` + `items`.`qty`)"),
+        "{sql}"
+    );
+    assert!(my("insert up() { into items set id = 1, order_id = 1, sku = \"x\", price = 1, qty = 1 on conflict (id) do nothing }").contains("ON DUPLICATE KEY UPDATE `id` = `id`"));
+    assert!(my("insert bare() { into items set order_id = 1, sku = \"z\", price = 1, qty = 1 }").starts_with("INSERT INTO `items` (`order_id`"), "no alias on an insert");
+}

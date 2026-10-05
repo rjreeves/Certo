@@ -434,6 +434,7 @@ dependencies = [
  "certo-sdl",
  "certo-sql",
  "chrono",
+ "mysql",
  "postgres",
  "rusqlite",
  "rust_decimal",

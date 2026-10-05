@@ -1,6 +1,8 @@
 //! Lower a checked `QueryIR` to SQL.
 //!
-//! Parameters become numbered placeholders (PostgreSQL `$1`, SQLite `?1`, ...)
+//! Parameters become numbered placeholders (PostgreSQL `$1`, SQLite `?1`, ...; MySQL has only
+//! positional `?`, so every use of a parameter is a placeholder of its own and `param_order` lists it
+//! once per use, in the order the placeholders appear in the text)
 //! in order of first use, each cast to its declared type so the engine never
 //! has to guess;
 //! `param_order` says which declared parameter is which placeholder. Every
@@ -29,13 +31,10 @@ pub struct LowerOptions {
     pub enums_as_text: bool,
 }
 
-/// QL has no MySQL lowering yet: `compile` refuses the dialect before anything is lowered.
-const MYSQL_NOT_YET: &str = "QL does not lower to MySQL yet (compile rejects it first)";
-
 pub fn lower(dialect: Dialect, q: &QueryIR) -> Lowered { lower_with(dialect, q, LowerOptions::default()) }
 
 pub fn lower_with(dialect: Dialect, q: &QueryIR, opts: LowerOptions) -> Lowered {
-    let mut l = Lowerer { dialect, params: &q.params, order: Vec::new(), bare_columns: false, enums_as_text: opts.enums_as_text, cast_enums: false };
+    let mut l = Lowerer { dialect, params: &q.params, order: Vec::new(), bare_columns: false, enums_as_text: opts.enums_as_text, cast_enums: false, existing_row: None };
     let sql = l.query(q);
     Lowered { sql, param_order: l.order }
 }
@@ -44,7 +43,7 @@ pub fn lower_with(dialect: Dialect, q: &QueryIR, opts: LowerOptions) -> Lowered 
 pub fn lower_mutation(dialect: Dialect, m: &MutationIR) -> Lowered { lower_mutation_with(dialect, m, LowerOptions::default()) }
 
 pub fn lower_mutation_with(dialect: Dialect, m: &MutationIR, opts: LowerOptions) -> Lowered {
-    let mut l = Lowerer { dialect, params: &m.params, order: Vec::new(), bare_columns: false, enums_as_text: opts.enums_as_text, cast_enums: false };
+    let mut l = Lowerer { dialect, params: &m.params, order: Vec::new(), bare_columns: false, enums_as_text: opts.enums_as_text, cast_enums: false, existing_row: None };
     let sql = l.mutation(m);
     Lowered { sql, param_order: l.order }
 }
@@ -58,19 +57,30 @@ struct Lowerer<'a> {
     enums_as_text: bool,
     /// Applies to the next column list only (the statement's own, not a subquery's).
     cast_enums: bool,
+    /// MySQL: the alias an `insert ... on conflict` update uses for the existing row is written as the table's name
+    /// (an `INSERT` target cannot have an alias there).
+    existing_row: Option<(String, String)>,
 }
 
 impl Lowerer<'_> {
     fn id(&self, s: &str) -> String { quote_ident(self.dialect, s) }
 
     fn mutation(&mut self, m: &MutationIR) -> String {
-        let table = format!("{} AS {}", self.id(&m.table), self.id(&m.alias));
+        let mysql = self.dialect == Dialect::Mysql;
+        // MySQL's INSERT takes no alias, and its `with` goes after the column list
+        let table = if mysql && m.kind == MutationKind::Insert {
+            self.id(&m.table)
+        } else {
+            format!("{} AS {}", self.id(&m.table), self.id(&m.alias))
+        };
         let mut lines = self.with_lines(&m.ctes);
+        let moved_ctes = if mysql && m.kind == MutationKind::Insert { std::mem::take(&mut lines) } else { Vec::new() };
         match m.kind {
             MutationKind::Insert => {
                 if let Some(src) = &m.source {
                     let cols: Vec<String> = m.insert_columns.iter().map(|c| self.id(c)).collect();
                     lines.push(format!("INSERT INTO {table} ({})", cols.join(", ")));
+                    lines.extend(moved_ctes.iter().cloned());
                     let prefix = self.with_lines(&src.ctes);
                     let mut sql = self.select_lines(&src.sources, &src.select, &src.filter, &src.group_by, &src.having, src.distinct, &src.unions, &src.order_by, &src.limit, &src.offset);
                     // SQLite cannot tell `ON CONFLICT` from a join's `ON` after a bare `INSERT ... SELECT`
@@ -83,6 +93,7 @@ impl Lowerer<'_> {
                 } else if !m.rows.is_empty() {
                     let cols: Vec<String> = m.insert_columns.iter().map(|c| self.id(c)).collect();
                     lines.push(format!("INSERT INTO {table} ({})", cols.join(", ")));
+                    lines.extend(moved_ctes.iter().cloned());
                     let rows: Vec<String> = m
                         .rows
                         .iter()
@@ -92,14 +103,35 @@ impl Lowerer<'_> {
                 } else {
                     let cols: Vec<String> = m.assignments.iter().map(|a| self.id(&a.column)).collect();
                     let vals: Vec<String> = m.assignments.iter().map(|a| self.expr(&a.expr)).collect();
-                    if cols.is_empty() {
+                    if cols.is_empty() && mysql {
+                        lines.push(format!("INSERT INTO {table} () VALUES ()"));
+                    } else if cols.is_empty() {
                         lines.push(format!("INSERT INTO {table} DEFAULT VALUES"));
                     } else {
                         lines.push(format!("INSERT INTO {table} ({})", cols.join(", ")));
                         lines.push(format!("VALUES ({})", vals.join(", ")));
                     }
                 }
-                if let Some(c) = &m.conflict {
+                if let (true, Some(c)) = (mysql, &m.conflict) {
+                    // MySQL's upsert fires on any unique key (the rules pass allows it only where that is the target
+                    // key); "do nothing" is an update that changes nothing
+                    match &c.action {
+                        ConflictActionIR::Nothing => {
+                            let col = self.id(&c.columns[0]);
+                            lines.push(format!("ON DUPLICATE KEY UPDATE {col} = {col}"));
+                        }
+                        ConflictActionIR::Update { assignments } => {
+                            self.existing_row = Some((m.alias.clone(), m.table.clone()));
+                            let set = self.set_list(assignments);
+                            self.existing_row = None;
+                            // the incoming row is `excluded`, as in PostgreSQL and SQLite
+                            if let Some(last) = lines.last_mut() {
+                                last.push_str(" AS `excluded`");
+                            }
+                            lines.push(format!("ON DUPLICATE KEY UPDATE {set}"));
+                        }
+                    }
+                } else if let Some(c) = &m.conflict {
                     let target: Vec<String> = c.columns.iter().map(|x| self.id(x)).collect();
                     match &c.action {
                         ConflictActionIR::Nothing => {
@@ -122,7 +154,7 @@ impl Lowerer<'_> {
         if let Some(f) = &m.filter {
             lines.push(format!("WHERE {}", self.expr(f)));
         }
-        if !m.returning.is_empty() {
+        if !m.returning.is_empty() && !mysql {
             self.bare_columns = self.dialect == Dialect::Sqlite;
             let cast = self.enums_as_text;
             let cols: Vec<String> = m.returning.iter().map(|c| self.output(c, cast)).collect();
@@ -144,6 +176,16 @@ impl Lowerer<'_> {
         let e = self.expr(&c.expr);
         let e = if cast && self.dialect == Dialect::Postgres && matches!(c.ty, certo_sdl::TypeIR::Enum(_)) {
             format!("({e})::text")
+        } else if self.dialect == Dialect::Mysql && !matches!(c.expr, QExpr::Column { .. }) {
+            // MySQL gives sums and averages of integers as decimals and its own numeric types elsewhere: a result column
+            // has the type the query declares
+            use certo_sdl::{Builtin, TypeIR};
+            match &c.ty {
+                TypeIR::Builtin(Builtin::SmallInt | Builtin::Int | Builtin::BigInt) => format!("CAST({e} AS SIGNED)"),
+                TypeIR::Builtin(Builtin::Real) => format!("CAST({e} AS FLOAT)"),
+                TypeIR::Builtin(Builtin::Float) => format!("CAST({e} AS DOUBLE)"),
+                _ => e,
+            }
         } else {
             e
         };
@@ -259,6 +301,8 @@ impl Lowerer<'_> {
             lines.push(format!("LIMIT {}", self.expr(l)));
         } else if offset.is_some() && self.dialect == Dialect::Sqlite {
             lines.push("LIMIT -1".to_string()); // SQLite has no OFFSET without LIMIT
+        } else if offset.is_some() && self.dialect == Dialect::Mysql {
+            lines.push("LIMIT 18446744073709551615".to_string()); // nor has MySQL
         }
         if let Some(o) = offset {
             lines.push(format!("OFFSET {}", self.expr(o)));
@@ -276,6 +320,11 @@ impl Lowerer<'_> {
     }
 
     fn param(&mut self, name: &str) -> String {
+        if self.dialect == Dialect::Mysql {
+            // positional only: each use is a placeholder of its own
+            self.order.push(name.to_string());
+            return "?".to_string();
+        }
         let idx = match self.order.iter().position(|p| p == name) {
             Some(i) => i + 1,
             None => {
@@ -289,7 +338,7 @@ impl Lowerer<'_> {
             (Dialect::Postgres, None) => format!("${idx}"),
             (Dialect::Sqlite, Some(t)) => format!("CAST(?{idx} AS {t})"),
             (Dialect::Sqlite, None) => format!("?{idx}"),
-            (Dialect::Mysql, _) => unreachable!("{MYSQL_NOT_YET}"),
+            (Dialect::Mysql, _) => unreachable!("handled above"),
         }
     }
 
@@ -305,9 +354,13 @@ impl Lowerer<'_> {
             // the output column of a set operation (what `order by` names)
             QExpr::Column { source, column } if source.is_empty() => self.id(column),
             QExpr::Column { column, .. } if self.bare_columns => self.id(column),
+            QExpr::Column { source, column } if self.existing_row.as_ref().is_some_and(|(alias, _)| alias == source) => {
+                let table = self.existing_row.as_ref().map(|(_, t)| t.clone()).unwrap_or_default();
+                format!("{}.{}", self.id(&table), self.id(column))
+            }
             QExpr::Column { source, column } => format!("{}.{}", self.id(source), self.id(column)),
             QExpr::Param { name } => self.param(name),
-            QExpr::Binary { op, lhs, rhs } => {
+            QExpr::Binary { op, lhs, rhs, int_div } => {
                 let sql_op = match op {
                     BinaryOp::Eq => "=",
                     BinaryOp::Ne => "<>",
@@ -318,6 +371,7 @@ impl Lowerer<'_> {
                     BinaryOp::Add => "+",
                     BinaryOp::Sub => "-",
                     BinaryOp::Mul => "*",
+                    BinaryOp::Div if *int_div && self.dialect == Dialect::Mysql => "DIV",
                     BinaryOp::Div => "/",
                     BinaryOp::And => "AND",
                     BinaryOp::Or => "OR",
@@ -336,15 +390,18 @@ impl Lowerer<'_> {
                 format!("({} {}LIKE {})", self.expr(expr), if *negated { "NOT " } else { "" }, self.expr(pattern))
             }
             QExpr::Call { func, args } => match func.as_str() {
+                "today" if self.dialect == Dialect::Mysql => "UTC_DATE()".to_string(),
                 "today" => "CURRENT_DATE".to_string(),
                 "now" if self.dialect == Dialect::Sqlite => "CURRENT_TIMESTAMP".to_string(),
+                "now" if self.dialect == Dialect::Mysql => "UTC_TIMESTAMP(6)".to_string(),
                 "date_part" | "date_part_utc" => {
                     let (QExpr::String { value: part }, Some(x)) = (&args[0], args.get(1)) else { unreachable!("checked") };
                     let x = self.expr(x);
                     match self.dialect {
                         Dialect::Postgres if func == "date_part_utc" => format!("CAST(EXTRACT({} FROM ({x} AT TIME ZONE 'UTC')) AS integer)", part.to_uppercase()),
                         Dialect::Postgres => format!("CAST(EXTRACT({} FROM {x}) AS integer)", part.to_uppercase()),
-                        Dialect::Mysql => unreachable!("{MYSQL_NOT_YET}"),
+                        // DATETIME holds UTC, so there is no zone to convert from
+                        Dialect::Mysql => format!("CAST(EXTRACT({} FROM {x}) AS SIGNED)", part.to_uppercase()),
                         Dialect::Sqlite => {
                             let f = match part.as_str() { "year" => "%Y", "month" => "%m", "day" => "%d", "hour" => "%H", _ => "%M" };
                             format!("CAST(strftime('{f}', {x}) AS INTEGER)")
@@ -355,6 +412,7 @@ impl Lowerer<'_> {
                 "left" | "right" => {
                     let (s, QExpr::Number { value: n }) = (self.expr(&args[0]), &args[1]) else { unreachable!("checked") };
                     match (func.as_str(), self.dialect) {
+                        (_, Dialect::Mysql) => format!("{}({s}, {n})", func.to_uppercase()),
                         ("left", _) => format!("substr({s}, 1, {n})"),
                         ("right", Dialect::Postgres) => format!("right({s}, {n})"),
                         _ => format!("substr({s}, -{n})"),
@@ -363,39 +421,76 @@ impl Lowerer<'_> {
                 "starts_with" => {
                     // the same on both: the prefix is the start of the text (an empty prefix always is)
                     let (s, p1, p2) = (self.expr(&args[0]), self.expr(&args[1]), self.expr(&args[1]));
-                    format!("(substr({s}, 1, length({p1})) = {p2})")
+                    let length = if self.dialect == Dialect::Mysql { "CHAR_LENGTH" } else { "length" };
+                    format!("(substr({s}, 1, {length}({p1})) = {p2})")
                 }
                 "add_days" => {
                     let (d, n) = (self.expr(&args[0]), self.expr(&args[1]));
                     match self.dialect {
                         Dialect::Postgres => format!("({d} + CAST({n} AS integer))"),
                         Dialect::Sqlite => format!("date({d}, CAST({n} AS TEXT) || ' days')"),
-                        Dialect::Mysql => unreachable!("{MYSQL_NOT_YET}"),
+                        Dialect::Mysql => format!("DATE_ADD({d}, INTERVAL CAST({n} AS SIGNED) DAY)"),
                     }
+                }
+                "days_between" if self.dialect == Dialect::Mysql => {
+                    // DATEDIFF(to, from): the placeholders must be met in the order they are written
+                    let (to, from) = (self.expr(&args[1]), self.expr(&args[0]));
+                    format!("DATEDIFF({to}, {from})")
                 }
                 "days_between" => {
                     let (from, to) = (self.expr(&args[0]), self.expr(&args[1]));
                     match self.dialect {
                         Dialect::Postgres => format!("({to} - {from})"),
                         Dialect::Sqlite => format!("CAST(julianday({to}) - julianday({from}) AS INTEGER)"),
-                        Dialect::Mysql => unreachable!("{MYSQL_NOT_YET}"),
+                        Dialect::Mysql => unreachable!("handled above"),
                     }
                 }
                 "position" => {
                     // PostgreSQL strpos(haystack, needle) and SQLite instr(haystack, needle) agree
                     let a: Vec<String> = args.iter().map(|a| self.expr(a)).collect();
-                    let f = if self.dialect == Dialect::Postgres { "strpos" } else { "instr" };
+                    let f = if self.dialect == Dialect::Postgres { "strpos" } else { "instr" }; // MySQL has INSTR too
                     format!("{f}({})", a.join(", "))
                 }
                 other => {
                     let name = match (self.dialect, other) {
                         (Dialect::Postgres, "trim") => "btrim",
+                        // MySQL's LENGTH counts bytes
+                        (Dialect::Mysql, "length") => "CHAR_LENGTH",
                         _ => other,
                     };
                     let a: Vec<String> = args.iter().map(|a| self.expr(a)).collect();
                     format!("{name}({})", a.join(", "))
                 }
             },
+            QExpr::Agg { func, arg, distinct, filter, separator, order_by } if self.dialect == Dialect::Mysql => {
+                // no FILTER clause: the rows left out become NULLs, which an aggregate skips (`count(*)` counts 1s)
+                let value = |l: &mut Self| -> Option<String> {
+                    match (filter, arg) {
+                        (Some(f), Some(a)) => {
+                            let f = l.expr(f);
+                            Some(format!("CASE WHEN {f} THEN {} END", l.expr(a)))
+                        }
+                        (Some(f), None) => Some(format!("CASE WHEN {} THEN 1 END", l.expr(f))),
+                        (None, Some(a)) => Some(l.expr(a)),
+                        (None, None) => None,
+                    }
+                };
+                match (arg, separator) {
+                    (None, _) if filter.is_none() => format!("{func}(*)"),
+                    (None, _) => format!("{func}({})", value(self).unwrap_or_default()),
+                    (Some(_), Some(sep)) => {
+                        let text = value(self).unwrap_or_default();
+                        let order = if order_by.is_empty() {
+                            String::new()
+                        } else {
+                            let o: Vec<String> = order_by.iter().map(|o| format!("{}{}", self.expr(&o.expr), if o.desc { " DESC" } else { "" })).collect();
+                            format!(" ORDER BY {}", o.join(", "))
+                        };
+                        format!("GROUP_CONCAT({text}{order} SEPARATOR {})", quote_literal(self.dialect, sep))
+                    }
+                    (Some(_), None) => format!("{func}({}{})", if *distinct { "DISTINCT " } else { "" }, value(self).unwrap_or_default()),
+                }
+            }
             QExpr::Agg { func, arg, distinct, filter, separator, order_by } => {
                 let mut sql = match (arg, separator) {
                     (None, _) => format!("{func}(*)"),
@@ -421,7 +516,11 @@ impl Lowerer<'_> {
             }
             QExpr::Concat { parts } => {
                 let p: Vec<String> = parts.iter().map(|e| self.expr(e)).collect();
-                format!("({})", p.join(" || "))
+                if self.dialect == Dialect::Mysql {
+                    format!("CONCAT({})", p.join(", "))
+                } else {
+                    format!("({})", p.join(" || "))
+                }
             }
             QExpr::Window { call, partition_by, order_by, frame } => {
                 let call = self.expr(call);
@@ -480,6 +579,9 @@ impl Lowerer<'_> {
     /// the same answers: a string as text, a whole number below 10^18 as `bigint`, `true` / `false` as a boolean, and NULL
     /// for a missing key or a value of another kind (`json_has` is false instead of NULL).
     fn json_function(&mut self, func: &str, args: &[QExpr]) -> String {
+        if self.dialect == Dialect::Mysql {
+            return self.json_function_mysql(func, args);
+        }
         let j = self.expr(&args[0]);
         let keys: Vec<(String, bool)> = args[1..]
             .iter()
@@ -490,7 +592,7 @@ impl Lowerer<'_> {
             })
             .collect();
         match self.dialect {
-            Dialect::Mysql => unreachable!("{MYSQL_NOT_YET}"),
+            Dialect::Mysql => unreachable!("handled above"),
             Dialect::Postgres => {
                 let path = format!("'{{{}}}'", keys.iter().map(|(k, _)| k.as_str()).collect::<Vec<_>>().join(","));
                 let x = format!("(({j})::jsonb #> {path})");
@@ -515,6 +617,42 @@ impl Lowerer<'_> {
                     _ => format!("(CASE WHEN json_valid({j}) THEN {ty} IS NOT NULL ELSE FALSE END)"),
                 }
             }
+        }
+    }
+}
+
+impl Lowerer<'_> {
+    /// The same four functions on MySQL. The json value is written again wherever it is used (a parameter must be
+    /// one placeholder per use), in the order the text reads.
+    fn json_function_mysql(&mut self, func: &str, args: &[QExpr]) -> String {
+        let mut path = String::from("$");
+        for k in &args[1..] {
+            match k {
+                QExpr::String { value } => path.push_str(&format!(".\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))),
+                QExpr::Number { value } => path.push_str(&format!("[{value}]")),
+                _ => unreachable!("checked"),
+            }
+        }
+        let path = quote_literal(self.dialect, &path);
+        let x = |l: &mut Self| format!("JSON_EXTRACT({}, {path})", l.expr(&args[0]));
+        match func {
+            "json_text" => {
+                let (a, b) = (format!("JSON_TYPE({})", x(self)), format!("JSON_UNQUOTE({})", x(self)));
+                format!("(CASE WHEN {a} = 'STRING' THEN {b} END)")
+            }
+            "json_int" => {
+                // MySQL calls a positive whole number beyond 32 bits UNSIGNED INTEGER
+                let (a, b, c) = (format!("JSON_TYPE({})", x(self)), format!("CAST({} AS SIGNED)", x(self)), format!("CAST({} AS SIGNED)", x(self)));
+                let (d, e, f) = (format!("JSON_TYPE({})", x(self)), format!("CAST({} AS UNSIGNED)", x(self)), format!("CAST({} AS SIGNED)", x(self)));
+                format!(
+                    "(CASE WHEN {a} = 'INTEGER' AND {b} BETWEEN -999999999999999999 AND 999999999999999999 THEN {c}                      WHEN {d} = 'UNSIGNED INTEGER' AND {e} <= 999999999999999999 THEN {f} END)"
+                )
+            }
+            "json_bool" => {
+                let (a, b) = (format!("JSON_TYPE({})", x(self)), format!("JSON_UNQUOTE({})", x(self)));
+                format!("(CASE WHEN {a} = 'BOOLEAN' THEN {b} = 'true' END)")
+            }
+            _ => format!("COALESCE(JSON_CONTAINS_PATH({}, 'one', {path}), FALSE)", self.expr(&args[0])),
         }
     }
 }

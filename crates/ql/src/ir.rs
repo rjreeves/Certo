@@ -134,7 +134,14 @@ pub enum QExpr {
     Null,
     Column { source: String, column: String },
     Param { name: String },
-    Binary { op: BinaryOp, lhs: Box<QExpr>, rhs: Box<QExpr> },
+    /// `int_div`: a division whose result is an integer type (integer division; MySQL's `/` would give a decimal).
+    Binary {
+        op: BinaryOp,
+        lhs: Box<QExpr>,
+        rhs: Box<QExpr>,
+        #[serde(default, skip_serializing_if = "is_false")]
+        int_div: bool,
+    },
     Not { expr: Box<QExpr> },
     IsNull { expr: Box<QExpr>, negated: bool },
     In { expr: Box<QExpr>, list: Vec<QExpr>, negated: bool },
