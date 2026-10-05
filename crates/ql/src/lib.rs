@@ -16,6 +16,7 @@
 pub mod ast;
 pub mod check;
 pub mod csharp;
+mod mysql_rules;
 pub mod rust;
 pub mod fragments;
 pub mod views;
@@ -140,9 +141,6 @@ pub struct Compiled {
 /// `compile`, with the file's fragments and views too. A view is read as a table by every statement in the file.
 pub fn compile_full(schema: &SchemaIR, src: &str, dialect: Dialect) -> Compiled {
     let fail = |diagnostics| Compiled { statements: None, fragments: Vec::new(), views: Vec::new(), diagnostics };
-    if dialect == Dialect::Mysql {
-        return fail(vec![Diagnostic::error("QL099", "QL does not support MySQL yet: use postgres or sqlite")]);
-    }
     let (mut file, mut diags) = parse(src);
     if has_errors(&diags) {
         return fail(diags);
@@ -165,6 +163,12 @@ pub fn compile_full(schema: &SchemaIR, src: &str, dialect: Dialect) -> Compiled 
     let mutations = check_mutations(schema, &file, &mut diags);
     if has_errors(&diags) {
         return fail(diags);
+    }
+    if dialect == Dialect::Mysql {
+        mysql_rules::check(schema, &queries, &mutations, &mut diags);
+        if has_errors(&diags) {
+            return fail(diags);
+        }
     }
     let mut out: Vec<Statement> = queries
         .into_iter()

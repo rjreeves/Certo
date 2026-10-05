@@ -277,6 +277,22 @@ naive types. The first lines of the file list the crates and features it needs. 
 `CURRENT_TIMESTAMP` is (UTC, no offset), decimals are bound as text and read from whichever number or text SQLite holds, and
 uuids are text. The generated code is compiled and run against live SQLite and PostgreSQL in `tests/rust_codegen.rs`.
 
+## MySQL
+
+`--dialect mysql` lowers QL for MySQL 8. Parameters are positional `?` (MySQL cannot reuse a placeholder), so `param_order` lists a
+parameter once per use, in the order the placeholders appear; integer results are cast to the declared type (MySQL calls the sum of
+integers a decimal); `/` between integers is `DIV`; `||` is `CONCAT`; `filter (where ...)` becomes `CASE`; `string_agg` is
+`GROUP_CONCAT` (set `group_concat_max_len` high enough on the connection: the default cuts text at 1024 bytes); the JSON functions
+use `JSON_EXTRACT` and friends; dates and `now()` are UTC (`DATETIME` holds UTC, as in the schema lowering). An upsert becomes
+`ON DUPLICATE KEY UPDATE` with the incoming row as `excluded`, and an update's `existing row` is the table's own name.
+
+What MySQL cannot do the same way is refused, with a reason: `returning` (`QL270`), `groups` window frames (`QL271`), `on conflict`
+unless its target is the table's only unique key and the rows are not an `insert ... select` (`QL272`, because MySQL's upsert reacts to
+any unique key), and an `update` / `delete` that reads the table it changes in a subquery (`QL273`, MySQL error 1093). Known
+differences that are not refused: a foreign key is checked row by row (a self-referencing `delete` of a parent and its child in one
+statement fails on MySQL), division by zero in a `select` is NULL, and `order by` puts NULLs first for ascending (as SQLite does).
+The tests run 32 queries over the same data on SQLite and MySQL and compare the rows (`tests/live_mysql.rs`).
+
 ## Not covered yet
 
 - No named window definitions (`window w as (...)`), frame `exclude`

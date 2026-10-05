@@ -154,6 +154,9 @@ pub fn ql_codegen(schema_ir: &str, ql_source: &str, options: &str) -> String {
     let Some(dialect) = Dialect::from_name(dialect_name) else {
         return error("unknown_dialect", format!("unknown SQL dialect `{dialect_name}` (supported: postgres, sqlite)"));
     };
+    if dialect == Dialect::Mysql {
+        return error("unsupported_dialect", "code generation for MySQL is not available yet (supported: postgres, sqlite)");
+    }
     let schema = match parse_ir(schema_ir, "schema") { Ok(v) => v, Err(e) => return e };
     let (statements, diags) = certo_ql::compile(&schema, ql_source, dialect);
     let mut cs = certo_ql::CSharpOptions { dialect, ..Default::default() };

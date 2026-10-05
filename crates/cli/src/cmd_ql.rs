@@ -87,6 +87,9 @@ pub fn cmd_ql(args: &[String]) {
     };
 
     if sub == "codegen" {
+        if dialect == certo_sql::Dialect::Mysql {
+            die("code generation for MySQL is not available yet (supported: postgres, sqlite)", 2);
+        }
         let rust = match lang.as_deref() {
             Some("csharp" | "cs" | "c#") => false,
             Some("rust" | "rs") => true,

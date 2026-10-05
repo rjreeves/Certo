@@ -94,8 +94,8 @@ pub(crate) fn expr(e: &ExprIR) -> Result<String, String> {
         ExprIR::EnumVariant { variant, .. } => lit(variant),
         ExprIR::NextVal { .. } => return Err("MySQL has no sequences (`nextval`)".into()),
         ExprIR::Call { func, args } => match func.as_str() {
-            "today" => "CURRENT_DATE".to_string(),
-            "now" => "CURRENT_TIMESTAMP(6)".to_string(),
+            "today" => "UTC_DATE()".to_string(),
+            "now" => "UTC_TIMESTAMP(6)".to_string(),
             "gen_uuid" => UUID_V4.to_string(),
             "is_null" => format!("({} IS NULL)", expr(&args[0])?),
             // MySQL's LENGTH counts bytes

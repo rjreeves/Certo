@@ -1337,7 +1337,7 @@ impl<'a> Checker<'a> {
                 .and_then(|c| rank(&c.ty))
                 .is_some_and(|r| r <= max),
             QExpr::Param { name } => self.params.iter().find(|p| &p.name == name).and_then(|p| rank(&p.ty)).is_some_and(|r| r <= max),
-            QExpr::Binary { op: BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div, lhs, rhs } => {
+            QExpr::Binary { op: BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div, lhs, rhs, .. } => {
                 self.fits(lhs, max) && self.fits(rhs, max)
             }
             _ => false,
@@ -1797,7 +1797,8 @@ impl<'a> Checker<'a> {
                 boolean
             }
         };
-        Some(Typed { e: QExpr::Binary { op, lhs: Box::new(l.e), rhs: Box::new(r.e) }, t, nullable, agg })
+        let int_div = op == Div && matches!(&t, T::Known(TypeIR::Builtin(Builtin::SmallInt | Builtin::Int | Builtin::BigInt)));
+        Some(Typed { e: QExpr::Binary { op, lhs: Box::new(l.e), rhs: Box::new(r.e), int_div }, t, nullable, agg })
     }
 
     #[allow(clippy::too_many_arguments)]
