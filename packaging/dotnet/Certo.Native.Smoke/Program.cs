@@ -381,14 +381,15 @@ finally
         CertoMigrations.Init(pdir, SqlDialect.Sqlite).EnsureOk();
         // reading a schema needs no project and changes nothing; a mistyped path is an error, not a new empty database
         var imported = CertoSdl.Import(legacy).EnsureOk();
-        Check(imported.SchemaSdl.Contains("table t") && imported.Imported is { Tables: 1, Columns: 2 } && imported.Omissions.Any(o => o.Contains("vw")),
-            "typed Import: SDL, counts and omissions from a SQLite file");
+        // a plain select of one table is an SDL view: read back, counted, and not left out
+        Check(imported.SchemaSdl.Contains("table t") && imported.SchemaSdl.Contains("view vw on t (id)") && imported.Imported is { Tables: 1, Columns: 2, Views: 1 } && !imported.Omissions.Any(o => o.Contains("vw")),
+            "typed Import: SDL, counts and views from a SQLite file");
         var missingDb = Path.Combine(adoptProj, "missing.db");
         var notThere = CertoSdl.Import(missingDb);
         Check(!notThere.Ok && notThere.Error?.Code == "connection" && !File.Exists(missingDb), "typed Import: a missing SQLite file is an error and is not created");
         var preview = CertoMigrations.Adopt(pdir, new AdoptOptions { Url = legacy, DryRun = true }).EnsureOk();
         Check(preview.DryRun && preview.Migration is null && preview.Adopted is { Tables: 1, Columns: 2 }, "typed Adopt dry run: counts");
-        Check(preview.Omissions.Any(o => o.Contains("vw")), "typed Adopt: omissions are listed");
+        Check(preview.Adopted.Views == 1 && !preview.Omissions.Any(o => o.Contains("vw")), "typed Adopt: a plain view is adopted as an SDL view, not left out");
         var adopted = CertoMigrations.Adopt(pdir, new AdoptOptions { Url = legacy }).EnsureOk();
         Check(adopted.SchemaSdl.Contains("table t") && adopted.Migration is not null, "typed Adopt: schema and baseline migration");
         Check(CertoMigrations.Drift(pdir, new DriftOptions { Url = legacy }).EnsureOk().InSync, "the adopted project is in sync");
