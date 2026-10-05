@@ -259,6 +259,24 @@ them in the application.
 it, and runs it against SQLite (always) and PostgreSQL (when `CERTO_TEST_PG_URL` is set). The same
 generator is available to hosts as `certo_ql_codegen` in the C ABI.
 
+## Generated host code (Rust)
+
+```
+certo ql codegen queries.ql --schema schema.sdl --lang rust --dialect sqlite -o queries.rs
+```
+
+Plain, synchronous driver code, one driver per dialect: `--dialect postgres` (the default) calls the `postgres` crate and takes
+any `postgres::GenericClient` (a `Client` or a `Transaction`); `--dialect sqlite` calls `rusqlite` and takes a `&Connection`
+(which a `Transaction` derefs to). Each statement is a function named after it in `snake_case`, with one Rust parameter per QL
+parameter (`Option<T>` for `null` ones; text and bytes are borrowed as `&str` and `&[u8]`; a parameter the statement never uses
+keeps its place and gets a leading `_`). A statement that returns rows gives `Vec<<Name>Row>`, a struct with one field per column;
+any other mutation gives the affected-row count (`u64`). The SQL is also a constant (`<NAME>_SQL`). Enums become Rust enums with
+`as_db()`/`from_db()` that read and bind as their database text; `json` is a generated `Json(String)`; `decimal` is
+`rust_decimal::Decimal`, `uuid` is `uuid::Uuid`, `timestamp` is `chrono::DateTime<Utc>`, `timestamp naive` and `date` are chrono's
+naive types. The first lines of the file list the crates and features it needs. Under SQLite, timestamps are written the way
+`CURRENT_TIMESTAMP` is (UTC, no offset), decimals are bound as text and read from whichever number or text SQLite holds, and
+uuids are text. The generated code is compiled and run against live SQLite and PostgreSQL in `tests/rust_codegen.rs`.
+
 ## Not covered yet
 
 - No named window definitions (`window w as (...)`), frame `exclude`

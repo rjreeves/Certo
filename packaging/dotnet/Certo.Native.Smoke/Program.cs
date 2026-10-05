@@ -255,6 +255,8 @@ finally
     var gen = CertoQl.GenerateCSharp(typedSchema.EnsureOk(), "query by_id(id: int) { from users u where u.id == :id select u.id }",
         SqlDialect.Sqlite, "My.Db", "Q");
     Check(gen.Ok && gen.EnsureOk().Contains("namespace My.Db;") && gen.Code!.Contains("public static partial class Q"), "typed code generation");
+    var genRs = CertoQl.GenerateRust(typedSchema.EnsureOk(), "query by_id(id: int) { from users u where u.id == :id select u.id }", SqlDialect.Sqlite);
+    Check(genRs.Ok && genRs.Code!.Contains("pub fn by_id(conn: &rusqlite::Connection, id: i32)") && genRs.Code.Contains("pub struct ByIdRow"), "typed Rust code generation");
     // round trip: the type converter writes what it reads
     var rt = System.Text.Json.JsonSerializer.Serialize(find.Params[0].Type);
     Check(System.Text.Json.JsonSerializer.Deserialize<SchemaType>(rt)!.ToString() == "decimal(10,2)", "SchemaType round-trips through JSON");

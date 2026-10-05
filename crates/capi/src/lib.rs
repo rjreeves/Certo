@@ -142,7 +142,7 @@ pub unsafe extern "C" fn certo_ql_compile(
     }
 }
 
-/// Generate typed host code from QL. `options` is JSON: `{"language":"csharp",
+/// Generate typed host code from QL. `options` is JSON: `{"language":"csharp"|"rust",
 /// "dialect"?, "namespace"?, "class_name"?}`. See `api::ql_codegen` for the result.
 ///
 /// # Safety
