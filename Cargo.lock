@@ -286,7 +286,7 @@ dependencies = [
 
 [[package]]
 name = "certo-capi"
-version = "0.22.0"
+version = "0.22.1"
 dependencies = [
  "certo-ast",
  "certo-diagnostics",
