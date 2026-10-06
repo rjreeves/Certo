@@ -860,9 +860,11 @@ reuse private declaration and factory names without source or C-symbol
 collisions.
 
 Each build also emits `CERTO_HOST_PLUGIN_FINGERPRINT` in generated C. The
-fingerprint is a stable 32-hex-digit value over the Host API version, resolved
-plugin IDs and versions, entry module/factory metadata, and source bytes in
-dependency order. Absolute paths and manifest JSON formatting are excluded.
+fingerprint is a stable SHA-256 value over the Host API version, resolved
+plugin IDs and versions, entry module/factory metadata, capabilities, declared
+dependency ranges and resolved dependency versions, and source bytes in
+dependency order. Absolute paths, manifest listing order, and JSON formatting
+are excluded.
 
 ---
 

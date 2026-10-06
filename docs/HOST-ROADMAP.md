@@ -234,7 +234,7 @@ container platforms.
 
 ## Milestone H6 — Plugin packaging and compatibility
 
-**Status: In progress**
+**Status: Shipped**
 
 Define a versioned plugin contract before supporting separately distributed
 components.
@@ -249,14 +249,16 @@ machine-readable v1 schema in `schemas/host-plugin.schema.json`.
 - ✅ Host and plugin API compatibility policy.
 - ✅ Explicit compile-time discovery and semantic validation for local plugin
   manifests, including deterministic dependency ordering.
-- Duplicate capability and incompatible version diagnostics.
-- Deterministic activation and isolation boundaries.
+- ✅ Duplicate capability and incompatible version diagnostics.
+- ✅ Deterministic activation and isolation boundaries.
+- ✅ Reproducible SHA-256 build fingerprints over the resolved semantic graph
+  and plugin entry sources.
 
 ### Exit criteria
 
-- A manifest schema and compatibility policy are accepted before implementation.
-- Statically packaged plugins require no unsafe runtime type casts.
-- Dependency resolution produces a reproducible build graph.
+- ✅ A manifest schema and compatibility policy are accepted before implementation.
+- ✅ Statically packaged plugins require no unsafe runtime type casts.
+- ✅ Dependency resolution produces a reproducible build graph.
 
 ## Milestone H7 — Dynamic and out-of-process plugins
 
@@ -300,5 +302,5 @@ Every Host milestone must satisfy the following gates:
 
 ## Recommended next implementation item
 
-Add deterministic plugin build fingerprints covering ordered manifests,
-resolved versions, entry sources, and the Host API version.
+Define an H7 decision record comparing trusted native dynamic libraries, WASM
+components, and out-of-process plugins before selecting any runtime boundary.

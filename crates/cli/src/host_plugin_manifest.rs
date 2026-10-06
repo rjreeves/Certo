@@ -6,6 +6,7 @@ use std::{
 
 use semver::Version;
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 
 const HOST_API_VERSION: &str = "1.0.0";
 
@@ -64,32 +65,63 @@ pub struct ResolvedPlugin {
     pub source_path: PathBuf,
     pub module: String,
     pub factory: String,
+    pub capabilities: Vec<(String, Version)>,
+    pub dependencies: Vec<ResolvedDependency>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedDependency {
+    pub id: String,
+    pub min: Version,
+    pub max_exclusive: Version,
+    pub optional: bool,
+    pub resolved_version: Option<Version>,
 }
 
 /// Stable source fingerprint for a resolved static-plugin composition. The
 /// input is deliberately semantic (ordered IDs, versions, entry metadata and
 /// source bytes), never absolute paths or JSON formatting.
 pub fn fingerprint(plugins: &[ResolvedPlugin]) -> Result<String, String> {
-    let mut lanes = [0xcbf29ce484222325u64, 0x84222325cbf29ceu64];
-    fn feed(lanes: &mut [u64; 2], bytes: &[u8]) {
-        for &byte in bytes {
-            lanes[0] = (lanes[0] ^ byte as u64).wrapping_mul(0x100000001b3);
-            lanes[1] = (lanes[1] ^ byte as u64).wrapping_mul(0x100000001b3 ^ 0x9e3779b97f4a7c15);
+    fingerprint_with_host_api(plugins, HOST_API_VERSION)
+}
+
+pub fn build_graph_snapshot(plugins: &[ResolvedPlugin]) -> String {
+    build_graph_snapshot_with_host_api(plugins, HOST_API_VERSION)
+}
+
+fn build_graph_snapshot_with_host_api(plugins: &[ResolvedPlugin], host_api: &str) -> String {
+    let mut snapshot = format!("certo.host.plugins/v2\nhost-api {host_api}\n");
+    for plugin in plugins {
+        snapshot.push_str(&format!("plugin {}@{} module={} factory={}\n",
+            plugin.id, plugin.version, plugin.module, plugin.factory));
+        for (id, version) in &plugin.capabilities {
+            snapshot.push_str(&format!("  capability {id}@{version}\n"));
+        }
+        for dependency in &plugin.dependencies {
+            let resolved = dependency.resolved_version.as_ref()
+                .map(ToString::to_string).unwrap_or_else(|| "absent".into());
+            snapshot.push_str(&format!(
+                "  dependency {} [{},{}) optional={} resolved={}\n",
+                dependency.id, dependency.min, dependency.max_exclusive,
+                dependency.optional, resolved));
         }
     }
-    feed(&mut lanes, b"certo.host.plugins/v1\0host-api=1.0.0\0");
+    snapshot
+}
+
+fn fingerprint_with_host_api(plugins: &[ResolvedPlugin], host_api: &str) -> Result<String, String> {
+    let mut digest = Sha256::new();
+    fn feed(digest: &mut Sha256, value: &[u8]) {
+        digest.update((value.len() as u64).to_le_bytes());
+        digest.update(value);
+    }
+    feed(&mut digest, build_graph_snapshot_with_host_api(plugins, host_api).as_bytes());
     for plugin in plugins {
-        for value in [&plugin.id, &plugin.version.to_string(), &plugin.module, &plugin.factory] {
-            feed(&mut lanes, value.as_bytes());
-            feed(&mut lanes, &[0]);
-        }
         let source = fs::read(&plugin.source_path).map_err(|error| format!(
             "[HostPluginManifest/UnreadableEntry] {}: {}", plugin.source_path.display(), error))?;
-        feed(&mut lanes, &(source.len() as u64).to_le_bytes());
-        feed(&mut lanes, &source);
-        feed(&mut lanes, &[0xff]);
+        feed(&mut digest, &source);
     }
-    Ok(format!("{:016x}{:016x}", lanes[0], lanes[1]))
+    Ok(format!("{:x}", digest.finalize()))
 }
 
 fn diagnostic(category: &str, path: &Path, field: &str, message: impl AsRef<str>) -> String {
@@ -207,8 +239,26 @@ pub fn discover(project_root: &Path, listed: &[String]) -> Result<Vec<ResolvedPl
         ordered.push(id);
     }
 
+    let resolved_versions = manifests.iter().map(|(id, (_, _, version, _))|
+        (id.clone(), version.clone())).collect::<BTreeMap<_, _>>();
     Ok(ordered.into_iter().map(|id| {
         let (manifest, manifest_path, version, source_path) = manifests.remove(&id).unwrap();
+        let mut capabilities = manifest.capabilities.iter().map(|capability| (
+            capability.id.clone(),
+            Version::parse(&capability.version).expect("capability version already validated"),
+        )).collect::<Vec<_>>();
+        capabilities.sort();
+        let mut dependencies = manifest.dependencies.iter().map(|dependency| ResolvedDependency {
+            id: dependency.id.clone(),
+            min: Version::parse(&dependency.version.min).expect("dependency min already validated"),
+            max_exclusive: Version::parse(&dependency.version.max_exclusive)
+                .expect("dependency max already validated"),
+            optional: dependency.optional,
+            resolved_version: resolved_versions.get(&dependency.id).cloned(),
+        }).collect::<Vec<_>>();
+        dependencies.sort_by(|left, right| left.id.cmp(&right.id)
+            .then(left.min.cmp(&right.min))
+            .then(left.max_exclusive.cmp(&right.max_exclusive)));
         ResolvedPlugin {
             id,
             version,
@@ -216,6 +266,8 @@ pub fn discover(project_root: &Path, listed: &[String]) -> Result<Vec<ResolvedPl
             source_path,
             module: manifest.entry.module,
             factory: manifest.entry.factory,
+            capabilities,
+            dependencies,
         }
     }).collect())
 }
@@ -275,5 +327,86 @@ mod tests {
             r#""min": "2.0.0", "max_exclusive": "3.0.0""#);
         fs::write(path, text).unwrap();
         assert!(discover(root.path(), &[incompatible]).unwrap_err().contains("IncompatibleHostApi"));
+    }
+
+    fn fingerprint_graph(root: &Path, capability_version: &str, dependency_max: &str) -> Vec<String> {
+        let provider = package(root, "provider", &format!(r#"{{
+  "schema_version": 1,
+  "id": "dev.test.provider",
+  "version": "1.0.0",
+  "host_api": {{ "min": "1.0.0", "max_exclusive": "2.0.0" }},
+  "entry": {{ "source": "plugin.cto", "module": "Plugin", "factory": "plugin" }},
+  "capabilities": [{{ "id": "dev.test.storage", "version": "{capability_version}" }}],
+  "dependencies": []
+}}"#));
+        let consumer = package(root, "consumer", &format!(r#"{{
+  "schema_version": 1,
+  "id": "dev.test.consumer",
+  "version": "1.0.0",
+  "host_api": {{ "min": "1.0.0", "max_exclusive": "2.0.0" }},
+  "entry": {{ "source": "plugin.cto", "module": "Plugin", "factory": "plugin" }},
+  "capabilities": [],
+  "dependencies": [{{
+    "id": "dev.test.provider",
+    "version": {{ "min": "1.0.0", "max_exclusive": "{dependency_max}" }}
+  }}]
+}}"#));
+        vec![consumer, provider]
+    }
+
+    #[test]
+    fn fingerprint_is_path_and_manifest_order_independent() {
+        let first = tempfile::tempdir().unwrap();
+        let second = tempfile::tempdir().unwrap();
+        let listed = fingerprint_graph(first.path(), "1.0.0", "2.0.0");
+        let mut reversed = fingerprint_graph(second.path(), "1.0.0", "2.0.0");
+        reversed.reverse();
+        let first_plugins = discover(first.path(), &listed).unwrap();
+        let same_root_reversed = discover(first.path(), &listed.iter().cloned().rev().collect::<Vec<_>>()).unwrap();
+        let second_plugins = discover(second.path(), &reversed).unwrap();
+        let expected = fingerprint(&first_plugins).unwrap();
+        assert_eq!(expected, fingerprint(&same_root_reversed).unwrap());
+        assert_eq!(expected, fingerprint(&second_plugins).unwrap());
+        assert_eq!(build_graph_snapshot(&first_plugins), concat!(
+            "certo.host.plugins/v2\n",
+            "host-api 1.0.0\n",
+            "plugin dev.test.provider@1.0.0 module=Plugin factory=plugin\n",
+            "  capability dev.test.storage@1.0.0\n",
+            "plugin dev.test.consumer@1.0.0 module=Plugin factory=plugin\n",
+            "  dependency dev.test.provider [1.0.0,2.0.0) optional=false resolved=1.0.0\n",
+        ));
+    }
+
+    #[test]
+    fn fingerprint_changes_for_every_build_graph_input() {
+        let baseline_root = tempfile::tempdir().unwrap();
+        let baseline_list = fingerprint_graph(baseline_root.path(), "1.0.0", "2.0.0");
+        let baseline_plugins = discover(baseline_root.path(), &baseline_list).unwrap();
+        let baseline = fingerprint(&baseline_plugins).unwrap();
+
+        let source_root = tempfile::tempdir().unwrap();
+        let source_list = fingerprint_graph(source_root.path(), "1.0.0", "2.0.0");
+        fs::write(source_root.path().join("provider/plugin.cto"),
+            "module provider\npub fn plugin(): HostPlugin = panic(\"changed\")\n").unwrap();
+        assert_ne!(baseline, fingerprint(&discover(source_root.path(), &source_list).unwrap()).unwrap());
+
+        let version_root = tempfile::tempdir().unwrap();
+        let version_list = fingerprint_graph(version_root.path(), "1.0.0", "2.0.0");
+        let provider_manifest = version_root.path().join("provider/certo-plugin.json");
+        let changed_version = fs::read_to_string(&provider_manifest).unwrap()
+            .replacen(r#""version": "1.0.0""#, r#""version": "1.1.0""#, 1);
+        fs::write(provider_manifest, changed_version).unwrap();
+        assert_ne!(baseline, fingerprint(&discover(version_root.path(), &version_list).unwrap()).unwrap());
+
+        let capability_root = tempfile::tempdir().unwrap();
+        let capability_list = fingerprint_graph(capability_root.path(), "1.1.0", "2.0.0");
+        assert_ne!(baseline, fingerprint(&discover(capability_root.path(), &capability_list).unwrap()).unwrap());
+
+        let dependency_root = tempfile::tempdir().unwrap();
+        let dependency_list = fingerprint_graph(dependency_root.path(), "1.0.0", "3.0.0");
+        assert_ne!(baseline, fingerprint(&discover(dependency_root.path(), &dependency_list).unwrap()).unwrap());
+
+        assert_ne!(baseline,
+            fingerprint_with_host_api(&baseline_plugins, "1.0.1").unwrap());
     }
 }

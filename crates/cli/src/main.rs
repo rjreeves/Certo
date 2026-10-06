@@ -510,6 +510,8 @@ fn cmd_build(args: &[String], quiet: bool) {
         .unwrap_or_else(|error| die(&error, 1));
     if verbose && !resolved_plugins.is_empty() {
         eprintln!("host plugin fingerprint: {plugin_fingerprint}");
+        eprintln!("host plugin build graph:\n{}",
+            host_plugin_manifest::build_graph_snapshot(&resolved_plugins));
     }
     if let Some(cfg) = &project_toml {
         if let Some(build) = &cfg.build {
