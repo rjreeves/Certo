@@ -523,3 +523,37 @@ fn views_are_read_back_and_a_changed_definition_is_drift() {
     assert!(fs::read_to_string(p2.schema_path()).unwrap().contains("view adults on people (id, name) where age >= 18"));
     assert!(drift::check(&p2, &mut ex2).unwrap().in_sync());
 }
+
+const WITH_ENUMS: &str = r#"
+enum Status { open, done }
+table tasks {
+    id: serial primary key
+    title: text not null
+    status: Status not null default open
+    priority: int not null default 3
+}
+index tasks_status on tasks (status)
+constraint not_done_urgent on tasks using status != done or priority >= 3
+view open_tasks_view on tasks (id, title, priority) where status == open
+"#;
+
+#[test]
+fn an_enum_default_a_check_and_a_view_that_name_an_enum_value_read_back() {
+    let (_dir, p, db) = fixture(WITH_ENUMS);
+    create(&p, "init", None, false).unwrap();
+    let mut ex = SqliteExecutor::open(&db).unwrap();
+    apply(&p, &mut ex, &ApplyOptions::default()).unwrap();
+
+    // SQLite writes an enum value as a plain string: it reads back as the value, in the default, the CHECK and the view
+    let prepared = certo_runner::import_schema(&mut ex).unwrap();
+    assert!(prepared.omissions.is_empty(), "{:?}", prepared.omissions);
+    assert_eq!(prepared.ir, certo_sdl::compile(WITH_ENUMS).0.unwrap(), "{}", prepared.sdl);
+    assert!(prepared.sdl.contains("status: Status not null default open") && prepared.sdl.contains("where status == open"), "{}", prepared.sdl);
+
+    // and what was applied is no drift, a changed enum condition in the view is
+    let d = drift::check(&p, &mut ex).unwrap();
+    assert!(d.in_sync(), "{:?} {:?}", d.items, d.notes);
+    ex.connection().execute_batch("DROP VIEW open_tasks_view; CREATE VIEW open_tasks_view AS SELECT id, title, priority FROM tasks WHERE status = 'done'").unwrap();
+    let d = drift::check(&p, &mut ex).unwrap();
+    assert!(d.items.iter().any(|i| i.text.contains("view open_tasks_view") && i.text.contains("differs")), "{:?}", d.items);
+}
