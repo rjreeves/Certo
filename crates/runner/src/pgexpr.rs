@@ -445,7 +445,9 @@ fn verify(dialect: Dialect, raw: &str, e: &ExprIR, synthetic: &SchemaIR) -> Resu
     let sdl = to_sdl(synthetic)?;
     let (ir, diags) = compile(&sdl);
     if ir.is_none() {
-        let msg = diags.first().map(|d| d.message.clone()).unwrap_or_else(|| "does not compile".into());
+        // the first error (a warning, such as "no primary key" for the scratch table, is not the reason)
+        let first = diags.iter().find(|d| d.severity == certo_diagnostics::Severity::Error).or(diags.first());
+        let msg = first.map(|d| d.message.clone()).unwrap_or_else(|| "does not compile".into());
         return Err(format!("not valid SDL: {msg}"));
     }
     Ok(())
@@ -549,9 +551,9 @@ pub fn translate_default_for(
         Some(e) => e,
         None => parse(raw, enums, None, &seq_names)?,
     };
-    // MySQL writes an enum value as a plain string
+    // MySQL and SQLite write an enum value as a plain string (PostgreSQL's text carries a cast that says what it is)
     let e = match (dialect, col_ty, e) {
-        (Dialect::Mysql, TypeIR::Enum(n), ExprIR::String { value }) => ExprIR::EnumVariant { enum_name: n.clone(), variant: value },
+        (Dialect::Mysql | Dialect::Sqlite, TypeIR::Enum(n), ExprIR::String { value }) => ExprIR::EnumVariant { enum_name: n.clone(), variant: value },
         (_, _, e) => e,
     };
     let mut id = plain("id", TypeIR::Builtin(certo_sdl::Builtin::Int));
@@ -592,8 +594,8 @@ pub fn translate_check_for(dialect: Dialect, raw: &str, columns: &[ColumnIR], en
         .collect();
     let types: HashMap<String, TypeIR> = usable.iter().map(|c| (c.name.clone(), c.ty.clone())).collect();
     let e = parse(raw, enums, Some(&types), &[])?;
-    // MySQL writes an enum value as a plain string: where one meets an enum column, it is the value
-    let e = if dialect == Dialect::Mysql { mysql_enum_values(e, &types) } else { e };
+    // MySQL and SQLite write an enum value as a plain string: where one meets an enum column, it is the value
+    let e = if matches!(dialect, Dialect::Mysql | Dialect::Sqlite) { mysql_enum_values(e, &types) } else { e };
     let synth = SchemaIR {
         version: certo_sdl::IR_VERSION,
         tables: vec![base_table(usable, vec![ConstraintIR { name: "chk".into(), expr: e.clone() }])],
