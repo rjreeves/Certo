@@ -1002,3 +1002,27 @@ fn self_referential_field_with_nested_constructor_subpattern_still_unboxes_corre
     )).count();
     assert!(tag_field_reads >= 3, "expected the nested `Leaf` sub-pattern check to read `.tag` independently, got {tag_field_reads} reads");
 }
+
+// ------------------------------------------------------------------ //
+// `guard cond else e` early return — BACKLOG item 342
+// ------------------------------------------------------------------ //
+
+fn return_terminator_count(mf: &crate::MirFn) -> usize {
+    mf.blocks.iter().filter(|bb| matches!(&bb.terminator, Some(Terminator::Return(_)))).count()
+}
+
+#[test]
+fn guard_adds_a_real_return_terminator_beyond_the_functions_own_final_one() {
+    let plain = mir_fn("module A\nfn f(n: Int): Int = {\n val x = n * 2\n x\n}");
+    let guarded = mir_fn("module A\nfn f(n: Int): Int = {\n guard n > 0 else -1\n n * 2\n}");
+    assert_eq!(return_terminator_count(&plain), 1);
+    assert!(return_terminator_count(&guarded) >= 2,
+        "a guard must emit its own Return, not just fall through to the function's final one (got {})",
+        return_terminator_count(&guarded));
+}
+
+#[test]
+fn two_guards_emit_two_extra_returns() {
+    let mf = mir_fn("module A\nfn f(n: Int, m: Int): Int = {\n guard n > 0 else -1\n guard m > 0 else -2\n n + m\n}");
+    assert!(return_terminator_count(&mf) >= 3, "got {}", return_terminator_count(&mf));
+}

@@ -3403,3 +3403,52 @@ fn f(x: A): A = x"
     let _ = check_module(&module);
 }
 
+
+// ------------------------------------------------------------------ //
+// `guard cond else e` — BACKLOG item 342
+// ------------------------------------------------------------------ //
+
+#[test]
+fn guard_else_value_must_match_the_enclosing_functions_return_type() {
+    // `guard` returns its else value from the enclosing function, so a
+    // `Text` else in an `Int`-returning function is a real type error —
+    // it used to be inferred and discarded.
+    let kind = first_error_kind("module A\nfn f(n: Int): Int = {\n guard n > 0 else \"no\"\n n\n}");
+    assert!(matches!(kind, TypeErrorKind::Mismatch { .. }), "expected E0200, got {kind:?}");
+}
+
+#[test]
+fn guard_in_a_function_returning_result_accepts_an_err_else() {
+    check("module A\nfn f(n: Int): Result<Int, Text> = {\n guard n > 0 else Err(\"neg\")\n Ok(n)\n}").unwrap();
+}
+
+#[test]
+fn guard_in_an_unannotated_function_unifies_with_the_bodys_own_type() {
+    check("module A\nfn f(n: Int) = {\n guard n > 0 else 99\n n + 1\n}").unwrap();
+    let kind = first_error_kind("module A\nfn f(n: Int) = {\n guard n > 0 else \"x\"\n n + 1\n}");
+    assert!(matches!(kind, TypeErrorKind::Mismatch { .. }), "expected E0200, got {kind:?}");
+}
+
+#[test]
+fn guard_in_an_impl_method_is_checked_against_the_methods_return_type() {
+    check("module A\ntype C = { open: Bool }\nimpl C {\n fn f(self, n: Int): Result<Int, Text> = {\n guard self.open else Err(\"closed\")\n Ok(n)\n }\n}").unwrap();
+}
+
+#[test]
+fn guard_inside_a_lambda_is_rejected_not_silently_returning_from_the_wrong_function() {
+    let kind = first_error_kind(
+        "module A\nfn apply(f: (Int) => Int, x: Int): Int = f(x)\nfn g(n: Int): Int = apply((x) => {\n guard x > 0 else 0\n x\n}, n)");
+    assert!(matches!(kind, TypeErrorKind::GuardOutsideFunction), "expected E0222, got {kind:?}");
+}
+
+#[test]
+fn guard_inside_a_spawn_or_withtimeout_block_is_rejected() {
+    let kind = first_error_kind("module A\nfn f(n: Int): Int = {\n val t = spawn { guard n > 0 else 0\n n }\n await t\n}");
+    assert!(matches!(kind, TypeErrorKind::GuardOutsideFunction), "expected E0222 for spawn, got {kind:?}");
+}
+
+#[test]
+fn guard_in_a_function_after_a_lambda_is_not_misflagged() {
+    // The nesting depth must come back down after leaving the lambda.
+    check("module A\nfn apply(f: (Int) => Int, x: Int): Int = f(x)\nfn g(n: Int): Int = {\n val y = apply((x) => x + 1, n)\n guard y > 0 else 0\n y\n}").unwrap();
+}

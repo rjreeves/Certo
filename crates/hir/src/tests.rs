@@ -2964,3 +2964,34 @@ fn var_bound_struct_field_access_resolves_real_type_not_ty_error() {
     assert!(matches!(&inner_base.ty, Ty::Named { name, .. } if name == "Inner"),
         "expected the intermediate result.name access to resolve to Inner, got {:?}", inner_base.ty);
 }
+
+// ------------------------------------------------------------------ //
+// `guard cond else e` — BACKLOG item 342
+// ------------------------------------------------------------------ //
+
+fn contains_return(e: &HirExpr) -> bool {
+    match &e.kind {
+        HirExprKind::Return(_) => true,
+        HirExprKind::If { cond, then_expr, else_expr } =>
+            contains_return(cond) || contains_return(then_expr) || contains_return(else_expr),
+        HirExprKind::Block { stmts, tail } =>
+            stmts.iter().any(|s| matches!(s, HirStmt::Expr(x) if contains_return(x))) || contains_return(tail),
+        _ => false,
+    }
+}
+
+#[test]
+fn guard_lowers_to_a_conditional_early_return_not_a_discarded_expression() {
+    // This used to lower to `if !cond { else_expr }; unit` — the else value
+    // was evaluated and thrown away, so every `guard` was a silent no-op.
+    let m = lower("module A\nfn f(n: Int): Int = {\n guard n > 0 else -1\n n * 2\n}");
+    let f = m.items.iter().find_map(|it| match it { HirItem::Fn(f) if f.name == "f" => Some(f), _ => None }).unwrap();
+    assert!(contains_return(f.body.as_ref().unwrap()), "expected a HirExprKind::Return inside the guard's lowering");
+}
+
+#[test]
+fn a_function_without_guard_lowers_with_no_early_return() {
+    let m = lower("module A\nfn f(n: Int): Int = {\n val x = n * 2\n x\n}");
+    let f = m.items.iter().find_map(|it| match it { HirItem::Fn(f) if f.name == "f" => Some(f), _ => None }).unwrap();
+    assert!(!contains_return(f.body.as_ref().unwrap()));
+}

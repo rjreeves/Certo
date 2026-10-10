@@ -841,7 +841,9 @@ pub fn infer(expr: &S<Expr>, ctx: &mut Ctx<'_>) -> Ty {
                 ctx.env.define(p.name.node.clone(), ty.clone());
                 ty
             }).collect();
+            ctx.env.enter_nested_body();
             let ret_ty = infer(body, ctx);
+            ctx.env.leave_nested_body();
             ctx.env.pop();
             Ty::Fn { params: param_tys, ret: Box::new(ret_ty) }
         }
@@ -1023,12 +1025,30 @@ pub fn infer(expr: &S<Expr>, ctx: &mut Ctx<'_>) -> Ty {
 
         Expr::Await { expr, .. } => infer(expr, ctx),
 
-        Expr::Spawn { expr, .. } => infer(expr, ctx),
+        Expr::Spawn { expr, .. } => {
+            ctx.env.enter_nested_body();
+            let ty = infer(expr, ctx);
+            ctx.env.leave_nested_body();
+            ty
+        }
 
+        // `guard cond else e` — BACKLOG item 342. Returns `e` from the
+        // enclosing function when `cond` is false (HIR lowers it to a real
+        // early return). `e` must therefore have the enclosing function's
+        // own return type; and since "the enclosing function" is only
+        // well-defined directly in a fn/method body, a `guard` inside a
+        // lambda, task block, or any body with no function return type is
+        // rejected (E0222) instead of silently returning from the wrong
+        // function.
         Expr::Guard { cond, else_expr, span } => {
             let cond_ty = infer(cond, ctx);
             ctx.unify(cond_ty, Ty::Bool, *span);
-            infer(else_expr, ctx);
+            let else_ty = infer(else_expr, ctx);
+            let ret_ty = ctx.env.lookup_current_body_return_ty().cloned();
+            match ret_ty {
+                Some(ret) if !ctx.env.in_nested_body() => { ctx.unify(else_ty, ret, *span); }
+                _ => ctx.errors.push(TypeError { kind: TypeErrorKind::GuardOutsideFunction, span: *span }),
+            }
             Ty::Unit
         }
 
@@ -1049,7 +1069,10 @@ pub fn infer(expr: &S<Expr>, ctx: &mut Ctx<'_>) -> Ty {
                 let ty = infer(t, ctx);
                 ctx.unify(ty, Ty::Named { name: "Duration".into(), args: vec![] }, *span);
             }
-            Ty::Tuple(tasks.iter().map(|t| infer(t, ctx)).collect())
+            ctx.env.enter_nested_body();
+            let tys = tasks.iter().map(|t| infer(t, ctx)).collect();
+            ctx.env.leave_nested_body();
+            Ty::Tuple(tys)
         }
 
         // `withTimeout(d) { body }` (BACKLOG item 122) — cooperative-cancellation
@@ -1058,11 +1081,20 @@ pub fn infer(expr: &S<Expr>, ctx: &mut Ctx<'_>) -> Ty {
         Expr::WithTimeout { duration, body, span } => {
             let dur_ty = infer(duration, ctx);
             ctx.unify(dur_ty, Ty::Named { name: "Duration".into(), args: vec![] }, *span);
+            ctx.env.enter_nested_body();
             let body_ty = infer(body, ctx);
+            ctx.env.leave_nested_body();
             Ty::Option(Box::new(body_ty))
         }
 
-        Expr::Transaction { body, .. } | Expr::Unsafe { body, .. } => infer(body, ctx),
+        Expr::Transaction { body, .. } => {
+            ctx.env.enter_nested_body();
+            let ty = infer(body, ctx);
+            ctx.env.leave_nested_body();
+            ty
+        }
+
+        Expr::Unsafe { body, .. } => infer(body, ctx),
 
         Expr::Ascribe { expr, ty, span } => {
             let inferred = infer(expr, ctx);

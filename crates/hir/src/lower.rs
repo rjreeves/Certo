@@ -2497,14 +2497,18 @@ fn lower_expr(expr: &S<Expr>, cx: &mut Cx) -> HirExpr {
             HirExpr { kind: HirExprKind::Spawn { fn_name: String::new(), args: vec![inner], captures }, ty: Ty::Error, span }
         }
 
-        // `guard cond else e` → `if !cond { e }; unit`
+        // `guard cond else e` → `if !cond { return e }; unit` — BACKLOG item
+        // 342. This used to lower to `if !cond { e }`, which evaluated `e` and
+        // discarded it without ever leaving the function, so every `guard` was
+        // a silent no-op.
         Expr::Guard { cond, else_expr, .. } => {
             let cond = lower_expr(cond, cx);
             let else_ = lower_expr(else_expr, cx);
             let not_cond = HirExpr { kind: HirExprKind::UnOp { op: UnOp::Not, arg: Box::new(cond) }, ty: Ty::Bool, span };
             let unit = HirExpr { kind: HirExprKind::Unit, ty: Ty::Unit, span };
+            let early_return = HirExpr { kind: HirExprKind::Return(Box::new(else_)), ty: Ty::Unit, span };
             let if_expr = HirExpr {
-                kind: HirExprKind::If { cond: Box::new(not_cond), then_expr: Box::new(else_), else_expr: Box::new(unit.clone()) },
+                kind: HirExprKind::If { cond: Box::new(not_cond), then_expr: Box::new(early_return), else_expr: Box::new(unit.clone()) },
                 ty: Ty::Unit, span,
             };
             HirExpr { kind: HirExprKind::Block { stmts: vec![HirStmt::Expr(if_expr)], tail: Box::new(unit) }, ty: Ty::Unit, span }
@@ -3912,7 +3916,7 @@ fn collect_free_locals(expr: &HirExpr, threshold: LocalId, out: &mut Vec<LocalId
                 collect_free_locals(&arm.body, threshold, out);
             }
         }
-        HirExprKind::Try(inner) | HirExprKind::Unsafe(inner) | HirExprKind::Await(inner) => {
+        HirExprKind::Try(inner) | HirExprKind::Unsafe(inner) | HirExprKind::Await(inner) | HirExprKind::Return(inner) => {
             collect_free_locals(inner, threshold, out);
         }
         HirExprKind::For { iter, body, .. } => {

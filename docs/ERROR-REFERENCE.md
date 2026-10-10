@@ -530,6 +530,39 @@ fn serialize<T: Serializable>(v: T): Text = v.toJsonx()
 fn serialize<T: Serializable>(v: T): Text = v.toJson()
 ```
 
+### E0222  `guard` outside a function body
+
+```
+error[E0222]: `guard` can only be used directly in a function or method body
+  --> src/main.cto:4:3
+   |
+ 4 |   guard x > 0 else 0
+   |   ^^^^^^^^^^^^^^^^^^ `guard` returns from the enclosing function, which this position doesn't have
+```
+
+**Cause:** `guard cond else e` returns `e` from the enclosing function or
+method when `cond` is false. That only has a single, well-defined meaning
+directly in a function or method body. Inside a lambda, or a `spawn`,
+`parallel`, `withTimeout` or `transaction` block, the code runs as its own
+synthesized function, so "return from the enclosing function" would silently
+mean something else — it is rejected instead. A body with no function return
+type to return into at all (a `test` block, a computed property, a
+state-machine hook) is rejected for the same reason.
+
+**Fix:** Use an `if`/`match` expression whose branches produce the value, or
+move the `guard` into the function that owns the early exit:
+
+```certo
+// Before (rejected):
+List.map(xs, (x) => {
+  guard x > 0 else 0
+  x * 2
+})
+
+// After:
+List.map(xs, (x) => if x > 0 then x * 2 else 0)
+```
+
 ---
 
 ## E0300–E0306  Trait errors

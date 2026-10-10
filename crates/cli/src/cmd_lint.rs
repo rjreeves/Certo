@@ -247,7 +247,7 @@ fn recurse_lint(expr: &HirExpr, path: &Path, src: &str,
         HirExprKind::Lambda { body, .. } => {
             count += lint_block_stmts(body, path, src, reads, color);
         }
-        HirExprKind::Try(e) | HirExprKind::Unsafe(e) => {
+        HirExprKind::Try(e) | HirExprKind::Unsafe(e) | HirExprKind::Return(e) => {
             count += lint_block_stmts(e, path, src, reads, color);
         }
         _ => {}
@@ -310,7 +310,7 @@ fn collect_reads(expr: &HirExpr, out: &mut HashSet<LocalId>) {
             collect_reads(cond, out); collect_reads(body, out);
         }
         HirExprKind::Lambda { body, .. } => collect_reads(body, out),
-        HirExprKind::Try(e) | HirExprKind::Unsafe(e) => collect_reads(e, out),
+        HirExprKind::Try(e) | HirExprKind::Unsafe(e) | HirExprKind::Return(e) => collect_reads(e, out),
         _ => {}
     }
 }
@@ -412,7 +412,7 @@ fn collect_todo_calls(expr: &HirExpr, path: &Path, src: &str, color: bool) -> us
             count += collect_todo_calls(body, path, src, color);
         }
         HirExprKind::Lambda { body, .. } => count += collect_todo_calls(body, path, src, color),
-        HirExprKind::Try(e) | HirExprKind::Unsafe(e) => count += collect_todo_calls(e, path, src, color),
+        HirExprKind::Try(e) | HirExprKind::Unsafe(e) | HirExprKind::Return(e) => count += collect_todo_calls(e, path, src, color),
         _ => {}
     }
     count

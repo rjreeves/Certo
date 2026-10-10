@@ -2998,6 +2998,26 @@ fn lower_expr(expr: &HirExpr, b: &mut Builder) -> Operand {
             Operand::Local(val_local)
         }
 
+        // Early exit from the function — BACKLOG item 342 (`guard cond else e`).
+        // Mirrors `lower_fn`'s own final return exactly: assign the value into
+        // the return slot (local 0, always the first local declared — skipped
+        // for a Unit value, which has no `_l0` to write), then run every
+        // open `defer` scope and return, same as `?`'s propagation branch.
+        // Typeck (E0222) guarantees this never appears inside a lambda or
+        // task body, whose own builders have a differently-typed/boxed return
+        // slot this would bypass. Everything lowered after it in the same
+        // block is unreachable, so continue into a fresh dead block.
+        HirExprKind::Return(inner) => {
+            let value = lower_value_expr(inner, b);
+            if !matches!(infer_operand_ty(&value, b), Ty::Unit) {
+                b.assign(0, Rvalue::Use(value));
+            }
+            emit_defers_then_return(Operand::Local(0), b);
+            let dead = b.new_block();
+            b.switch_to(dead);
+            Operand::Const(MirConst::Unit)
+        }
+
         HirExprKind::Unsafe(inner) => lower_expr(inner, b),
 
         HirExprKind::For { binding, binding_name, binding_ty, iter, body } => {

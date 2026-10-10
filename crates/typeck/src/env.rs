@@ -106,6 +106,13 @@ pub struct TypeEnv {
     /// have no real value to construct — there is no such thing as a "safe
     /// default" `Result`/other value to manufacture from a bare `None`.
     current_body_return_ty: Option<Ty>,
+    /// How many lambda / `spawn` / `parallel` / `withTimeout` bodies are
+    /// currently open inside the function body being checked — BACKLOG item
+    /// 342. `guard cond else e` returns `e` from the *enclosing function*;
+    /// inside any of these it would instead return from the lifted
+    /// closure/task function MIR synthesizes for them, so `Expr::Guard`
+    /// rejects itself (E0222) whenever this is non-zero.
+    nested_body_depth: u32,
     /// Sum type variant names: type_name → [variant_name, ...], in declaration
     /// order. Used for match exhaustiveness checking.
     pub sum_variants: HashMap<String, Vec<String>>,
@@ -140,6 +147,7 @@ impl TypeEnv {
             trait_defs: HashMap::new(),
             current_body_trait_bounds: HashMap::new(),
             current_body_return_ty: None,
+            nested_body_depth: 0,
             sum_variants: HashMap::new(),
             type_aliases: HashMap::new(),
             alias_expand_stack: Vec::new(),
@@ -290,6 +298,16 @@ impl TypeEnv {
     pub fn lookup_current_body_return_ty(&self) -> Option<&Ty> {
         self.current_body_return_ty.as_ref()
     }
+
+    /// Enter a lambda/spawn/parallel/withTimeout body — see `nested_body_depth`.
+    pub fn enter_nested_body(&mut self) { self.nested_body_depth += 1; }
+
+    /// Leave a lambda/spawn/parallel/withTimeout body.
+    pub fn leave_nested_body(&mut self) { self.nested_body_depth = self.nested_body_depth.saturating_sub(1); }
+
+    /// True when the expression being checked is inside a lambda/task body
+    /// rather than directly in a function or method body.
+    pub fn in_nested_body(&self) -> bool { self.nested_body_depth > 0 }
 
     /// Seed the environment with built-in types/values.
     pub fn seed_builtins(&mut self, counter: &mut u32) {

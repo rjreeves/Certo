@@ -208,6 +208,14 @@ pub enum HirExprKind {
     /// `e?` — error propagation (requires enclosing fn to return Result).
     Try(Box<HirExpr>),
 
+    /// Early exit from the enclosing function with the given value —
+    /// BACKLOG item 342. Produced only by lowering `guard cond else e` (there
+    /// is no source-level `return`); typeck guarantees it never appears inside
+    /// a lambda or task body, so MIR can treat it as returning from the
+    /// function currently being lowered. Its own type is `Unit` (the dead code
+    /// after it never executes).
+    Return(Box<HirExpr>),
+
     /// `unsafe { body }`.
     Unsafe(Box<HirExpr>),
 
