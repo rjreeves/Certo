@@ -935,7 +935,7 @@ fn const_expr_to_c(expr: &certo_hir::HirExpr) -> String {
     use certo_hir::HirExprKind;
     match &expr.kind {
         HirExprKind::Int(n)     => n.to_string(),
-        HirExprKind::Float(f)   => format!("{:.}", f),
+        HirExprKind::Float(f)   => crate::emit_mir::float_to_c(*f),
         HirExprKind::Bool(b)    => if *b { "true".into() } else { "false".into() },
         HirExprKind::Str(s)     => {
             let escaped: String = s.chars().flat_map(|c| match c {
@@ -1007,7 +1007,7 @@ fn simple_expr_to_c_rvalue(expr: &certo_ast::expr::Expr) -> Option<String> {
                 Some(format!("CERTO_STR(\"{}\")", e))
             }
             Lit::Int(n)    => Some(n.to_string()),
-            Lit::Float(f)  => Some(f.to_string()),
+            Lit::Float(f)  => Some(crate::emit_mir::float_to_c(*f)),
             Lit::Bool(b)   => Some(if *b { "true".into() } else { "false".into() }),
             _ => None,
         },

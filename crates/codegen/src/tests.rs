@@ -2924,3 +2924,60 @@ fn char_typed_function_signature_uses_int32_not_a_byte() {
     assert_contains(&c, "int32_t certo_identity(int32_t");
     assert_not_contains(&c, "char certo_identity");
 }
+
+// ------------------------------------------------------------------ //
+// Float literals — BACKLOG item 344
+// ------------------------------------------------------------------ //
+
+#[test]
+fn float_to_c_always_yields_a_double_literal_never_a_bare_integer() {
+    use crate::emit_mir::float_to_c;
+    // Whole-valued doubles used to print as bare integers (`7.0` -> `7`).
+    assert_eq!(float_to_c(7.0), "7.0");
+    assert_eq!(float_to_c(0.0), "0.0");
+    assert_eq!(float_to_c(-3.0), "-3.0");
+    assert_eq!(float_to_c(0.5), "0.5");
+    assert_eq!(float_to_c(0.1), "0.1");
+    // Large/small magnitudes keep an exponent instead of being expanded to a
+    // 24-digit integer clang rejects as too large for any integer type.
+    assert_eq!(float_to_c(6.022e23), "6.022e23");
+    assert_eq!(float_to_c(1e21), "1e21");
+    assert_eq!(float_to_c(1.5e-9), "1.5e-9");
+    // Every finite result has a '.' or an exponent, so C reads it as a double.
+    for v in [1.0, 2.0, 100.0, 1e15, 1e16, 123456789012345680.0, -0.0, 1e300, 1e-300] {
+        let s = float_to_c(v);
+        assert!(s.contains('.') || s.contains('e'), "{v} printed as {s:?}, which C reads as an integer");
+        assert_eq!(s.parse::<f64>().unwrap(), v, "{s:?} does not round-trip {v}");
+    }
+}
+
+#[test]
+fn float_to_c_spells_non_finite_values_as_constant_expressions() {
+    use crate::emit_mir::float_to_c;
+    assert_eq!(float_to_c(f64::NAN), "(0.0/0.0)");
+    assert_eq!(float_to_c(f64::INFINITY), "(1.0/0.0)");
+    assert_eq!(float_to_c(f64::NEG_INFINITY), "(-1.0/0.0)");
+}
+
+#[test]
+fn float_literal_arithmetic_is_emitted_with_double_operands_not_integer_division() {
+    // `7.0 / 2.0` used to become `(7 / 2)` in the generated C — integer
+    // division, so it printed 3 instead of 3.5.
+    let c = codegen("module A\nfn f(): Float = 7.0 / 2.0");
+    assert_contains(&c, "7.0");
+    assert_contains(&c, "2.0");
+    assert_not_contains(&c, "(7 / 2)");
+}
+
+#[test]
+fn large_float_literal_keeps_its_exponent_instead_of_expanding_to_an_integer() {
+    let c = codegen("module A\nfn f(): Float = 6.022e23");
+    assert_contains(&c, "6.022e23");
+    assert_not_contains(&c, "602200000000000000000000");
+}
+
+#[test]
+fn module_level_float_constant_is_emitted_as_a_double_literal() {
+    let c = codegen("module A\nval k: Float = 2.0\nfn f(): Float = k");
+    assert_contains(&c, "2.0");
+}

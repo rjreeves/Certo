@@ -674,10 +674,27 @@ fn emit_call_arg(func_c: &str, idx: usize, arg: &Operand, locals: &[MirLocalDecl
     }
 }
 
+/// A Float constant as a C `double` literal — BACKLOG item 344. Float
+/// constants used to be printed with Rust's `{:.}`, which writes a
+/// whole-valued double as a bare integer (`7.0` → `7`), so the generated C
+/// held an *integer* literal: `7.0 / 2.0` became `(7 / 2)` (integer
+/// division → `3`), `1.0 / 3.0` became `(1 / 3)` (`0`), and a large literal
+/// like `6.022e23` became a 24-digit integer clang rejects as too large for
+/// any integer type. `{:?}` always emits a `.` or an exponent (`7.0`,
+/// `6.022e23`, `1e21`, `1e-7`) — a valid, shortest-round-trip C double
+/// literal. The non-finite values have no literal form at all, so they're
+/// spelled as constant expressions.
+pub(crate) fn float_to_c(f: f64) -> String {
+    if f.is_nan() { "(0.0/0.0)".into() }
+    else if f == f64::INFINITY { "(1.0/0.0)".into() }
+    else if f == f64::NEG_INFINITY { "(-1.0/0.0)".into() }
+    else { format!("{:?}", f) }
+}
+
 fn emit_const(c: &MirConst) -> String {
     match c {
         MirConst::Int(n)     => n.to_string(),
-        MirConst::Float(f)   => format!("{:.}", f),
+        MirConst::Float(f)   => float_to_c(*f),
         MirConst::Decimal(s) => format!("CERTO_DECIMAL(\"{}\")", s),
         MirConst::Bool(b)    => if *b { "true".into() } else { "false".into() },
         MirConst::Str(s)     => format!("CERTO_STR(\"{}\")", escape_str(s)),
