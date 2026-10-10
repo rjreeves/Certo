@@ -134,6 +134,23 @@ impl Builder {
         mir
     }
 
+    /// Like `map_hir_local`, for a *pattern* binding — BACKLOG item 343.
+    /// The alternatives of an or-pattern (`Circle(r) | Square(r) => ..`)
+    /// share one HIR local per name (see `Cx::or_binding_reuse` in
+    /// `crates/hir`); each alternative's bind site must write the *same* MIR
+    /// local, or only the last-lowered alternative's would be the one the arm
+    /// body reads. A HIR local with no mapping yet is declared fresh, exactly
+    /// like `map_hir_local`; an already-mapped one is reused (patching a
+    /// still-unknown `Ty::Error` declared type with the better one).
+    fn bind_pattern_local(&mut self, hir: LocalId, name: &str, ty: Ty) -> MirLocal {
+        if let Some(&existing) = self.local_map.get(&hir) {
+            let decl = &mut self.locals[existing as usize];
+            if matches!(decl.ty, Ty::Error) && !matches!(ty, Ty::Error) { decl.ty = ty; }
+            return existing;
+        }
+        self.map_hir_local(hir, name, ty)
+    }
+
     fn get_local(&self, hir: LocalId) -> MirLocal {
         *self.local_map.get(&hir).unwrap_or(&hir)
     }
@@ -1396,7 +1413,7 @@ fn unwrap_result_into(b: &mut Builder, scrut: &Operand, payload_ty: &Ty, dest: M
 
 /// Bind a match-arm's `Ok(v)`/`Err(e)` payload local; see `unwrap_result_into`.
 fn unwrap_result_payload(b: &mut Builder, scrut: &Operand, hir_local: LocalId, name: &str, payload_ty: &Ty) {
-    let ml = b.map_hir_local(hir_local, name, payload_ty.clone());
+    let ml = b.bind_pattern_local(hir_local, name, payload_ty.clone());
     unwrap_result_into(b, scrut, payload_ty, ml);
 }
 
@@ -1426,7 +1443,7 @@ fn check_nested_pattern(b: &mut Builder, pat: &HirPat, op: &Operand, ty: &Ty, ne
     match pat {
         HirPat::Wildcard => {}
         HirPat::Bind { local, name } => {
-            let ml = b.map_hir_local(*local, name, ty.clone());
+            let ml = b.bind_pattern_local(*local, name, ty.clone());
             b.assign(ml, Rvalue::Use(op.clone()));
         }
         HirPat::Lit(lit) => {
@@ -2278,7 +2295,7 @@ fn lower_expr(expr: &HirExpr, b: &mut Builder) -> Operand {
                         if arm.guard.is_some() { b.switch_to(after_pat); }
                     }
                     HirPat::Bind { local, name } => {
-                        let mir_local = b.map_hir_local(*local, name, Ty::Error);
+                        let mir_local = b.bind_pattern_local(*local, name, Ty::Error);
                         b.assign(mir_local, Rvalue::Use(scrut_op.clone()));
                         // Pattern always matches — still need to check guard.
                         let after_pat = if arm.guard.is_some() { b.new_block() } else { arm_bb };
@@ -2327,7 +2344,7 @@ fn lower_expr(expr: &HirExpr, b: &mut Builder) -> Operand {
                                 b.switch_to(fields_bb);
                                 match fields.first() {
                                     Some(HirPat::Bind { local, name: fname }) => {
-                                        let ml = b.map_hir_local(*local, fname, opt_payload.clone());
+                                        let ml = b.bind_pattern_local(*local, fname, opt_payload.clone());
                                         b.assign(ml, Rvalue::UnboxSome {
                                             opt: scrut_op.clone(),
                                             ty:  opt_payload.clone(),
@@ -2516,7 +2533,7 @@ fn lower_expr(expr: &HirExpr, b: &mut Builder) -> Operand {
                                         other => (other.clone(), FieldUnbox::None),
                                     };
                                     let dest = match field_pat {
-                                        HirPat::Bind { local, name: fname } => b.map_hir_local(*local, fname, real_ty.clone()),
+                                        HirPat::Bind { local, name: fname } => b.bind_pattern_local(*local, fname, real_ty.clone()),
                                         _ => b.declare_local("_field_val", real_ty.clone()),
                                     };
                                     // Read the payload directly via a nested path
@@ -2588,7 +2605,7 @@ fn lower_expr(expr: &HirExpr, b: &mut Builder) -> Operand {
                                 other => (other.clone(), false),
                             };
                             let dest = match field_pat {
-                                HirPat::Bind { local, name: fname } => b.map_hir_local(*local, fname, real_ty.clone()),
+                                HirPat::Bind { local, name: fname } => b.bind_pattern_local(*local, fname, real_ty.clone()),
                                 _ => b.declare_local("_field_val", real_ty.clone()),
                             };
                             if needs_unbox {
@@ -2614,7 +2631,7 @@ fn lower_expr(expr: &HirExpr, b: &mut Builder) -> Operand {
                             // vs `(None, y)`) used to be silently skipped.
                             if matches!(field_pat, HirPat::Wildcard) { continue; }
                             let elem_local = match field_pat {
-                                HirPat::Bind { local, name: fname } => b.map_hir_local(*local, fname, Ty::Error),
+                                HirPat::Bind { local, name: fname } => b.bind_pattern_local(*local, fname, Ty::Error),
                                 _ => b.declare_local("_tuple_elem", Ty::Error),
                             };
                             let next_bb = b.new_block();
@@ -2702,7 +2719,7 @@ fn lower_expr(expr: &HirExpr, b: &mut Builder) -> Operand {
                                 });
                                 b.switch_to(next_bb);
 
-                                let elem_local = b.map_hir_local(*local, fname, elem_ty.clone());
+                                let elem_local = b.bind_pattern_local(*local, fname, elem_ty.clone());
                                 if elem_needs_unbox {
                                     b.assign(elem_local, Rvalue::Unbox { value: Operand::Local(elem_raw), ty: elem_ty.clone() });
                                 } else {
@@ -2721,7 +2738,7 @@ fn lower_expr(expr: &HirExpr, b: &mut Builder) -> Operand {
                                 // function, caught by a real end-to-end run
                                 // before this shipped.
                                 let list_ty = Ty::List(Box::new(elem_ty.clone()));
-                                let tail_local = b.map_hir_local(*local, fname, list_ty);
+                                let tail_local = b.bind_pattern_local(*local, fname, list_ty);
                                 let next_bb = b.new_block();
                                 b.terminate(Terminator::Call {
                                     func: Operand::Global("List.slice".into()),
@@ -2737,6 +2754,22 @@ fn lower_expr(expr: &HirExpr, b: &mut Builder) -> Operand {
                             }
                         }
 
+                        let after_pat = if arm.guard.is_some() { b.new_block() } else { arm_bb };
+                        b.terminate(Terminator::Goto(after_pat));
+                        if arm.guard.is_some() { b.switch_to(after_pat); }
+                    }
+                    // BACKLOG item 343 — an or-pattern (`1 | 2 => ..`,
+                    // `Circle(_) | Square(_) => ..`) used to fall into the
+                    // catch-all below, which jumps straight to the arm body
+                    // with no test at all, so a top-level `|` arm matched
+                    // *every* scrutinee. `check_nested_pattern` already
+                    // implements the real "try left, else try right, else
+                    // fall to the next arm" test (it's how a `|` nested
+                    // inside `Some(..)`/a tuple always worked) — reuse it,
+                    // then continue into the arm exactly like every other
+                    // pattern kind.
+                    HirPat::Or(..) => {
+                        check_nested_pattern(b, &arm.pat, &scrut_op, &scrutinee.ty, next_arm_bb);
                         let after_pat = if arm.guard.is_some() { b.new_block() } else { arm_bb };
                         b.terminate(Terminator::Goto(after_pat));
                         if arm.guard.is_some() { b.switch_to(after_pat); }

@@ -2508,6 +2508,14 @@ pub(crate) fn type_error_to_diagnostic(e: &TypeError) -> Diagnostic {
                 .with_note("`overrides` must name another rule declared in the same validator")
         }
 
+        TypeErrorKind::OrPatternBindingMismatch { name } => {
+            Diagnostic::error("E0223",
+                format!("every alternative of an or-pattern must bind the same names — `{name}` is bound in only one of them"))
+                .with_span(e.span)
+                .with_label(format!("`{name}` is missing from one alternative"))
+                .with_note("the arm body can't know which alternative matched, so each `|` side must bind exactly the same names")
+        }
+
         TypeErrorKind::GuardOutsideFunction => {
             Diagnostic::error("E0222",
                 "`guard` can only be used directly in a function or method body")

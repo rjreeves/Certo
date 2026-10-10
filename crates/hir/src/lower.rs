@@ -14,6 +14,14 @@ use crate::error::{LowerError, LowerErrorKind};
 // ------------------------------------------------------------------ //
 
 struct Cx {
+    /// Names already bound by an enclosing or-pattern's *left* alternative,
+    /// innermost last — BACKLOG item 343. While lowering the *right*
+    /// alternative of `p1 | p2`, a binding of the same name must reuse the
+    /// left alternative's `LocalId` rather than defining a fresh one: the
+    /// arm body (and the MIR match lowering) sees exactly one local per
+    /// name, assigned by whichever alternative actually matched. Empty
+    /// outside the right-hand side of an or-pattern.
+    or_binding_reuse: Vec<HashMap<String, LocalId>>,
     /// Next LocalId to assign.
     next_local: LocalId,
     /// Next FnId to assign.
@@ -180,6 +188,7 @@ impl Cx {
             trait_method_accessors: HashMap::new(),
             type_aliases:        HashMap::new(),
             current_type_params: Vec::new(),
+            or_binding_reuse: Vec::new(),
             errors:              Vec::new(),
         }
     }
@@ -3122,12 +3131,37 @@ fn lower_block(stmts: &[Stmt], span: Span, cx: &mut Cx) -> HirExpr {
 /// have a literal body (or `Ty::Error` if none does), which silently
 /// truncates e.g. a `Float` payload once codegen maps `Ty::Error` to
 /// `int64_t` (see BACKLOG item 111).
+/// Every `name → LocalId` a lowered pattern binds (see `Cx::or_binding_reuse`).
+fn collect_hir_pat_bindings(p: &HirPat, out: &mut HashMap<String, LocalId>) {
+    match p {
+        HirPat::Bind { local, name } => { out.insert(name.clone(), *local); }
+        HirPat::Tuple(ps) => for q in ps { collect_hir_pat_bindings(q, out); },
+        HirPat::Constructor { fields, .. } | HirPat::Record { fields, .. } =>
+            for q in fields { collect_hir_pat_bindings(q, out); },
+        HirPat::List { head, tail, .. } => {
+            for q in head { collect_hir_pat_bindings(q, out); }
+            if let Some(t) = tail { collect_hir_pat_bindings(t, out); }
+        }
+        HirPat::Or(l, r) => { collect_hir_pat_bindings(l, out); collect_hir_pat_bindings(r, out); }
+        HirPat::Wildcard | HirPat::Lit(_) => {}
+    }
+}
+
 fn lower_pat(pat: &S<certo_ast::pattern::Pattern>, scrut_ty: &Ty, cx: &mut Cx) -> HirPat {
     use certo_ast::pattern::{Pattern, LitPat};
     match &pat.node {
         Pattern::Wildcard { .. } => HirPat::Wildcard,
         Pattern::Ident { name, .. } => {
-            let local = cx.define_local(&name.node);
+            // BACKLOG item 343 — the right alternative of an or-pattern reuses
+            // the left alternative's local for a name both bind.
+            let reused = cx.or_binding_reuse.iter().rev().find_map(|m| m.get(&name.node).copied());
+            let local = match reused {
+                Some(id) => {
+                    cx.locals.last_mut().unwrap().insert(name.node.clone(), id);
+                    id
+                }
+                None => cx.define_local(&name.node),
+            };
             if !matches!(scrut_ty, Ty::Error) {
                 cx.local_types.insert(local, scrut_ty.clone());
             }
@@ -3221,10 +3255,16 @@ fn lower_pat(pat: &S<certo_ast::pattern::Pattern>, scrut_ty: &Ty, cx: &mut Cx) -
                 .collect();
             HirPat::Constructor { name, fields: lowered_fields, field_names, field_types }
         }
-        Pattern::Or { left, right, .. } => HirPat::Or(
-            Box::new(lower_pat(left, scrut_ty, cx)),
-            Box::new(lower_pat(right, scrut_ty, cx)),
-        ),
+        Pattern::Or { left, right, .. } => {
+            let l = lower_pat(left, scrut_ty, cx);
+            // BACKLOG item 343 — see `Cx::or_binding_reuse`.
+            let mut bound = HashMap::new();
+            collect_hir_pat_bindings(&l, &mut bound);
+            cx.or_binding_reuse.push(bound);
+            let r = lower_pat(right, scrut_ty, cx);
+            cx.or_binding_reuse.pop();
+            HirPat::Or(Box::new(l), Box::new(r))
+        }
         Pattern::Record { path, fields, .. } => {
             // Bare (path-less) record patterns resolve structurally against
             // the scrutinee's own already-known type (BACKLOG item 145) —

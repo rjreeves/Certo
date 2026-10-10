@@ -2995,3 +2995,49 @@ fn a_function_without_guard_lowers_with_no_early_return() {
     let f = m.items.iter().find_map(|it| match it { HirItem::Fn(f) if f.name == "f" => Some(f), _ => None }).unwrap();
     assert!(!contains_return(f.body.as_ref().unwrap()));
 }
+
+// ------------------------------------------------------------------ //
+// or-pattern bindings — BACKLOG item 343
+// ------------------------------------------------------------------ //
+
+fn first_arm_pat(f: &HirFn) -> &HirPat {
+    fn find(e: &HirExpr) -> Option<&HirPat> {
+        match &e.kind {
+            HirExprKind::Match { arms, .. } => arms.first().map(|a| &a.pat),
+            HirExprKind::Block { stmts, tail } => stmts.iter().find_map(|s| match s { HirStmt::Expr(x) => find(x), _ => None }).or_else(|| find(tail)),
+            _ => None,
+        }
+    }
+    find(f.body.as_ref().unwrap()).expect("expected a match")
+}
+
+fn bind_local(p: &HirPat) -> Option<crate::hir::LocalId> {
+    match p {
+        HirPat::Bind { local, .. } => Some(*local),
+        HirPat::Constructor { fields, .. } => fields.iter().find_map(bind_local),
+        _ => None,
+    }
+}
+
+#[test]
+fn or_pattern_alternatives_binding_the_same_name_share_one_local() {
+    // Each alternative used to get its own fresh LocalId, so the arm body only
+    // ever saw the right-hand one (the left stayed unassigned at runtime).
+    let m = lower("module A\ntype S = | C(Int) | Q(Int) | D\nfn f(s: S): Int = match s { C(r) | Q(r) => r\n D => 0 }");
+    let f = m.items.iter().find_map(|it| match it { HirItem::Fn(f) if f.name == "f" => Some(f), _ => None }).unwrap();
+    let HirPat::Or(l, r) = first_arm_pat(f) else { panic!("expected an or-pattern") };
+    let (ll, rl) = (bind_local(l).expect("left binds"), bind_local(r).expect("right binds"));
+    assert_eq!(ll, rl, "both alternatives must bind the same LocalId");
+}
+
+#[test]
+fn bindings_outside_an_or_pattern_still_get_distinct_locals() {
+    let m = lower("module A\ntype S = | C(Int) | Q(Int)\nfn f(s: S): Int = match s { C(r) => r\n Q(r) => r }");
+    let f = m.items.iter().find_map(|it| match it { HirItem::Fn(f) if f.name == "f" => Some(f), _ => None }).unwrap();
+    let ids: Vec<_> = match f.body.as_ref().unwrap().kind {
+        HirExprKind::Match { ref arms, .. } => arms.iter().filter_map(|a| bind_local(&a.pat)).collect(),
+        _ => panic!("expected match body"),
+    };
+    assert_eq!(ids.len(), 2);
+    assert_ne!(ids[0], ids[1]);
+}

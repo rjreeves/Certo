@@ -563,6 +563,30 @@ List.map(xs, (x) => {
 List.map(xs, (x) => if x > 0 then x * 2 else 0)
 ```
 
+### E0223  Or-pattern alternatives bind different names
+
+```
+error[E0223]: every alternative of an or-pattern must bind the same names — `q` is bound in only one of them
+  --> src/main.cto:3:30
+```
+
+**Cause:** `p1 | p2` matches when either alternative matches, and the arm body
+then reads one set of names without knowing which alternative matched. So
+every alternative must bind exactly the same names — `Circle(r) | Square(r)`
+is fine, `Circle(r) | Square(q)` and `Circle(r) | Dot` are not. (If the
+alternatives bind the same name at *different types*, that is reported as an
+ordinary E0200 mismatch instead.)
+
+**Fix:** Bind the same names in every alternative, or split the arms:
+
+```certo
+// Before (rejected):
+match s { Circle(r) | Square(q) => r  Dot => 0 }
+
+// After:
+match s { Circle(r) | Square(r) => r  Dot => 0 }
+```
+
 ---
 
 ## E0300–E0306  Trait errors

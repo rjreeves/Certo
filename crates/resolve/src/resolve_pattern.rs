@@ -60,10 +60,18 @@ pub fn define_pattern_bindings(pat: &S<Pattern>, scope: &mut ScopeChain) {
         }
 
         Pattern::Or { left, right, .. } => {
-            // Both sides must bind the same names (checked by the type checker).
-            // For now resolve both sides independently.
+            // Both sides must bind the same names (checked by the type checker,
+            // E0223 — BACKLOG item 343). The left alternative defines them in
+            // the arm's scope; the right alternative is resolved in a
+            // throwaway frame instead, so binding the *same* name again (the
+            // whole point of `Circle(r) | Square(r) => r`) isn't flagged as a
+            // duplicate definition — while its constructor names are still
+            // verified and a name bound twice *within* the right side is still
+            // an error.
             define_pattern_bindings(left, scope);
+            scope.push();
             define_pattern_bindings(right, scope);
+            scope.pop();
         }
     }
 }

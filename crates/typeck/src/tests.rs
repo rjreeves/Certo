@@ -3452,3 +3452,38 @@ fn guard_in_a_function_after_a_lambda_is_not_misflagged() {
     // The nesting depth must come back down after leaving the lambda.
     check("module A\nfn apply(f: (Int) => Int, x: Int): Int = f(x)\nfn g(n: Int): Int = {\n val y = apply((x) => x + 1, n)\n guard y > 0 else 0\n y\n}").unwrap();
 }
+
+// ------------------------------------------------------------------ //
+// or-pattern bindings — BACKLOG item 343
+// ------------------------------------------------------------------ //
+
+const OR_SHAPES: &str = "type Shape = | Circle(Int) | Square(Int) | Dot\n";
+
+#[test]
+fn or_pattern_alternatives_binding_the_same_name_are_accepted() {
+    check(&format!("module A\n{OR_SHAPES}fn f(s: Shape): Int = match s {{ Circle(r) | Square(r) => r\n Dot => 0 }}")).unwrap();
+}
+
+#[test]
+fn or_pattern_with_no_bindings_is_accepted() {
+    check("module A\nfn f(n: Int): Text = match n { 1 | 2 => \"low\"\n _ => \"other\" }").unwrap();
+}
+
+#[test]
+fn or_pattern_alternatives_binding_different_names_are_rejected_e0223() {
+    let errs = check_err(&format!("module A\n{OR_SHAPES}fn f(s: Shape): Int = match s {{ Circle(r) | Square(q) => r\n Dot => 0 }}"));
+    assert!(has_kind_typeck(&errs, |k| matches!(k, TypeErrorKind::OrPatternBindingMismatch { name } if name == "q")), "{errs:?}");
+    assert!(has_kind_typeck(&errs, |k| matches!(k, TypeErrorKind::OrPatternBindingMismatch { name } if name == "r")), "{errs:?}");
+}
+
+#[test]
+fn or_pattern_binding_a_name_in_only_one_alternative_is_rejected_e0223() {
+    let errs = check_err(&format!("module A\n{OR_SHAPES}fn f(s: Shape): Int = match s {{ Circle(r) | Dot => r\n Square(_) => 1 }}"));
+    assert!(has_kind_typeck(&errs, |k| matches!(k, TypeErrorKind::OrPatternBindingMismatch { name } if name == "r")), "{errs:?}");
+}
+
+#[test]
+fn or_pattern_alternatives_binding_one_name_at_different_types_are_an_e0200_mismatch() {
+    let kind = first_error_kind("module A\ntype P = | A(Int) | B(Text)\nfn f(s: P): Text = match s { A(x) | B(x) => \"t\" }");
+    assert!(matches!(kind, TypeErrorKind::Mismatch { .. }), "expected E0200, got {kind:?}");
+}
