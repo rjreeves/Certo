@@ -25,6 +25,11 @@ fn unescape_once(s: &str) -> String {
     out
 }
 
+/// Text read from a MariaDB `information_schema`: unlike MySQL's it is the plain SQL, not escaped a second time.
+pub fn from_mariadb(text: &str) -> String {
+    from_render(text)
+}
+
 /// MySQL SQL text to PostgreSQL-flavoured text (see the module comment).
 pub fn from_render(text: &str) -> String {
     let c: Vec<char> = text.chars().collect();
@@ -103,6 +108,9 @@ pub fn from_render(text: &str) -> String {
                         i = skip_args(&c, i);
                     }
                     ("char_length" | "character_length", true) => out.push_str("length"),
+                    // MariaDB's spelling of LOWER and UPPER
+                    ("lcase", true) => out.push_str("lower"),
+                    ("ucase", true) => out.push_str("upper"),
                     _ => out.push_str(&word),
                 }
             }
@@ -150,6 +158,8 @@ mod tests {
         assert_eq!(from_server("utc_date()"), "today()");
         assert_eq!(from_server("(char_length(`name`) > 0)"), "(length(\"name\") > 0)");
         assert_eq!(from_server("-(5)"), "-(5)");
+        assert_eq!(from_mariadb("lcase(concat(`a`, 'it''s'))"), "lower(concat(\"a\", 'it''s'))");
+        assert_eq!(from_mariadb(r"'it''s a \\ test'"), r"'it''s a \ test'");
     }
 
     #[test]

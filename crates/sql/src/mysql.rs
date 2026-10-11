@@ -1,4 +1,4 @@
-//! MySQL 8 lowering (8.0.16 or later: it needs `CHECK`). Identifiers are backtick-quoted.
+//! MySQL 8 and MariaDB lowering (MySQL 8.0.19 or later, MariaDB 10.11 or later: both need `CHECK` and `DROP CONSTRAINT`). Identifiers are backtick-quoted.
 //!
 //! Where MySQL differs from PostgreSQL and SQLite, this either makes it behave the same or refuses with a reason:
 //!
@@ -392,7 +392,7 @@ fn lower_op(cx: &Cx, op: &Op, out: &mut Vec<String>) -> Result<(), LowerError> {
                 q(table), q(&constraint.name), expr(&constraint.expr).map_err(fail)?
             ));
         }
-        Op::DropConstraint { table, name } => out.push(format!("ALTER TABLE {} DROP CHECK {};", q(table), q(name))),
+        Op::DropConstraint { table, name } => out.push(format!("ALTER TABLE {} DROP CONSTRAINT {};", q(table), q(name))),
 
         Op::RenameTable { from, to, columns } => {
             out.push(format!("RENAME TABLE {} TO {};", q(from), q(to)));

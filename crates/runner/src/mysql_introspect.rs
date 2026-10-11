@@ -123,7 +123,31 @@ fn literal_default(value: &str, ty: &TypeIR) -> String {
     }
 }
 
+/// Is the server MariaDB? Its `information_schema` differs from MySQL's in a few places the reading below adapts to.
+pub fn is_mariadb(conn: &mut Conn) -> Result<bool, mysql::Error> {
+    let version: Option<String> = conn.query_first("SELECT VERSION()")?;
+    Ok(version.is_some_and(|v| v.to_ascii_lowercase().contains("mariadb")))
+}
+
+/// A MariaDB column default is SQL text: `NULL` for none, a quoted literal, a number, or an expression.
+fn mariadb_default(text: &str, ty: &TypeIR) -> Option<String> {
+    if text.eq_ignore_ascii_case("null") {
+        return None;
+    }
+    if text.len() >= 2 && text.starts_with('\'') && text.ends_with('\'') {
+        // a quoted literal: read it as SQL, then write it the way `literal_default` does
+        let value = mysqlexpr::from_mariadb(text);
+        let inner = value[1..value.len() - 1].replace("''", "'");
+        return Some(literal_default(&inner, ty));
+    }
+    if text.parse::<f64>().is_ok() {
+        return Some(literal_default(text, ty));
+    }
+    Some(mysqlexpr::from_mariadb(text))
+}
+
 pub fn introspect(conn: &mut Conn) -> Result<LiveSchema, mysql::Error> {
+    let mariadb = is_mariadb(conn)?;
     let mut notes: Vec<String> = Vec::new();
     let reserved: HashSet<&str> =
         [HISTORY_TABLE, crate::journal::LOG_TABLE, crate::views::VIEWS_TABLE, crate::mysql_exec::PROGRESS_TABLE].into_iter().collect();
@@ -178,6 +202,7 @@ pub fn introspect(conn: &mut Conn) -> Result<LiveSchema, mysql::Error> {
         }
         let auto = extra.contains("auto_increment");
         let default = match default {
+            Some(text) if !auto && mariadb => mariadb_default(&text, &ty).map(|sql| ExprIR::Raw { sql }),
             Some(text) if !auto => {
                 let sql = if extra.contains("DEFAULT_GENERATED") { mysqlexpr::from_server(&text) } else { literal_default(&text, &ty) };
                 Some(ExprIR::Raw { sql })
@@ -221,7 +246,9 @@ pub fn introspect(conn: &mut Conn) -> Result<LiveSchema, mysql::Error> {
         }
         let (col, rtable, rcol, on_update, on_delete) = parts.into_iter().next().unwrap();
         if let Some(c) = tables.get_mut(&table).and_then(|cs| cs.iter_mut().find(|c| c.name == col)) {
-            c.references = Some(ForeignKeyIR { table: rtable, column: rcol, on_delete: action(&on_delete), on_update: action(&on_update) });
+            // MariaDB reports NO ACTION as RESTRICT (the two are one thing there): read it as the default
+            let rule = |r: &str| if mariadb && r == "RESTRICT" { ReferentialAction::NoAction } else { action(r) };
+            c.references = Some(ForeignKeyIR { table: rtable, column: rcol, on_delete: rule(&on_delete), on_update: rule(&on_update) });
         }
     }
 
@@ -264,9 +291,21 @@ pub fn introspect(conn: &mut Conn) -> Result<LiveSchema, mysql::Error> {
     )?;
     let mut constraints: BTreeMap<String, Vec<ConstraintIR>> = BTreeMap::new();
     for (table, name, clause) in checks {
-        if known.contains(table.as_str()) {
-            constraints.entry(table).or_default().push(ConstraintIR { name, expr: ExprIR::Raw { sql: mysqlexpr::from_server(&clause) } });
+        if !known.contains(table.as_str()) {
+            continue;
         }
+        let sql = if mariadb { mysqlexpr::from_mariadb(&clause) } else { mysqlexpr::from_server(&clause) };
+        // MariaDB makes `json` a LONGTEXT with a check named after the column: that pair is the JSON column
+        let json_check = mariadb && sql == format!("json_valid(\"{name}\")");
+        let json_column = json_check
+            .then(|| tables.get_mut(&table).and_then(|cs| cs.iter_mut().find(|c| c.name == name)))
+            .flatten()
+            .filter(|c| c.ty == TypeIR::Builtin(Builtin::Text));
+        if let Some(c) = json_column {
+            c.ty = TypeIR::Builtin(Builtin::Json);
+            continue;
+        }
+        constraints.entry(table).or_default().push(ConstraintIR { name, expr: ExprIR::Raw { sql } });
     }
 
     // ---- what SDL has no place for -------------------------------------------------------------
@@ -307,6 +346,21 @@ mod tests {
         assert_eq!(enum_values("enum('a','b')"), Some(vec!["a".into(), "b".into()]));
         assert_eq!(enum_values("enum('it''s','x,y')"), Some(vec!["it's".into(), "x,y".into()]));
         assert_eq!(enum_values("varchar(5)"), None);
+    }
+
+    #[test]
+    fn mariadb_defaults_are_sql_text() {
+        use Builtin::*;
+        let text = TypeIR::Builtin(Varchar(10));
+        assert_eq!(mariadb_default("NULL", &text), None);
+        assert_eq!(mariadb_default("'free'", &text), Some("'free'".into()));
+        assert_eq!(mariadb_default("'it''s'", &text), Some("'it''s'".into()));
+        assert_eq!(mariadb_default("''", &text), Some("''".into()));
+        assert_eq!(mariadb_default("0.00", &TypeIR::Builtin(Numeric(10, 2))), Some("0.00".into()));
+        assert_eq!(mariadb_default("1", &TypeIR::Builtin(Bool)), Some("true".into()));
+        assert_eq!(mariadb_default("0", &TypeIR::Builtin(Bool)), Some("false".into()));
+        assert_eq!(mariadb_default("current_timestamp()", &TypeIR::Builtin(TimestampNaive)), Some("now()".into()));
+        assert_eq!(mariadb_default("lcase(`a`)", &text), Some("lower(\"a\")".into()));
     }
 
     #[test]

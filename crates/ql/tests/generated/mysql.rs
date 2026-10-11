@@ -206,7 +206,7 @@ pub fn add_blob<C: mysql::prelude::Queryable>(conn: &mut C, data: Option<&[u8]>,
 }
 
 /// The SQL of `delete purge_orders`.
-pub const PURGE_ORDERS_SQL: &str = r#"DELETE FROM `orders` AS `o`"#;
+pub const PURGE_ORDERS_SQL: &str = r#"DELETE `o` FROM `orders` AS `o`"#;
 
 /// Runs `delete purge_orders`; returns the number of rows affected.
 pub fn purge_orders<C: mysql::prelude::Queryable>(conn: &mut C) -> Result<u64, mysql::Error> {
