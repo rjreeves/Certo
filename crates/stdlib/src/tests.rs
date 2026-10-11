@@ -3481,3 +3481,13 @@ fn partition_pred_must_return_bool_is_type_error() {
     ).unwrap_err();
     assert!(!errs.is_empty(), "expected a type error for a non-Bool partition predicate");
 }
+
+// BACKLOG item 345 — Float `**` needs a real floating-point power function;
+// the integer-only `certo_pow` truncated both operands.
+#[test]
+fn core_c_defines_a_float_pow_helper_backed_by_libm_pow() {
+    let idx = CORE_C.find("double certo_pow_float(double base, double exp)")
+        .expect("missing certo_pow_float in CORE_C");
+    let end = CORE_C[idx..].find('\n').map(|i| idx + i).unwrap_or(CORE_C.len());
+    assert!(CORE_C[idx..end].contains("pow(base, exp)"), "certo_pow_float must call libm pow");
+}

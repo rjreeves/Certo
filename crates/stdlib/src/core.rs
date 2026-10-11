@@ -200,6 +200,11 @@ int64_t certo_pow(int64_t base, int64_t exp) {
     return result;
 }
 
+/* Float `**` — BACKLOG item 345. `a ** b` on Float operands used to call the
+   integer `certo_pow(int64_t, int64_t)` above, silently truncating both
+   arguments (`2.0 ** 0.5` -> certo_pow(2, 0) -> 1). */
+double certo_pow_float(double base, double exp) { return pow(base, exp); }
+
 int64_t certo_abs_int(int64_t n)   { return n < 0 ? -n : n; }
 double  certo_abs_float(double f)  { return f < 0.0 ? -f : f; }
 int64_t certo_min_int(int64_t a, int64_t b) { return a < b ? a : b; }

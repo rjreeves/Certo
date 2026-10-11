@@ -854,7 +854,17 @@ fn emit_binop(
         BinOp::Mul  => format!("({} * {})", lhs, rhs),
         BinOp::Div  => format!("({} / {})", lhs, rhs),
         BinOp::Rem  => format!("({} % {})", lhs, rhs),
-        BinOp::Pow  => format!("certo_pow({}, {})", lhs, rhs),
+        // BACKLOG item 345 — a Float `**` goes to `pow`, not the integer-only
+        // `certo_pow(int64_t, int64_t)` (which silently truncated both
+        // operands: `2.0 ** 0.5` computed `certo_pow(2, 0)` = 1).
+        BinOp::Pow  => {
+            let is_float = |t: Ty| matches!(t, Ty::Float | Ty::Float32);
+            if is_float(operand_ty(l, locals)) || is_float(operand_ty(r, locals)) {
+                format!("certo_pow_float({}, {})", lhs, rhs)
+            } else {
+                format!("certo_pow({}, {})", lhs, rhs)
+            }
+        }
         BinOp::Eq   => emit_eq(l, r, locals, eq_types, variant_parent, &lhs, &rhs),
         BinOp::NotEq => format!("(!{})", emit_eq(l, r, locals, eq_types, variant_parent, &lhs, &rhs)),
         BinOp::Lt   => format!("({} < {})", lhs, rhs),

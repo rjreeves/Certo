@@ -2981,3 +2981,30 @@ fn module_level_float_constant_is_emitted_as_a_double_literal() {
     let c = codegen("module A\nval k: Float = 2.0\nfn f(): Float = k");
     assert_contains(&c, "2.0");
 }
+
+// ------------------------------------------------------------------ //
+// Float `**` — BACKLOG item 345
+// ------------------------------------------------------------------ //
+
+#[test]
+fn float_exponentiation_calls_pow_not_the_integer_only_certo_pow() {
+    // `2.0 ** 0.5` used to emit `certo_pow(2, 0.5)` — the integer-only
+    // `int64_t certo_pow(int64_t, int64_t)`, which truncated both operands
+    // (computing `2 ** 0` = 1).
+    let c = codegen("module A\nfn f(x: Float, y: Float): Float = x ** y");
+    assert_contains(&c, "certo_pow_float(");
+    assert_not_contains(&c, "certo_pow(_l");
+}
+
+#[test]
+fn float_exponentiation_with_literal_operands_also_calls_pow() {
+    let c = codegen("module A\nfn f(): Float = 2.0 ** 0.5");
+    assert_contains(&c, "certo_pow_float(2.0, 0.5)");
+}
+
+#[test]
+fn integer_exponentiation_still_uses_the_integer_certo_pow() {
+    let c = codegen("module A\nfn f(x: Int, y: Int): Int = x ** y");
+    assert_contains(&c, "certo_pow(");
+    assert_not_contains(&c, "certo_pow_float(");
+}

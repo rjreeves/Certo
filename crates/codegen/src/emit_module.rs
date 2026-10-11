@@ -1120,6 +1120,7 @@ static inline intptr_t __tuple_get(void* t, int64_t i) { return (intptr_t)((cert
 
 /* Arithmetic helpers */
 int64_t certo_pow(int64_t base, int64_t exp);
+double  certo_pow_float(double base, double exp);
 void*   certo_coalesce(void* opt, void* fallback);
 
 /* NULL constant used by Option pattern matching (cast to int64_t for comparison) */
