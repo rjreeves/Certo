@@ -246,7 +246,7 @@ dependencies = [
 
 [[package]]
 name = "certo"
-version = "1.0.71"
+version = "1.0.72"
 dependencies = [
  "certo-ast",
  "certo-codegen",
