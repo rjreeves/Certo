@@ -784,6 +784,17 @@ fn operand_type_name(op: &Operand, locals: &[MirLocalDecl], variant_parent: &Has
 /// about — List/Option/Map/Tuple/Fn-typed values, deliberately out of
 /// this item's scope, see item 200's own design sketch) falls back to the
 /// original bare `==`, unchanged.
+/// True when an ordering comparison's operands are `Text` — taking whichever
+/// side's type is known when the other is still `Ty::Error` (same fallback
+/// `emit_eq` uses).
+fn text_ordering(l: &Operand, r: &Operand, locals: &[MirLocalDecl]) -> bool {
+    let ty = match operand_ty(l, locals) {
+        Ty::Error => operand_ty(r, locals),
+        other => other,
+    };
+    matches!(ty, Ty::Text)
+}
+
 fn emit_eq(
     l: &Operand, r: &Operand, locals: &[MirLocalDecl],
     eq_types: &HashSet<String>, variant_parent: &HashMap<String, String>,
@@ -867,6 +878,14 @@ fn emit_binop(
         }
         BinOp::Eq   => emit_eq(l, r, locals, eq_types, variant_parent, &lhs, &rhs),
         BinOp::NotEq => format!("(!{})", emit_eq(l, r, locals, eq_types, variant_parent, &lhs, &rhs)),
+        // BACKLOG item 346 — Text ordering compares contents via
+        // `certo_text_compare`, not the raw `char*` pointers (which compared
+        // heap addresses: `"apple" < "banana"` could be true or false
+        // depending on allocation order).
+        BinOp::Lt | BinOp::LtEq | BinOp::Gt | BinOp::GtEq if text_ordering(l, r, locals) => {
+            let cmp = match op { BinOp::Lt => "<", BinOp::LtEq => "<=", BinOp::Gt => ">", _ => ">=" };
+            format!("(certo_text_compare({}, {}) {} 0)", lhs, rhs, cmp)
+        }
         BinOp::Lt   => format!("({} < {})", lhs, rhs),
         BinOp::LtEq => format!("({} <= {})", lhs, rhs),
         BinOp::Gt   => format!("({} > {})", lhs, rhs),

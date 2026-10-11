@@ -3008,3 +3008,25 @@ fn integer_exponentiation_still_uses_the_integer_certo_pow() {
     assert_contains(&c, "certo_pow(");
     assert_not_contains(&c, "certo_pow_float(");
 }
+
+// ------------------------------------------------------------------ //
+// Text ordering — BACKLOG item 346
+// ------------------------------------------------------------------ //
+
+#[test]
+fn text_ordering_calls_certo_text_compare_not_a_pointer_comparison() {
+    // `a < b` on Text used to emit `(a < b)` — a raw `char*` comparison.
+    for (op, c_op) in [("<", "<"), ("<=", "<="), (">", ">"), (">=", ">=")] {
+        let c = codegen(&format!("module A\nfn f(a: Text, b: Text): Bool = a {} b", op));
+        assert_contains(&c, &format!("certo_text_compare(_l1, _l2) {} 0", c_op));
+    }
+}
+
+#[test]
+fn numeric_ordering_still_emits_plain_c_comparisons() {
+    let c = codegen("module A\nfn f(a: Int, b: Int): Bool = a < b");
+    assert_contains(&c, "(_l1 < _l2)");
+    assert_not_contains(&c, "certo_text_compare(_l1");
+    let c = codegen("module A\nfn f(a: Float, b: Float): Bool = a >= b");
+    assert_contains(&c, "(_l1 >= _l2)");
+}

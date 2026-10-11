@@ -712,6 +712,25 @@ fn lower_lambda_with_param_hint(params: &[certo_ast::expr::LambdaParam], body: &
     lower_lambda_with_param_hints(params, body, std::slice::from_ref(hint), &Ty::Error, cx, span)
 }
 
+/// `lower_lambda_with_param_hint`, except that `List.sort`'s two-param
+/// comparator has *every* param hinted with the element type (both sides of
+/// the comparison are elements), not just param 0 — and only when that
+/// element type is `Text`. `certo_list_sort` calls the comparator directly
+/// with the list's raw erased `void*` elements (it is not a
+/// `BOXED_ABI_CALLEES` entry), so giving a lambda param a native type whose
+/// C ABI differs from `void*` (a `Float`'s `double`, a struct by value)
+/// would read the wrong register / memory; a `Text` is a pointer either way,
+/// so the hint is ABI-neutral there and lets `p < q` be recognised as a Text
+/// comparison.
+fn lower_hinted_callback(fn_path: Option<&str>, params: &[certo_ast::expr::LambdaParam], body: &S<Expr>, hint: &Ty, cx: &mut Cx, span: Span) -> HirExpr {
+    if fn_path == Some("List.sort") {
+        let hints = if matches!(hint, Ty::Text) { vec![hint.clone(); params.len()] } else { Vec::new() };
+        lower_lambda_with_param_hints(params, body, &hints, &Ty::Error, cx, span)
+    } else {
+        lower_lambda_with_param_hint(params, body, hint, cx, span)
+    }
+}
+
 /// Same as `lower_lambda_with_param_hint`, but one hint per param instead of
 /// only ever hinting param 0, plus a return-type hint — needed when a
 /// lambda literal is passed directly as an argument whose *declared* type
@@ -1686,7 +1705,13 @@ fn lower_expr(expr: &S<Expr>, cx: &mut Cx) -> HirExpr {
                     // BACKLOG item 266 — `List.forEach`'s own callback param
                     // needs the identical hint, sourced from the receiver
                     // list's own element type exactly like `List.map`'s.
-                    | Some("List.forEach")) || result_hint_side.is_some();
+                    | Some("List.forEach")
+                    // BACKLOG item 346 — `List.sort`'s comparator
+                    // `(a, b) => ...` takes two params, *both* of the list's
+                    // element type. Unhinted they stay `Ty::Error`, so
+                    // `p < q` on Text elements could not be recognised as a
+                    // Text comparison. See `lower_hinted_callback`.
+                    | Some("List.sort")) || result_hint_side.is_some();
                 // Every one of the above takes its lambda as the 2nd
                 // positional argument (index 1) — except `List.upsert`
                 // (BACKLOG item 209), whose signature is `(list, item, on)`,
@@ -1745,7 +1770,7 @@ fn lower_expr(expr: &S<Expr>, cx: &mut Cx) -> HirExpr {
                         if slots[i].is_some() { continue; }
                         if Some(i) == lambda_slot_idx {
                             if let Expr::Lambda { params, body, .. } = &arg.value.node {
-                                let lowered = lower_lambda_with_param_hint(params, body, &list_ty_hint, cx, arg.value.span);
+                                let lowered = lower_hinted_callback(fn_full_path.as_deref(), params, body, &list_ty_hint, cx, arg.value.span);
                                 // `sortBy`/`minBy`/`maxBy`/`sumBy`'s
                                 // key/numeric projection type restriction
                                 // (BACKLOG item 162b) is *mostly* enforced
@@ -1811,7 +1836,7 @@ fn lower_expr(expr: &S<Expr>, cx: &mut Cx) -> HirExpr {
                                         _ => None,
                                     }).unwrap_or(Ty::Error)
                                 };
-                                let lowered = lower_lambda_with_param_hint(params, body, &hint, cx, arg.value.span);
+                                let lowered = lower_hinted_callback(fn_full_path.as_deref(), params, body, &hint, cx, arg.value.span);
                                 let is_key_fn = matches!(fn_full_path.as_deref(),
                                     Some("List.sortBy") | Some("List.minBy") | Some("List.maxBy") | Some("List.sumBy"));
                                 // BACKLOG item 311 — `List.sumBy` alone also

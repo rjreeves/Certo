@@ -3491,3 +3491,11 @@ fn core_c_defines_a_float_pow_helper_backed_by_libm_pow() {
     let end = CORE_C[idx..].find('\n').map(|i| idx + i).unwrap_or(CORE_C.len());
     assert!(CORE_C[idx..end].contains("pow(base, exp)"), "certo_pow_float must call libm pow");
 }
+
+// BACKLOG item 346 — Text ordering runtime.
+#[test]
+fn text_compare_is_defined_in_the_runtime_and_null_aware() {
+    let text = crate::text::TEXT_C;
+    assert!(text.contains("int64_t certo_text_compare(certo_text_t a, certo_text_t b)"));
+    assert!(text.contains("strcmp(a, b)"));
+}

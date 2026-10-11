@@ -1054,6 +1054,7 @@ certo_decimal_t certo_decimal_parse(const char* s);
 certo_text_t certo_text_concat(certo_text_t a, certo_text_t b);
 int64_t      certo_text_len(certo_text_t t);
 bool         certo_text_eq(certo_text_t a, certo_text_t b);
+int64_t      certo_text_compare(certo_text_t a, certo_text_t b);
 
 /* UUID */
 typedef struct { uint8_t bytes[16]; } certo_uuid_t;
