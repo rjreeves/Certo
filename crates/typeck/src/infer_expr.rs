@@ -841,7 +841,9 @@ pub fn infer(expr: &S<Expr>, ctx: &mut Ctx<'_>) -> Ty {
                 ctx.env.define(p.name.node.clone(), ty.clone());
                 ty
             }).collect();
+            ctx.env.enter_nested_body();
             let ret_ty = infer(body, ctx);
+            ctx.env.leave_nested_body();
             ctx.env.pop();
             Ty::Fn { params: param_tys, ret: Box::new(ret_ty) }
         }
@@ -1023,12 +1025,30 @@ pub fn infer(expr: &S<Expr>, ctx: &mut Ctx<'_>) -> Ty {
 
         Expr::Await { expr, .. } => infer(expr, ctx),
 
-        Expr::Spawn { expr, .. } => infer(expr, ctx),
+        Expr::Spawn { expr, .. } => {
+            ctx.env.enter_nested_body();
+            let ty = infer(expr, ctx);
+            ctx.env.leave_nested_body();
+            ty
+        }
 
+        // `guard cond else e` — BACKLOG item 342. Returns `e` from the
+        // enclosing function when `cond` is false (HIR lowers it to a real
+        // early return). `e` must therefore have the enclosing function's
+        // own return type; and since "the enclosing function" is only
+        // well-defined directly in a fn/method body, a `guard` inside a
+        // lambda, task block, or any body with no function return type is
+        // rejected (E0222) instead of silently returning from the wrong
+        // function.
         Expr::Guard { cond, else_expr, span } => {
             let cond_ty = infer(cond, ctx);
             ctx.unify(cond_ty, Ty::Bool, *span);
-            infer(else_expr, ctx);
+            let else_ty = infer(else_expr, ctx);
+            let ret_ty = ctx.env.lookup_current_body_return_ty().cloned();
+            match ret_ty {
+                Some(ret) if !ctx.env.in_nested_body() => { ctx.unify(else_ty, ret, *span); }
+                _ => ctx.errors.push(TypeError { kind: TypeErrorKind::GuardOutsideFunction, span: *span }),
+            }
             Ty::Unit
         }
 
@@ -1049,7 +1069,10 @@ pub fn infer(expr: &S<Expr>, ctx: &mut Ctx<'_>) -> Ty {
                 let ty = infer(t, ctx);
                 ctx.unify(ty, Ty::Named { name: "Duration".into(), args: vec![] }, *span);
             }
-            Ty::Tuple(tasks.iter().map(|t| infer(t, ctx)).collect())
+            ctx.env.enter_nested_body();
+            let tys = tasks.iter().map(|t| infer(t, ctx)).collect();
+            ctx.env.leave_nested_body();
+            Ty::Tuple(tys)
         }
 
         // `withTimeout(d) { body }` (BACKLOG item 122) — cooperative-cancellation
@@ -1058,11 +1081,20 @@ pub fn infer(expr: &S<Expr>, ctx: &mut Ctx<'_>) -> Ty {
         Expr::WithTimeout { duration, body, span } => {
             let dur_ty = infer(duration, ctx);
             ctx.unify(dur_ty, Ty::Named { name: "Duration".into(), args: vec![] }, *span);
+            ctx.env.enter_nested_body();
             let body_ty = infer(body, ctx);
+            ctx.env.leave_nested_body();
             Ty::Option(Box::new(body_ty))
         }
 
-        Expr::Transaction { body, .. } | Expr::Unsafe { body, .. } => infer(body, ctx),
+        Expr::Transaction { body, .. } => {
+            ctx.env.enter_nested_body();
+            let ty = infer(body, ctx);
+            ctx.env.leave_nested_body();
+            ty
+        }
+
+        Expr::Unsafe { body, .. } => infer(body, ctx),
 
         Expr::Ascribe { expr, ty, span } => {
             let inferred = infer(expr, ctx);
@@ -1797,6 +1829,36 @@ fn bind_pattern_vars(pat: &certo_ast::pattern::Pattern, ctx: &mut Ctx<'_>) {
 /// named-field sum-variant pattern (`Circle { radius: r }`): variant fields
 /// are registered as a positional constructor `Fn`, not individually by
 /// name, so there's no per-field type to look up for that specific form.
+/// Every name `pat` binds when it matches — a bare identifier, an `as`
+/// alias, a record-pattern shorthand field, and recursively through every
+/// compound pattern. For a nested or-pattern, the left alternative's names
+/// (a mismatched or-pattern is reported where it's checked, not here).
+fn pattern_binding_names(pat: &certo_ast::pattern::Pattern, out: &mut std::collections::BTreeSet<String>) {
+    use certo_ast::pattern::Pattern;
+    match pat {
+        Pattern::Ident { name, .. } => { out.insert(name.node.clone()); }
+        Pattern::As { pattern, name, .. } => {
+            pattern_binding_names(&pattern.node, out);
+            out.insert(name.node.clone());
+        }
+        Pattern::Guard { pattern, .. } => pattern_binding_names(&pattern.node, out),
+        Pattern::Tuple { elements, .. } => for e in elements { pattern_binding_names(&e.node, out); },
+        Pattern::List { head, tail, .. } => {
+            for e in head { pattern_binding_names(&e.node, out); }
+            if let Some(t) = tail { pattern_binding_names(&t.node, out); }
+        }
+        Pattern::Constructor { fields, .. } => for f in fields { pattern_binding_names(&f.node, out); },
+        Pattern::Record { fields, .. } => for f in fields {
+            match &f.pattern {
+                Some(p) => pattern_binding_names(&p.node, out),
+                None => { out.insert(f.name.node.clone()); }
+            }
+        },
+        Pattern::Or { left, .. } => pattern_binding_names(&left.node, out),
+        Pattern::Wildcard { .. } | Pattern::Literal { .. } => {}
+    }
+}
+
 fn check_pattern(pat: &certo_ast::pattern::Pattern, expected: Ty, ctx: &mut Ctx<'_>) {
     use certo_ast::pattern::{Pattern, LitPat};
     match pat {
@@ -1813,9 +1875,30 @@ fn check_pattern(pat: &certo_ast::pattern::Pattern, expected: Ty, ctx: &mut Ctx<
 
         Pattern::Guard { pattern, .. } => check_pattern(&pattern.node, expected, ctx),
 
-        Pattern::Or { left, right, .. } => {
+        // BACKLOG item 343 — `p1 | p2` matches when either alternative does,
+        // and the arm body then sees *one* set of names, so both alternatives
+        // must bind exactly the same names (E0223) with the same types. This
+        // used to just check each side independently and let the second
+        // side's bindings silently shadow the first's — `Circle(r) | Square(q)
+        // => r` type-checked, then read an unassigned variable at runtime.
+        Pattern::Or { left, right, span } => {
+            let mut lnames = std::collections::BTreeSet::new();
+            let mut rnames = std::collections::BTreeSet::new();
+            pattern_binding_names(&left.node, &mut lnames);
+            pattern_binding_names(&right.node, &mut rnames);
             check_pattern(&left.node, expected.clone(), ctx);
+            let left_tys: Vec<(String, Ty)> = lnames.iter()
+                .filter_map(|n| ctx.env.lookup(n).cloned().map(|t| (n.clone(), t)))
+                .collect();
             check_pattern(&right.node, expected, ctx);
+            for n in lnames.symmetric_difference(&rnames) {
+                ctx.errors.push(TypeError { kind: TypeErrorKind::OrPatternBindingMismatch { name: n.clone() }, span: *span });
+            }
+            for (n, lt) in left_tys {
+                if rnames.contains(&n) {
+                    if let Some(rt) = ctx.env.lookup(&n).cloned() { ctx.unify(rt, lt, *span); }
+                }
+            }
         }
 
         Pattern::Literal { value, span } => {

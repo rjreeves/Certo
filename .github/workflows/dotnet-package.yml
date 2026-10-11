@@ -57,6 +57,29 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo test --locked -p certo-sdl -p certo-mdl -p certo-sql -p certo-ql -p certo-runner -p certo-capi -- --test-threads=1
 
+  mariadb:
+    # the MySQL code paths against MariaDB (the oldest LTS we support and the newest): schema read-back, migrations, QL
+    name: MariaDB ${{ matrix.version }}
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ["10.11", "11.4"]
+    services:
+      mariadb:
+        image: mariadb:${{ matrix.version }}
+        env:
+          MARIADB_ALLOW_EMPTY_ROOT_PASSWORD: "1"
+        ports: ["3306:3306"]
+        options: >-
+          --health-cmd "healthcheck.sh --connect --innodb_initialized" --health-interval 5s --health-timeout 5s --health-retries 20
+    env:
+      CERTO_TEST_MYSQL_URL: mysql://root@127.0.0.1:3306/mysql
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test --locked -p certo-sql -p certo-ql -p certo-runner -- --test-threads=1
+
   codegen:
     # generate C# from sample queries, compile it, and run it against SQLite and PostgreSQL
     runs-on: ubuntu-22.04

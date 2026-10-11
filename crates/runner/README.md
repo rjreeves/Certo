@@ -86,6 +86,10 @@ A project with `dialect = "mysql"` runs against MySQL 8 (`mysql://user:password@
 and `--yes`-style safety is the same as for the others). Migrations are written by `migrate new` as for the other dialects (see
 `certo-sql`'s MySQL notes for what is refused and why).
 
+**MariaDB** (10.11 or later) uses the same dialect and URL: the runner recognises the server (`SELECT VERSION()`) and reads its
+`information_schema` accordingly (column defaults as SQL text, `json` as `LONGTEXT` with a `JSON_VALID` check, `NO ACTION` reported
+as `RESTRICT`). Live tests run against both with `CERTO_TEST_MYSQL_URL`.
+
 MySQL commits every DDL statement as it runs, so a migration cannot be atomic. The runner applies it **one statement at a time and
 counts**: `_certo_progress` holds how many of a migration's statements have run. If one fails, the ones before it are in the
 database, `status` lists the migration under `partial` (`seq`, `done`, `total`), the error says which step failed, and `apply` again

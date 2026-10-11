@@ -51,6 +51,20 @@ bool certo_text_eq(certo_text_t a, certo_text_t b) {
     return strcmp(a, b) == 0;
 }
 
+/* Three-way lexicographic comparison — BACKLOG item 346. Text `<`/`<=`/`>`/`>=`
+   used to compile to a raw C pointer comparison (so the result depended on
+   heap addresses and was unrelated to the strings' contents). Compares byte
+   by byte (for UTF-8 that is code-point order, not locale collation);
+   returns <0, 0 or >0. NULL is ordered before every non-NULL text and equal
+   to itself, mirroring certo_text_eq (where NULL never equals ""). */
+int64_t certo_text_compare(certo_text_t a, certo_text_t b) {
+    if (!a && !b) return 0;
+    if (!a) return -1;
+    if (!b) return 1;
+    int c = strcmp(a, b);
+    return c < 0 ? -1 : (c > 0 ? 1 : 0);
+}
+
 bool certo_text_contains(certo_text_t haystack, certo_text_t needle) {
     if (!haystack || !needle) return false;
     return strstr(haystack, needle) != NULL;

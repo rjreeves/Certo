@@ -134,6 +134,23 @@ impl Builder {
         mir
     }
 
+    /// Like `map_hir_local`, for a *pattern* binding — BACKLOG item 343.
+    /// The alternatives of an or-pattern (`Circle(r) | Square(r) => ..`)
+    /// share one HIR local per name (see `Cx::or_binding_reuse` in
+    /// `crates/hir`); each alternative's bind site must write the *same* MIR
+    /// local, or only the last-lowered alternative's would be the one the arm
+    /// body reads. A HIR local with no mapping yet is declared fresh, exactly
+    /// like `map_hir_local`; an already-mapped one is reused (patching a
+    /// still-unknown `Ty::Error` declared type with the better one).
+    fn bind_pattern_local(&mut self, hir: LocalId, name: &str, ty: Ty) -> MirLocal {
+        if let Some(&existing) = self.local_map.get(&hir) {
+            let decl = &mut self.locals[existing as usize];
+            if matches!(decl.ty, Ty::Error) && !matches!(ty, Ty::Error) { decl.ty = ty; }
+            return existing;
+        }
+        self.map_hir_local(hir, name, ty)
+    }
+
     fn get_local(&self, hir: LocalId) -> MirLocal {
         *self.local_map.get(&hir).unwrap_or(&hir)
     }
@@ -564,6 +581,189 @@ fn wrap_named_fn_as_erased_closure(name: &str, real_param_tys: &[Ty], real_ret_t
 /// (item 140) means the existing `AggregateKind::Tuple`/`Rvalue::Field`
 /// codegen already box/unbox each closure transparently — no manual
 /// box/unbox rvalues needed here, unlike the erased-closure case.
+/// Encode `value` (of type `ty`) into the pointer-sized `Result` payload slot
+/// — the inverse of `unwrap_result_into`: `Float` as raw bits, a
+/// `needs_result_box` type heap-boxed, everything else as-is.
+fn encode_result_payload(b: &mut Builder, value: Operand, ty: &Ty) -> Operand {
+    if matches!(ty, Ty::Float) {
+        let bits = b.declare_local("_fbits", Ty::Int);
+        b.assign(bits, Rvalue::Call { func: Operand::Global("__certo_f2i".into()), args: vec![value] });
+        Operand::Local(bits)
+    } else if needs_result_box(ty) {
+        let boxed = b.declare_local("_boxed", Ty::Error);
+        b.assign(boxed, Rvalue::BoxSome { value, ty: ty.clone() });
+        Operand::Local(boxed)
+    } else {
+        value
+    }
+}
+
+/// First type in `candidates` that isn't `Ty::Error`.
+fn first_known_ty(candidates: &[&Ty]) -> Ty {
+    candidates.iter().find(|t| !matches!(***t, Ty::Error)).map(|t| (**t).clone()).unwrap_or(Ty::Error)
+}
+
+/// `Result.getOrElse`/`recover`/`flatMap`/`mapErr` (BACKLOG item 347),
+/// expanded inline per call site instead of calling the C runtime's
+/// `certo_get_or_else`/`certo_recover`/`certo_flat_map`/`certo_map_err`.
+/// Those runtime functions can only see the raw pointer-sized payload slot
+/// and hand it, untouched, to / take it from the callback — but a `Result`
+/// payload is *not* uniformly raw: `Float` is stored as bits, `Int`/`Bool`/
+/// structs/etc. are heap-boxed (`needs_result_box`), and a lambda callback
+/// is compiled with its param/return typed natively (a `double` is passed in
+/// an XMM register, not as a `void*`). Mixing the two silently produced
+/// garbage (`v(5).getOrElse(99)` printed a heap address; a Float payload read
+/// back as a nonsense double; a struct payload didn't compile; a `mapErr`
+/// callback returning an Int/enum segfaulted). Expanding here knows the real
+/// payload types, so it decodes the slot with `unwrap_result_into` (exactly
+/// what a `match` arm's `Ok(v)`/`Err(e)` binding uses), calls the callback
+/// through its real native signature, and re-encodes with
+/// `encode_result_payload` — one convention everywhere. Returns `None` for
+/// any other call so the caller falls through.
+fn lower_result_combinator_call(name: &str, args: &[HirExpr], expr_ty: &Ty, b: &mut Builder) -> Option<Operand> {
+    #[derive(PartialEq)]
+    enum K { GetOrElse, Recover, FlatMap, MapErr }
+    let kind = match name {
+        "getOrElse" | "Result.getOrElse" => K::GetOrElse,
+        "recover"   | "Result.recover"   => K::Recover,
+        "flatMap"   | "Result.flatMap"   => K::FlatMap,
+        "mapErr"    | "Result.mapErr"    => K::MapErr,
+        _ => return None,
+    };
+    if args.len() != 2 { return None; }
+
+    let r_op = lower_expr(&args[0], b);
+    let r_ty = match &args[0].ty { Ty::Result(..) => args[0].ty.clone(), _ => infer_operand_ty(&r_op, b) };
+    let (recv_ok, recv_err) = match &r_ty { Ty::Result(t, e) => ((**t).clone(), (**e).clone()), _ => (Ty::Error, Ty::Error) };
+
+    // The second argument: a plain default value (`getOrElse`) or a callback.
+    let (default_op, f_op, f_ret) = if kind == K::GetOrElse {
+        (Some(lower_expr(&args[1], b)), None, Ty::Error)
+    } else {
+        let f = lower_value_expr(&args[1], b);
+        let ret = match infer_operand_ty(&f, b) { Ty::Fn { ret, .. } => *ret, _ => Ty::Error };
+        (None, Some(f), ret)
+    };
+
+    let ok_ty = match kind {
+        K::GetOrElse => first_known_ty(&[&recv_ok, &args[1].ty, expr_ty]),
+        K::Recover   => first_known_ty(&[&recv_ok, &f_ret, expr_ty]),
+        _            => recv_ok.clone(),
+    };
+    let err_ty = recv_err.clone();
+
+    let is_ok = b.declare_local("_rc_is_ok", Ty::Bool);
+    let after = b.new_block();
+    b.terminate(Terminator::Call { func: Operand::Global("__result_is_ok".into()), args: vec![r_op.clone()], dest: is_ok, next: after });
+    b.switch_to(after);
+    let ok_bb = b.new_block();
+    let err_bb = b.new_block();
+    let join = b.new_block();
+    b.terminate(Terminator::If { cond: Operand::Local(is_ok), true_bb: ok_bb, false_bb: err_bb });
+
+    let void_result = Ty::Result(Box::new(Ty::Error), Box::new(Ty::Error));
+    let result_ty = match kind {
+        K::GetOrElse | K::Recover => ok_ty.clone(),
+        K::FlatMap => if matches!(expr_ty, Ty::Result(..)) { expr_ty.clone() } else if matches!(f_ret, Ty::Result(..)) { f_ret.clone() } else { void_result },
+        K::MapErr => if matches!(expr_ty, Ty::Result(..)) { expr_ty.clone() } else { void_result },
+    };
+    let dest = b.declare_local("_rc_res", result_ty);
+
+    // Ok branch.
+    b.switch_to(ok_bb);
+    match kind {
+        K::GetOrElse | K::Recover => unwrap_result_into(b, &r_op, &ok_ty, dest),
+        K::FlatMap => {
+            let v = b.declare_local("_rc_ok", ok_ty.clone());
+            unwrap_result_into(b, &r_op, &ok_ty, v);
+            let next = b.new_block();
+            b.terminate(Terminator::Call { func: f_op.clone().unwrap(), args: vec![Operand::Local(v)], dest, next });
+            b.switch_to(next);
+        }
+        K::MapErr => b.assign(dest, Rvalue::Use(r_op.clone())),
+    }
+    b.terminate(Terminator::Goto(join));
+
+    // Err branch.
+    b.switch_to(err_bb);
+    match kind {
+        K::GetOrElse => b.assign(dest, Rvalue::Use(default_op.clone().unwrap())),
+        K::FlatMap => b.assign(dest, Rvalue::Use(r_op.clone())),
+        K::Recover => {
+            let e = b.declare_local("_rc_err", err_ty.clone());
+            unwrap_result_into(b, &r_op, &err_ty, e);
+            let next = b.new_block();
+            b.terminate(Terminator::Call { func: f_op.clone().unwrap(), args: vec![Operand::Local(e)], dest, next });
+            b.switch_to(next);
+        }
+        K::MapErr => {
+            let e = b.declare_local("_rc_err", err_ty.clone());
+            unwrap_result_into(b, &r_op, &err_ty, e);
+            let ret_err = match expr_ty { Ty::Result(_, f) => (**f).clone(), _ => Ty::Error };
+            let new_err_ty = first_known_ty(&[&f_ret, &ret_err]);
+            let mapped = b.declare_local("_rc_mapped", new_err_ty.clone());
+            let next = b.new_block();
+            b.terminate(Terminator::Call { func: f_op.clone().unwrap(), args: vec![Operand::Local(e)], dest: mapped, next });
+            b.switch_to(next);
+            let slot = encode_result_payload(b, Operand::Local(mapped), &new_err_ty);
+            let next2 = b.new_block();
+            b.terminate(Terminator::Call { func: Operand::Global("Err".into()), args: vec![slot], dest, next: next2 });
+            b.switch_to(next2);
+        }
+    }
+    b.terminate(Terminator::Goto(join));
+
+    b.switch_to(join);
+    Some(Operand::Local(dest))
+}
+
+/// `Result.all(results)` (BACKLOG item 347): the runtime's
+/// `certo_result_all` copies each `Ok` payload *slot* straight into the
+/// result list, but a list element isn't encoded the same way as a `Result`
+/// slot for the small scalar types (`Int`/`Bool`/…): the slot holds a
+/// pointer to a heap box, the list element holds the value itself
+/// (`Rvalue::Box`'s bit-packing). For those payload types this synthesizes a
+/// per-call-site converter closure and calls `certo_result_all_conv`
+/// instead; every other payload type (pointer-like, `Float` bits, struct
+/// boxes) already shares one representation and keeps the plain runtime
+/// call, so `None` is returned for it.
+fn lower_result_all_call(args: &[HirExpr], expr_ty: &Ty, b: &mut Builder) -> Option<Operand> {
+    if args.len() != 1 { return None; }
+    let elem_ok = match &args[0].ty {
+        Ty::List(inner) => match &**inner { Ty::Result(t, _) => (**t).clone(), _ => Ty::Error },
+        _ => Ty::Error,
+    };
+    let ok_from_ret = match expr_ty {
+        Ty::Result(l, _) => match &**l { Ty::List(t) => (**t).clone(), _ => Ty::Error },
+        _ => Ty::Error,
+    };
+    let t = first_known_ty(&[&elem_ok, &ok_from_ret]);
+    if !(needs_result_box(&t) && !t.needs_heap_box()) { return None; }
+
+    let results = lower_expr(&args[0], b);
+    let idx = b.lambda_count;
+    b.lambda_count += 1;
+    let conv_name = format!("__resall_{}_{}", b.fn_name, idx);
+    let mut lb = Builder::new(&conv_name, b.record_field_types.clone(), b.variant_field_types.clone(), b.fn_param_tys.clone(), b.fn_ret_tys.clone(), b.variant_to_type.clone());
+    let ret_slot = lb.declare_local("_ret", Ty::Var(0));
+    let _env = lb.declare_local("_env", Ty::Error);
+    let slot = lb.declare_local("_slot", Ty::Var(0));
+    let v = lb.declare_local("_v", t.clone());
+    lb.assign(v, Rvalue::UnboxSome { opt: Operand::Local(slot), ty: t.clone() });
+    lb.assign(ret_slot, Rvalue::Box { value: Operand::Local(v), ty: t.clone() });
+    emit_defers_then_return(Operand::Local(ret_slot), &mut lb);
+    b.lifted_fns.extend(lb.lifted_fns);
+    b.lifted_fns.push(MirFn { name: conv_name.clone(), param_count: 2, locals: lb.locals, blocks: lb.blocks });
+    let conv = make_closure(&conv_name, Operand::Const(MirConst::Unit), Ty::Fn { params: vec![Ty::Var(0)], ret: Box::new(Ty::Var(0)) }, b);
+
+    let dest_ty = if matches!(expr_ty, Ty::Result(..)) { expr_ty.clone() } else { Ty::Result(Box::new(Ty::List(Box::new(t))), Box::new(Ty::Error)) };
+    let dest = b.declare_local("_rc_all", dest_ty);
+    let next = b.new_block();
+    b.terminate(Terminator::Call { func: Operand::Global("Result.allConv".into()), args: vec![results, conv], dest, next });
+    b.switch_to(next);
+    Some(Operand::Local(dest))
+}
+
 fn lower_compose_call(f_expr: &HirExpr, g_expr: &HirExpr, b: &mut Builder) -> Operand {
     let (a_ty, b_ty) = match &g_expr.ty {
         Ty::Fn { params, ret } if params.len() == 1 => (params[0].clone(), (**ret).clone()),
@@ -1396,7 +1596,7 @@ fn unwrap_result_into(b: &mut Builder, scrut: &Operand, payload_ty: &Ty, dest: M
 
 /// Bind a match-arm's `Ok(v)`/`Err(e)` payload local; see `unwrap_result_into`.
 fn unwrap_result_payload(b: &mut Builder, scrut: &Operand, hir_local: LocalId, name: &str, payload_ty: &Ty) {
-    let ml = b.map_hir_local(hir_local, name, payload_ty.clone());
+    let ml = b.bind_pattern_local(hir_local, name, payload_ty.clone());
     unwrap_result_into(b, scrut, payload_ty, ml);
 }
 
@@ -1426,7 +1626,7 @@ fn check_nested_pattern(b: &mut Builder, pat: &HirPat, op: &Operand, ty: &Ty, ne
     match pat {
         HirPat::Wildcard => {}
         HirPat::Bind { local, name } => {
-            let ml = b.map_hir_local(*local, name, ty.clone());
+            let ml = b.bind_pattern_local(*local, name, ty.clone());
             b.assign(ml, Rvalue::Use(op.clone()));
         }
         HirPat::Lit(lit) => {
@@ -1823,6 +2023,16 @@ fn lower_expr(expr: &HirExpr, b: &mut Builder) -> Operand {
                     b.switch_to(next);
                     return Operand::Local(dest);
                 }
+                // `Result.getOrElse`/`recover`/`flatMap`/`mapErr`/`all` —
+                // BACKLOG item 347. See `lower_result_combinator_call`.
+                if let Some(op) = lower_result_combinator_call(name, args, &expr.ty, b) {
+                    return op;
+                }
+                if name == "Result.all" {
+                    if let Some(op) = lower_result_all_call(args, &expr.ty, b) {
+                        return op;
+                    }
+                }
                 // `compose(f, g)` — BACKLOG item 161. See `lower_compose_call`'s
                 // own doc comment for why this needs per-call-site synthesis
                 // rather than an ordinary hand-written C runtime function.
@@ -2089,6 +2299,8 @@ fn lower_expr(expr: &HirExpr, b: &mut Builder) -> Operand {
             };
             let user_raw_return = matches!(user_generic_return, Some(Ty::Var(_)))
                 && !matches!(expr.ty, Ty::Var(_) | Ty::Error);
+            let raw_element_return = matches!(user_generic_return,
+                Some(Ty::Var(v)) if *v == certo_hir::RAW_ELEM_RET_VAR);
             // Same idea again, generalized one step further: a call through
             // a *locally held* closure value (not a named global) whose own
             // declared return is erased (`Ty::Fn{ret: Ty::Var(_), ..}`) —
@@ -2154,7 +2366,13 @@ fn lower_expr(expr: &HirExpr, b: &mut Builder) -> Operand {
                 // int it pointed to. `UnboxSome` always dereferences,
                 // matching `BoxSome` unconditionally — the correct pairing
                 // here.
-                if user_raw_return || local_closure_raw_return {
+                // BACKLOG items 350/340 — except a generic whose result paths
+                // all yield a raw container-element word (`List.getOrPanic`,
+                // a `Some(v)` extracted from `List.first`, ...), classified by
+                // `certo_hir::RAW_ELEM_RET_VAR`: that is `Unbox`'s scheme,
+                // not `BoxSome`'s, so `UnboxSome`'s dereference would read a
+                // bit-packed scalar / a Text pointer as if it were a cell.
+                if (user_raw_return || local_closure_raw_return) && !raw_element_return {
                     b.assign(real, Rvalue::UnboxSome { opt: Operand::Local(dest), ty: expr.ty.clone() });
                 } else {
                     b.assign(real, Rvalue::Unbox { value: Operand::Local(dest), ty: expr.ty.clone() });
@@ -2278,7 +2496,7 @@ fn lower_expr(expr: &HirExpr, b: &mut Builder) -> Operand {
                         if arm.guard.is_some() { b.switch_to(after_pat); }
                     }
                     HirPat::Bind { local, name } => {
-                        let mir_local = b.map_hir_local(*local, name, Ty::Error);
+                        let mir_local = b.bind_pattern_local(*local, name, Ty::Error);
                         b.assign(mir_local, Rvalue::Use(scrut_op.clone()));
                         // Pattern always matches — still need to check guard.
                         let after_pat = if arm.guard.is_some() { b.new_block() } else { arm_bb };
@@ -2327,7 +2545,7 @@ fn lower_expr(expr: &HirExpr, b: &mut Builder) -> Operand {
                                 b.switch_to(fields_bb);
                                 match fields.first() {
                                     Some(HirPat::Bind { local, name: fname }) => {
-                                        let ml = b.map_hir_local(*local, fname, opt_payload.clone());
+                                        let ml = b.bind_pattern_local(*local, fname, opt_payload.clone());
                                         b.assign(ml, Rvalue::UnboxSome {
                                             opt: scrut_op.clone(),
                                             ty:  opt_payload.clone(),
@@ -2516,7 +2734,7 @@ fn lower_expr(expr: &HirExpr, b: &mut Builder) -> Operand {
                                         other => (other.clone(), FieldUnbox::None),
                                     };
                                     let dest = match field_pat {
-                                        HirPat::Bind { local, name: fname } => b.map_hir_local(*local, fname, real_ty.clone()),
+                                        HirPat::Bind { local, name: fname } => b.bind_pattern_local(*local, fname, real_ty.clone()),
                                         _ => b.declare_local("_field_val", real_ty.clone()),
                                     };
                                     // Read the payload directly via a nested path
@@ -2588,7 +2806,7 @@ fn lower_expr(expr: &HirExpr, b: &mut Builder) -> Operand {
                                 other => (other.clone(), false),
                             };
                             let dest = match field_pat {
-                                HirPat::Bind { local, name: fname } => b.map_hir_local(*local, fname, real_ty.clone()),
+                                HirPat::Bind { local, name: fname } => b.bind_pattern_local(*local, fname, real_ty.clone()),
                                 _ => b.declare_local("_field_val", real_ty.clone()),
                             };
                             if needs_unbox {
@@ -2614,7 +2832,7 @@ fn lower_expr(expr: &HirExpr, b: &mut Builder) -> Operand {
                             // vs `(None, y)`) used to be silently skipped.
                             if matches!(field_pat, HirPat::Wildcard) { continue; }
                             let elem_local = match field_pat {
-                                HirPat::Bind { local, name: fname } => b.map_hir_local(*local, fname, Ty::Error),
+                                HirPat::Bind { local, name: fname } => b.bind_pattern_local(*local, fname, Ty::Error),
                                 _ => b.declare_local("_tuple_elem", Ty::Error),
                             };
                             let next_bb = b.new_block();
@@ -2702,7 +2920,7 @@ fn lower_expr(expr: &HirExpr, b: &mut Builder) -> Operand {
                                 });
                                 b.switch_to(next_bb);
 
-                                let elem_local = b.map_hir_local(*local, fname, elem_ty.clone());
+                                let elem_local = b.bind_pattern_local(*local, fname, elem_ty.clone());
                                 if elem_needs_unbox {
                                     b.assign(elem_local, Rvalue::Unbox { value: Operand::Local(elem_raw), ty: elem_ty.clone() });
                                 } else {
@@ -2721,7 +2939,7 @@ fn lower_expr(expr: &HirExpr, b: &mut Builder) -> Operand {
                                 // function, caught by a real end-to-end run
                                 // before this shipped.
                                 let list_ty = Ty::List(Box::new(elem_ty.clone()));
-                                let tail_local = b.map_hir_local(*local, fname, list_ty);
+                                let tail_local = b.bind_pattern_local(*local, fname, list_ty);
                                 let next_bb = b.new_block();
                                 b.terminate(Terminator::Call {
                                     func: Operand::Global("List.slice".into()),
@@ -2737,6 +2955,22 @@ fn lower_expr(expr: &HirExpr, b: &mut Builder) -> Operand {
                             }
                         }
 
+                        let after_pat = if arm.guard.is_some() { b.new_block() } else { arm_bb };
+                        b.terminate(Terminator::Goto(after_pat));
+                        if arm.guard.is_some() { b.switch_to(after_pat); }
+                    }
+                    // BACKLOG item 343 — an or-pattern (`1 | 2 => ..`,
+                    // `Circle(_) | Square(_) => ..`) used to fall into the
+                    // catch-all below, which jumps straight to the arm body
+                    // with no test at all, so a top-level `|` arm matched
+                    // *every* scrutinee. `check_nested_pattern` already
+                    // implements the real "try left, else try right, else
+                    // fall to the next arm" test (it's how a `|` nested
+                    // inside `Some(..)`/a tuple always worked) — reuse it,
+                    // then continue into the arm exactly like every other
+                    // pattern kind.
+                    HirPat::Or(..) => {
+                        check_nested_pattern(b, &arm.pat, &scrut_op, &scrutinee.ty, next_arm_bb);
                         let after_pat = if arm.guard.is_some() { b.new_block() } else { arm_bb };
                         b.terminate(Terminator::Goto(after_pat));
                         if arm.guard.is_some() { b.switch_to(after_pat); }
@@ -2996,6 +3230,26 @@ fn lower_expr(expr: &HirExpr, b: &mut Builder) -> Operand {
             let val_local = b.declare_local("_try_val", expr.ty.clone());
             unwrap_result_into(b, &Operand::Local(result_local), &expr.ty, val_local);
             Operand::Local(val_local)
+        }
+
+        // Early exit from the function — BACKLOG item 342 (`guard cond else e`).
+        // Mirrors `lower_fn`'s own final return exactly: assign the value into
+        // the return slot (local 0, always the first local declared — skipped
+        // for a Unit value, which has no `_l0` to write), then run every
+        // open `defer` scope and return, same as `?`'s propagation branch.
+        // Typeck (E0222) guarantees this never appears inside a lambda or
+        // task body, whose own builders have a differently-typed/boxed return
+        // slot this would bypass. Everything lowered after it in the same
+        // block is unreachable, so continue into a fresh dead block.
+        HirExprKind::Return(inner) => {
+            let value = lower_value_expr(inner, b);
+            if !matches!(infer_operand_ty(&value, b), Ty::Unit) {
+                b.assign(0, Rvalue::Use(value));
+            }
+            emit_defers_then_return(Operand::Local(0), b);
+            let dead = b.new_block();
+            b.switch_to(dead);
+            Operand::Const(MirConst::Unit)
         }
 
         HirExprKind::Unsafe(inner) => lower_expr(inner, b),

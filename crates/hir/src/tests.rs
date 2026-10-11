@@ -2964,3 +2964,124 @@ fn var_bound_struct_field_access_resolves_real_type_not_ty_error() {
     assert!(matches!(&inner_base.ty, Ty::Named { name, .. } if name == "Inner"),
         "expected the intermediate result.name access to resolve to Inner, got {:?}", inner_base.ty);
 }
+
+// ------------------------------------------------------------------ //
+// `guard cond else e` — BACKLOG item 342
+// ------------------------------------------------------------------ //
+
+fn contains_return(e: &HirExpr) -> bool {
+    match &e.kind {
+        HirExprKind::Return(_) => true,
+        HirExprKind::If { cond, then_expr, else_expr } =>
+            contains_return(cond) || contains_return(then_expr) || contains_return(else_expr),
+        HirExprKind::Block { stmts, tail } =>
+            stmts.iter().any(|s| matches!(s, HirStmt::Expr(x) if contains_return(x))) || contains_return(tail),
+        _ => false,
+    }
+}
+
+#[test]
+fn guard_lowers_to_a_conditional_early_return_not_a_discarded_expression() {
+    // This used to lower to `if !cond { else_expr }; unit` — the else value
+    // was evaluated and thrown away, so every `guard` was a silent no-op.
+    let m = lower("module A\nfn f(n: Int): Int = {\n guard n > 0 else -1\n n * 2\n}");
+    let f = m.items.iter().find_map(|it| match it { HirItem::Fn(f) if f.name == "f" => Some(f), _ => None }).unwrap();
+    assert!(contains_return(f.body.as_ref().unwrap()), "expected a HirExprKind::Return inside the guard's lowering");
+}
+
+#[test]
+fn a_function_without_guard_lowers_with_no_early_return() {
+    let m = lower("module A\nfn f(n: Int): Int = {\n val x = n * 2\n x\n}");
+    let f = m.items.iter().find_map(|it| match it { HirItem::Fn(f) if f.name == "f" => Some(f), _ => None }).unwrap();
+    assert!(!contains_return(f.body.as_ref().unwrap()));
+}
+
+// ------------------------------------------------------------------ //
+// or-pattern bindings — BACKLOG item 343
+// ------------------------------------------------------------------ //
+
+fn first_arm_pat(f: &HirFn) -> &HirPat {
+    fn find(e: &HirExpr) -> Option<&HirPat> {
+        match &e.kind {
+            HirExprKind::Match { arms, .. } => arms.first().map(|a| &a.pat),
+            HirExprKind::Block { stmts, tail } => stmts.iter().find_map(|s| match s { HirStmt::Expr(x) => find(x), _ => None }).or_else(|| find(tail)),
+            _ => None,
+        }
+    }
+    find(f.body.as_ref().unwrap()).expect("expected a match")
+}
+
+fn bind_local(p: &HirPat) -> Option<crate::hir::LocalId> {
+    match p {
+        HirPat::Bind { local, .. } => Some(*local),
+        HirPat::Constructor { fields, .. } => fields.iter().find_map(bind_local),
+        _ => None,
+    }
+}
+
+#[test]
+fn or_pattern_alternatives_binding_the_same_name_share_one_local() {
+    // Each alternative used to get its own fresh LocalId, so the arm body only
+    // ever saw the right-hand one (the left stayed unassigned at runtime).
+    let m = lower("module A\ntype S = | C(Int) | Q(Int) | D\nfn f(s: S): Int = match s { C(r) | Q(r) => r\n D => 0 }");
+    let f = m.items.iter().find_map(|it| match it { HirItem::Fn(f) if f.name == "f" => Some(f), _ => None }).unwrap();
+    let HirPat::Or(l, r) = first_arm_pat(f) else { panic!("expected an or-pattern") };
+    let (ll, rl) = (bind_local(l).expect("left binds"), bind_local(r).expect("right binds"));
+    assert_eq!(ll, rl, "both alternatives must bind the same LocalId");
+}
+
+#[test]
+fn bindings_outside_an_or_pattern_still_get_distinct_locals() {
+    let m = lower("module A\ntype S = | C(Int) | Q(Int)\nfn f(s: S): Int = match s { C(r) => r\n Q(r) => r }");
+    let f = m.items.iter().find_map(|it| match it { HirItem::Fn(f) if f.name == "f" => Some(f), _ => None }).unwrap();
+    let ids: Vec<_> = match f.body.as_ref().unwrap().kind {
+        HirExprKind::Match { ref arms, .. } => arms.iter().filter_map(|a| bind_local(&a.pat)).collect(),
+        _ => panic!("expected match body"),
+    };
+    assert_eq!(ids.len(), 2);
+    assert_ne!(ids[0], ids[1]);
+}
+
+// BACKLOG item 347 — `Result.all`'s result type is recovered from its list
+// argument, so a match-bound `Ok(xs)` knows its element type.
+#[test]
+fn result_all_call_type_is_recovered_from_the_list_argument() {
+    let m = lower("module A\nfn f(rs: List<Result<Float, Text>>): Result<List<Float>, Text> = Result.all(rs)");
+    let f = m.items.iter().find_map(|it| match it { HirItem::Fn(f) if f.name == "f" => Some(f), _ => None }).unwrap();
+    let body = f.body.as_ref().unwrap();
+    assert_eq!(
+        body.ty,
+        certo_typeck::Ty::Result(
+            Box::new(certo_typeck::Ty::List(Box::new(certo_typeck::Ty::Float))),
+            Box::new(certo_typeck::Ty::Text),
+        )
+    );
+}
+
+// BACKLOG items 350 / 340 — return-provenance classification of generics.
+fn erased_ret(m: &crate::HirModule, name: &str) -> certo_typeck::Ty {
+    m.fn_ret_tys.get(name).cloned().unwrap_or(certo_typeck::Ty::Error)
+}
+
+#[test]
+fn generic_returning_a_some_extracted_element_is_marked_raw() {
+    let m = lower("module A\nfn head<T>(list: List<T>): T = match list.first() {\n Some(v) => v\n None => panic(\"empty\")\n}");
+    assert_eq!(erased_ret(&m, "head"), certo_typeck::Ty::Var(crate::RAW_ELEM_RET_VAR));
+}
+
+#[test]
+fn generic_returning_get_or_panic_is_marked_raw_and_forwarders_follow() {
+    let m = lower("module A\nfn firstOf<T>(xs: List<T>): T = List.getOrPanic(xs, 0)\nfn viaFirst<T>(xs: List<T>): T = firstOf(xs)");
+    assert_eq!(erased_ret(&m, "firstOf"), certo_typeck::Ty::Var(crate::RAW_ELEM_RET_VAR));
+    assert_eq!(erased_ret(&m, "viaFirst"), certo_typeck::Ty::Var(crate::RAW_ELEM_RET_VAR));
+}
+
+#[test]
+fn generics_returning_a_param_or_mixing_paths_are_not_marked_raw() {
+    // A returned parameter is a BoxSome cell; a function mixing a raw
+    // `Some(v)` path with a boxed-parameter path can't be classified either
+    // way, so it keeps the plain erased `Var(0)` it always had.
+    let m = lower("module A\nfn ident<T>(x: T): T = x\nfn headOr<T>(xs: List<T>, d: T): T = match xs.first() {\n Some(v) => v\n None => d\n}");
+    assert_eq!(erased_ret(&m, "ident"), certo_typeck::Ty::Var(0));
+    assert_eq!(erased_ret(&m, "headOr"), certo_typeck::Ty::Var(0));
+}

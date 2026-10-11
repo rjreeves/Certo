@@ -3481,3 +3481,29 @@ fn partition_pred_must_return_bool_is_type_error() {
     ).unwrap_err();
     assert!(!errs.is_empty(), "expected a type error for a non-Bool partition predicate");
 }
+
+// BACKLOG item 345 — Float `**` needs a real floating-point power function;
+// the integer-only `certo_pow` truncated both operands.
+#[test]
+fn core_c_defines_a_float_pow_helper_backed_by_libm_pow() {
+    let idx = CORE_C.find("double certo_pow_float(double base, double exp)")
+        .expect("missing certo_pow_float in CORE_C");
+    let end = CORE_C[idx..].find('\n').map(|i| idx + i).unwrap_or(CORE_C.len());
+    assert!(CORE_C[idx..end].contains("pow(base, exp)"), "certo_pow_float must call libm pow");
+}
+
+// BACKLOG item 346 — Text ordering runtime.
+#[test]
+fn text_compare_is_defined_in_the_runtime_and_null_aware() {
+    let text = crate::text::TEXT_C;
+    assert!(text.contains("int64_t certo_text_compare(certo_text_t a, certo_text_t b)"));
+    assert!(text.contains("strcmp(a, b)"));
+}
+
+// BACKLOG item 347 — Result.all converter variant for scalar payloads.
+#[test]
+fn result_all_conv_applies_the_converter_closure_per_ok_payload() {
+    let r = crate::result::RESULT_C;
+    assert!(r.contains("void* certo_result_all_conv(CertoList* results, certo_fn_t conv)"));
+    assert!(r.contains("((CertoFn1)conv.fn)(conv.env, (void*)__result_unwrap(r))"));
+}

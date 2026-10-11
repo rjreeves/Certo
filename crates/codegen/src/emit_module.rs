@@ -935,7 +935,7 @@ fn const_expr_to_c(expr: &certo_hir::HirExpr) -> String {
     use certo_hir::HirExprKind;
     match &expr.kind {
         HirExprKind::Int(n)     => n.to_string(),
-        HirExprKind::Float(f)   => format!("{:.}", f),
+        HirExprKind::Float(f)   => crate::emit_mir::float_to_c(*f),
         HirExprKind::Bool(b)    => if *b { "true".into() } else { "false".into() },
         HirExprKind::Str(s)     => {
             let escaped: String = s.chars().flat_map(|c| match c {
@@ -1007,7 +1007,7 @@ fn simple_expr_to_c_rvalue(expr: &certo_ast::expr::Expr) -> Option<String> {
                 Some(format!("CERTO_STR(\"{}\")", e))
             }
             Lit::Int(n)    => Some(n.to_string()),
-            Lit::Float(f)  => Some(f.to_string()),
+            Lit::Float(f)  => Some(crate::emit_mir::float_to_c(*f)),
             Lit::Bool(b)   => Some(if *b { "true".into() } else { "false".into() }),
             _ => None,
         },
@@ -1054,6 +1054,7 @@ certo_decimal_t certo_decimal_parse(const char* s);
 certo_text_t certo_text_concat(certo_text_t a, certo_text_t b);
 int64_t      certo_text_len(certo_text_t t);
 bool         certo_text_eq(certo_text_t a, certo_text_t b);
+int64_t      certo_text_compare(certo_text_t a, certo_text_t b);
 
 /* UUID */
 typedef struct { uint8_t bytes[16]; } certo_uuid_t;
@@ -1120,6 +1121,7 @@ static inline intptr_t __tuple_get(void* t, int64_t i) { return (intptr_t)((cert
 
 /* Arithmetic helpers */
 int64_t certo_pow(int64_t base, int64_t exp);
+double  certo_pow_float(double base, double exp);
 void*   certo_coalesce(void* opt, void* fallback);
 
 /* NULL constant used by Option pattern matching (cast to int64_t for comparison) */

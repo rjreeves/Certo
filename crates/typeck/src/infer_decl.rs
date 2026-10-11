@@ -1812,9 +1812,17 @@ fn check_decl(decl: &Decl, ctx: &mut Ctx<'_>) {
                 // returns `Option<_>`. Computed once here and reused below
                 // for the existing body/declared-return unification.
                 let declared_ret = f.ret_ty.as_ref().map(|ann| type_expr_to_ty(&ann.node, ctx));
-                ctx.env.set_current_body_return_ty(declared_ret.clone());
+                // BACKLOG item 342 — a function with no return annotation still
+                // needs *some* return type for `guard cond else e` to unify its
+                // `e` against; a fresh var, unified with the body's own type
+                // below, is exactly "whatever this function turns out to
+                // return" (and `?`'s `Option`-vs-`Result` check treats an
+                // unresolved var like the old `None`).
+                let implicit_ret = if declared_ret.is_none() { Some(ctx.fresh()) } else { None };
+                ctx.env.set_current_body_return_ty(declared_ret.clone().or_else(|| implicit_ret.clone()));
                 // Infer body
                 let body_ty = infer_fn_body(body, ctx);
+                if let Some(v) = implicit_ret { ctx.unify(body_ty.clone(), v, f.span); }
 
                 // Unify body type with declared return type (if present)
                 if let Some(declared) = declared_ret {
@@ -2064,8 +2072,11 @@ fn check_decl(decl: &Decl, ctx: &mut Ctx<'_>) {
                     }
                     // BACKLOG item 321 — same as Decl::Fn above.
                     let declared_ret = m.ret_ty.as_ref().map(|ann| type_expr_to_ty(&ann.node, ctx));
-                    ctx.env.set_current_body_return_ty(declared_ret.clone());
+                    // BACKLOG item 342 — see Decl::Fn above.
+                    let implicit_ret = if declared_ret.is_none() { Some(ctx.fresh()) } else { None };
+                    ctx.env.set_current_body_return_ty(declared_ret.clone().or_else(|| implicit_ret.clone()));
                     let body_ty = infer_fn_body(body, ctx);
+                    if let Some(v) = implicit_ret { ctx.unify(body_ty.clone(), v, m.span); }
                     if let Some(declared) = declared_ret {
                         if !literal_matches_fixed_width(&body.node, &declared) {
                             ctx.unify(body_ty, declared, m.span);

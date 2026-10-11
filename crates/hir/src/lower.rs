@@ -14,6 +14,14 @@ use crate::error::{LowerError, LowerErrorKind};
 // ------------------------------------------------------------------ //
 
 struct Cx {
+    /// Names already bound by an enclosing or-pattern's *left* alternative,
+    /// innermost last — BACKLOG item 343. While lowering the *right*
+    /// alternative of `p1 | p2`, a binding of the same name must reuse the
+    /// left alternative's `LocalId` rather than defining a fresh one: the
+    /// arm body (and the MIR match lowering) sees exactly one local per
+    /// name, assigned by whichever alternative actually matched. Empty
+    /// outside the right-hand side of an or-pattern.
+    or_binding_reuse: Vec<HashMap<String, LocalId>>,
     /// Next LocalId to assign.
     next_local: LocalId,
     /// Next FnId to assign.
@@ -180,6 +188,7 @@ impl Cx {
             trait_method_accessors: HashMap::new(),
             type_aliases:        HashMap::new(),
             current_type_params: Vec::new(),
+            or_binding_reuse: Vec::new(),
             errors:              Vec::new(),
         }
     }
@@ -533,6 +542,17 @@ fn generic_container_ret(full: Option<&str>, args: &[HirExpr]) -> Option<Ty> {
             Some(Ty::Result(Box::new(ok_ty), Box::new(err_ty)))
         }
         Some("getOrElse") | Some("Result.getOrElse") => args.get(1).map(|a| a.ty.clone()),
+        // BACKLOG item 347 — `Result.all`'s own result type, recovered from
+        // the list argument's `List<Result<T,E>>`: without it the call is
+        // `Ty::Error`, so a match-bound `Ok(xs)` has an unknown element
+        // type and a `Float` payload's bits get read back as an Int.
+        Some("Result.all") => match args.first().map(|a| &a.ty) {
+            Some(Ty::List(inner)) => match &**inner {
+                Ty::Result(ok, err) => Some(Ty::Result(Box::new(Ty::List(ok.clone())), err.clone())),
+                _ => None,
+            },
+            _ => None,
+        },
         Some("Map.get") => args.first().and_then(map_kv).map(|(_, v)| Ty::Option(Box::new(v))),
         // BACKLOG item 338 — `Map.insert`'s own return type used to just
         // blindly copy its first (input-map) argument's type, unchanged.
@@ -701,6 +721,25 @@ fn binop_result_ty(op: &crate::hir::BinOp, lhs: &Ty, rhs: &Ty) -> Ty {
 /// and skips unboxing it. See BACKLOG item 113.
 fn lower_lambda_with_param_hint(params: &[certo_ast::expr::LambdaParam], body: &S<Expr>, hint: &Ty, cx: &mut Cx, span: Span) -> HirExpr {
     lower_lambda_with_param_hints(params, body, std::slice::from_ref(hint), &Ty::Error, cx, span)
+}
+
+/// `lower_lambda_with_param_hint`, except that `List.sort`'s two-param
+/// comparator has *every* param hinted with the element type (both sides of
+/// the comparison are elements), not just param 0 — and only when that
+/// element type is `Text`. `certo_list_sort` calls the comparator directly
+/// with the list's raw erased `void*` elements (it is not a
+/// `BOXED_ABI_CALLEES` entry), so giving a lambda param a native type whose
+/// C ABI differs from `void*` (a `Float`'s `double`, a struct by value)
+/// would read the wrong register / memory; a `Text` is a pointer either way,
+/// so the hint is ABI-neutral there and lets `p < q` be recognised as a Text
+/// comparison.
+fn lower_hinted_callback(fn_path: Option<&str>, params: &[certo_ast::expr::LambdaParam], body: &S<Expr>, hint: &Ty, cx: &mut Cx, span: Span) -> HirExpr {
+    if fn_path == Some("List.sort") {
+        let hints = if matches!(hint, Ty::Text) { vec![hint.clone(); params.len()] } else { Vec::new() };
+        lower_lambda_with_param_hints(params, body, &hints, &Ty::Error, cx, span)
+    } else {
+        lower_lambda_with_param_hint(params, body, hint, cx, span)
+    }
 }
 
 /// Same as `lower_lambda_with_param_hint`, but one hint per param instead of
@@ -1251,12 +1290,16 @@ pub fn lower_module(module: &Module) -> Result<HirModule, Vec<LowerError>> {
         .unwrap_or_default();
 
     if cx.errors.is_empty() {
+        // BACKLOG items 350/340 — mark generic functions whose erased
+        // return is a raw container-element word; see `raw_return`.
+        let mut fn_ret_tys = cx.fn_ret_types;
+        crate::raw_return::classify_raw_returns(&items, &mut fn_ret_tys);
         Ok(HirModule {
             name, items,
             record_field_types:  cx.record_field_types,
             variant_field_types: cx.variant_field_types,
             fn_param_tys:        cx.fn_param_tys,
-            fn_ret_tys:          cx.fn_ret_types,
+            fn_ret_tys,
             variant_to_type:     cx.variant_to_type,
         })
     } else {
@@ -1677,7 +1720,13 @@ fn lower_expr(expr: &S<Expr>, cx: &mut Cx) -> HirExpr {
                     // BACKLOG item 266 — `List.forEach`'s own callback param
                     // needs the identical hint, sourced from the receiver
                     // list's own element type exactly like `List.map`'s.
-                    | Some("List.forEach")) || result_hint_side.is_some();
+                    | Some("List.forEach")
+                    // BACKLOG item 346 — `List.sort`'s comparator
+                    // `(a, b) => ...` takes two params, *both* of the list's
+                    // element type. Unhinted they stay `Ty::Error`, so
+                    // `p < q` on Text elements could not be recognised as a
+                    // Text comparison. See `lower_hinted_callback`.
+                    | Some("List.sort")) || result_hint_side.is_some();
                 // Every one of the above takes its lambda as the 2nd
                 // positional argument (index 1) — except `List.upsert`
                 // (BACKLOG item 209), whose signature is `(list, item, on)`,
@@ -1736,7 +1785,7 @@ fn lower_expr(expr: &S<Expr>, cx: &mut Cx) -> HirExpr {
                         if slots[i].is_some() { continue; }
                         if Some(i) == lambda_slot_idx {
                             if let Expr::Lambda { params, body, .. } = &arg.value.node {
-                                let lowered = lower_lambda_with_param_hint(params, body, &list_ty_hint, cx, arg.value.span);
+                                let lowered = lower_hinted_callback(fn_full_path.as_deref(), params, body, &list_ty_hint, cx, arg.value.span);
                                 // `sortBy`/`minBy`/`maxBy`/`sumBy`'s
                                 // key/numeric projection type restriction
                                 // (BACKLOG item 162b) is *mostly* enforced
@@ -1802,7 +1851,7 @@ fn lower_expr(expr: &S<Expr>, cx: &mut Cx) -> HirExpr {
                                         _ => None,
                                     }).unwrap_or(Ty::Error)
                                 };
-                                let lowered = lower_lambda_with_param_hint(params, body, &hint, cx, arg.value.span);
+                                let lowered = lower_hinted_callback(fn_full_path.as_deref(), params, body, &hint, cx, arg.value.span);
                                 let is_key_fn = matches!(fn_full_path.as_deref(),
                                     Some("List.sortBy") | Some("List.minBy") | Some("List.maxBy") | Some("List.sumBy"));
                                 // BACKLOG item 311 — `List.sumBy` alone also
@@ -2497,14 +2546,18 @@ fn lower_expr(expr: &S<Expr>, cx: &mut Cx) -> HirExpr {
             HirExpr { kind: HirExprKind::Spawn { fn_name: String::new(), args: vec![inner], captures }, ty: Ty::Error, span }
         }
 
-        // `guard cond else e` → `if !cond { e }; unit`
+        // `guard cond else e` → `if !cond { return e }; unit` — BACKLOG item
+        // 342. This used to lower to `if !cond { e }`, which evaluated `e` and
+        // discarded it without ever leaving the function, so every `guard` was
+        // a silent no-op.
         Expr::Guard { cond, else_expr, .. } => {
             let cond = lower_expr(cond, cx);
             let else_ = lower_expr(else_expr, cx);
             let not_cond = HirExpr { kind: HirExprKind::UnOp { op: UnOp::Not, arg: Box::new(cond) }, ty: Ty::Bool, span };
             let unit = HirExpr { kind: HirExprKind::Unit, ty: Ty::Unit, span };
+            let early_return = HirExpr { kind: HirExprKind::Return(Box::new(else_)), ty: Ty::Unit, span };
             let if_expr = HirExpr {
-                kind: HirExprKind::If { cond: Box::new(not_cond), then_expr: Box::new(else_), else_expr: Box::new(unit.clone()) },
+                kind: HirExprKind::If { cond: Box::new(not_cond), then_expr: Box::new(early_return), else_expr: Box::new(unit.clone()) },
                 ty: Ty::Unit, span,
             };
             HirExpr { kind: HirExprKind::Block { stmts: vec![HirStmt::Expr(if_expr)], tail: Box::new(unit) }, ty: Ty::Unit, span }
@@ -3118,12 +3171,37 @@ fn lower_block(stmts: &[Stmt], span: Span, cx: &mut Cx) -> HirExpr {
 /// have a literal body (or `Ty::Error` if none does), which silently
 /// truncates e.g. a `Float` payload once codegen maps `Ty::Error` to
 /// `int64_t` (see BACKLOG item 111).
+/// Every `name → LocalId` a lowered pattern binds (see `Cx::or_binding_reuse`).
+fn collect_hir_pat_bindings(p: &HirPat, out: &mut HashMap<String, LocalId>) {
+    match p {
+        HirPat::Bind { local, name } => { out.insert(name.clone(), *local); }
+        HirPat::Tuple(ps) => for q in ps { collect_hir_pat_bindings(q, out); },
+        HirPat::Constructor { fields, .. } | HirPat::Record { fields, .. } =>
+            for q in fields { collect_hir_pat_bindings(q, out); },
+        HirPat::List { head, tail, .. } => {
+            for q in head { collect_hir_pat_bindings(q, out); }
+            if let Some(t) = tail { collect_hir_pat_bindings(t, out); }
+        }
+        HirPat::Or(l, r) => { collect_hir_pat_bindings(l, out); collect_hir_pat_bindings(r, out); }
+        HirPat::Wildcard | HirPat::Lit(_) => {}
+    }
+}
+
 fn lower_pat(pat: &S<certo_ast::pattern::Pattern>, scrut_ty: &Ty, cx: &mut Cx) -> HirPat {
     use certo_ast::pattern::{Pattern, LitPat};
     match &pat.node {
         Pattern::Wildcard { .. } => HirPat::Wildcard,
         Pattern::Ident { name, .. } => {
-            let local = cx.define_local(&name.node);
+            // BACKLOG item 343 — the right alternative of an or-pattern reuses
+            // the left alternative's local for a name both bind.
+            let reused = cx.or_binding_reuse.iter().rev().find_map(|m| m.get(&name.node).copied());
+            let local = match reused {
+                Some(id) => {
+                    cx.locals.last_mut().unwrap().insert(name.node.clone(), id);
+                    id
+                }
+                None => cx.define_local(&name.node),
+            };
             if !matches!(scrut_ty, Ty::Error) {
                 cx.local_types.insert(local, scrut_ty.clone());
             }
@@ -3217,10 +3295,16 @@ fn lower_pat(pat: &S<certo_ast::pattern::Pattern>, scrut_ty: &Ty, cx: &mut Cx) -
                 .collect();
             HirPat::Constructor { name, fields: lowered_fields, field_names, field_types }
         }
-        Pattern::Or { left, right, .. } => HirPat::Or(
-            Box::new(lower_pat(left, scrut_ty, cx)),
-            Box::new(lower_pat(right, scrut_ty, cx)),
-        ),
+        Pattern::Or { left, right, .. } => {
+            let l = lower_pat(left, scrut_ty, cx);
+            // BACKLOG item 343 — see `Cx::or_binding_reuse`.
+            let mut bound = HashMap::new();
+            collect_hir_pat_bindings(&l, &mut bound);
+            cx.or_binding_reuse.push(bound);
+            let r = lower_pat(right, scrut_ty, cx);
+            cx.or_binding_reuse.pop();
+            HirPat::Or(Box::new(l), Box::new(r))
+        }
         Pattern::Record { path, fields, .. } => {
             // Bare (path-less) record patterns resolve structurally against
             // the scrutinee's own already-known type (BACKLOG item 145) —
@@ -3912,7 +3996,7 @@ fn collect_free_locals(expr: &HirExpr, threshold: LocalId, out: &mut Vec<LocalId
                 collect_free_locals(&arm.body, threshold, out);
             }
         }
-        HirExprKind::Try(inner) | HirExprKind::Unsafe(inner) | HirExprKind::Await(inner) => {
+        HirExprKind::Try(inner) | HirExprKind::Unsafe(inner) | HirExprKind::Await(inner) | HirExprKind::Return(inner) => {
             collect_free_locals(inner, threshold, out);
         }
         HirExprKind::For { iter, body, .. } => {

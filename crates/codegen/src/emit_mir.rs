@@ -674,10 +674,27 @@ fn emit_call_arg(func_c: &str, idx: usize, arg: &Operand, locals: &[MirLocalDecl
     }
 }
 
+/// A Float constant as a C `double` literal — BACKLOG item 344. Float
+/// constants used to be printed with Rust's `{:.}`, which writes a
+/// whole-valued double as a bare integer (`7.0` → `7`), so the generated C
+/// held an *integer* literal: `7.0 / 2.0` became `(7 / 2)` (integer
+/// division → `3`), `1.0 / 3.0` became `(1 / 3)` (`0`), and a large literal
+/// like `6.022e23` became a 24-digit integer clang rejects as too large for
+/// any integer type. `{:?}` always emits a `.` or an exponent (`7.0`,
+/// `6.022e23`, `1e21`, `1e-7`) — a valid, shortest-round-trip C double
+/// literal. The non-finite values have no literal form at all, so they're
+/// spelled as constant expressions.
+pub(crate) fn float_to_c(f: f64) -> String {
+    if f.is_nan() { "(0.0/0.0)".into() }
+    else if f == f64::INFINITY { "(1.0/0.0)".into() }
+    else if f == f64::NEG_INFINITY { "(-1.0/0.0)".into() }
+    else { format!("{:?}", f) }
+}
+
 fn emit_const(c: &MirConst) -> String {
     match c {
         MirConst::Int(n)     => n.to_string(),
-        MirConst::Float(f)   => format!("{:.}", f),
+        MirConst::Float(f)   => float_to_c(*f),
         MirConst::Decimal(s) => format!("CERTO_DECIMAL(\"{}\")", s),
         MirConst::Bool(b)    => if *b { "true".into() } else { "false".into() },
         MirConst::Str(s)     => format!("CERTO_STR(\"{}\")", escape_str(s)),
@@ -767,6 +784,17 @@ fn operand_type_name(op: &Operand, locals: &[MirLocalDecl], variant_parent: &Has
 /// about — List/Option/Map/Tuple/Fn-typed values, deliberately out of
 /// this item's scope, see item 200's own design sketch) falls back to the
 /// original bare `==`, unchanged.
+/// True when an ordering comparison's operands are `Text` — taking whichever
+/// side's type is known when the other is still `Ty::Error` (same fallback
+/// `emit_eq` uses).
+fn text_ordering(l: &Operand, r: &Operand, locals: &[MirLocalDecl]) -> bool {
+    let ty = match operand_ty(l, locals) {
+        Ty::Error => operand_ty(r, locals),
+        other => other,
+    };
+    matches!(ty, Ty::Text)
+}
+
 fn emit_eq(
     l: &Operand, r: &Operand, locals: &[MirLocalDecl],
     eq_types: &HashSet<String>, variant_parent: &HashMap<String, String>,
@@ -837,9 +865,27 @@ fn emit_binop(
         BinOp::Mul  => format!("({} * {})", lhs, rhs),
         BinOp::Div  => format!("({} / {})", lhs, rhs),
         BinOp::Rem  => format!("({} % {})", lhs, rhs),
-        BinOp::Pow  => format!("certo_pow({}, {})", lhs, rhs),
+        // BACKLOG item 345 — a Float `**` goes to `pow`, not the integer-only
+        // `certo_pow(int64_t, int64_t)` (which silently truncated both
+        // operands: `2.0 ** 0.5` computed `certo_pow(2, 0)` = 1).
+        BinOp::Pow  => {
+            let is_float = |t: Ty| matches!(t, Ty::Float | Ty::Float32);
+            if is_float(operand_ty(l, locals)) || is_float(operand_ty(r, locals)) {
+                format!("certo_pow_float({}, {})", lhs, rhs)
+            } else {
+                format!("certo_pow({}, {})", lhs, rhs)
+            }
+        }
         BinOp::Eq   => emit_eq(l, r, locals, eq_types, variant_parent, &lhs, &rhs),
         BinOp::NotEq => format!("(!{})", emit_eq(l, r, locals, eq_types, variant_parent, &lhs, &rhs)),
+        // BACKLOG item 346 — Text ordering compares contents via
+        // `certo_text_compare`, not the raw `char*` pointers (which compared
+        // heap addresses: `"apple" < "banana"` could be true or false
+        // depending on allocation order).
+        BinOp::Lt | BinOp::LtEq | BinOp::Gt | BinOp::GtEq if text_ordering(l, r, locals) => {
+            let cmp = match op { BinOp::Lt => "<", BinOp::LtEq => "<=", BinOp::Gt => ">", _ => ">=" };
+            format!("(certo_text_compare({}, {}) {} 0)", lhs, rhs, cmp)
+        }
         BinOp::Lt   => format!("({} < {})", lhs, rhs),
         BinOp::LtEq => format!("({} <= {})", lhs, rhs),
         BinOp::Gt   => format!("({} > {})", lhs, rhs),

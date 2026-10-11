@@ -2508,6 +2508,22 @@ pub(crate) fn type_error_to_diagnostic(e: &TypeError) -> Diagnostic {
                 .with_note("`overrides` must name another rule declared in the same validator")
         }
 
+        TypeErrorKind::OrPatternBindingMismatch { name } => {
+            Diagnostic::error("E0223",
+                format!("every alternative of an or-pattern must bind the same names — `{name}` is bound in only one of them"))
+                .with_span(e.span)
+                .with_label(format!("`{name}` is missing from one alternative"))
+                .with_note("the arm body can't know which alternative matched, so each `|` side must bind exactly the same names")
+        }
+
+        TypeErrorKind::GuardOutsideFunction => {
+            Diagnostic::error("E0222",
+                "`guard` can only be used directly in a function or method body")
+                .with_span(e.span)
+                .with_label("`guard` returns from the enclosing function, which this position doesn't have")
+                .with_note("inside a lambda or a `spawn`/`parallel`/`withTimeout` block, use an `if`/`match` expression instead")
+        }
+
         TypeErrorKind::DbAccessorNotFound { table, method, expected_fn } => {
             Diagnostic::error("E0711",
                 format!("no `db.{table}.{method}` — did you run `certo db pull`?"))

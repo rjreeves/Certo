@@ -34,7 +34,7 @@ pub struct LowerOptions {
 pub fn lower(dialect: Dialect, q: &QueryIR) -> Lowered { lower_with(dialect, q, LowerOptions::default()) }
 
 pub fn lower_with(dialect: Dialect, q: &QueryIR, opts: LowerOptions) -> Lowered {
-    let mut l = Lowerer { dialect, params: &q.params, order: Vec::new(), bare_columns: false, enums_as_text: opts.enums_as_text, cast_enums: false, existing_row: None };
+    let mut l = Lowerer { dialect, params: &q.params, order: Vec::new(), bare_columns: false, enums_as_text: opts.enums_as_text, cast_enums: false, existing_row: None, incoming_as_values: false };
     let sql = l.query(q);
     Lowered { sql, param_order: l.order }
 }
@@ -43,7 +43,7 @@ pub fn lower_with(dialect: Dialect, q: &QueryIR, opts: LowerOptions) -> Lowered 
 pub fn lower_mutation(dialect: Dialect, m: &MutationIR) -> Lowered { lower_mutation_with(dialect, m, LowerOptions::default()) }
 
 pub fn lower_mutation_with(dialect: Dialect, m: &MutationIR, opts: LowerOptions) -> Lowered {
-    let mut l = Lowerer { dialect, params: &m.params, order: Vec::new(), bare_columns: false, enums_as_text: opts.enums_as_text, cast_enums: false, existing_row: None };
+    let mut l = Lowerer { dialect, params: &m.params, order: Vec::new(), bare_columns: false, enums_as_text: opts.enums_as_text, cast_enums: false, existing_row: None, incoming_as_values: false };
     let sql = l.mutation(m);
     Lowered { sql, param_order: l.order }
 }
@@ -60,6 +60,8 @@ struct Lowerer<'a> {
     /// MySQL: the alias an `insert ... on conflict` update uses for the existing row is written as the table's name
     /// (an `INSERT` target cannot have an alias there).
     existing_row: Option<(String, String)>,
+    /// MySQL's upsert: a column of the incoming row (`excluded.col`) is written `VALUES(col)`.
+    incoming_as_values: bool,
 }
 
 impl Lowerer<'_> {
@@ -122,12 +124,12 @@ impl Lowerer<'_> {
                         }
                         ConflictActionIR::Update { assignments } => {
                             self.existing_row = Some((m.alias.clone(), m.table.clone()));
+                            self.incoming_as_values = true;
                             let set = self.set_list(assignments);
                             self.existing_row = None;
-                            // the incoming row is `excluded`, as in PostgreSQL and SQLite
-                            if let Some(last) = lines.last_mut() {
-                                last.push_str(" AS `excluded`");
-                            }
+                            self.incoming_as_values = false;
+                            // the incoming row is `excluded` in PostgreSQL and SQLite; here it is `VALUES(col)`, the one
+                            // spelling MySQL and MariaDB share (MariaDB has no `AS excluded` row alias)
                             lines.push(format!("ON DUPLICATE KEY UPDATE {set}"));
                         }
                     }
@@ -149,6 +151,9 @@ impl Lowerer<'_> {
                 let set = self.set_list(&m.assignments);
                 lines.push(format!("SET {set}"));
             }
+            // MariaDB takes no alias in a single-table DELETE; the multi-table form `DELETE a FROM t AS a` is the same
+            // statement on MySQL and works on both
+            MutationKind::Delete if mysql => lines.push(format!("DELETE {} FROM {table}", self.id(&m.alias))),
             MutationKind::Delete => lines.push(format!("DELETE FROM {table}")),
         }
         if let Some(f) = &m.filter {
@@ -354,6 +359,7 @@ impl Lowerer<'_> {
             // the output column of a set operation (what `order by` names)
             QExpr::Column { source, column } if source.is_empty() => self.id(column),
             QExpr::Column { column, .. } if self.bare_columns => self.id(column),
+            QExpr::Column { source, column } if self.incoming_as_values && source == "excluded" => format!("VALUES({})", self.id(column)),
             QExpr::Column { source, column } if self.existing_row.as_ref().is_some_and(|(alias, _)| alias == source) => {
                 let table = self.existing_row.as_ref().map(|(_, t)| t.clone()).unwrap_or_default();
                 format!("{}.{}", self.id(&table), self.id(column))

@@ -206,6 +206,23 @@ pub enum TypeErrorKind {
     /// both are "no such accessor exists" — the fix is the same either way
     /// (run `certo db pull`, or check the spelling).
     DbAccessorNotFound { table: String, method: String, expected_fn: String },
+
+    /// E0222 — `guard cond else e` (BACKLOG item 342) returns `e` from the
+    /// enclosing function or method, so it can only appear directly in a
+    /// function/method body — not inside a lambda, a `spawn`/`parallel`/
+    /// `withTimeout` block, or any other body with no function return type
+    /// to return into (a test block, a computed property, a state-machine
+    /// hook). Rejected rather than silently returning from the wrong
+    /// function.
+    GuardOutsideFunction,
+
+    /// E0223 — an or-pattern's alternatives bind different sets of names
+    /// (BACKLOG item 343): `Circle(r) | Square(q) => r` or
+    /// `Circle(r) | Dot => r`. Every alternative must bind exactly the same
+    /// names — the arm body reads them without knowing which alternative
+    /// matched. (Alternatives that bind the *same* name at *different types*
+    /// are reported as an ordinary E0200 mismatch instead.)
+    OrPatternBindingMismatch { name: String },
 }
 
 impl TypeError {
@@ -284,6 +301,10 @@ impl TypeError {
                 format!("E0701: rule `{}` has `after {}` but `{}` does not exist in this validator", rule_name, after_name, after_name),
             TypeErrorKind::OverridesRuleNotFound { rule_name, overrides_name } =>
                 format!("E0702: rule `{}` has `overrides {}` but `{}` does not exist in this validator", rule_name, overrides_name, overrides_name),
+            TypeErrorKind::OrPatternBindingMismatch { name } =>
+                format!("E0223: every alternative of an or-pattern must bind the same names — `{}` is bound in only one of them", name),
+            TypeErrorKind::GuardOutsideFunction =>
+                "E0222: `guard` returns from the enclosing function, so it can only be used directly in a function or method body — not inside a lambda, a `spawn`/`parallel`/`withTimeout` block, or a body with no function to return from".to_string(),
             TypeErrorKind::DbAccessorNotFound { table, method, expected_fn } =>
                 format!("E0711: no `db.{}.{}` — did you run `certo db pull`? (expected a generated function named `{}`)", table, method, expected_fn),
         }

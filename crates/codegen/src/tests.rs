@@ -621,7 +621,12 @@ fn result_flat_map_dot_call_reaches_the_real_function() {
     let c = codegen(
         "module A\ntype E = | Bad\nfn addOne(x: Int): Result<Int, E> = Ok(x + 1)\n\
          fn f(r: Result<Int, E>): Result<Int, E> = r.flatMap(addOne)");
-    assert_contains(&c, "certo_result_flat_map(");
+    // BACKLOG item 347 — these four combinators are now expanded inline
+    // (decoding the payload slot by its real type) instead of calling the
+    // C runtime function, which only saw the raw slot; the dot-call still
+    // has to resolve (no E0205) and reach a real `__result_is_ok` branch.
+    assert_contains(&c, "__result_is_ok(");
+    assert_not_contains(&c, "certo_result_flat_map(");
 }
 
 #[test]
@@ -629,14 +634,24 @@ fn result_map_err_dot_call_reaches_the_real_function() {
     let c = codegen(
         "module A\ntype E = | Bad\ntype F = | Worse\nfn toF(e: E): F = F.Worse\n\
          fn f(r: Result<Int, E>): Result<Int, F> = r.mapErr(toF)");
-    assert_contains(&c, "certo_result_map_err(");
+    // BACKLOG item 347 — these four combinators are now expanded inline
+    // (decoding the payload slot by its real type) instead of calling the
+    // C runtime function, which only saw the raw slot; the dot-call still
+    // has to resolve (no E0205) and reach a real `__result_is_ok` branch.
+    assert_contains(&c, "__result_is_ok(");
+    assert_not_contains(&c, "certo_result_map_err(");
 }
 
 #[test]
 fn result_get_or_else_dot_call_reaches_the_real_function() {
     let c = codegen(
         "module A\ntype E = | Bad\nfn f(r: Result<Int, E>): Int = r.getOrElse(0)");
-    assert_contains(&c, "certo_result_get_or_else(");
+    // BACKLOG item 347 — these four combinators are now expanded inline
+    // (decoding the payload slot by its real type) instead of calling the
+    // C runtime function, which only saw the raw slot; the dot-call still
+    // has to resolve (no E0205) and reach a real `__result_is_ok` branch.
+    assert_contains(&c, "__result_is_ok(");
+    assert_not_contains(&c, "certo_result_get_or_else(");
 }
 
 #[test]
@@ -644,7 +659,12 @@ fn result_recover_dot_call_reaches_the_real_function() {
     let c = codegen(
         "module A\ntype E = | Bad\nfn fallback(e: E): Int = 0\n\
          fn f(r: Result<Int, E>): Int = r.recover(fallback)");
-    assert_contains(&c, "certo_result_recover(");
+    // BACKLOG item 347 — these four combinators are now expanded inline
+    // (decoding the payload slot by its real type) instead of calling the
+    // C runtime function, which only saw the raw slot; the dot-call still
+    // has to resolve (no E0205) and reach a real `__result_is_ok` branch.
+    assert_contains(&c, "__result_is_ok(");
+    assert_not_contains(&c, "certo_result_recover(");
 }
 
 #[test]
@@ -2923,4 +2943,155 @@ fn char_typed_function_signature_uses_int32_not_a_byte() {
     let c = codegen("module A\nfn identity(c: Char): Char = c");
     assert_contains(&c, "int32_t certo_identity(int32_t");
     assert_not_contains(&c, "char certo_identity");
+}
+
+// ------------------------------------------------------------------ //
+// Float literals — BACKLOG item 344
+// ------------------------------------------------------------------ //
+
+#[test]
+fn float_to_c_always_yields_a_double_literal_never_a_bare_integer() {
+    use crate::emit_mir::float_to_c;
+    // Whole-valued doubles used to print as bare integers (`7.0` -> `7`).
+    assert_eq!(float_to_c(7.0), "7.0");
+    assert_eq!(float_to_c(0.0), "0.0");
+    assert_eq!(float_to_c(-3.0), "-3.0");
+    assert_eq!(float_to_c(0.5), "0.5");
+    assert_eq!(float_to_c(0.1), "0.1");
+    // Large/small magnitudes keep an exponent instead of being expanded to a
+    // 24-digit integer clang rejects as too large for any integer type.
+    assert_eq!(float_to_c(6.022e23), "6.022e23");
+    assert_eq!(float_to_c(1e21), "1e21");
+    assert_eq!(float_to_c(1.5e-9), "1.5e-9");
+    // Every finite result has a '.' or an exponent, so C reads it as a double.
+    for v in [1.0, 2.0, 100.0, 1e15, 1e16, 123456789012345680.0, -0.0, 1e300, 1e-300] {
+        let s = float_to_c(v);
+        assert!(s.contains('.') || s.contains('e'), "{v} printed as {s:?}, which C reads as an integer");
+        assert_eq!(s.parse::<f64>().unwrap(), v, "{s:?} does not round-trip {v}");
+    }
+}
+
+#[test]
+fn float_to_c_spells_non_finite_values_as_constant_expressions() {
+    use crate::emit_mir::float_to_c;
+    assert_eq!(float_to_c(f64::NAN), "(0.0/0.0)");
+    assert_eq!(float_to_c(f64::INFINITY), "(1.0/0.0)");
+    assert_eq!(float_to_c(f64::NEG_INFINITY), "(-1.0/0.0)");
+}
+
+#[test]
+fn float_literal_arithmetic_is_emitted_with_double_operands_not_integer_division() {
+    // `7.0 / 2.0` used to become `(7 / 2)` in the generated C — integer
+    // division, so it printed 3 instead of 3.5.
+    let c = codegen("module A\nfn f(): Float = 7.0 / 2.0");
+    assert_contains(&c, "7.0");
+    assert_contains(&c, "2.0");
+    assert_not_contains(&c, "(7 / 2)");
+}
+
+#[test]
+fn large_float_literal_keeps_its_exponent_instead_of_expanding_to_an_integer() {
+    let c = codegen("module A\nfn f(): Float = 6.022e23");
+    assert_contains(&c, "6.022e23");
+    assert_not_contains(&c, "602200000000000000000000");
+}
+
+#[test]
+fn module_level_float_constant_is_emitted_as_a_double_literal() {
+    let c = codegen("module A\nval k: Float = 2.0\nfn f(): Float = k");
+    assert_contains(&c, "2.0");
+}
+
+// ------------------------------------------------------------------ //
+// Float `**` — BACKLOG item 345
+// ------------------------------------------------------------------ //
+
+#[test]
+fn float_exponentiation_calls_pow_not_the_integer_only_certo_pow() {
+    // `2.0 ** 0.5` used to emit `certo_pow(2, 0.5)` — the integer-only
+    // `int64_t certo_pow(int64_t, int64_t)`, which truncated both operands
+    // (computing `2 ** 0` = 1).
+    let c = codegen("module A\nfn f(x: Float, y: Float): Float = x ** y");
+    assert_contains(&c, "certo_pow_float(");
+    assert_not_contains(&c, "certo_pow(_l");
+}
+
+#[test]
+fn float_exponentiation_with_literal_operands_also_calls_pow() {
+    let c = codegen("module A\nfn f(): Float = 2.0 ** 0.5");
+    assert_contains(&c, "certo_pow_float(2.0, 0.5)");
+}
+
+#[test]
+fn integer_exponentiation_still_uses_the_integer_certo_pow() {
+    let c = codegen("module A\nfn f(x: Int, y: Int): Int = x ** y");
+    assert_contains(&c, "certo_pow(");
+    assert_not_contains(&c, "certo_pow_float(");
+}
+
+// ------------------------------------------------------------------ //
+// Text ordering — BACKLOG item 346
+// ------------------------------------------------------------------ //
+
+#[test]
+fn text_ordering_calls_certo_text_compare_not_a_pointer_comparison() {
+    // `a < b` on Text used to emit `(a < b)` — a raw `char*` comparison.
+    for (op, c_op) in [("<", "<"), ("<=", "<="), (">", ">"), (">=", ">=")] {
+        let c = codegen(&format!("module A\nfn f(a: Text, b: Text): Bool = a {} b", op));
+        assert_contains(&c, &format!("certo_text_compare(_l1, _l2) {} 0", c_op));
+    }
+}
+
+#[test]
+fn numeric_ordering_still_emits_plain_c_comparisons() {
+    let c = codegen("module A\nfn f(a: Int, b: Int): Bool = a < b");
+    assert_contains(&c, "(_l1 < _l2)");
+    assert_not_contains(&c, "certo_text_compare(_l1");
+    let c = codegen("module A\nfn f(a: Float, b: Float): Bool = a >= b");
+    assert_contains(&c, "(_l1 >= _l2)");
+}
+
+// ------------------------------------------------------------------ //
+// Result combinators — BACKLOG item 347
+// ------------------------------------------------------------------ //
+
+#[test]
+fn result_get_or_else_is_expanded_inline_with_a_payload_decode() {
+    // The C runtime's `certo_get_or_else` returns the raw payload slot, which
+    // for `Ok(Int)` is a heap box — so the call must not be emitted at all.
+    let c = codegen("module A\nfn f(r: Result<Int, Text>): Int = r.getOrElse(0)");
+    assert_not_contains(&c, "certo_result_get_or_else(");
+    assert_contains(&c, "__result_is_ok(");
+}
+
+#[test]
+fn result_map_err_and_recover_are_expanded_inline() {
+    let c = codegen("module A\nfn f(r: Result<Float, Text>): Float = r.recover((e) => 1.5)");
+    assert_not_contains(&c, "certo_result_recover(");
+    let c = codegen("module A\nfn g(r: Result<Int, Text>): Result<Int, Int> = r.mapErr((e) => 7)");
+    assert_not_contains(&c, "certo_result_map_err(");
+}
+
+// ------------------------------------------------------------------ //
+// Raw-element generic returns — BACKLOG items 350 / 340
+// ------------------------------------------------------------------ //
+
+#[test]
+fn call_to_raw_element_generic_unboxes_by_type_not_by_dereferencing_a_cell() {
+    // `head<T>` hands back the list's raw element word; the call site must
+    // bit-unpack it by concrete type (`Unbox`), not `UnboxSome`-dereference it.
+    let c = codegen(
+        "module A\nfn head<T>(list: List<T>): T = match list.first() {\n Some(v) => v\n None => panic(\"e\")\n}\n\
+         fn g(xs: List<Int>): Int = {
+ val x: Int = head(xs)
+ x
+}");
+    assert_contains(&c, "(int64_t)(intptr_t)(_l");
+    assert_not_contains(&c, "*(int64_t*)(_l");
+}
+
+#[test]
+fn call_to_boxed_generic_still_dereferences_the_cell() {
+    let c = codegen("module A\nfn ident<T>(x: T): T = x\nfn f(n: Int): Int = {\n val x: Int = ident(n)\n x\n}");
+    assert_contains(&c, "*(int64_t*)(");
 }

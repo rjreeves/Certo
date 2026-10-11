@@ -71,6 +71,22 @@ void* certo_result_all(CertoList* results) {
     return certo_ok((intptr_t)out);
 }
 
+/* Result.all for payload types whose `Result` slot encoding differs from the
+   list-element encoding (Int/Bool/... — BACKLOG item 347): `conv` (a
+   per-call-site closure synthesized by the compiler) turns each Ok slot
+   into the list element. */
+void* certo_result_all_conv(CertoList* results, certo_fn_t conv) {
+    int64_t n = results ? results->len : 0;
+    CertoList* out = list_alloc(n);
+    for (int64_t i = 0; i < n; i++) {
+        void* r = results->data[i];
+        if (!__result_is_ok(r)) return r;
+        out->data[i] = ((CertoFn1)conv.fn)(conv.env, (void*)__result_unwrap(r));
+    }
+    out->len = n;
+    return certo_ok((intptr_t)out);
+}
+
 /* Result.allSettled(results) — every individual outcome, unchanged; unlike
    .all it never short-circuits. Results are already fully computed by the
    time you have a List<Result<T,E>> (Certo has no separate future/promise
