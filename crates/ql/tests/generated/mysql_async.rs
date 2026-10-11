@@ -223,7 +223,7 @@ pub async fn add_blob<C: mysql_async::prelude::Queryable>(conn: &mut C, data: Op
 }
 
 /// The SQL of `delete purge_orders`.
-pub const PURGE_ORDERS_SQL: &str = r#"DELETE FROM `orders` AS `o`"#;
+pub const PURGE_ORDERS_SQL: &str = r#"DELETE `o` FROM `orders` AS `o`"#;
 
 /// Runs `delete purge_orders`; returns the number of rows affected.
 pub async fn purge_orders<C: mysql_async::prelude::Queryable>(conn: &mut C) -> Result<u64, mysql_async::Error> {

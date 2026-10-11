@@ -1800,8 +1800,8 @@ fn mysql_upsert_and_inserts() {
     let sql = my("insert up(n: int) { into items set id = 1, order_id = 1, sku = \"x\", price = 1, qty = :n on conflict (id) do update set qty = excluded.qty + items.qty }");
     assert!(
         sql.starts_with("INSERT INTO `items` (`id`, `order_id`, `sku`, `price`, `qty`)
-VALUES (1, 1, 'x', 1, ?) AS `excluded`
-ON DUPLICATE KEY UPDATE `qty` = (`excluded`.`qty` + `items`.`qty`)"),
+VALUES (1, 1, 'x', 1, ?)
+ON DUPLICATE KEY UPDATE `qty` = (VALUES(`qty`) + `items`.`qty`)"),
         "{sql}"
     );
     assert!(my("insert up() { into items set id = 1, order_id = 1, sku = \"x\", price = 1, qty = 1 on conflict (id) do nothing }").contains("ON DUPLICATE KEY UPDATE `id` = `id`"));

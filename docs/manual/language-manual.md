@@ -702,9 +702,9 @@ Placeholders are `$1`... on PostgreSQL, `?1`... on SQLite and `?` on MySQL. Ever
 
 # 4. Differences between the databases
 
-Certo makes PostgreSQL, SQLite and MySQL agree wherever it can. What remains:
+Certo makes PostgreSQL, SQLite and MySQL agree wherever it can. **MariaDB** (10.11 or later) is used through the MySQL dialect: the same `mysql://` URL and the same SQL, and the runner recognises the server by its version. The table's MySQL column holds for it too; the few differences are listed below the table. What remains:
 
-| Topic | PostgreSQL | SQLite | MySQL 8 |
+| Topic | PostgreSQL | SQLite | MySQL 8 / MariaDB |
 |-------|-----------|--------|---------|
 | Transactions around DDL | A migration is atomic. | Atomic, including table rebuilds. | **Not atomic.** DDL commits as it runs: Certo applies a migration one statement at a time and resumes after a failure. |
 | `returning` | Yes | Yes (3.35+) | **No** (QL270): read the row back with a query. |
@@ -721,6 +721,15 @@ Certo makes PostgreSQL, SQLite and MySQL agree wherever it can. What remains:
 | `string_agg` | `string_agg` | `group_concat` (SQLite 3.44 for `order by`) | `GROUP_CONCAT`; raise `group_concat_max_len` (default cuts at 1024 bytes) |
 | Unconstrained `decimal` | arbitrary precision | `NUMERIC` | `DECIMAL(65,30)` |
 | NULL ordering in `order by` | NULLs last when ascending | NULLs first | NULLs first |
+
+**MariaDB details.** Everything is the same as MySQL's row of the table, with these notes about how Certo copes:
+
+- MariaDB's `json` is a `LONGTEXT` that carries a `JSON_VALID` check. Certo creates it that way and reads the pair back as `json` (the check is not reported as a constraint of yours).
+- MariaDB reports `NO ACTION` as `RESTRICT` for a foreign key (the two are one thing on both servers), so a key you wrote with either reads back as the default, and drift treats them as equal.
+- Defaults come back from MariaDB as SQL text (`'open'`, `current_timestamp()`, `lcase(...)`); Certo reads them into the same expressions as on MySQL.
+- A mutation's upsert refers to the incoming row as `VALUES(col)`, the one spelling both servers share. MySQL 8 reports a deprecation warning for it; it keeps working.
+- A `delete` is written `DELETE a FROM t AS a ...`, the form MariaDB accepts for an aliased table.
+- The oldest versions covered are MariaDB 10.11 and MySQL 8.0.19 (migrations drop a check with `DROP CONSTRAINT`).
 
 SQLite stores `uuid`, `timestamp`, `timestamp_naive` and `date` as text, `decimal` as a number or text, and `json` as text. Compare timestamps in the application where the text forms could differ.
 
