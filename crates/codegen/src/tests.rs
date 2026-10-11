@@ -621,7 +621,12 @@ fn result_flat_map_dot_call_reaches_the_real_function() {
     let c = codegen(
         "module A\ntype E = | Bad\nfn addOne(x: Int): Result<Int, E> = Ok(x + 1)\n\
          fn f(r: Result<Int, E>): Result<Int, E> = r.flatMap(addOne)");
-    assert_contains(&c, "certo_result_flat_map(");
+    // BACKLOG item 347 — these four combinators are now expanded inline
+    // (decoding the payload slot by its real type) instead of calling the
+    // C runtime function, which only saw the raw slot; the dot-call still
+    // has to resolve (no E0205) and reach a real `__result_is_ok` branch.
+    assert_contains(&c, "__result_is_ok(");
+    assert_not_contains(&c, "certo_result_flat_map(");
 }
 
 #[test]
@@ -629,14 +634,24 @@ fn result_map_err_dot_call_reaches_the_real_function() {
     let c = codegen(
         "module A\ntype E = | Bad\ntype F = | Worse\nfn toF(e: E): F = F.Worse\n\
          fn f(r: Result<Int, E>): Result<Int, F> = r.mapErr(toF)");
-    assert_contains(&c, "certo_result_map_err(");
+    // BACKLOG item 347 — these four combinators are now expanded inline
+    // (decoding the payload slot by its real type) instead of calling the
+    // C runtime function, which only saw the raw slot; the dot-call still
+    // has to resolve (no E0205) and reach a real `__result_is_ok` branch.
+    assert_contains(&c, "__result_is_ok(");
+    assert_not_contains(&c, "certo_result_map_err(");
 }
 
 #[test]
 fn result_get_or_else_dot_call_reaches_the_real_function() {
     let c = codegen(
         "module A\ntype E = | Bad\nfn f(r: Result<Int, E>): Int = r.getOrElse(0)");
-    assert_contains(&c, "certo_result_get_or_else(");
+    // BACKLOG item 347 — these four combinators are now expanded inline
+    // (decoding the payload slot by its real type) instead of calling the
+    // C runtime function, which only saw the raw slot; the dot-call still
+    // has to resolve (no E0205) and reach a real `__result_is_ok` branch.
+    assert_contains(&c, "__result_is_ok(");
+    assert_not_contains(&c, "certo_result_get_or_else(");
 }
 
 #[test]
@@ -644,7 +659,12 @@ fn result_recover_dot_call_reaches_the_real_function() {
     let c = codegen(
         "module A\ntype E = | Bad\nfn fallback(e: E): Int = 0\n\
          fn f(r: Result<Int, E>): Int = r.recover(fallback)");
-    assert_contains(&c, "certo_result_recover(");
+    // BACKLOG item 347 — these four combinators are now expanded inline
+    // (decoding the payload slot by its real type) instead of calling the
+    // C runtime function, which only saw the raw slot; the dot-call still
+    // has to resolve (no E0205) and reach a real `__result_is_ok` branch.
+    assert_contains(&c, "__result_is_ok(");
+    assert_not_contains(&c, "certo_result_recover(");
 }
 
 #[test]
@@ -3029,4 +3049,25 @@ fn numeric_ordering_still_emits_plain_c_comparisons() {
     assert_not_contains(&c, "certo_text_compare(_l1");
     let c = codegen("module A\nfn f(a: Float, b: Float): Bool = a >= b");
     assert_contains(&c, "(_l1 >= _l2)");
+}
+
+// ------------------------------------------------------------------ //
+// Result combinators — BACKLOG item 347
+// ------------------------------------------------------------------ //
+
+#[test]
+fn result_get_or_else_is_expanded_inline_with_a_payload_decode() {
+    // The C runtime's `certo_get_or_else` returns the raw payload slot, which
+    // for `Ok(Int)` is a heap box — so the call must not be emitted at all.
+    let c = codegen("module A\nfn f(r: Result<Int, Text>): Int = r.getOrElse(0)");
+    assert_not_contains(&c, "certo_result_get_or_else(");
+    assert_contains(&c, "__result_is_ok(");
+}
+
+#[test]
+fn result_map_err_and_recover_are_expanded_inline() {
+    let c = codegen("module A\nfn f(r: Result<Float, Text>): Float = r.recover((e) => 1.5)");
+    assert_not_contains(&c, "certo_result_recover(");
+    let c = codegen("module A\nfn g(r: Result<Int, Text>): Result<Int, Int> = r.mapErr((e) => 7)");
+    assert_not_contains(&c, "certo_result_map_err(");
 }

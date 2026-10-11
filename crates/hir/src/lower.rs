@@ -542,6 +542,17 @@ fn generic_container_ret(full: Option<&str>, args: &[HirExpr]) -> Option<Ty> {
             Some(Ty::Result(Box::new(ok_ty), Box::new(err_ty)))
         }
         Some("getOrElse") | Some("Result.getOrElse") => args.get(1).map(|a| a.ty.clone()),
+        // BACKLOG item 347 — `Result.all`'s own result type, recovered from
+        // the list argument's `List<Result<T,E>>`: without it the call is
+        // `Ty::Error`, so a match-bound `Ok(xs)` has an unknown element
+        // type and a `Float` payload's bits get read back as an Int.
+        Some("Result.all") => match args.first().map(|a| &a.ty) {
+            Some(Ty::List(inner)) => match &**inner {
+                Ty::Result(ok, err) => Some(Ty::Result(Box::new(Ty::List(ok.clone())), err.clone())),
+                _ => None,
+            },
+            _ => None,
+        },
         Some("Map.get") => args.first().and_then(map_kv).map(|(_, v)| Ty::Option(Box::new(v))),
         // BACKLOG item 338 — `Map.insert`'s own return type used to just
         // blindly copy its first (input-map) argument's type, unchanged.

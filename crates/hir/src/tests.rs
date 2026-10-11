@@ -3041,3 +3041,19 @@ fn bindings_outside_an_or_pattern_still_get_distinct_locals() {
     assert_eq!(ids.len(), 2);
     assert_ne!(ids[0], ids[1]);
 }
+
+// BACKLOG item 347 — `Result.all`'s result type is recovered from its list
+// argument, so a match-bound `Ok(xs)` knows its element type.
+#[test]
+fn result_all_call_type_is_recovered_from_the_list_argument() {
+    let m = lower("module A\nfn f(rs: List<Result<Float, Text>>): Result<List<Float>, Text> = Result.all(rs)");
+    let f = m.items.iter().find_map(|it| match it { HirItem::Fn(f) if f.name == "f" => Some(f), _ => None }).unwrap();
+    let body = f.body.as_ref().unwrap();
+    assert_eq!(
+        body.ty,
+        certo_typeck::Ty::Result(
+            Box::new(certo_typeck::Ty::List(Box::new(certo_typeck::Ty::Float))),
+            Box::new(certo_typeck::Ty::Text),
+        )
+    );
+}
