@@ -3071,3 +3071,27 @@ fn result_map_err_and_recover_are_expanded_inline() {
     let c = codegen("module A\nfn g(r: Result<Int, Text>): Result<Int, Int> = r.mapErr((e) => 7)");
     assert_not_contains(&c, "certo_result_map_err(");
 }
+
+// ------------------------------------------------------------------ //
+// Raw-element generic returns — BACKLOG items 350 / 340
+// ------------------------------------------------------------------ //
+
+#[test]
+fn call_to_raw_element_generic_unboxes_by_type_not_by_dereferencing_a_cell() {
+    // `head<T>` hands back the list's raw element word; the call site must
+    // bit-unpack it by concrete type (`Unbox`), not `UnboxSome`-dereference it.
+    let c = codegen(
+        "module A\nfn head<T>(list: List<T>): T = match list.first() {\n Some(v) => v\n None => panic(\"e\")\n}\n\
+         fn g(xs: List<Int>): Int = {
+ val x: Int = head(xs)
+ x
+}");
+    assert_contains(&c, "(int64_t)(intptr_t)(_l");
+    assert_not_contains(&c, "*(int64_t*)(_l");
+}
+
+#[test]
+fn call_to_boxed_generic_still_dereferences_the_cell() {
+    let c = codegen("module A\nfn ident<T>(x: T): T = x\nfn f(n: Int): Int = {\n val x: Int = ident(n)\n x\n}");
+    assert_contains(&c, "*(int64_t*)(");
+}

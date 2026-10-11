@@ -2299,6 +2299,8 @@ fn lower_expr(expr: &HirExpr, b: &mut Builder) -> Operand {
             };
             let user_raw_return = matches!(user_generic_return, Some(Ty::Var(_)))
                 && !matches!(expr.ty, Ty::Var(_) | Ty::Error);
+            let raw_element_return = matches!(user_generic_return,
+                Some(Ty::Var(v)) if *v == certo_hir::RAW_ELEM_RET_VAR);
             // Same idea again, generalized one step further: a call through
             // a *locally held* closure value (not a named global) whose own
             // declared return is erased (`Ty::Fn{ret: Ty::Var(_), ..}`) —
@@ -2364,7 +2366,13 @@ fn lower_expr(expr: &HirExpr, b: &mut Builder) -> Operand {
                 // int it pointed to. `UnboxSome` always dereferences,
                 // matching `BoxSome` unconditionally — the correct pairing
                 // here.
-                if user_raw_return || local_closure_raw_return {
+                // BACKLOG items 350/340 — except a generic whose result paths
+                // all yield a raw container-element word (`List.getOrPanic`,
+                // a `Some(v)` extracted from `List.first`, ...), classified by
+                // `certo_hir::RAW_ELEM_RET_VAR`: that is `Unbox`'s scheme,
+                // not `BoxSome`'s, so `UnboxSome`'s dereference would read a
+                // bit-packed scalar / a Text pointer as if it were a cell.
+                if (user_raw_return || local_closure_raw_return) && !raw_element_return {
                     b.assign(real, Rvalue::UnboxSome { opt: Operand::Local(dest), ty: expr.ty.clone() });
                 } else {
                     b.assign(real, Rvalue::Unbox { value: Operand::Local(dest), ty: expr.ty.clone() });

@@ -3057,3 +3057,31 @@ fn result_all_call_type_is_recovered_from_the_list_argument() {
         )
     );
 }
+
+// BACKLOG items 350 / 340 — return-provenance classification of generics.
+fn erased_ret(m: &crate::HirModule, name: &str) -> certo_typeck::Ty {
+    m.fn_ret_tys.get(name).cloned().unwrap_or(certo_typeck::Ty::Error)
+}
+
+#[test]
+fn generic_returning_a_some_extracted_element_is_marked_raw() {
+    let m = lower("module A\nfn head<T>(list: List<T>): T = match list.first() {\n Some(v) => v\n None => panic(\"empty\")\n}");
+    assert_eq!(erased_ret(&m, "head"), certo_typeck::Ty::Var(crate::RAW_ELEM_RET_VAR));
+}
+
+#[test]
+fn generic_returning_get_or_panic_is_marked_raw_and_forwarders_follow() {
+    let m = lower("module A\nfn firstOf<T>(xs: List<T>): T = List.getOrPanic(xs, 0)\nfn viaFirst<T>(xs: List<T>): T = firstOf(xs)");
+    assert_eq!(erased_ret(&m, "firstOf"), certo_typeck::Ty::Var(crate::RAW_ELEM_RET_VAR));
+    assert_eq!(erased_ret(&m, "viaFirst"), certo_typeck::Ty::Var(crate::RAW_ELEM_RET_VAR));
+}
+
+#[test]
+fn generics_returning_a_param_or_mixing_paths_are_not_marked_raw() {
+    // A returned parameter is a BoxSome cell; a function mixing a raw
+    // `Some(v)` path with a boxed-parameter path can't be classified either
+    // way, so it keeps the plain erased `Var(0)` it always had.
+    let m = lower("module A\nfn ident<T>(x: T): T = x\nfn headOr<T>(xs: List<T>, d: T): T = match xs.first() {\n Some(v) => v\n None => d\n}");
+    assert_eq!(erased_ret(&m, "ident"), certo_typeck::Ty::Var(0));
+    assert_eq!(erased_ret(&m, "headOr"), certo_typeck::Ty::Var(0));
+}
