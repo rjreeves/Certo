@@ -212,7 +212,18 @@ int64_t certo_process_exec_inherit(certo_text_t cmd, CertoList* args, certo_text
         return 127;
     }
     CloseHandle(pi.hThread);
+    /* The child shares this console, so Ctrl+C reaches the child AND us. A
+     * launcher must not die first: a child that handles Ctrl+C itself (a
+     * shell, a REPL) would be left running with nothing waiting on it, still
+     * reading the terminal, and its exit status lost. Ignore Ctrl+C while we
+     * wait and let the child decide; we then return whatever it exits with.
+     * This is done AFTER CreateProcess on purpose: the "ignore Ctrl+C" flag
+     * is inherited by processes created while it is set, which would stop a
+     * child that relies on the default from dying. Ctrl+Break is left alone
+     * as the way to force-stop a launcher. */
+    SetConsoleCtrlHandler(NULL, TRUE);
     WaitForSingleObject(pi.hProcess, INFINITE);
+    SetConsoleCtrlHandler(NULL, FALSE);
     DWORD code = 0;
     GetExitCodeProcess(pi.hProcess, &code);
     CloseHandle(pi.hProcess);
@@ -238,8 +249,20 @@ int64_t certo_process_exec_inherit(certo_text_t cmd, CertoList* args, certo_text
         _exit(127); /* only reached if exec failed */
     }
     free(argv);
+    /* Same reasoning as the Windows branch: Ctrl+C (SIGINT) and Ctrl+\ (SIGQUIT)
+     * go to the whole foreground process group, child included, so ignore them
+     * here while we wait -- as system(3) does -- and restore afterwards. Done
+     * after fork() so the child keeps the default disposition. */
+    struct sigaction ign, old_int, old_quit;
+    memset(&ign, 0, sizeof(ign));
+    ign.sa_handler = SIG_IGN;
+    sigemptyset(&ign.sa_mask);
+    sigaction(SIGINT, &ign, &old_int);
+    sigaction(SIGQUIT, &ign, &old_quit);
     int status = 0;
     waitpid(pid, &status, 0);
+    sigaction(SIGINT, &old_int, NULL);
+    sigaction(SIGQUIT, &old_quit, NULL);
     return WIFEXITED(status) ? (int64_t)WEXITSTATUS(status) : -1;
 #endif
 }

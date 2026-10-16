@@ -2296,6 +2296,34 @@ fn process_c_contains_exec_inherit() {
     assert!(PROCESS_C.contains("Backslashes before the closing quote must be doubled"), "missing trailing-backslash quoting fix");
 }
 
+// A launcher built on execInherit (sym's shim) must outlive a Ctrl+C that its
+// child handles itself, or the child is orphaned and its exit status lost --
+// but it may only start ignoring Ctrl+C AFTER the child exists, because the
+// "ignore" flag is inherited by processes created while it is set (a child
+// relying on the default would then no longer die). The ordering is the point.
+#[test]
+fn process_c_exec_inherit_ignores_ctrl_c_only_while_waiting() {
+    let start = PROCESS_C.find("int64_t certo_process_exec_inherit").expect("exec_inherit present");
+    let end = PROCESS_C[start..].find("int64_t certo_process_quit").expect("end marker") + start;
+    let body = &PROCESS_C[start..end];
+
+    let create  = body.find("CreateProcessA(").expect("CreateProcessA");
+    let ignore  = body.find("SetConsoleCtrlHandler(NULL, TRUE)").expect("must ignore Ctrl+C while waiting");
+    let wait    = body.find("WaitForSingleObject(pi.hProcess, INFINITE)").expect("must wait for the child");
+    let restore = body.find("SetConsoleCtrlHandler(NULL, FALSE)").expect("must restore Ctrl+C handling");
+    assert!(create < ignore, "must ignore Ctrl+C only AFTER CreateProcess, or the child inherits the ignore flag");
+    assert!(ignore < wait,   "must ignore Ctrl+C before waiting");
+    assert!(wait < restore,  "must restore Ctrl+C handling after the wait");
+
+    // POSIX branch: SIGINT/SIGQUIT ignored in the parent after fork(), restored after waitpid().
+    let fork      = body.find("fork()").expect("fork");
+    let ignore_p  = body.find("sigaction(SIGINT, &ign, &old_int)").expect("parent must ignore SIGINT while waiting");
+    let waitpid   = body.find("waitpid(pid, &status, 0)").expect("waitpid");
+    let restore_p = body.find("sigaction(SIGINT, &old_int, NULL)").expect("parent must restore SIGINT");
+    assert!(fork < ignore_p && ignore_p < waitpid && waitpid < restore_p, "POSIX ordering: fork, ignore, wait, restore");
+    assert!(body.contains("sigaction(SIGQUIT, &ign, &old_quit)"), "SIGQUIT is ignored too, as system(3) does");
+}
+
 // BACKLOG item 333 — spawnDetached's own POSIX branch used to be a stub
 // that discarded every argument and always returned -1 without ever
 // spawning anything, unlike every other Process.* function in this file.
