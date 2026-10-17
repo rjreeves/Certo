@@ -1,2 +1,2 @@
-cd "C:\Users\robert\Desktop\Certo\scripts"
+cd /d "%~dp0"
 pwsh -ExecutionPolicy Bypass -File dist-package.ps1
