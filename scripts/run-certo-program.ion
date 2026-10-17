@@ -1,0 +1,285 @@
+# Validate, compile, and run a Certo program through the native toolchain.
+#
+# Usage:
+#   ion-win.exe scripts/run-certo-program.ion PROGRAM [OPTIONS] [-- PROGRAM_ARGS...]
+#
+# Options:
+#   --profile debug|release
+#   --output-directory DIRECTORY
+#   --skip-compiler-build
+#   --skip-format-check
+#   --skip-lint
+#   --skip-tests
+#   --build-only
+#   --keep-going
+#
+# Examples:
+#   ion-win.exe scripts/run-certo-program.ion examples/tasks.cto
+#   ion-win.exe scripts/run-certo-program.ion src/main.cto -- --port 8080
+#   ion-win.exe scripts/run-certo-program.ion src/main.cto --build-only --profile release
+
+if test $len(args) -lt 2
+    echo "Usage: ion-win.exe scripts/run-certo-program.ion PROGRAM [OPTIONS] [-- PROGRAM_ARGS...]"
+    exit 2
+end
+
+let invocation_directory = $replace($(pwd) '\' '/')
+let script_input = $replace(@args[0] '\' '/')
+let script_directory = $parent(script_input)
+if test -z $script_directory
+    let script_directory = $invocation_directory
+end
+
+pushd $script_directory
+or exit 2
+let scripts_directory = $replace($(pwd) '\' '/')
+popd
+let repo_root = $parent(scripts_directory)
+
+let program_input = $replace(@args[1] '\' '/')
+if not test -f $program_input
+    echo "ERROR: Program file not found: $program_input"
+    exit 2
+end
+if not eq $extension(program_input) cto
+    echo "ERROR: Program must be a .cto file: $program_input"
+    exit 2
+end
+
+let program_directory_input = $parent(program_input)
+if test -z $program_directory_input
+    let program_directory_input = $invocation_directory
+end
+pushd $program_directory_input
+or exit 2
+let program_directory = $replace($(pwd) '\' '/')
+popd
+let program_name = $filename(program_input)
+let program_path = ${program_directory}/$basename(program_input)
+
+let profile = debug
+let output_directory = ""
+let skip_compiler_build = false
+let skip_format_check = false
+let skip_lint = false
+let skip_tests = false
+let build_only = false
+let keep_going = false
+let parsing_program_arguments = false
+let expected_value = ""
+let program_arguments = [ ]
+
+for arg in @args[2..]
+    if eq $parsing_program_arguments true
+        let program_arguments = [ @program_arguments $arg ]
+    else if not test -z $expected_value
+        match $expected_value
+            case profile
+                let profile = $arg
+            case output
+                let output_directory = $replace(arg '\' '/')
+        end
+        let expected_value = ""
+    else
+        match $arg
+            case --
+                let parsing_program_arguments = true
+            case --profile
+                let expected_value = profile
+            case --output-directory
+                let expected_value = output
+            case --skip-compiler-build
+                let skip_compiler_build = true
+            case --skip-format-check
+                let skip_format_check = true
+            case --skip-lint
+                let skip_lint = true
+            case --skip-tests
+                let skip_tests = true
+            case --build-only
+                let build_only = true
+            case --keep-going
+                let keep_going = true
+            case _
+                echo "ERROR: Unknown option: $arg"
+                exit 2
+        end
+    end
+end
+
+if not test -z $expected_value
+    echo "ERROR: Missing value for --$expected_value"
+    exit 2
+end
+if not eq $profile debug
+    if not eq $profile release
+        echo "ERROR: --profile must be 'debug' or 'release'."
+        exit 2
+    end
+end
+
+if test -z $output_directory
+    let output_directory = ${repo_root}/out/programs/$program_name
+else
+    if not starts-with $output_directory /
+        if not matches $output_directory '^[A-Za-z]:/'
+            let output_directory = ${repo_root}/$output_directory
+        end
+    end
+end
+
+let compiler = ${repo_root}/target/$profile/certo.exe
+let executable = ${output_directory}/$program_name.exe
+let failed = false
+mkdir $output_directory
+or exit 1
+
+if eq $skip_compiler_build false
+    echo ""
+    echo "==> Build Certo compiler ($profile)"
+    pushd $repo_root
+    or exit 1
+    if eq $profile release
+        if cargo build --package certo --bin certo --release
+            popd
+            echo "PASS: Build Certo compiler ($profile)"
+        else
+            popd
+            let failed = true
+            echo "FAIL: Build Certo compiler ($profile)"
+            if eq $keep_going false
+                exit 1
+            end
+        end
+    else
+        if cargo build --package certo --bin certo
+            popd
+            echo "PASS: Build Certo compiler ($profile)"
+        else
+            popd
+            let failed = true
+            echo "FAIL: Build Certo compiler ($profile)"
+            if eq $keep_going false
+                exit 1
+            end
+        end
+    end
+end
+
+if not test -f $compiler
+    echo "ERROR: Certo compiler not found: $compiler"
+    echo "Run without --skip-compiler-build."
+    exit 1
+end
+
+echo ""
+echo "==> Compiler version"
+if cmd.exe /d /c $compiler --version
+    echo "PASS: Compiler version"
+else
+    let failed = true
+    echo "FAIL: Compiler version"
+    if eq $keep_going false
+        exit 1
+    end
+end
+
+if eq $skip_format_check false
+    echo ""
+    echo "==> Check formatting"
+    if cmd.exe /d /c $compiler fmt --check $program_path
+        echo "PASS: Check formatting"
+    else
+        let failed = true
+        echo "FAIL: Check formatting"
+        if eq $keep_going false
+            exit 1
+        end
+    end
+end
+
+echo ""
+echo "==> Parse and type-check"
+if cmd.exe /d /c $compiler check $program_path
+    echo "PASS: Parse and type-check"
+else
+    let failed = true
+    echo "FAIL: Parse and type-check"
+    if eq $keep_going false
+        exit 1
+    end
+end
+
+if eq $skip_lint false
+    echo ""
+    echo "==> Lint program"
+    if cmd.exe /d /c $compiler lint $program_path
+        echo "PASS: Lint program"
+    else
+        let failed = true
+        echo "FAIL: Lint program"
+        if eq $keep_going false
+            exit 1
+        end
+    end
+end
+
+if eq $skip_tests false
+    echo ""
+    echo "==> Run embedded tests"
+    if cmd.exe /d /c $compiler test $program_path
+        echo "PASS: Run embedded tests"
+    else
+        let failed = true
+        echo "FAIL: Run embedded tests"
+        if eq $keep_going false
+            exit 1
+        end
+    end
+end
+
+echo ""
+echo "==> Compile native program"
+let build_succeeded = true
+if cmd.exe /d /c $compiler build $program_path -o $executable
+    echo "PASS: Compile native program"
+else
+    let failed = true
+    let build_succeeded = false
+    echo "FAIL: Compile native program"
+    if eq $keep_going false
+        exit 1
+    end
+end
+
+if eq $build_only false
+    if eq $build_succeeded true
+        if test -f $executable
+            echo ""
+            echo "==> Run $program_name"
+            pushd $program_directory
+            or exit 1
+            if cmd.exe /d /c $executable @program_arguments
+                popd
+                echo "PASS: Run $program_name"
+            else
+                popd
+                let failed = true
+                echo "FAIL: Run $program_name"
+            end
+        end
+    end
+end
+
+echo ""
+if eq $failed true
+    echo "Program toolchain failed."
+    exit 1
+end
+
+if eq $build_only true
+    echo "Build complete: $executable"
+else
+    echo "Program completed successfully: $executable"
+end
+exit 0

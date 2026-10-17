@@ -133,6 +133,7 @@ scripts/release.ps1          # build release binaries → dist/
 scripts/dist-package.ps1     # create zip/tar.gz distribution package
 scripts/run-toolchain.ps1    # build, test, and smoke-test every CLI tool
 scripts/run-certo-program.ps1 # validate, compile, and run one .cto program
+scripts/run-certo-program.ion # same program workflow using ION.WIN
 ```
 
 The toolchain runner is non-destructive: formatting runs in check mode and all
@@ -145,6 +146,7 @@ To run the toolchain against your own Certo entry file:
 ```powershell
 .\scripts\run-certo-program.ps1 .\src\main.cto
 .\scripts\run-certo-program.ps1 .\src\main.cto -ProgramArguments @("--port", "8080")
+ion-win.exe .\scripts\run-certo-program.ion .\src\main.cto -- --port 8080
 ```
 
 The program runner checks formatting, types, lints, runs embedded tests,
