@@ -3535,3 +3535,28 @@ fn result_all_conv_applies_the_converter_closure_per_ok_payload() {
     assert!(r.contains("void* certo_result_all_conv(CertoList* results, certo_fn_t conv)"));
     assert!(r.contains("((CertoFn1)conv.fn)(conv.env, (void*)__result_unwrap(r))"));
 }
+
+// BACKLOG item 427 — Process.exec/run must not flash a console window.
+#[test]
+fn process_exec_runs_the_shell_hidden_instead_of_calling_system_on_windows() {
+    let p = crate::process::PROCESS_C;
+    let helper = p.find("static int certo_system_hidden").expect("hidden-shell helper");
+    let body = &p[helper..helper + p[helper..].find("\n}\n").unwrap()];
+    assert!(body.contains("CREATE_NO_WINDOW"), "the shell must be created with CREATE_NO_WINDOW");
+    assert!(body.contains("cmd.exe /c %s"), "must keep system()'s `cmd.exe /c <command>` semantics");
+    // The Windows branch of certo_process_exec uses it; system() remains only on POSIX.
+    assert!(p.contains("int rc = certo_system_hidden(full_cmd);"));
+    let sys = p.find("int rc = system(full_cmd);").expect("POSIX system() call");
+    let else_ = p[..sys].rfind("#else").unwrap();
+    let win = p[..sys].rfind("int rc = certo_system_hidden").unwrap();
+    assert!(win < else_, "system() must only be reachable from the non-Windows branch");
+}
+
+#[test]
+fn process_run_creates_its_child_without_a_console_window() {
+    let p = crate::process::PROCESS_C;
+    let run = p.find("CertoProcessResult* certo_process_run").unwrap();
+    let create = run + p[run..].find("CreateProcessA(").unwrap();
+    let call = &p[create..create + 400];
+    assert!(call.contains("CREATE_NO_WINDOW"), "Process.run's CreateProcessA must pass CREATE_NO_WINDOW");
+}

@@ -97,6 +97,69 @@ static void append_arg(char** buf, size_t* cap, size_t* pos, certo_text_t arg) {
     (*buf)[(*pos)++] = '"';
 }
 
+#ifdef _WIN32
+/* Run `command` through the command interpreter exactly as system() does
+   (`cmd.exe /c <command>`, same quote-stripping rules), but without letting
+   Windows create a visible console window — BACKLOG item 427.
+
+   system() starts cmd.exe with no creation flags, so when the calling process
+   has no console of its own (a `--windows-gui` app, a service) Windows gives
+   the child a brand-new console window that flashes up and disappears. That
+   is what made a GUI installer calling Process.exec three times flash two or
+   three black consoles. CREATE_NO_WINDOW runs the same cmd.exe invisibly.
+   stdout/stderr need no handle of their own because the command string
+   redirects both to files; stdin still reaches the child when the parent has
+   one. Returns cmd.exe's exit code, or -1 if it could not be started. */
+static int certo_system_hidden(const char* command) {
+    const char* comspec = getenv("COMSPEC");
+    if (!comspec || !*comspec) comspec = "cmd.exe";
+    size_t n = strlen(command) + 32;
+    char* line = (char*)malloc(n);
+    if (!line) certo_panic("out of memory");
+    snprintf(line, n, "cmd.exe /c %s", command);
+
+    SECURITY_ATTRIBUTES sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.nLength = sizeof(sa);
+    sa.bInheritHandle = TRUE;
+    HANDLE hNul = CreateFileA("NUL", GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                              &sa, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+
+    /* Hand the child our stdin if we have a usable one (made inheritable via
+       a duplicate, so our own handle's flags are left alone); otherwise NUL. */
+    HANDLE hIn = hNul;
+    HANDLE hInDup = NULL;
+    HANDLE hOwnIn = GetStdHandle(STD_INPUT_HANDLE);
+    if (hOwnIn && hOwnIn != INVALID_HANDLE_VALUE &&
+        DuplicateHandle(GetCurrentProcess(), hOwnIn, GetCurrentProcess(), &hInDup, 0, TRUE, DUPLICATE_SAME_ACCESS)) {
+        hIn = hInDup;
+    }
+
+    STARTUPINFOA si;
+    PROCESS_INFORMATION pi;
+    memset(&si, 0, sizeof(si));
+    memset(&pi, 0, sizeof(pi));
+    si.cb = sizeof(si);
+    si.dwFlags    = STARTF_USESTDHANDLES;
+    si.hStdInput  = hIn;
+    si.hStdOutput = hNul;
+    si.hStdError  = hNul;
+
+    BOOL ok = CreateProcessA(comspec, line, NULL, NULL, TRUE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi);
+    free(line);
+    if (hInDup) CloseHandle(hInDup);
+    if (hNul != INVALID_HANDLE_VALUE) CloseHandle(hNul);
+    if (!ok) return -1;
+
+    CloseHandle(pi.hThread);
+    WaitForSingleObject(pi.hProcess, INFINITE);
+    DWORD code = 0;
+    GetExitCodeProcess(pi.hProcess, &code);
+    CloseHandle(pi.hProcess);
+    return (int)code;
+}
+#endif
+
 CertoProcessResult* certo_process_exec(certo_text_t cmd, CertoList* args) {
     /* Build command string: cmd "arg1" "arg2" ... */
     size_t cap = 256;
@@ -140,7 +203,11 @@ CertoProcessResult* certo_process_exec(certo_text_t cmd, CertoList* args) {
 #endif
     free(cbuf);
 
+#ifdef _WIN32
+    int rc = certo_system_hidden(full_cmd);
+#else
     int rc = system(full_cmd);
+#endif
     free(full_cmd);
 
     /* Read captured output */
@@ -644,7 +711,7 @@ CertoProcessResult* certo_process_run(certo_text_t cmd, CertoList* args,
     BOOL ok = CreateProcessA(
         NULL, cbuf, NULL, NULL,
         TRUE /* inherit hOut/hErr */,
-        0, NULL,
+        CREATE_NO_WINDOW /* BACKLOG item 427: no console flash from a GUI parent */, NULL,
         (working_dir && *working_dir) ? working_dir : NULL,
         &si, &pi
     );
