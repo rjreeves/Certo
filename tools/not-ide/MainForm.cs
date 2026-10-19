@@ -39,7 +39,7 @@ sealed class MainForm : Form
     readonly ToolStripStatusLabel _stTime = new();
     readonly List<ToolStripItem> _cmdItems = new();
     ToolStripButton _stopBtn = null!;
-    ToolStripButton _releaseBtn = null!, _verboseBtn = null!, _keepBtn = null!;
+    ToolStripMenuItem _releaseBtn = null!, _verboseBtn = null!, _keepBtn = null!;
     ToolStripComboBox _scope = null!;
     ToolStripTextBox _args = null!;
     readonly System.Windows.Forms.Timer _tick = new() { Interval = 250 };
@@ -96,13 +96,13 @@ sealed class MainForm : Form
         main.BringToFront();
 
         // Left: view + filter + tree
-        var leftTop = new TableLayoutPanel { Dock = DockStyle.Top, Height = 32, ColumnCount = 2, Padding = new Padding(4, 4, 4, 0) };
-        leftTop.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 110));
+        var leftTop = new TableLayoutPanel { Dock = DockStyle.Top, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, ColumnCount = 2, RowCount = 1, Padding = new Padding(6, 6, 6, 6) };
+        leftTop.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         leftTop.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         _view.DropDownStyle = ComboBoxStyle.DropDownList;
         _view.Items.AddRange(new object[] { "Folders", "By module", "By type" });
         _view.SelectedItem = _s.ViewMode; if (_view.SelectedIndex < 0) _view.SelectedIndex = 0;
-        _view.Dock = DockStyle.Fill;
+        _view.Dock = DockStyle.Fill; _view.Margin = new Padding(0, 0, 6, 0);
         _view.SelectedIndexChanged += (_, _) => RefreshTree();
         _filter.PlaceholderText = "Filter files…";
         _filter.Dock = DockStyle.Fill;
@@ -132,10 +132,10 @@ sealed class MainForm : Form
         _rightSplit = right;
         main.Panel2.Controls.Add(right);
 
-        _diagHeader.Text = "Problems"; _diagHeader.Dock = DockStyle.Top; _diagHeader.Height = 22;
-        _diagHeader.Padding = new Padding(6, 4, 0, 0); _diagHeader.Font = new Font(Font, FontStyle.Bold);
+        _diagHeader.Text = "Problems"; _diagHeader.Dock = DockStyle.Top; _diagHeader.AutoSize = true;
+        _diagHeader.Padding = new Padding(6, 6, 0, 6); _diagHeader.Font = new Font(Font, FontStyle.Bold);
         _diag.Dock = DockStyle.Fill; _diag.View = View.Details; _diag.FullRowSelect = true; _diag.HideSelection = false;
-        _diag.Columns.Add("", 70); _diag.Columns.Add("Code", 70); _diag.Columns.Add("Message", 520); _diag.Columns.Add("Location", 260);
+        _diag.Columns.Add("Severity", 80); _diag.Columns.Add("Code", 70); _diag.Columns.Add("Message", 520); _diag.Columns.Add("Location", 260);
         _diag.DoubleClick += (_, _) =>
         {
             if (_diag.SelectedItems.Count > 0 && _diag.SelectedItems[0].Tag is Diagnostic { File: { } f } d)
@@ -150,28 +150,40 @@ sealed class MainForm : Form
         _log.DoubleClick += (_, _) => OpenLogLine();
         var logHeader = new Label
         {
-            Text = "Output  (double-click a file:line to open it in VS Code)", Dock = DockStyle.Top, Height = 22,
-            Padding = new Padding(6, 4, 0, 0), Font = new Font(Font, FontStyle.Bold),
+            Text = "Output  (double-click a file:line to open it in VS Code)", Dock = DockStyle.Top, AutoSize = true,
+            Padding = new Padding(6, 6, 0, 6), Font = new Font(Font, FontStyle.Bold),
         };
         right.Panel2.Controls.Add(_log);
         right.Panel2.Controls.Add(logHeader);
 
         // Command strip then project strip (added last = docked on top)
-        Controls.Add(BuildCommandStrip());
         Controls.Add(BuildProjectStrip());
+        Controls.Add(BuildCommandStrip());
+        var menu = BuildMenu();
+        Controls.Add(menu);
+        MainMenuStrip = menu;
+    }
+
+    MenuStrip BuildMenu()
+    {
+        var ms = new MenuStrip();
+        var file = new ToolStripMenuItem("&File");
+        file.DropDownItems.Add(new ToolStripMenuItem("&Open project…", null, (_, _) => PickProject(), Keys.Control | Keys.O));
+        file.DropDownItems.Add(new ToolStripMenuItem("Open folder in &VS Code", null, (_, _) => OpenFolderInCode()));
+        file.DropDownItems.Add(new ToolStripMenuItem("Open &certo.toml", null, (_, _) =>
+        {
+            if (_info?.ManifestPath is { } m) OpenInCode(m); else Warn("This project has no certo.toml.");
+        }));
+        file.DropDownItems.Add(new ToolStripMenuItem("&Reload tree", null, (_, _) => RefreshTree()));
+        file.DropDownItems.Add(new ToolStripSeparator());
+        file.DropDownItems.Add(new ToolStripMenuItem("E&xit", null, (_, _) => Close()));
+        ms.Items.Add(file);
+        return ms;
     }
 
     ToolStrip BuildProjectStrip()
     {
-        var ts = new ToolStrip { GripStyle = ToolStripGripStyle.Hidden, Padding = new Padding(4, 2, 4, 2) };
-        ts.Items.Add(Btn("Open…", "Open a Certo project folder (Ctrl+O)", (_, _) => PickProject()));
-        ts.Items.Add(Btn("Open in VS Code", "Open the project folder in VS Code", (_, _) => OpenFolderInCode()));
-        ts.Items.Add(Btn("certo.toml", "Open certo.toml", (_, _) =>
-        {
-            if (_info?.ManifestPath is { } m) OpenInCode(m); else Warn("This project has no certo.toml.");
-        }));
-        ts.Items.Add(Btn("Reload", "Rescan the project tree", (_, _) => RefreshTree()));
-        ts.Items.Add(new ToolStripSeparator());
+        var ts = new ToolStrip { GripStyle = ToolStripGripStyle.Hidden, Padding = new Padding(6, 2, 6, 2), BackColor = SystemColors.ControlLight };
         ts.Items.Add(new ToolStripLabel("Target:") { Font = new Font(Font, FontStyle.Bold) });
         _targetLabel.Text = "(none — select a .cto file)";
         ts.Items.Add(_targetLabel);
@@ -236,21 +248,22 @@ sealed class MainForm : Form
         _stopBtn = Btn("Stop", "Stop the running command (Shift+F5)", (_, _) => _cts?.Cancel());
         _stopBtn.Enabled = false;
         ts.Items.Add(_stopBtn);
-        ts.Items.Add(new ToolStripSeparator());
 
-        _releaseBtn = new ToolStripButton("Release") { CheckOnClick = true, Checked = _s.Release, ToolTipText = "Pass --release (uses [targets.production])" };
-        _verboseBtn = new ToolStripButton("Verbose") { CheckOnClick = true, Checked = _s.Verbose, ToolTipText = "Pass -v" };
-        _keepBtn = new ToolStripButton("Keep going") { CheckOnClick = true, Checked = _s.KeepGoing, ToolTipText = "Pipeline: continue after a failed step" };
-        ts.Items.AddRange(new ToolStripItem[] { _releaseBtn, _verboseBtn, _keepBtn, new ToolStripSeparator() });
+        // Rarely-changed toggles live in one menu; Scope and Args stay visible at the right edge.
+        _releaseBtn = new ToolStripMenuItem("Release build") { CheckOnClick = true, Checked = _s.Release, ToolTipText = "Pass --release (uses [targets.production])" };
+        _verboseBtn = new ToolStripMenuItem("Verbose (-v)") { CheckOnClick = true, Checked = _s.Verbose };
+        _keepBtn = new ToolStripMenuItem("Pipeline: keep going after failure") { CheckOnClick = true, Checked = _s.KeepGoing };
+        var options = new ToolStripDropDownButton("Options") { DisplayStyle = ToolStripItemDisplayStyle.Text, Alignment = ToolStripItemAlignment.Right };
+        options.DropDownItems.AddRange(new ToolStripItem[] { _releaseBtn, _verboseBtn, _keepBtn });
 
-        ts.Items.Add(new ToolStripLabel("Scope:"));
-        _scope = new ToolStripComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 110, ToolTipText = "Which files fmt / lint / test / check / build act on" };
+        _args = new ToolStripTextBox { Width = 120, Text = _s.ProgramArgs, Alignment = ToolStripItemAlignment.Right, ToolTipText = "Arguments passed to the program after -- when running" };
+        var argsLabel = new ToolStripLabel("Args") { Alignment = ToolStripItemAlignment.Right };
+        _scope = new ToolStripComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 100, Alignment = ToolStripItemAlignment.Right, ToolTipText = "Which files fmt / lint / test / check / build act on" };
         _scope.Items.AddRange(new object[] { "Target file", "All files" });
         _scope.SelectedIndex = _s.AllFiles ? 1 : 0;
-        ts.Items.Add(_scope);
-        ts.Items.Add(new ToolStripLabel("Args:"));
-        _args = new ToolStripTextBox { Width = 140, Text = _s.ProgramArgs, ToolTipText = "Arguments passed to the program after -- when running" };
-        ts.Items.Add(_args);
+        var scopeLabel = new ToolStripLabel("Scope") { Alignment = ToolStripItemAlignment.Right };
+        // Right-aligned items are laid out right-to-left, so add them in reverse visual order.
+        ts.Items.AddRange(new ToolStripItem[] { options, _args, argsLabel, _scope, scopeLabel });
         return ts;
     }
 
