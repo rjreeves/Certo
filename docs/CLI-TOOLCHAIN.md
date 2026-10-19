@@ -156,6 +156,7 @@ certo                               # reads entry from certo.toml
 | `-o <path>` | Output path. Default: `<stem>` on Unix, `<stem>.exe` on Windows. |
 | `--emit-c` | Stop after generating C; write `<stem>.c` instead of compiling it. |
 | `--emit-dll` | Compile to a shared library (`.dll` / `.so` / `.dylib`). |
+| `--link <lib>` | Link a native library for `extern "C"` declarations (repeatable) — see [Native interop](DLL-INTEROP.md). |
 | `-v`, `--verbose` | Print the full C compiler command line. |
 | `-w`, `--watch` | Watch the source file and rebuild whenever it changes. |
 | `--release` | Apply the `[targets.production]` profile from `certo.toml` — see [§15](#15-certotoml--project-manifest). |
@@ -185,6 +186,9 @@ pub fn addNumbers(a: Int, b: Int): Int = a + b
 to `addNumbers(...)` from other Certo code are unaffected — they still go
 through the usual internal `certo_add_numbers` symbol. `certo-ffi`'s generated
 header uses the same custom name.
+
+For the type mapping, calling the library from C, C# and Rust, and calling
+native code from Certo, see [Native interop](DLL-INTEROP.md).
 
 ### Inspecting the generated C
 

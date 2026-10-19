@@ -117,7 +117,7 @@ See [docs/GUIDE.md](docs/GUIDE.md) for the full developer guide, including:
 - Stdlib API
 - Building and testing
 - LLVM / WASM targets
-- FFI and C interop
+- FFI and C interop (in depth: [docs/DLL-INTEROP.md](docs/DLL-INTEROP.md), with runnable examples in [`dll-demo/`](dll-demo/README.md))
 
 See [docs/HOST-ROADMAP.md](docs/HOST-ROADMAP.md) for the `Stdlib.Host`
 capability roadmap, shipped guarantees, and production-readiness gates.

@@ -987,6 +987,11 @@ Generate a C header for the exported symbols:
 certo-ffi --header math.cto -o math.h
 ```
 
+To call native code *from* Certo (`extern "C"`, `--link`), and for the type
+mapping, symbol names and calling the library from C, C# and Rust, see
+[Native interop](DLL-INTEROP.md). Runnable examples are in
+[`dll-demo/`](../dll-demo/README.md).
+
 ---
 
 ## 12. Code Formatting

@@ -139,6 +139,7 @@ certo run src/main.cto -v -- hello world
 | `-o <path>` | Output path. Default: `<stem>` (Unix) / `<stem>.exe` (Windows). |
 | `--emit-c` | Stop after generating C; write `<stem>.c` instead of compiling it. |
 | `--emit-dll` | Compile to a shared library (`.dll` / `.so` / `.dylib`) instead of an executable. |
+| `--link <lib>` | Link a native library for `extern "C"` declarations (repeatable). See [Native interop](DLL-INTEROP.md). |
 | `-v`, `--verbose` | Print the exact C compiler invocation. |
 | `-w`, `--watch` | Recompile automatically whenever the source file changes. |
 
