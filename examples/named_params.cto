@@ -1,16 +1,18 @@
 // Named and optional parameters
+module NamedParams
 
-fn connect(host: Text, port: Int = 5432, ssl: Bool = false): Text {
-  f"${host}:${intToText(port)} ssl=${boolToText(ssl)}"
-}
+import Stdlib.Core
 
-fn main(): Unit {
-  // Positional (classic)
-  print(connect("localhost", 5432, false))
+fn connect(host: Text, port: Int = 5432, ssl: Bool = false): Text =
+    f"{host}:{intToText(port)} ssl={boolToText(ssl)}"
 
-  // Named args — any order
-  print(connect(host: "db.prod.example.com", ssl: true))
+fn main(): Unit [io] = {
+    // Positional (classic)
+    println(connect("localhost", 5432, false))
 
-  // Mix: positional first, then named
-  print(connect("localhost", ssl: true))
+    // Named args - any order
+    println(connect(host: "db.prod.example.com", ssl: true))
+
+    // Mix: positional first, then named
+    println(connect("localhost", ssl: true))
 }

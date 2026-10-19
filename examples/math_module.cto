@@ -1,17 +1,18 @@
+module MathModule
+
+import Stdlib.Core
 import Stdlib.Math
 
-fn circleArea(r: Float): Float {
-  Math.pi() * r * r
+fn circleArea(r: Float): Float = Math.pi() * r * r
+
+fn distance(x1: Float, y1: Float, x2: Float, y2: Float): Float = {
+    val dx = x2 - x1
+    val dy = y2 - y1
+    Math.hypot(dx, dy)
 }
 
-fn distance(x1: Float, y1: Float, x2: Float, y2: Float): Float {
-  val dx = x2 - x1
-  val dy = y2 - y1
-  Math.hypot(dx, dy)
-}
-
-fn main(): Unit {
-  print(floatToText(circleArea(5.0)))
-  print(floatToText(distance(0.0, 0.0, 3.0, 4.0)))
-  print(floatToText(Math.sin(Math.pi() / 2.0)))
+fn main(): Unit [io] = {
+    println(floatToText(circleArea(5.0)))
+    println(floatToText(distance(0.0, 0.0, 3.0, 4.0)))
+    println(floatToText(Math.sin(Math.pi() / 2.0)))
 }

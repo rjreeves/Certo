@@ -1,6 +1,7 @@
 module runps1
 
 import Stdlib.Core
+import Stdlib.Process
 
 // Usage: runps1 <path> <script-name>
 //   path        directory containing the .ps1 file
@@ -19,8 +20,11 @@ fn main(): Unit [io] = {
         eprintln("  path        directory containing the .ps1 file")
         eprintln("  script-name file name without the .ps1 extension")
     } else {
-        println(f"Running: {path}\{name}.ps1")
-        val code = runPs1(path, name)
+        val script = f"{path}\{name}.ps1"
+        println(f"Running: {script}")
+        val result = Process.exec("powershell.exe", ["-ExecutionPolicy", "Bypass", "-File", script])
+        val code = ProcessResult.exitCode(result)
+        println(ProcessResult.stdout(result))
         if code == 0 then {
             println("Script completed successfully.")
         } else {

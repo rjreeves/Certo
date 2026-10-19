@@ -1,3 +1,5 @@
+// A generic function's return type must be pinned by an annotation at the
+// call site (error E0601 otherwise) - see docs/ERROR-REFERENCE.md.
 module GenericTest
 
 import Stdlib.Core
@@ -7,11 +9,11 @@ fn identity<T>(x: T): T = x
 fn first<T>(xs: List<T>): T? = List.first(xs)
 
 fn main(): Unit [io] = {
-    val n = identity(42)
-    val s = identity("hello")
+    val n: Int = identity(42)
+    val s: Text = identity("hello")
     println(intToText(n))
     println(s)
     val nums = [1, 2, 3]
-    val f = first(nums)
+    val f: Int? = first(nums)
     println(intToText(f ?? 0))
 }
