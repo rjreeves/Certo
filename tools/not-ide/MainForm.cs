@@ -17,6 +17,7 @@ sealed class MainForm : Form
     CancellationTokenSource? _cts;
     bool _busy;
     readonly System.Diagnostics.Stopwatch _clock = new();
+    readonly RunHistory _history = RunHistory.Load();
     int _errors, _warnings;
     FileSystemWatcher? _watcher;
     SplitContainer _mainSplit = null!, _rightSplit = null!;
@@ -182,6 +183,10 @@ sealed class MainForm : Form
         file.DropDownItems.Add(new ToolStripSeparator());
         file.DropDownItems.Add(new ToolStripMenuItem("E&xit", null, (_, _) => Close()));
         ms.Items.Add(file);
+
+        var view = new ToolStripMenuItem("&View");
+        view.DropDownItems.Add(new ToolStripMenuItem("Run &history…", null, (_, _) => ShowHistory(), Keys.Control | Keys.H));
+        ms.Items.Add(view);
         return ms;
     }
 
@@ -820,6 +825,65 @@ sealed class MainForm : Form
             cancelled || failed > 0 ? Color.IndianRed : warned > 0 ? Color.FromArgb(230, 190, 90) : Color.FromArgb(106, 190, 106));
         SetBusy(false, $"{title}: {summary}");
         _cts.Dispose(); _cts = null;
+
+        _history.Add(new RunRecord(
+            DateTime.Now, _info?.Name ?? Path.GetFileName(_root.TrimEnd('\\', '/')), title,
+            AllScope ? "All files" : _target is null ? "—" : Path.GetFileName(_target),
+            cancelled ? RunResult.Stopped : failed > 0 ? RunResult.Failed : warned > 0 ? RunResult.Warnings : RunResult.Succeeded,
+            _errors, _warnings, _clock.Elapsed.TotalSeconds));
+    }
+
+    // ── run history window ───────────────────────────────────────────────
+    void ShowHistory()
+    {
+        using var dlg = new Form
+        {
+            Text = "Run history — not-ide", StartPosition = FormStartPosition.CenterParent, Font = Font,
+            Size = new Size(1040, 560), MinimumSize = new Size(760, 320),
+        };
+        var list = new ListView { Dock = DockStyle.Fill, View = View.Details, FullRowSelect = true, HideSelection = false, GridLines = false };
+        list.Columns.Add("When", 210); list.Columns.Add("Project", 120); list.Columns.Add("Command", 120);
+        list.Columns.Add("Target", 190); list.Columns.Add("Result", 110); list.Columns.Add("Errors", 70);
+        list.Columns.Add("Warnings", 90); list.Columns.Add("Time", 80);
+
+        void Fill()
+        {
+            list.Items.Clear();
+            foreach (var r in _history.Items)
+            {
+                var item = new ListViewItem(new[]
+                {
+                    r.When.ToString("ddd d MMM  HH:mm:ss"), r.Project,
+                    r.Command.Length > 0 ? char.ToUpper(r.Command[0]) + r.Command[1..] : r.Command, r.Target, r.Result.ToString(),
+                    r.Errors.ToString(), r.Warnings.ToString(), FormatElapsed(TimeSpan.FromSeconds(r.Seconds)),
+                });
+                item.ForeColor = r.Result switch
+                {
+                    RunResult.Succeeded => Color.SeaGreen, RunResult.Warnings => Color.DarkGoldenrod,
+                    RunResult.Failed => Color.Firebrick, _ => Color.DimGray,
+                };
+                list.Items.Add(item);
+            }
+        }
+        Fill();
+
+        var bar = new FlowLayoutPanel { Dock = DockStyle.Bottom, FlowDirection = FlowDirection.RightToLeft, AutoSize = true, Padding = new Padding(8) };
+        var close = new Button { Text = "Close", AutoSize = true, DialogResult = DialogResult.OK };
+        var clear = new Button { Text = "Clear history", AutoSize = true };
+        clear.Click += (_, _) =>
+        {
+            if (_history.Items.Count == 0) return;
+            if (MessageBox.Show(dlg, $"Delete all {_history.Items.Count} recorded runs?", "Clear history",
+                    MessageBoxButtons.YesNo, MessageBoxIcon.Question) == DialogResult.Yes)
+            { _history.Clear(); Fill(); }
+        };
+        var count = new Label { AutoSize = true, Padding = new Padding(0, 6, 12, 0), ForeColor = SystemColors.GrayText, Text = $"Keeps the last {RunHistory.Max} runs" };
+        bar.Controls.AddRange(new Control[] { close, clear, count });
+        dlg.Controls.Add(list);
+        dlg.Controls.Add(bar);
+        dlg.AcceptButton = close;
+        dlg.CancelButton = close;
+        dlg.ShowDialog(this);
     }
 
     static string Quote(string a) => a.Contains(' ') ? $"\"{a}\"" : a;
