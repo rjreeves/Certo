@@ -391,8 +391,18 @@ fn fmt_test_fixture_block(
 // view / form  (stub — UI nodes)
 // ------------------------------------------------------------------ //
 
+/// Prints every part the view parser reads: `live val`s, `pk`, `filter` and
+/// `layout`. (`ViewDecl.filter_by` is written `filter =` in source.)
 fn fmt_view(v: &ViewDecl, indent: usize) -> String {
-    format!("view {} {{\n{}    // ...\n{}}}", v.name.node, ind(indent), ind(indent))
+    let body_ind = format!("{}    ", ind(indent));
+    let mut lines = Vec::new();
+    for lv in &v.live {
+        lines.push(format!("{}live {}", body_ind, fmt_val(lv, indent + 1)));
+    }
+    if let Some(pk) = &v.pk { lines.push(format!("{}pk = {}", body_ind, pk)); }
+    if let Some(f) = &v.filter_by { lines.push(format!("{}filter = {}", body_ind, f)); }
+    lines.push(format!("{}layout = {}", body_ind, fmt_expr(&v.layout.node, indent + 1)));
+    format!("view {} {{\n{}\n{}}}", v.name.node, lines.join("\n"), ind(indent))
 }
 
 fn fmt_form(f: &FormDecl, indent: usize) -> String {

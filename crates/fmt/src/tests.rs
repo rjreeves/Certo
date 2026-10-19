@@ -803,7 +803,6 @@ fn every_example_program_formats_to_the_same_program() {
         if path.extension().and_then(|e| e.to_str()) != Some("cto") { continue; }
         let Ok(src) = std::fs::read_to_string(&path) else { continue };
         let Ok(module) = certo_parser::parse(&src) else { continue };
-        if module.decls.iter().any(|d| matches!(d.node, certo_ast::decl::Decl::View(_))) { continue; }
         let once = format_source(&src).expect("a file that parsed must format");
         let (before, after) = (shape(&src), shape(&once));
         assert!(
@@ -824,4 +823,13 @@ fn loop_and_block_bodies_do_not_gain_a_layer_of_braces_on_every_format() {
     let out = assert_preserved(src);
     assert_eq!(out.matches('{').count(), src.matches('{').count(), "no extra braces expected:\n{}", out);
     assert_not_contains(&out, "{\n    {");
+}
+
+#[test]
+fn a_view_keeps_its_live_values_keys_and_layout() {
+    let src = "module T\n\nview Orders {\n    live val count = 1\n    pk = id\n    filter = customerId\n    layout = (stack)(a, b)\n}\n";
+    let out = assert_preserved(src);
+    for part in ["live val count", "pk = id", "filter = customerId", "layout = "] {
+        assert!(out.contains(part), "missing `{}` in:\n{}", part, out);
+    }
 }
