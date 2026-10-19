@@ -1865,6 +1865,10 @@ fn check_decl(decl: &Decl, ctx: &mut Ctx<'_>) {
         }
 
         Decl::Var(v) => {
+            ctx.errors.push(TypeError {
+                kind: TypeErrorKind::ModuleLevelVar { name: v.name.node.clone() },
+                span: v.span,
+            });
             let inferred = infer(&v.value, ctx);
             let inferred = if let Some(ann) = &v.ty {
                 let declared = type_expr_to_ty(&ann.node, ctx);

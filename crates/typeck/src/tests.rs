@@ -3487,3 +3487,22 @@ fn or_pattern_alternatives_binding_one_name_at_different_types_are_an_e0200_mism
     let kind = first_error_kind("module A\ntype P = | A(Int) | B(Text)\nfn f(s: P): Text = match s { A(x) | B(x) => \"t\" }");
     assert!(matches!(kind, TypeErrorKind::Mismatch { .. }), "expected E0200, got {kind:?}");
 }
+
+// ------------------------------------------------------------------ //
+// E0224 — a module-level `var` is rejected (BACKLOG item 433). Nothing
+// downstream generates a mutable global, so it used to fail in the C compiler.
+// ------------------------------------------------------------------ //
+
+#[test]
+fn a_module_level_var_is_rejected_with_its_name() {
+    let kind = first_error_kind("module A\nvar counter = 0\nfn f(): Int = counter");
+    match kind {
+        TypeErrorKind::ModuleLevelVar { name } => assert_eq!(name, "counter"),
+        other => panic!("expected E0224, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_module_level_val_and_a_local_var_are_still_fine() {
+    check("module A\nval limit = 10\nfn f(): Int = {\n var n = 0\n n = n + limit\n n\n}").unwrap();
+}
