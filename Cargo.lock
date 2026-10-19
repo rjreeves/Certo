@@ -386,6 +386,7 @@ dependencies = [
  "certo-mir",
  "certo-parser",
  "certo-typeck",
+ "tempfile",
 ]
 
 [[package]]

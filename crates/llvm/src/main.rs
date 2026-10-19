@@ -11,6 +11,16 @@
 //!   --annotate                  Emit comment annotations in the IR
 //!   --no-entry                  Don't emit a program entry point (`main`), e.g. when
 //!                               linking into a host that has its own
+//!   --exe <file>                Also build a native executable: compiles the IR
+//!                               together with the bundled runtime shim using
+//!                               clang. Without -o, no .ll file is written.
+//!   --allow-unresolved          Emit IR even for constructs the backend can't
+//!                               compile (unknown runtime calls become external
+//!                               declarations); for linking your own runtime
+//!
+//! Supported runtime calls: print, println, eprint, eprintln, intToText,
+//! floatToText, boolToText, Text.eq, Text.len, plus `++` on Text and `**` on
+//! Int. Anything else is reported as an error.
 //!
 //! Exit codes:
 //!   0  success
@@ -31,6 +41,8 @@ fn main() {
     let mut data_layout: Option<String>  = None;
     let mut annotate = false;
     let mut no_entry = false;
+    let mut allow_unresolved = false;
+    let mut exe: Option<String> = None;
 
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -57,6 +69,13 @@ fn main() {
             }
             "--annotate" => annotate = true,
             "--no-entry" => no_entry = true,
+            "--allow-unresolved" => allow_unresolved = true,
+            "--exe" => {
+                exe = Some(args.next().unwrap_or_else(|| {
+                    eprintln!("error: --exe requires a filename");
+                    process::exit(2);
+                }));
+            }
             other if other.starts_with('-') => {
                 eprintln!("error: unknown option '{}'", other);
                 process::exit(2);
@@ -90,6 +109,7 @@ fn main() {
     });
 
     // Determine output path
+    let explicit_output = output.is_some();
     let out_path = output.unwrap_or_else(|| {
         let stem = input.file_stem()
             .and_then(|s| s.to_str())
@@ -103,12 +123,24 @@ fn main() {
         data_layout,
         annotate,
         no_entry,
+        allow_unresolved,
     };
 
     let ir = emit_module(&module, &opts).unwrap_or_else(|e| {
         eprintln!("error: {}", e);
         process::exit(1);
     });
+
+    // Build a native executable from the IR plus the runtime shim.
+    if let Some(exe) = &exe {
+        if let Err(e) = certo_llvm::link_executable(&ir, std::path::Path::new(exe)) {
+            eprintln!("error: {}", e);
+            process::exit(1);
+        }
+        eprintln!("wrote {}", exe);
+        // Only write the .ll as well when it was asked for with -o.
+        if !explicit_output { return; }
+    }
 
     // Write
     if out_path == "-" {

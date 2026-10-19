@@ -106,6 +106,9 @@ fn call_result_llty(sigs: &HashMap<String, FnSig>, func: &Operand) -> String {
         if let Some(sig) = sigs.get(&llvm_fn_name(n)) {
             return if sig.ret == "void" { "i8".into() } else { sig.ret.clone() };
         }
+        if let Some(rt) = crate::rt::lookup(n) {
+            return if rt.ret == "void" { "i8".into() } else { rt.ret.into() };
+        }
     }
     "ptr".into()
 }
@@ -197,6 +200,12 @@ impl<'ctx> FnEmitter<'ctx> {
 
     fn w(&mut self, s: &str) { self.out.push_str(s); self.out.push('\n'); }
 
+    /// Record a construct this backend can't compile (see `ModuleCtx::errors`).
+    fn unsupported(&mut self, what: &str) {
+        let name = self.ast_fn.name.node.clone();
+        self.ctx.unsupported(&name, what);
+    }
+
     fn local_ptr(id: MirLocal) -> String { format!("%_l{}.ptr", id) }
 
     fn llty_of(&self, id: MirLocal) -> &str {
@@ -224,7 +233,7 @@ impl<'ctx> FnEmitter<'ctx> {
     fn emit_const(&mut self, c: &MirConst) -> (String, String) {
         match c {
             MirConst::Int(n)   => ("i64".into(),    n.to_string()),
-            MirConst::Float(f) => ("double".into(), format!("{:e}", f)),
+            MirConst::Float(f) => ("double".into(), crate::ty::llvm_double(*f)),
             MirConst::Bool(b)  => ("i1".into(),     if *b {"1".into()} else {"0".into()}),
             MirConst::Unit     => ("i8".into(),      "0".into()),
 
@@ -287,13 +296,16 @@ impl<'ctx> FnEmitter<'ctx> {
             }
 
             Rvalue::Field { .. } => {
-                // LLVM backend: field access on structs not yet supported — emit null.
+                // Field access on structs isn't supported: an error, or (with
+                // `allow_unresolved`) a null placeholder.
+                self.unsupported("field access on a record is not supported by the LLVM backend");
                 let v = self.fresh();
                 self.w(&format!("  %v{v} = inttoptr i64 0 to ptr"));
                 self.w(&format!("  store ptr %v{v}, ptr {dest_ptr}"));
             }
 
             Rvalue::Aggregate(_, _) => {
+                self.unsupported("constructing a record, list, tuple or enum value is not supported by the LLVM backend");
                 let v = self.fresh();
                 self.w(&format!("  %v{v} = inttoptr i64 0 to ptr"));
                 self.w(&format!("  store ptr %v{v}, ptr {dest_ptr}"));
@@ -306,6 +318,7 @@ impl<'ctx> FnEmitter<'ctx> {
             | Rvalue::BoxSome { .. } | Rvalue::UnboxSome { .. }
             | Rvalue::Box { .. } | Rvalue::Unbox { .. }
             | Rvalue::UnwrapOptStructBox { .. } => {
+                self.unsupported("spawn/await, options and boxed values are not supported by the LLVM backend");
                 let v = self.fresh();
                 self.w(&format!("  %v{v} = inttoptr i64 0 to ptr"));
                 self.w(&format!("  store ptr %v{v}, ptr {dest_ptr}"));
@@ -342,10 +355,19 @@ impl<'ctx> FnEmitter<'ctx> {
             ),
             BinOp::Rem  => (format!("  {name} = srem i64 {lv}, {rv}"), "i64"),
             BinOp::Pow  => {
+                if is_float {
+                    self.unsupported("`**` on Float is not supported by the LLVM backend");
+                }
                 self.ctx.declare_extern(
-                    "certo_pow".into(), "i64".into(),
+                    crate::rt::INT_POW.into(), "i64".into(),
                     vec!["i64".into(), "i64".into()]);
-                (format!("  {name} = call i64 @certo_pow(i64 {lv}, i64 {rv})"), "i64")
+                (format!("  {name} = call i64 @{}(i64 {lv}, i64 {rv})", crate::rt::INT_POW), "i64")
+            }
+            BinOp::Eq | BinOp::NotEq if lty == "ptr" => {
+                // Comparing two `ptr` values compares addresses, which is wrong
+                // for Text (and meaningless for the rest).
+                self.unsupported("`==`/`!=` on Text or other non-numeric values is not supported by the LLVM backend (use Text.eq for Text)");
+                (format!("  {name} = icmp {} ptr {lv}, {rv}", if matches!(op, BinOp::Eq) { "eq" } else { "ne" }), "i1")
             }
             BinOp::Eq    => (
                 if is_float { format!("  {name} = fcmp oeq double {lv}, {rv}") }
@@ -380,16 +402,19 @@ impl<'ctx> FnEmitter<'ctx> {
             BinOp::And         => (format!("  {name} = and i1 {lv}, {rv}"), "i1"),
             BinOp::Or          => (format!("  {name} = or i1 {lv}, {rv}"),  "i1"),
             BinOp::NullCoalesce => {
+                self.unsupported("`??` is not supported by the LLVM backend");
                 self.ctx.declare_extern(
                     "certo_coalesce".into(), "ptr".into(),
                     vec!["ptr".into(), "ptr".into()]);
                 (format!("  {name} = call ptr @certo_coalesce(ptr {lv}, ptr {rv})"), "ptr")
             }
             BinOp::Concat => {
+                // Only Text concatenation is implemented; the operands' Certo
+                // types aren't known here, so a List `++` would be miscompiled.
                 self.ctx.declare_extern(
-                    "certo_text_concat".into(), "ptr".into(),
+                    crate::rt::TEXT_CONCAT.into(), "ptr".into(),
                     vec!["ptr".into(), "ptr".into()]);
-                (format!("  {name} = call ptr @certo_text_concat(ptr {lv}, ptr {rv})"), "ptr")
+                (format!("  {name} = call ptr @{}(ptr {lv}, ptr {rv})", crate::rt::TEXT_CONCAT), "ptr")
             }
         };
         self.w(&line);
@@ -417,6 +442,18 @@ impl<'ctx> FnEmitter<'ctx> {
             _ => None,
         };
 
+        // A call to a runtime function the shim implements gets its real
+        // signature rather than one guessed from the call site.
+        if let (Operand::Global(n), None) = (func, &local_sig) {
+            if let Some(rt) = crate::rt::lookup(n) {
+                self.emit_rt_call(rt, &arg_pairs, dest_ptr);
+                return;
+            }
+            self.unsupported(&format!(
+                "call to `{n}` is not supported by the LLVM backend (it can call functions defined in the module and these runtime functions: {})",
+                crate::rt::supported_names()));
+        }
+
         let callee = match func {
             Operand::Global(n) => {
                 let ln = llvm_fn_name(n);
@@ -440,6 +477,35 @@ impl<'ctx> FnEmitter<'ctx> {
             let v = self.fresh();
             self.w(&format!("  %v{v} = call {dest_lty} {callee}({arg_str})"));
             self.w(&format!("  store {dest_lty} %v{v}, ptr {dest_ptr}"));
+        }
+    }
+
+    /// Emit a call to a runtime function the shim implements, checking that
+    /// the arguments have the types the shim expects.
+    fn emit_rt_call(&mut self, rt: &'static crate::rt::RtFn, args: &[(String, String)], dest_ptr: &str) {
+        let ok = args.len() == rt.params.len()
+            && args.iter().zip(rt.params).all(|((t, _), want)| t.as_str() == *want);
+        if !ok {
+            let got: Vec<&str> = args.iter().map(|(t, _)| t.as_str()).collect();
+            self.unsupported(&format!(
+                "call to `{}` has arguments ({}) where ({}) are needed - the backend could not work out their types",
+                rt.certo, got.join(", "), rt.params.join(", ")));
+        }
+        self.ctx.declare_extern(
+            rt.symbol.into(),
+            crate::rt::abi_ret(rt.ret),
+            rt.params.iter().map(|p| crate::rt::abi_param(p)).collect(),
+        );
+        let arg_str = args.iter()
+            .map(|(t, v)| format!("{} {v}", crate::rt::abi_param(t)))
+            .collect::<Vec<_>>().join(", ");
+        if rt.ret == "void" {
+            self.w(&format!("  call void @{}({arg_str})", rt.symbol));
+            self.w(&format!("  store i8 0, ptr {dest_ptr}"));
+        } else {
+            let v = self.fresh();
+            self.w(&format!("  %v{v} = call {} @{}({arg_str})", crate::rt::abi_ret(rt.ret), rt.symbol));
+            self.w(&format!("  store {} %v{v}, ptr {dest_ptr}", rt.ret));
         }
     }
 

@@ -31,6 +31,17 @@ pub struct ModuleCtx {
     /// Key: LLVM global name (e.g. `certo_pow`).
     /// Value: (return_type, arg_types).
     pub externs: HashMap<String, (String, Vec<String>)>,
+
+    /// Constructs the backend cannot compile correctly (an unsupported runtime
+    /// call, a record, …). Emission carries on so every problem is reported at
+    /// once, then `emit_module` fails with the whole list.
+    pub errors: Vec<String>,
+
+    /// Restore the old behaviour for unsupported constructs: declare an
+    /// unknown runtime call as an external and emit a null placeholder for
+    /// values the backend can't build, for output that is linked against a
+    /// runtime the caller supplies.
+    pub allow_unresolved: bool,
 }
 
 impl ModuleCtx {
@@ -41,6 +52,15 @@ impl ModuleCtx {
     /// Record a function this module defines (see `fn_sigs`).
     pub fn register_fn(&mut self, name: String, ret: String, params: Vec<String>) {
         self.fn_sigs.insert(name, FnSig { ret, params });
+    }
+
+    /// Record a construct the backend can't compile (see `errors`). Does
+    /// nothing under `allow_unresolved`; returns whether it was recorded.
+    pub fn unsupported(&mut self, in_fn: &str, what: &str) -> bool {
+        if self.allow_unresolved { return false; }
+        let msg = format!("in `{in_fn}`: {what}");
+        if !self.errors.contains(&msg) { self.errors.push(msg); }
+        true
     }
 
     /// Intern a string literal and return its global index.

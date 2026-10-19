@@ -55,6 +55,12 @@ pub struct LlvmOptions {
     /// Don't emit the program entry point (`define i32 @main()`). Needed when
     /// linking the output into a host program that supplies its own `main`.
     pub no_entry: bool,
+
+    /// Keep going past constructs the backend can't compile: declare an
+    /// unknown runtime call as an external and emit a null placeholder for a
+    /// value it can't build, instead of failing. For IR that is linked against
+    /// a runtime the caller supplies; the default is to report them.
+    pub allow_unresolved: bool,
 }
 
 /// Wasm targets use their own entry-point convention (WASI looks for a
@@ -79,6 +85,7 @@ pub fn emit_module(module: &Module, opts: &LlvmOptions) -> Result<String, String
     })?;
 
     let mut ctx = ModuleCtx::new();
+    ctx.allow_unresolved = opts.allow_unresolved;
     let mut fn_bodies: Vec<String> = Vec::new();
 
     // Build HirFn lookup by name for MIR lowering.
@@ -120,7 +127,7 @@ pub fn emit_module(module: &Module, opts: &LlvmOptions) -> Result<String, String
             use certo_hir::HirExprKind;
             let (llty, val): (String, String) = match &c.value.kind {
                 HirExprKind::Int(n)   => ("i64".into(), n.to_string()),
-                HirExprKind::Float(f) => ("double".into(), format!("{:e}", f)),
+                HirExprKind::Float(f) => ("double".into(), crate::ty::llvm_double(*f)),
                 HirExprKind::Bool(b)  => ("i1".into(), if *b { "1".into() } else { "0".into() }),
                 HirExprKind::Str(s)   => {
                     let idx = ctx.intern_str(s);
@@ -130,11 +137,23 @@ pub fn emit_module(module: &Module, opts: &LlvmOptions) -> Result<String, String
                     );
                     ("ptr".into(), gep)
                 }
-                _ => ("ptr".into(), "null".into()),
+                _ => {
+                    ctx.unsupported(&c.name, "a module-level value that is not a plain number, Bool or Text is not supported by the LLVM backend");
+                    ("ptr".into(), "null".into())
+                }
             };
             let cname = format!("certo_{}", c.name.replace('.', "_"));
             const_lines.push(format!("@{cname} = global {llty} {val}"));
         }
+    }
+
+    // Everything the backend couldn't compile, reported together.
+    if !ctx.errors.is_empty() {
+        return Err(format!(
+            "{} construct(s) the LLVM backend cannot compile:\n  {}\n(use --allow-unresolved to emit IR anyway, for linking against your own runtime)",
+            ctx.errors.len(),
+            ctx.errors.join("\n  "),
+        ));
     }
 
     // ── Assemble output ───────────────────────────────────────────────
@@ -287,7 +306,7 @@ mod tests {
         let src = "module Test\n\nfn square(x: Int): Int = x ** x\n";
         let m   = module_from(src);
         let ir  = emit_module(&m, &LlvmOptions::default()).unwrap();
-        assert!(ir.contains("declare i64 @certo_pow(i64, i64)"), "missing pow declare");
+        assert!(ir.contains("declare i64 @certo_rt_pow(i64, i64)"), "missing pow declare");
     }
 
     // ------------------------------------------------------------------ //
@@ -340,13 +359,15 @@ fn run(): Unit = noop(1)
     }
 
     #[test]
-    fn stdlib_calls_are_still_declared_extern() {
-        // Not defined in this module, so it keeps the old behaviour.
+    fn supported_runtime_calls_are_declared_with_their_real_signature() {
+        // Not defined in this module, so it is declared, but as the shim's
+        // `certo_rt_*` symbol with the real parameter and return types.
         let ir = ir_of("module T
 import Stdlib.Core
 fn run(): Text = intToText(5)
 ");
-        assert!(ir.contains("declare ptr @certo_intToText("), "{ir}");
+        assert!(ir.contains("declare ptr @certo_rt_int_to_text(i64)"), "{ir}");
+        assert!(ir.contains("call ptr @certo_rt_int_to_text(i64 5)"), "{ir}");
     }
 
     // ------------------------------------------------------------------ //
@@ -422,5 +443,118 @@ fn main(): Unit = ()
             assert!(!ir.contains("define i32 @main"), "{triple}
 {ir}");
         }
+    }
+
+    // ------------------------------------------------------------------ //
+    // Runtime support (BACKLOG item 429): the calls the shim implements get
+    // their real signatures, and anything else is reported instead of being
+    // left as an unresolved external.
+    // ------------------------------------------------------------------ //
+
+    fn emit_err(src: &str) -> String {
+        emit_module(&module_from(src), &LlvmOptions::default()).expect_err("expected an unsupported-construct error")
+    }
+
+    #[test]
+    fn println_is_a_void_call_to_the_shim() {
+        let ir = ir_of("module T
+import Stdlib.Core
+fn main(): Unit [io] = println(\"hi\")
+");
+        assert!(ir.contains("declare void @certo_rt_println(ptr)"), "{ir}");
+        assert!(ir.contains("call void @certo_rt_println(ptr "), "{ir}");
+    }
+
+    #[test]
+    fn text_concat_and_pow_use_the_shim_symbols() {
+        let ir = ir_of("module T
+fn join(a: Text, b: Text): Text = a ++ b
+fn sq(x: Int): Int = x ** 2
+");
+        assert!(ir.contains("call ptr @certo_rt_text_concat(ptr "), "{ir}");
+        assert!(ir.contains("call i64 @certo_rt_pow(i64 "), "{ir}");
+        assert!(!ir.contains("@certo_text_concat") && !ir.contains("@certo_pow"), "{ir}");
+    }
+
+    #[test]
+    fn bool_arguments_and_results_are_zero_extended_for_c() {
+        // A C `bool` parameter assumes the caller zero-extended it; a bare
+        // `i1` does not promise that.
+        let ir = ir_of("module T
+import Stdlib.Core
+fn show(b: Bool): Text = boolToText(b)
+fn same(a: Text, b: Text): Bool = Text.eq(a, b)
+");
+        assert!(ir.contains("declare ptr @certo_rt_bool_to_text(i1 zeroext)"), "{ir}");
+        assert!(ir.contains("declare zeroext i1 @certo_rt_text_eq(ptr, ptr)"), "{ir}");
+        assert!(ir.contains("call ptr @certo_rt_bool_to_text(i1 zeroext "), "{ir}");
+        assert!(ir.contains("call zeroext i1 @certo_rt_text_eq(ptr "), "{ir}");
+    }
+
+    #[test]
+    fn float_constants_are_written_as_hex_bit_patterns() {
+        // `2e0` (Rust's `{:e}`) is rejected by LLVM as an integer constant.
+        let ir = ir_of("module T
+fn half(x: Float): Float = x / 2.0
+");
+        assert!(ir.contains("fdiv double %v0, 0x4000000000000000"), "{ir}");
+    }
+
+    #[test]
+    fn an_unsupported_runtime_call_is_an_error_naming_the_call() {
+        let err = emit_err("module T
+import Stdlib.Core
+fn run(): Unit [io] = println(getEnv(\"HOME\") ?? \"none\")
+");
+        assert!(err.contains("call to `getEnv` is not supported"), "{err}");
+        assert!(err.contains("in `run`"), "{err}");
+        assert!(err.contains("println"), "the message lists what is supported: {err}");
+    }
+
+    #[test]
+    fn coalesce_records_and_text_equality_are_reported() {
+        let err = emit_err("module T
+type P = { x: Int }
+fn a(): Int = 1 ?? 2
+fn b(): Int = { val p = P { x: 1 }
+p.x }
+fn c(): Bool = \"a\" == \"b\"
+");
+        assert!(err.contains("`??`"), "{err}");
+        assert!(err.contains("record"), "{err}");
+        assert!(err.contains("Text.eq"), "{err}");
+    }
+
+    #[test]
+    fn a_supported_call_with_arguments_of_unknown_type_is_an_error() {
+        // `p.x` can't be typed here, so `intToText(p.x)` would be a ptr
+        // passed where the shim expects an i64.
+        let err = emit_err("module T
+import Stdlib.Core
+type P = { x: Int }
+fn f(p: P): Text = intToText(p.x)
+");
+        assert!(err.contains("call to `intToText` has arguments (ptr) where (i64) are needed"), "{err}");
+    }
+
+    #[test]
+    fn allow_unresolved_keeps_the_old_declare_everything_behaviour() {
+        let opts = LlvmOptions { allow_unresolved: true, ..Default::default() };
+        let ir = emit_module(&module_from("module T
+import Stdlib.Core
+fn run(): Text = getEnv(\"HOME\") ?? \"none\"
+"), &opts).unwrap();
+        assert!(ir.contains("declare ptr @certo_getEnv("), "{ir}");
+        assert!(ir.contains("@certo_coalesce"), "{ir}");
+    }
+
+    #[test]
+    fn calls_between_user_functions_still_need_no_runtime() {
+        // Nothing here is a runtime call, so nothing is declared or reported.
+        let ir = ir_of("module T
+fn add(a: Int, b: Int): Int = a + b
+fn run(): Int = add(1, 2)
+");
+        assert!(!ir.contains("declare"), "{ir}");
     }
 }

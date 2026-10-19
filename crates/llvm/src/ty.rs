@@ -128,6 +128,12 @@ pub fn llvm_fn_name(name: &str) -> String {
     format!("certo_{}", name.replace('.', "_").replace('-', "_"))
 }
 
+/// A `double` constant as LLVM IR requires: its exact bit pattern in hex.
+/// (`format!("{:e}")` gives `2e0`, which LLVM rejects as an integer.)
+pub fn llvm_double(f: f64) -> String {
+    format!("0x{:016X}", f.to_bits())
+}
+
 /// Escape a UTF-8 string for use inside an LLVM `c"…"` constant.
 ///
 /// Non-printable bytes and special characters (`"`, `\`) are encoded as
