@@ -2,7 +2,7 @@ module Min
 extern "C" {
     fn rustReverse(s: Text): Text
 }
-fn main(): Unit = {
+fn main(): Unit [io, unsafe] = {
     val r = unsafe { rustReverse("abcdef") }
     println(r)
 }

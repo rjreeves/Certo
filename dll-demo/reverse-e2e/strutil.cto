@@ -9,7 +9,7 @@ extern "C" {
 type Reversed = { reversed: Text, length: Int }
 
 /// Reverse `s` by calling into the Rust DLL, and report the length.
-pub fn reverseString(s: Text): Reversed = {
+pub fn reverseString(s: Text): Reversed [unsafe] = {
     val r = unsafe { rustReverse(s) }
     Reversed { reversed: r, length: Text.len(r) }
 }

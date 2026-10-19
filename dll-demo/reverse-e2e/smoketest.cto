@@ -2,7 +2,7 @@ module SmokeTest
 
 import StrUtil
 
-fn main(): Unit = {
+fn main(): Unit [io, unsafe] = {
     val out = reverseString("abcdef")
     println("reversed: " ++ out.reversed)
     println("length:   " ++ intToText(out.length))

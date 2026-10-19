@@ -1,13 +1,15 @@
 // Rust shared library: reverses a C string. Called from Certo via `extern "C"`.
-// Certo mangles `extern fn rustReverse` -> the C symbol `certo_rust_reverse`,
-// so the export name must match exactly. Certo `Text` is `const char*` (UTF-8).
+// An `extern "C"` declaration names a real C symbol and Certo uses it verbatim,
+// so `fn rustReverse` in the .cto file is the symbol `rustReverse` here.
+// Certo `Text` is `const char*` (UTF-8).
 
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 use std::ptr;
 
 #[no_mangle]
-pub extern "C" fn certo_rust_reverse(s: *const c_char) -> *const c_char {
+#[allow(non_snake_case)]
+pub extern "C" fn rustReverse(s: *const c_char) -> *const c_char {
     if s.is_null() {
         return ptr::null();
     }

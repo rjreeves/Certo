@@ -4,7 +4,7 @@ extern "C" {
     fn rustAdd(a: Int, b: Int): Int
 }
 
-fn main(): Unit = {
+fn main(): Unit [io, unsafe] = {
     // FFI calls are unsafe — the compiler cannot verify the foreign function.
     val result = unsafe { rustAdd(2, 3) }
     println(f"rustAdd(2, 3) = {result}")
