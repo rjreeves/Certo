@@ -16,6 +16,17 @@ sealed class Settings
     public bool Verbose { get; set; }
     public bool KeepGoing { get; set; }
     public bool AllFiles { get; set; }
+    public List<string> RecentProjects { get; set; } = new();
+
+    const int MaxRecent = 10;
+
+    /// <summary>Moves (or inserts) <paramref name="path"/> to the top of the recent list.</summary>
+    public void AddRecent(string path)
+    {
+        RecentProjects.RemoveAll(p => string.Equals(p, path, StringComparison.OrdinalIgnoreCase));
+        RecentProjects.Insert(0, path);
+        if (RecentProjects.Count > MaxRecent) RecentProjects.RemoveRange(MaxRecent, RecentProjects.Count - MaxRecent);
+    }
 
     static string FilePath => Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "NotIde", "settings.json");

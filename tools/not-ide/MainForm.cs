@@ -169,6 +169,10 @@ sealed class MainForm : Form
         var ms = new MenuStrip();
         var file = new ToolStripMenuItem("&File");
         file.DropDownItems.Add(new ToolStripMenuItem("&Open project…", null, (_, _) => PickProject(), Keys.Control | Keys.O));
+        var recent = new ToolStripMenuItem("Open &recent");
+        file.DropDownOpening += (_, _) => FillRecentMenu(recent);
+        file.DropDownItems.Add(recent);
+        file.DropDownItems.Add(new ToolStripSeparator());
         file.DropDownItems.Add(new ToolStripMenuItem("Open folder in &VS Code", null, (_, _) => OpenFolderInCode()));
         file.DropDownItems.Add(new ToolStripMenuItem("Open &certo.toml", null, (_, _) =>
         {
@@ -179,6 +183,38 @@ sealed class MainForm : Form
         file.DropDownItems.Add(new ToolStripMenuItem("E&xit", null, (_, _) => Close()));
         ms.Items.Add(file);
         return ms;
+    }
+
+    /// <summary>Refills File ▸ Open recent from the saved list (rebuilt on each open, so it's always current).</summary>
+    void FillRecentMenu(ToolStripMenuItem menu)
+    {
+        menu.DropDownItems.Clear();
+        var shown = _s.RecentProjects
+            .Where(p => Directory.Exists(p) && !string.Equals(p, _root, StringComparison.OrdinalIgnoreCase))
+            .ToList();
+        if (shown.Count == 0)
+        {
+            menu.DropDownItems.Add(new ToolStripMenuItem("(no recent projects)") { Enabled = false });
+            return;
+        }
+        for (int i = 0; i < shown.Count; i++)
+        {
+            string p = shown[i];
+            string name = (Path.GetFileName(p.TrimEnd('\\', '/')) is { Length: > 0 } n ? n : p).Replace("&", "&&");
+            string text = (i < 9 ? $"&{i + 1}  " : "     ") + name;
+            var item = new ToolStripMenuItem(text) { ToolTipText = p };
+            item.Click += (_, _) =>
+            {
+                if (Directory.Exists(p)) OpenProject(p); else Warn($"That folder no longer exists:\n{p}");
+            };
+            menu.DropDownItems.Add(item);
+        }
+        menu.DropDownItems.Add(new ToolStripSeparator());
+        menu.DropDownItems.Add(new ToolStripMenuItem("Clear list", null, (_, _) =>
+        {
+            _s.RecentProjects.Clear();
+            if (_root is not null) _s.AddRecent(_root);
+        }));
     }
 
     ToolStrip BuildProjectStrip()
@@ -312,6 +348,7 @@ sealed class MainForm : Form
         _root = Path.GetFullPath(path);
         _info = ProjectInfo.Load(_root);
         _s.ProjectRoot = _root;
+        _s.AddRecent(_root);
         Text = $"{_info.Name} — not-ide";
         _target = null;
         if (!string.IsNullOrEmpty(_s.Target) && File.Exists(_s.Target) && _s.Target.StartsWith(_root, StringComparison.OrdinalIgnoreCase))
