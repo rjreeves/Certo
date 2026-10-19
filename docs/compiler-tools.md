@@ -154,8 +154,9 @@ struct; this one uses a plain `ptr`). `--exe` instead compiles the IR together w
 `intToText`, `floatToText`, `boolToText`, `Text.eq`, `Text.len`, `++` on Text and `**` on Int. Calls
 between your own functions, arithmetic, `if`, recursion, records (construction, field access,
 nested records) and sum types with `match` (payload-free and payload variants, in records and
-as arguments) work. Anything else — other stdlib calls, lists, tuples, generic sum types,
-`Option`/`Result`, `??`, `==` on Text or on enums — is reported as an error naming the construct, rather than
+as arguments) and `Option`, `Result` and `??` (`Some`/`None`/`Ok`/`Err`, `match` on them, any payload
+type) work. Anything else — other stdlib calls (including the `Option.*` / `Result.*` helpers), lists,
+tuples, generic sum types of your own, `==` on Text or on enums — is reported as an error naming the construct, rather than
 left as an unresolved external. `--allow-unresolved` restores the old behaviour for IR you link against
 your own runtime. `--exe` needs `clang` (on PATH, or in `C:\Program Files\LLVM\bin`).
 
