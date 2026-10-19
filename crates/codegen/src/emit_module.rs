@@ -36,13 +36,43 @@ pub fn emit_module(module: &Module, opts: &CodegenOptions) -> String {
         _ => None,
     }).collect());
 
-    // A user function named like a runtime helper (`identity`, `expect`, …)
-    // would emit a second, conflicting `certo_<name>`; give it its own prefix.
+    // A user function, global `val`/`var` or sum-type variant constant named
+    // like a runtime helper (`identity`, `expect`, …) would emit a second,
+    // conflicting `certo_<name>`; give it its own prefix. A function or global
+    // named like a variant (`val admin` next to `Admin`) collides with that
+    // variant's constant the same way (both mangle to `certo_admin`), so it
+    // is renamed too — BACKLOG item 358.
     let runtime = runtime_c_symbols();
-    set_user_renames(module.decls.iter().filter_map(|sdecl| match &sdecl.node {
-        Decl::Fn(f) if !f.is_extern && runtime.contains(&plain_c_fn_name(&f.name.node)) => Some(f.name.node.clone()),
-        _ => None,
-    }).collect());
+    let variant_plain: std::collections::HashSet<String> = module.decls.iter()
+        .filter_map(|d| if let Decl::Type(t) = &d.node { Some(t) } else { None })
+        .filter_map(|t| if let TypeBody::Sum(variants) = &t.body { Some(variants) } else { None })
+        .flat_map(|variants| variants.iter().map(|v| plain_c_fn_name(&v.name.node)))
+        .collect();
+    let collides = |name: &str| {
+        let plain = plain_c_fn_name(name);
+        runtime.contains(&plain) || variant_plain.contains(&plain)
+    };
+    let mut renames: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for sdecl in &module.decls {
+        match &sdecl.node {
+            Decl::Fn(f) if !f.is_extern && collides(&f.name.node) => { renames.insert(f.name.node.clone()); }
+            Decl::Val(v) => {
+                if let certo_ast::pattern::Pattern::Ident { name, .. } = &v.pattern.node {
+                    if collides(&name.node) { renames.insert(name.node.clone()); }
+                }
+            }
+            Decl::Var(v) if collides(&v.name.node) => { renames.insert(v.name.node.clone()); }
+            Decl::Type(t) => {
+                if let TypeBody::Sum(variants) = &t.body {
+                    for v in variants {
+                        if runtime.contains(&plain_c_fn_name(&v.name.node)) { renames.insert(v.name.node.clone()); }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    set_user_renames(renames);
 
     // All-nullary enums are represented as plain int enums (not structs). The
     // function emitters need to know which, so `match`'s `.tag` read on such a

@@ -3126,3 +3126,37 @@ fn call_to_boxed_generic_still_dereferences_the_cell() {
     let c = codegen("module A\nfn ident<T>(x: T): T = x\nfn f(n: Int): Int = {\n val x: Int = ident(n)\n x\n}");
     assert_contains(&c, "*(int64_t*)(");
 }
+
+// ------------------------------------------------------------------ //
+// Globals and variant constants collide with runtime helpers, and with each
+// other, the same way functions do (BACKLOG item 358).
+// ------------------------------------------------------------------ //
+
+#[test]
+fn global_val_named_like_a_runtime_helper_does_not_collide() {
+    let c = codegen("module A\nval identity = 5\nfn run(): Int = identity");
+    assert_contains(&c, "certo_user_identity");
+    assert_not_contains(&c, " certo_identity = ");
+}
+
+#[test]
+fn global_val_next_to_a_variant_of_the_same_name_does_not_collide() {
+    let c = codegen("module A\ntype Role = Admin | User\nval admin = 5\nfn run(): Int = admin");
+    // The value is renamed; the variant constant keeps its usual name.
+    assert_contains(&c, "certo_user_admin");
+    assert_contains(&c, "static const Role certo_admin");
+}
+
+#[test]
+fn variant_named_like_a_runtime_helper_does_not_collide() {
+    let c = codegen("module A\ntype Kind = Identity | Other\nfn run(): Kind = Identity");
+    assert_contains(&c, "static const Kind certo_user_variant_identity");
+    assert_not_contains(&c, "static const Kind certo_identity");
+}
+
+#[test]
+fn ordinary_global_val_names_keep_the_plain_certo_prefix() {
+    let c = codegen("module A\nval limit = 5\nfn run(): Int = limit");
+    assert_contains(&c, "certo_limit");
+    assert_not_contains(&c, "certo_user_limit");
+}

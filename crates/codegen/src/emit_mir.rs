@@ -1004,7 +1004,11 @@ pub fn c_fn_name(name: &str) -> String {
     let plain = plain_c_fn_name(name);
     // A user function that would shadow a runtime symbol gets its own prefix.
     if USER_RENAMES.with(|s| s.borrow().contains(name)) {
-        return format!("certo_user_{}", &plain["certo_".len()..]);
+        // A sum-type variant (capitalised) gets its own prefix so it can't
+        // land on the same name as a renamed function or global: `val identity`
+        // and variant `Identity` would both become `certo_user_identity`.
+        let kind = if name.starts_with(|c: char| c.is_ascii_uppercase()) { "user_variant" } else { "user" };
+        return format!("certo_{}_{}", kind, &plain["certo_".len()..]);
     }
     plain
 }
