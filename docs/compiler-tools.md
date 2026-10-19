@@ -183,6 +183,23 @@ certo-wasm --target browser --bindings examples\math.cto  # math.wasm + math.d.t
 certo-wasm --html examples\math.cto                 # + math.html demo page
 ```
 
+**Printing in the browser.** A module that uses the LLVM backend's runtime calls (`print`, `println`,
+`eprint`, `eprintln`, `intToText`, `floatToText`, `boolToText`, `Text.eq`, `Text.len`, `++` on Text)
+is built with a libc-free copy of the runtime (`crates/llvm/runtime/certo_llvm_rt_wasm.c`). Its
+output goes through two host imports, `env.certo_write` and `env.certo_float_to_text`, which the
+`--bindings` loader supplies. If the module has a `main`, the loader's result has `run()`:
+
+```js
+import { load } from './hello.js';
+const program = await load('./hello.wasm', { stdout: line => console.log(line) });
+program.run();
+```
+
+`stdout` and `stderr` default to `console.log` / `console.error`. A purely numeric module gets no
+runtime and no imports. The other limits of `certo-llvm` apply (no records, lists, options or other
+stdlib calls). The WASI target links the native runtime instead; that path is untested, because it
+needs a WASI sysroot.
+
 ---
 
 ## `certo-ui` — View/Form Compiler

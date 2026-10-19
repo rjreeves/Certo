@@ -96,7 +96,7 @@ complete, and are excluded from the v1.0 stability guarantee.
 | Crate | State | Gaps |
 |---|---|---|
 | `certo-llvm` | Experimental | Runs programs built from arithmetic, `if`, recursion, your own functions and a handful of runtime calls (`print`/`println`/`eprint`/`eprintln`, `intToText`/`floatToText`/`boolToText`, `Text.eq`/`Text.len`, `++` on Text); `--exe` builds one with clang. Records, lists, options, `??`, `==` on Text, `spawn`/`await` and every other stdlib call are reported as errors. The C backend's runtime is not linked. |
-| `certo-wasm` | Experimental | WebAssembly backend; incomplete. |
+| `certo-wasm` | Experimental | Goes through `certo-llvm`, so it has the same language limits. The browser target can print (output via host imports the generated JS loader supplies). The WASI target needs a WASI sysroot and is untested. |
 | `certo-xeq` | Experimental | Bytecode interpreter; incomplete. |
 
 The **C backend** (`certo-codegen`) is the supported, covered-by-v1.0 backend.
