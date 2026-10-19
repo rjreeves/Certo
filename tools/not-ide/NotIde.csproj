@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>NotIde</AssemblyName>
+    <RootNamespace>NotIde</RootNamespace>
+    <Version>0.1.0</Version>
+    <!-- Run on a newer installed .NET runtime if 8 isn't present -->
+    <RollForward>Major</RollForward>
+    <!-- Lets the project also be compile-checked on non-Windows machines -->
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
+  </PropertyGroup>
+
+</Project>
