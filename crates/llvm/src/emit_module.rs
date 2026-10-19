@@ -51,6 +51,17 @@ pub struct LlvmOptions {
 
     /// Emit `; comment` annotations describing each block's purpose.
     pub annotate: bool,
+
+    /// Don't emit the program entry point (`define i32 @main()`). Needed when
+    /// linking the output into a host program that supplies its own `main`.
+    pub no_entry: bool,
+}
+
+/// Wasm targets use their own entry-point convention (WASI looks for a
+/// mangled `__main_void`, not `main`), which hasn't been verified here, so
+/// no `main` is emitted for them.
+fn is_wasm_triple(triple: Option<&str>) -> bool {
+    triple.is_some_and(|t| t.starts_with("wasm"))
 }
 
 // ------------------------------------------------------------------ //
@@ -180,6 +191,23 @@ pub fn emit_module(module: &Module, opts: &LlvmOptions) -> Result<String, String
     for body in fn_bodies {
         out.push_str(&body);
         writeln!(out).unwrap();
+    }
+
+    // Program entry point. Mirrors the C backend's `main`: call the user's
+    // zero-argument `main` and exit 0 (its result, if any, is ignored). The
+    // user's function is `@certo_main`, so this never clashes with it.
+    if !opts.no_entry && !is_wasm_triple(opts.target_triple.as_deref()) {
+        if let Some(sig) = ctx.fn_sigs.get("certo_main").filter(|s| s.params.is_empty()) {
+            writeln!(out, "define i32 @main() {{").unwrap();
+            writeln!(out, "entry:").unwrap();
+            if sig.ret == "void" {
+                writeln!(out, "  call void @certo_main()").unwrap();
+            } else {
+                writeln!(out, "  %r = call {} @certo_main()", sig.ret).unwrap();
+            }
+            writeln!(out, "  ret i32 0").unwrap();
+            writeln!(out, "}}").unwrap();
+        }
     }
 
     Ok(out)
@@ -319,5 +347,80 @@ import Stdlib.Core
 fn run(): Text = intToText(5)
 ");
         assert!(ir.contains("declare ptr @certo_intToText("), "{ir}");
+    }
+
+    // ------------------------------------------------------------------ //
+    // Program entry point: a module with a zero-argument `main` gets a real
+    // `define i32 @main()` so it links and runs on its own. Mirrors the C
+    // backend: call the user's main, exit 0, ignore its result.
+    // ------------------------------------------------------------------ //
+
+    #[test]
+    fn unit_main_gets_a_program_entry_point() {
+        let ir = ir_of("module T
+fn noop(x: Int): Unit = ()
+fn main(): Unit = noop(1)
+");
+        assert!(ir.contains("define void @certo_main()"), "the user's main keeps its own name
+{ir}");
+        assert!(ir.contains("define i32 @main() {
+entry:
+  call void @certo_main()
+  ret i32 0
+}"), "{ir}");
+    }
+
+    #[test]
+    fn non_unit_main_result_is_ignored_by_the_entry_point() {
+        let ir = ir_of("module T
+fn main(): Int = 42
+");
+        assert!(ir.contains("%r = call i64 @certo_main()"), "{ir}");
+        assert!(ir.contains("ret i32 0"), "exit code stays 0 like the C backend
+{ir}");
+    }
+
+    #[test]
+    fn no_entry_point_without_a_main_fn() {
+        let ir = ir_of("module T
+fn add(a: Int, b: Int): Int = a + b
+");
+        assert!(!ir.contains("@main"), "a library module must not gain a main
+{ir}");
+    }
+
+    #[test]
+    fn main_with_parameters_gets_no_entry_point() {
+        // The C backend always calls `certo_main()` with no arguments, so a
+        // main that expects some can't be wired up the same way.
+        let ir = ir_of("module T
+fn main(x: Int): Unit = ()
+");
+        assert!(!ir.contains("@main()"), "{ir}");
+    }
+
+    #[test]
+    fn no_entry_option_suppresses_the_entry_point() {
+        let opts = LlvmOptions { no_entry: true, ..Default::default() };
+        let ir = emit_module(&module_from("module T
+fn main(): Unit = ()
+"), &opts).unwrap();
+        assert!(ir.contains("define void @certo_main()"), "{ir}");
+        assert!(!ir.contains("define i32 @main"), "for linking into a host that has its own main
+{ir}");
+    }
+
+    #[test]
+    fn wasm_targets_get_no_entry_point() {
+        // WASI's entry convention differs (a mangled __main_void) and is not
+        // verified here, so wasm output is left as it was.
+        for triple in ["wasm32-wasi", "wasm32-unknown-unknown"] {
+            let opts = LlvmOptions { target_triple: Some(triple.into()), ..Default::default() };
+            let ir = emit_module(&module_from("module T
+fn main(): Unit = ()
+"), &opts).unwrap();
+            assert!(!ir.contains("define i32 @main"), "{triple}
+{ir}");
+        }
     }
 }

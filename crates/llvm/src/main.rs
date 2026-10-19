@@ -9,6 +9,8 @@
 //!   --data-layout <layout>      LLVM data layout string
 //!   --wasm                      Shorthand for --target wasm32-wasi
 //!   --annotate                  Emit comment annotations in the IR
+//!   --no-entry                  Don't emit a program entry point (`main`), e.g. when
+//!                               linking into a host that has its own
 //!
 //! Exit codes:
 //!   0  success
@@ -28,6 +30,7 @@ fn main() {
     let mut target:      Option<String>  = None;
     let mut data_layout: Option<String>  = None;
     let mut annotate = false;
+    let mut no_entry = false;
 
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -53,6 +56,7 @@ fn main() {
                 target = Some("wasm32-wasi".into());
             }
             "--annotate" => annotate = true,
+            "--no-entry" => no_entry = true,
             other if other.starts_with('-') => {
                 eprintln!("error: unknown option '{}'", other);
                 process::exit(2);
@@ -98,6 +102,7 @@ fn main() {
         target_triple: target,
         data_layout,
         annotate,
+        no_entry,
     };
 
     let ir = emit_module(&module, &opts).unwrap_or_else(|e| {
