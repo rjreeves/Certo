@@ -13,6 +13,18 @@ use std::process::Command;
 /// The runtime shim's C source.
 pub const RUNTIME_SHIM_C: &str = include_str!("../runtime/certo_llvm_rt.c");
 
+/// The same functions for browser WebAssembly (`wasm32-unknown-unknown`),
+/// which has no libc: output and Float formatting go through host imports
+/// (`env.certo_write`, `env.certo_float_to_text`) that the JS loader supplies.
+pub const RUNTIME_SHIM_WASM_BROWSER_C: &str = include_str!("../runtime/certo_llvm_rt_wasm.c");
+
+/// Does this IR call into the runtime shim? A module that doesn't (numeric
+/// functions only) must not have the shim linked in: on the browser target
+/// that would add imports the host has to provide for nothing.
+pub fn ir_needs_runtime(ir: &str) -> bool {
+    ir.contains("@certo_rt_")
+}
+
 /// A runtime function the LLVM backend supports.
 #[derive(Debug)]
 pub struct RtFn {
@@ -125,6 +137,26 @@ mod tests {
                 "runtime/certo_llvm_rt.c does not define `{sym}`"
             );
         }
+    }
+
+    #[test]
+    fn the_browser_shim_defines_the_same_symbols_without_a_libc() {
+        let mut symbols: Vec<&str> = RT_FNS.iter().map(|f| f.symbol).collect();
+        symbols.push(TEXT_CONCAT);
+        symbols.push(INT_POW);
+        for sym in symbols {
+            assert!(
+                RUNTIME_SHIM_WASM_BROWSER_C.contains(&format!(" {sym}(")) || RUNTIME_SHIM_WASM_BROWSER_C.contains(&format!("*{sym}(")),
+                "runtime/certo_llvm_rt_wasm.c does not define `{sym}`"
+            );
+        }
+        assert!(!RUNTIME_SHIM_WASM_BROWSER_C.contains("#include"), "the browser shim has no libc to include");
+    }
+
+    #[test]
+    fn only_ir_that_calls_the_shim_needs_it_linked() {
+        assert!(ir_needs_runtime("  call void @certo_rt_println(ptr %v0)"));
+        assert!(!ir_needs_runtime("define i64 @certo_add(i64 %p1, i64 %p2) {"));
     }
 
     #[test]

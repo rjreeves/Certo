@@ -61,6 +61,7 @@ pub fn compile(
     opt_level:    u8,
     wasi_sysroot: Option<&Path>,
     extra_flags:  &[String],
+    runtime_c:    Option<&str>,
 ) -> Result<(), WasmError> {
     use tempfile::NamedTempFile;
 
@@ -68,6 +69,19 @@ pub fn compile(
         .map_err(|e| WasmError::Io(e.to_string()))?;
     std::fs::write(src_file.path(), ll_src)
         .map_err(|e| WasmError::Io(e.to_string()))?;
+
+    // The runtime shim (C source) is compiled alongside the IR.
+    let rt_file = match runtime_c {
+        Some(c) => {
+            let f = NamedTempFile::with_suffix(".c").map_err(|e| WasmError::Io(e.to_string()))?;
+            std::fs::write(f.path(), c).map_err(|e| WasmError::Io(e.to_string()))?;
+            Some(f)
+        }
+        None => None,
+    };
+    let rt_path: Vec<String> = rt_file.iter()
+        .map(|f| f.path().to_str().unwrap_or("").to_string())
+        .collect();
 
     let out_str = out_path.to_str().unwrap_or("out.wasm");
     let opt_str = format!("-O{}", opt_level.min(3));
@@ -85,8 +99,9 @@ pub fn compile(
                     None
                 }
             });
-            args = clang_args(target, &opt_str, sysroot.as_deref(), out_str,
-                src_file.path().to_str().unwrap_or(""));
+            let mut sources = vec![src_file.path().to_str().unwrap_or("").to_string()];
+            sources.extend(rt_path.iter().cloned());
+            args = clang_args(target, &opt_str, sysroot.as_deref(), out_str, &sources);
         }
 
         ToolchainKind::Emscripten => {
@@ -94,6 +109,7 @@ pub fn compile(
             args.push("-o".into());
             args.push(out_str.into());
             args.push(src_file.path().to_str().unwrap_or("").into());
+            args.extend(rt_path.iter().cloned());
         }
     }
 
@@ -123,7 +139,7 @@ pub fn compile(
 
 /// The `clang` argument list for one wasm build. Pure, so it can be tested
 /// without a toolchain.
-fn clang_args(target: &WasmTarget, opt: &str, sysroot: Option<&str>, out: &str, src: &str) -> Vec<String> {
+fn clang_args(target: &WasmTarget, opt: &str, sysroot: Option<&str>, out: &str, sources: &[String]) -> Vec<String> {
     let triple = match target {
         WasmTarget::Wasi    => "wasm32-wasi",
         WasmTarget::Browser => "wasm32-unknown-unknown",
@@ -137,6 +153,9 @@ fn clang_args(target: &WasmTarget, opt: &str, sysroot: Option<&str>, out: &str, 
         // Deliberately no `-lm` — there is no libm to find without a sysroot,
         // and asking for one made every browser build fail at link time.
         args.push("-nostdlib".into());
+        // Freestanding: without this the optimiser turns the runtime shim's
+        // loops into calls to `strlen`/`memcpy`, which do not exist here.
+        args.push("-ffreestanding".into());
         args.push("-Wl,--export-all".into());
         args.push("-Wl,--no-entry".into());
     } else {
@@ -144,7 +163,7 @@ fn clang_args(target: &WasmTarget, opt: &str, sysroot: Option<&str>, out: &str, 
     }
     args.push("-o".into());
     args.push(out.into());
-    args.push(src.into());
+    args.extend(sources.iter().cloned());
     args
 }
 
@@ -210,7 +229,7 @@ mod tests {
     // with "wasm-ld: unable to find library -lm".
     #[test]
     fn browser_args_do_not_ask_for_libm() {
-        let args = clang_args(&WasmTarget::Browser, "-O2", None, "out.wasm", "in.ll");
+        let args = clang_args(&WasmTarget::Browser, "-O2", None, "out.wasm", &["in.ll".to_string()]);
         assert!(!args.iter().any(|a| a == "-lm"), "{:?}", args);
         for want in ["--target=wasm32-unknown-unknown", "-nostdlib", "-Wl,--export-all", "-Wl,--no-entry"] {
             assert!(args.iter().any(|a| a == want), "missing {} in {:?}", want, args);
@@ -219,7 +238,7 @@ mod tests {
 
     #[test]
     fn wasi_args_still_link_libm_and_keep_the_sysroot() {
-        let args = clang_args(&WasmTarget::Wasi, "-O2", Some("/sdk/sysroot"), "out.wasm", "in.ll");
+        let args = clang_args(&WasmTarget::Wasi, "-O2", Some("/sdk/sysroot"), "out.wasm", &["in.ll".to_string()]);
         assert!(args.iter().any(|a| a == "-lm"), "{:?}", args);
         assert!(args.iter().any(|a| a == "--target=wasm32-wasi"), "{:?}", args);
         assert!(args.iter().any(|a| a == "--sysroot=/sdk/sysroot"), "{:?}", args);
@@ -228,7 +247,7 @@ mod tests {
 
     #[test]
     fn args_end_with_output_then_source() {
-        let args = clang_args(&WasmTarget::Browser, "-O1", None, "o.wasm", "i.ll");
+        let args = clang_args(&WasmTarget::Browser, "-O1", None, "o.wasm", &["i.ll".to_string()]);
         assert_eq!(&args[args.len() - 3..], ["-o", "o.wasm", "i.ll"]);
     }
 
@@ -240,5 +259,22 @@ mod tests {
         } else {
             assert!(paths.is_empty(), "no Windows paths off Windows: {:?}", paths);
         }
+    }
+
+    #[test]
+    fn every_source_is_passed_to_clang_after_the_output() {
+        let args = clang_args(&WasmTarget::Browser, "-O2", None, "o.wasm", &["p.ll".to_string(), "rt.c".to_string()]);
+        let tail: Vec<&str> = args.iter().rev().take(4).rev().map(|s| s.as_str()).collect();
+        assert_eq!(tail, ["-o", "o.wasm", "p.ll", "rt.c"], "{args:?}");
+    }
+
+    #[test]
+    fn the_browser_build_is_freestanding() {
+        // Without this the optimiser turns the shim's loops into calls to
+        // `strlen`/`memcpy`, which don't exist without a libc.
+        let args = clang_args(&WasmTarget::Browser, "-O2", None, "o.wasm", &["p.ll".to_string()]);
+        assert!(args.iter().any(|a| a == "-ffreestanding"), "{args:?}");
+        let wasi = clang_args(&WasmTarget::Wasi, "-O2", None, "o.wasm", &["p.ll".to_string()]);
+        assert!(!wasi.iter().any(|a| a == "-ffreestanding"), "WASI has a libc: {wasi:?}");
     }
 }

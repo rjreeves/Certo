@@ -104,6 +104,16 @@ pub fn compile_module(
     // ── Find toolchain ────────────────────────────────────────────────
     let tc = toolchain::detect().ok_or(WasmError::NoToolchain)?;
 
+    // A module that prints or builds Text calls the `certo_rt_*` runtime, which
+    // has to be compiled in: the libc-free version for the browser (output goes
+    // through host imports), the libc one for WASI. A purely numeric module
+    // gets nothing extra, so it still needs no imports.
+    let runtime_c = if certo_llvm::rt::ir_needs_runtime(&ir) {
+        Some(runtime_source(&opts.target))
+    } else {
+        None
+    };
+
     // ── Compile ───────────────────────────────────────────────────────
     toolchain::compile(
         &tc,
@@ -113,7 +123,16 @@ pub fn compile_module(
         opts.opt_level.max(2),
         opts.wasi_sysroot.as_deref(),
         &opts.extra_flags,
+        runtime_c,
     )
+}
+
+/// The runtime shim source for a target.
+fn runtime_source(target: &WasmTarget) -> &'static str {
+    match target {
+        WasmTarget::Browser => certo_llvm::rt::RUNTIME_SHIM_WASM_BROWSER_C,
+        WasmTarget::Wasi    => certo_llvm::rt::RUNTIME_SHIM_C,
+    }
 }
 
 /// Emit LLVM IR with the WASM triple but do not invoke a compiler.
