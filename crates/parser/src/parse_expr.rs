@@ -1049,7 +1049,7 @@ fn parse_fstring_parts(content: &str, base_span: Span) -> Result<Vec<FStringPart
     while !rest.is_empty() {
         if let Some(open) = rest.find('{') {
             if open > 0 {
-                parts.push(FStringPart::Literal(rest[..open].to_string()));
+                parts.push(FStringPart::Literal(unescape_str(&rest[..open])));
             }
             rest = &rest[open + 1..];
             // Find matching `}`, respecting nested braces
@@ -1091,7 +1091,7 @@ fn parse_fstring_parts(content: &str, base_span: Span) -> Result<Vec<FStringPart
             let expr = parse_expr(&mut sub)?;
             parts.push(FStringPart::Interpolated(Box::new(expr)));
         } else {
-            parts.push(FStringPart::Literal(rest.to_string()));
+            parts.push(FStringPart::Literal(unescape_str(rest)));
             break;
         }
     }

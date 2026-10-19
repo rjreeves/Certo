@@ -86,6 +86,8 @@ fn main(): Unit [io] = {
 }
 "#);
     assert!(before.starts_with("x is 5\n"), "{before}");
+    // Item 431: escapes inside an f-string are processed like any string's.
+    assert!(before.contains("tab[\t] quote[\"] 5"), "escapes must be processed: {before:?}");
     assert_eq!(after, before, "formatting changed what the program prints\n--- formatted source ---\n{formatted}");
     assert!(!formatted.contains("${"), "interpolation must stay `{{x}}`, not `${{x}}`\n{formatted}");
     // The text around the interpolation is kept exactly as written, escapes included.

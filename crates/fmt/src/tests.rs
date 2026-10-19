@@ -758,9 +758,9 @@ fn fstring_interpolated_expressions_keep_their_own_grouping() {
 }
 
 #[test]
-fn fstring_literal_text_and_escapes_are_kept_verbatim() {
-    // The parser keeps f-string text as the raw source slice, so re-escaping
-    // it turned `\n` into `\\n` and `\"` into `\\\"`.
+fn fstring_literal_text_and_escapes_survive_formatting() {
+    // The parser unescapes f-string text (item 431), so the formatter must
+    // escape it again or `\t` would come back as a real tab character.
     let src = "module T\n\nfn f(a: Int): Text = f\"a\\tb \\\"q\\\" {a}\\n\"\n";
     let out = assert_preserved(src);
     assert_contains(&out, "f\"a\\tb \\\"q\\\" {a}\\n\"");

@@ -2230,3 +2230,17 @@ fn ordinary_field_access_after_a_real_receiver_is_unaffected() {
     let body = parse_fn_body("module A\nfn f(order: Order): OrderStatus = order.status");
     assert!(matches!(&body.node, Expr::Field { .. }), "expected ordinary Expr::Field, got {:?}", body.node);
 }
+
+#[test]
+fn fstring_literal_text_has_its_escapes_processed() {
+    // BACKLOG item 431: `f"a\tb"` used to keep the backslash and the `t`.
+    let module = crate::parse(r#"module T
+
+fn f(x: Int): Text = f"a\tb \"q\" {x}\n"
+"#).unwrap();
+    let dump = format!("{:?}", module);
+    // `Debug` shows a real tab as `\t`, so a processed escape looks like this;
+    // an unprocessed one would show a doubled backslash.
+    assert!(dump.contains(r#"Literal("a\tb \"q\" ")"#), "{dump}");
+    assert!(dump.contains(r#"Literal("\n")"#), "{dump}");
+}

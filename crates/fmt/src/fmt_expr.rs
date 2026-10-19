@@ -440,13 +440,12 @@ fn fmt_lit(lit: &Lit) -> String {
         Lit::Bool(b)       => if *b { "true".into() } else { "false".into() },
         Lit::String(s)     => format!("\"{}\"", escape_str(s)),
         Lit::FString(parts) => {
-            // Literal parts are kept as the raw source text the parser sliced
-            // out (escapes still unprocessed), so they print back verbatim —
-            // re-escaping them turned `\n` into `\\n`. Interpolation is plain
-            // `{expr}`; a `$` before the brace would become literal text
-            // (BACKLOG item 404).
+            // Literal parts hold the unescaped text (the parser processes
+            // escapes, BACKLOG item 431), so they are escaped again here like
+            // any string. Interpolation is plain `{expr}`; a `$` before the
+            // brace would become literal text (BACKLOG item 404).
             let inner: String = parts.iter().map(|p| match p {
-                FStringPart::Literal(s) => s.clone(),
+                FStringPart::Literal(s) => escape_str(s),
                 FStringPart::Interpolated(e) => format!("{{{}}}", fmt_expr(&e.node, 0)),
             }).collect();
             format!("f\"{}\"", inner)
