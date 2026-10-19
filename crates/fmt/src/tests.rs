@@ -449,7 +449,8 @@ fn a_hand_written_lambda_still_prints_normally() {
     // Regression guard: an ordinary, hand-written lambda (not matching the
     // parser's own exact desugar shape) must still print as a lambda.
     let out = fmt("module A\nfn f(items: List<Item>): Int = items.sumBy((item) => item.lineTotal)");
-    assert_contains(&out, "item => item.lineTotal");
+    // The parser has no bare `x => ...` form, so the parameter keeps its parentheses.
+    assert_contains(&out, "(item) => item.lineTotal");
 }
 
 // ------------------------------------------------------------------ //
@@ -577,4 +578,250 @@ fn validator_decl_is_idempotent() {
     let out1 = fmt(VALIDATOR_DECL_SRC);
     let out2 = fmt(&out1);
     assert_eq!(out1, out2, "validator formatting not idempotent");
+}
+
+// ------------------------------------------------------------------ //
+// Formatting must never change what a program means.
+// BACKLOG item 403 (grouping parentheses dropped) and 404 (f-string
+// interpolation printed as `${x}`, lambda parameter parentheses stripped).
+//
+// The strongest check available without a compiler: the formatted source must
+// parse to exactly the same program as the original (spans blanked out, since
+// layout legitimately changes), and formatting must be stable.
+// ------------------------------------------------------------------ //
+
+/// Debug-print the parsed module with every span (`Span { start: 7, end: 8 }`)
+/// replaced by `_`, so two parses of the same program compare equal however
+/// it's laid out.
+fn shape(src: &str) -> String {
+    let module = certo_parser::parse(src)
+        .unwrap_or_else(|e| panic!("parse error {:?} in:\n{}", e, src));
+    let dbg = format!("{:?}", module);
+    let mut out = String::new();
+    let mut rest = dbg.as_str();
+    while let Some(i) = rest.find("Span { start: ") {
+        out.push_str(&rest[..i]);
+        let tail = &rest[i..];
+        let close = tail.find(" }").expect("unterminated Span in Debug output") + 2;
+        out.push('_');
+        rest = &tail[close..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Where two `shape` strings first differ, with a little context from each.
+fn first_difference(a: &str, b: &str) -> String {
+    let at = a.chars().zip(b.chars()).take_while(|(x, y)| x == y).count();
+    let ctx = |s: &str| -> String {
+        let from = at.saturating_sub(120);
+        s.chars().skip(from).take(300).collect()
+    };
+    format!("first difference at char {}:\n  before: ...{}\n  after:  ...{}", at, ctx(a), ctx(b))
+}
+
+/// Formats `src`, requires the result to parse to the same program and to be
+/// a fixed point of the formatter, and returns it.
+fn assert_preserved(src: &str) -> String {
+    let once = fmt(src);
+    let (before, after) = (shape(src), shape(&once));
+    assert!(
+        before == after,
+        "formatting changed the program\n--- before ---\n{}\n--- after ---\n{}\n{}", src, once, first_difference(&before, &after)
+    );
+    assert_eq!(fmt(&once), once, "formatting is not stable for:\n{}", src);
+    once
+}
+
+/// A function whose body is `expr` (types are irrelevant: only parsing matters).
+fn body(expr: &str) -> String {
+    format!(
+        "module T\n\nfn f(a: Int, b: Int, c: Int, p: Bool, q: Bool, r: Bool, xs: List<Int>): Int = {}\n",
+        expr
+    )
+}
+
+#[test]
+fn arithmetic_grouping_parentheses_are_kept() {
+    for e in [
+        "(a + b) * c", "a * (b + c)", "(a + b) * (c - a)", "a - (b - c)", "a / (b * c)",
+        "a % (b + c)", "(a + b) * c - (a - b) / (c + 1)", "(a ++ b) + c", "a ++ (b + c)",
+    ] {
+        assert_preserved(&body(e));
+    }
+}
+
+#[test]
+fn the_motivating_case_prints_with_its_parentheses() {
+    let out = assert_preserved(&body("(a + b) * c"));
+    assert_contains(&out, "(a + b) * c");
+}
+
+#[test]
+fn power_and_unary_minus_keep_the_right_grouping() {
+    // `**` is right-associative; unary minus binds tighter than `**`.
+    for e in ["(a ** b) ** c", "a ** (b ** c)", "a ** b ** c", "(a + b) ** c", "-(a + b)", "-(-a)", "(-a) ** b", "-(a ** b)"] {
+        assert_preserved(&body(e));
+    }
+}
+
+#[test]
+fn logical_grouping_parentheses_are_kept() {
+    for e in [
+        "(p or q) and r", "p or (q and r)", "p and (q or r)", "(p and q) or r",
+        "not (p and q)", "not (p or q)", "not (a > b)", "not (p ?? q)",
+        "(p ?? q) ?? r", "p ?? (q ?? r)", "(p or q) ?? r", "(p and q) ?? r",
+    ] {
+        assert_preserved(&body(e));
+    }
+}
+
+#[test]
+fn comparison_range_and_membership_grouping_is_kept() {
+    for e in [
+        "(a < b) == (b < c)", "a < (b == c)", "a == (b == c)", "(a == b) == c",
+        "a in (b ++ c)", "(a .. b) .. c", "a .. (b .. c)", "(a < b) .. c",
+    ] {
+        assert_preserved(&body(e));
+    }
+}
+
+#[test]
+fn pipes_keep_the_grouping_they_need() {
+    for e in ["(a |> f) |> g", "a |> f |> g", "(a |> f) + 1", "(a |> f).x", "a |> (p or q)"] {
+        assert_preserved(&body(e));
+    }
+}
+
+#[test]
+fn open_ended_forms_are_parenthesised_as_operands() {
+    // An `if` or a lambda swallows everything to its right, so as an operand
+    // it must be wrapped or the following operator moves inside it.
+    for e in [
+        "(if p then a else b) + c", "c + (if p then a else b)",
+        "((x) => x + 1)(a)", "(if p then f else g)(a)",
+    ] {
+        assert_preserved(&body(e));
+    }
+}
+
+#[test]
+fn postfix_receivers_keep_their_parentheses() {
+    for e in [
+        "(a + b).x", "(f(a) ?? b).name", "(a + b)?", "(a |> f)?", "(-a).x", "(not p).x",
+        "(await f(a)).name", "await (a + b)", "(spawn f(a)).x",
+    ] {
+        assert_preserved(&body(e));
+    }
+}
+
+#[test]
+fn parentheses_that_are_not_needed_are_dropped() {
+    // The AST has no parenthesis node, so redundant ones can't be told apart
+    // from needed ones; the printer emits only the ones the grammar requires.
+    assert_contains(&assert_preserved(&body("(a * b) + c")), "a * b + c");
+    assert_contains(&assert_preserved(&body("(a + b) - c")), "a + b - c");
+    assert_contains(&assert_preserved(&body("a ** (b ** c)")), "a ** b ** c");
+    assert_contains(&assert_preserved(&body("(p and q) or r")), "p and q or r");
+    assert_contains(&assert_preserved(&body("not (a > b)")), "not a > b");
+}
+
+#[test]
+fn lambda_parameters_always_keep_their_parentheses() {
+    // The parser has no bare `x => ...` form (item 404).
+    for e in [
+        "List.map(xs, (x) => x * 2)", "List.map(xs, (x: Int) => x * 2)",
+        "List.fold(xs, 0, (acc, x) => acc + x)", "List.map(xs, (a, b: Int) => a)", "(() => 1)()",
+    ] {
+        assert_preserved(&body(e));
+    }
+    let out = assert_preserved(&body("List.map(xs, (x) => x * 2)"));
+    assert_contains(&out, "(x) => x * 2");
+    assert_not_contains(&out, " x => ");
+}
+
+#[test]
+fn fstring_interpolation_stays_plain_braces() {
+    // Item 404: `{x}` was printed as `${x}`, which prints a literal `$`.
+    let src = "module T\n\nfn f(a: Int, b: Int): Text = f\"x is {a} and {a + b}\"\n";
+    let out = assert_preserved(src);
+    assert_contains(&out, "f\"x is {a} and {a + b}\"");
+    assert_not_contains(&out, "${");
+}
+
+#[test]
+fn fstring_interpolated_expressions_keep_their_own_grouping() {
+    let src = "module T\n\nfn f(a: Int, b: Int): Text = f\"{(a + b) * 2} / {-(a - b)}\"\n";
+    let out = assert_preserved(src);
+    assert_contains(&out, "{(a + b) * 2}");
+    assert_contains(&out, "{-(a - b)}");
+}
+
+#[test]
+fn fstring_literal_text_and_escapes_are_kept_verbatim() {
+    // The parser keeps f-string text as the raw source slice, so re-escaping
+    // it turned `\n` into `\\n` and `\"` into `\\\"`.
+    let src = "module T\n\nfn f(a: Int): Text = f\"a\\tb \\\"q\\\" {a}\\n\"\n";
+    let out = assert_preserved(src);
+    assert_contains(&out, "f\"a\\tb \\\"q\\\" {a}\\n\"");
+}
+
+#[test]
+fn realistic_function_round_trips_unchanged() {
+    // A bigger mixed program: whatever the formatter does must still parse to
+    // the same program (match arms, guards, records, closures, calls).
+    let src = "module Shop\n\nimport Stdlib.Core\n\n\
+        type Item = { name: Text, price: Int, qty: Int }\n\n\
+        fn total(items: List<Item>, discount: Int): Int = List.fold(items, 0, (acc, i) => acc + (i.price - discount) * i.qty)\n\n\
+        fn label(i: Item): Text = if (i.price * i.qty) > 100 then f\"big: {i.name}\" else f\"small: {i.name}\"\n\n\
+        fn ok(p: Bool, q: Bool, r: Bool): Bool = not (p and q) or (q and not r)\n";
+    assert_preserved(src);
+}
+
+#[test]
+fn typed_val_and_var_keep_the_annotation_after_the_name() {
+    // `val n: Int = 1` was printed as `val: Int n = 1`, which doesn't parse.
+    let src = "module T\n\nfn f(a: Int): Int = {\n    val n: Int = a + 1\n    var m: Int = n * 2\n    val (x, y): (Int, Int) = (n, m)\n    x + y\n}\n".replace("\n", "\n");
+    let out = assert_preserved(&src);
+    assert_contains(&out, "val n: Int = a + 1");
+    assert_contains(&out, "var m: Int = n * 2");
+    assert_not_contains(&out, "val: ");
+}
+
+#[test]
+fn every_example_program_formats_to_the_same_program() {
+    // Real programs rather than hand-picked snippets: format each file in
+    // `examples/` and require the result to parse to exactly the same program.
+    // Files that don't parse are skipped (nothing to compare). Files with a
+    // `view` are skipped too: `fmt_view` is a stub that replaces the whole view
+    // body with `// ...` (BACKLOG), a known, separate gap.
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples");
+    let Ok(entries) = std::fs::read_dir(&dir) else { return };
+    let mut checked = 0;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("cto") { continue; }
+        let Ok(src) = std::fs::read_to_string(&path) else { continue };
+        let Ok(module) = certo_parser::parse(&src) else { continue };
+        if module.decls.iter().any(|d| matches!(d.node, certo_ast::decl::Decl::View(_))) { continue; }
+        let once = format_source(&src).expect("a file that parsed must format");
+        let (before, after) = (shape(&src), shape(&once));
+        assert!(
+            before == after,
+            "formatting changed the program in {}\n{}", path.display(), first_difference(&before, &after)
+        );
+        checked += 1;
+    }
+    assert!(checked > 0 || !dir.exists(), "expected to check at least one example in {}", dir.display());
+}
+
+#[test]
+fn loop_and_block_bodies_do_not_gain_a_layer_of_braces_on_every_format() {
+    // The body of `for`/`while`/`unsafe`/`db.transaction`/`defer` is already a
+    // block; printing braces around it again made each `certo fmt` run add
+    // another `{ ... }` and a file grew every time it was formatted.
+    let src = "module T\n\nfn f(xs: List<Int>): Int = {\n    var total = 0\n    for x in xs {\n        total = total + x\n    }\n    while total > 100 {\n        total = total - 1\n    }\n    defer {\n        println(\"done\")\n    }\n    total\n}\n";
+    let out = assert_preserved(src);
+    assert_eq!(out.matches('{').count(), src.matches('{').count(), "no extra braces expected:\n{}", out);
+    assert_not_contains(&out, "{\n    {");
 }

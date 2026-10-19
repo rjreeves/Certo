@@ -1,7 +1,93 @@
-use certo_ast::expr::{Expr, ExpectMatcher, Stmt, Lit, FStringPart, UnOp, Arg, MatchArm, LambdaParam};
+use certo_ast::expr::{Expr, ExpectMatcher, Stmt, Lit, FStringPart, UnOp, BinOp, Arg, MatchArm, LambdaParam};
 use certo_ast::pattern::Pattern;
 use crate::printer::{ind, group, binop_str};
 use crate::fmt_type::fmt_type;
+
+// ------------------------------------------------------------------ //
+// Operator precedence
+//
+// The AST has no "parenthesised" node — `(a + b) * c` parses to a `Mul` whose
+// left child is an `Add`, and the parentheses are gone. The printer therefore
+// has to put them back wherever the grammar needs them, or the formatted
+// program computes something else (BACKLOG item 403).
+//
+// These levels mirror the parser's own ladder in `crates/parser/src/
+// parse_expr.rs` (low → high) and must be kept in step with it. `fmt_operand`
+// parenthesises a child whenever it binds more loosely than its position
+// allows.
+// ------------------------------------------------------------------ //
+
+const P_PIPE: u8 = 1;
+const P_OR: u8 = 2;
+const P_AND: u8 = 3;
+const P_COALESCE: u8 = 4;
+const P_NOT: u8 = 5;
+const P_CMP: u8 = 6;
+const P_RANGE: u8 = 7;
+const P_ADD: u8 = 8;
+const P_MUL: u8 = 9;
+const P_POW: u8 = 10;
+const P_UNARY: u8 = 11;
+const P_POSTFIX: u8 = 12;
+const P_ATOM: u8 = 13;
+
+/// How tightly an expression's own printed form binds. `0` means it is
+/// open-ended (a trailing `else`/lambda body swallows whatever follows), so it
+/// needs parentheses whenever it is an operand of anything.
+fn prec(expr: &Expr) -> u8 {
+    match expr {
+        Expr::Pipe { .. } => P_PIPE,
+        Expr::BinOp { op, .. } => match op {
+            BinOp::Or => P_OR,
+            BinOp::And => P_AND,
+            BinOp::NullCoalesce => P_COALESCE,
+            BinOp::Eq | BinOp::NotEq | BinOp::Lt | BinOp::LtEq | BinOp::Gt | BinOp::GtEq | BinOp::In => P_CMP,
+            BinOp::RangeInclusive | BinOp::RangeExclusive => P_RANGE,
+            BinOp::Add | BinOp::Sub | BinOp::Concat => P_ADD,
+            BinOp::Mul | BinOp::Div | BinOp::Rem => P_MUL,
+            BinOp::Pow => P_POW,
+        },
+        Expr::UnOp { op: UnOp::Not, .. } => P_NOT,
+        Expr::UnOp { op: UnOp::Neg, .. } => P_UNARY,
+        // `await x` / `spawn x` are prefix forms: fine as a binary operand, but
+        // `await x.y` means `await (x.y)`, so they need parens as a receiver.
+        Expr::Await { .. } | Expr::Spawn { .. } => P_UNARY,
+        Expr::Field { .. } | Expr::SafeField { .. } | Expr::Try { .. } | Expr::App { .. }
+        | Expr::Age { .. } | Expr::ExpectAssertion { .. } => P_POSTFIX,
+        // Open-ended: the last thing they print is a full expression.
+        Expr::If { .. } | Expr::Lambda { .. } | Expr::Guard { .. } | Expr::Require { .. }
+        | Expr::Ascribe { .. } => 0,
+        _ => P_ATOM,
+    }
+}
+
+/// `(left, right)` — the loosest precedence each operand may have without
+/// parentheses. Left-associative operators allow an equal-precedence left
+/// operand and demand a tighter right one (`a - (b - c)` keeps its parens,
+/// `a - b - c` doesn't); `**` and `??` are right-associative, so the reverse.
+fn binop_operand_prec(op: &BinOp) -> (u8, u8) {
+    match op {
+        BinOp::Or => (P_OR, P_AND),
+        BinOp::And => (P_AND, P_NOT),
+        BinOp::NullCoalesce => (P_NOT, P_COALESCE),
+        BinOp::Eq | BinOp::NotEq | BinOp::Lt | BinOp::LtEq | BinOp::Gt | BinOp::GtEq | BinOp::In => (P_CMP, P_RANGE),
+        BinOp::RangeInclusive | BinOp::RangeExclusive => (P_ADD, P_ADD),
+        BinOp::Add | BinOp::Sub | BinOp::Concat => (P_ADD, P_MUL),
+        BinOp::Mul | BinOp::Div | BinOp::Rem => (P_MUL, P_POW),
+        BinOp::Pow => (P_UNARY, P_POW),
+    }
+}
+
+/// Print `expr` as an operand that must bind at least as tightly as `min`.
+fn fmt_operand(expr: &Expr, min: u8, indent: usize) -> String {
+    let s = fmt_expr(expr, indent);
+    if prec(expr) < min { format!("({})", s) } else { s }
+}
+
+/// Print `expr` as the receiver of a postfix form (`.field`, `?`, a call).
+fn fmt_receiver(expr: &Expr, indent: usize) -> String {
+    fmt_operand(expr, P_POSTFIX, indent)
+}
 
 pub fn fmt_expr(expr: &Expr, indent: usize) -> String {
     match expr {
@@ -11,15 +97,15 @@ pub fn fmt_expr(expr: &Expr, indent: usize) -> String {
             path.segments.iter().map(|s| s.node.as_str()).collect::<Vec<_>>().join("."),
 
         Expr::App { func, args, .. } => {
-            let f = fmt_expr(&func.node, indent);
+            let f = fmt_receiver(&func.node, indent);
             let formatted_args: Vec<String> = args.iter().map(|a| fmt_arg(a, indent)).collect();
             let args_str = group(&formatted_args, "(", ")", ", ", indent, false);
             format!("{}{}", f, args_str)
         }
 
         Expr::Pipe { left, right, .. } => {
-            let l = fmt_expr(&left.node, indent);
-            let r = fmt_expr(&right.node, indent);
+            let l = fmt_operand(&left.node, P_PIPE, indent);
+            let r = fmt_operand(&right.node, P_OR, indent);
             let inline = format!("{} |> {}", l, r);
             if inline.len() <= 80 {
                 inline
@@ -29,25 +115,26 @@ pub fn fmt_expr(expr: &Expr, indent: usize) -> String {
         }
 
         Expr::BinOp { op, left, right, .. } => {
-            let l = fmt_expr(&left.node, indent);
-            let r = fmt_expr(&right.node, indent);
-            // Wrap in parens if the sub-expression is itself a binop with lower precedence.
+            let (lmin, rmin) = binop_operand_prec(op);
+            let l = fmt_operand(&left.node, lmin, indent);
+            let r = fmt_operand(&right.node, rmin, indent);
             format!("{} {} {}", l, binop_str(op), r)
         }
 
-        Expr::UnOp { op, expr, .. } => {
-            let e = fmt_expr(&expr.node, indent);
-            match op {
-                UnOp::Neg => format!("-{}", e),
-                UnOp::Not => format!("not {}", e),
+        Expr::UnOp { op, expr, .. } => match op {
+            UnOp::Neg => {
+                let e = fmt_operand(&expr.node, P_UNARY, indent);
+                // `--x` would read as the start of a comment-like token; keep it apart.
+                if e.starts_with('-') { format!("-({})", e) } else { format!("-{}", e) }
             }
-        }
+            UnOp::Not => format!("not {}", fmt_operand(&expr.node, P_NOT, indent)),
+        },
 
         Expr::Field { expr, field, .. } =>
-            format!("{}.{}", fmt_expr(&expr.node, indent), field.node),
+            format!("{}.{}", fmt_receiver(&expr.node, indent), field.node),
 
         Expr::SafeField { expr, field, .. } =>
-            format!("{}?.{}", fmt_expr(&expr.node, indent), field.node),
+            format!("{}?.{}", fmt_receiver(&expr.node, indent), field.node),
 
         Expr::If { cond, then_expr, else_expr, .. } => {
             let c = fmt_expr(&cond.node, indent);
@@ -101,10 +188,11 @@ pub fn fmt_expr(expr: &Expr, indent: usize) -> String {
                     }
                 }
             }
+            // The parameter list is always parenthesised — the parser has no
+            // bare `x => ...` form (BACKLOG item 404), even for one parameter.
             let ps: Vec<String> = params.iter().map(fmt_lambda_param).collect();
-            let param_str = if ps.len() == 1 { ps[0].clone() } else { format!("({})", ps.join(", ")) };
             let b = fmt_expr(&body.node, indent);
-            format!("{} => {}", param_str, b)
+            format!("({}) => {}", ps.join(", "), b)
         }
 
         Expr::List { elements, .. } => {
@@ -153,18 +241,19 @@ pub fn fmt_expr(expr: &Expr, indent: usize) -> String {
             }
         }
 
-        Expr::Try      { expr, .. }  => format!("{}?", fmt_expr(&expr.node, indent)),
-        Expr::Await    { expr, .. }  => format!("await {}", fmt_expr(&expr.node, indent)),
-        Expr::Spawn    { expr, .. }  => format!("spawn {}", fmt_expr(&expr.node, indent)),
-        Expr::Unsafe   { body, .. }  => format!("unsafe {{\n{}{}\n{}}}", ind(indent + 1), fmt_expr(&body.node, indent + 1), ind(indent)),
-        Expr::Transaction { body, .. } => format!("db.transaction {{\n{}{}\n{}}}", ind(indent + 1), fmt_expr(&body.node, indent + 1), ind(indent)),
+        Expr::Try      { expr, .. }  => format!("{}?", fmt_receiver(&expr.node, indent)),
+        Expr::Await    { expr, .. }  => format!("await {}", fmt_receiver(&expr.node, indent)),
+        Expr::Spawn    { expr, .. }  => format!("spawn {}", fmt_receiver(&expr.node, indent)),
+        Expr::Unsafe   { body, .. }  => format!("unsafe {}", fmt_braced_body(&body.node, indent)),
+        Expr::Transaction { body, .. } => format!("db.transaction {}", fmt_braced_body(&body.node, indent)),
 
         Expr::Guard { cond, else_expr, .. } => {
             format!("guard {} else {}", fmt_expr(&cond.node, indent), fmt_expr(&else_expr.node, indent))
         }
 
         Expr::Require { expr, error, .. } => {
-            format!("require {} ({})", fmt_expr(&expr.node, indent), fmt_expr(&error.node, indent))
+            // The parser reads the checked expression as a postfix chain, then `(error)`.
+            format!("require {} ({})", fmt_receiver(&expr.node, indent), fmt_expr(&error.node, indent))
         }
 
         Expr::Parallel { tasks, timeout, .. } => {
@@ -186,26 +275,20 @@ pub fn fmt_expr(expr: &Expr, indent: usize) -> String {
             format!("{}: {}", fmt_expr(&expr.node, indent), fmt_type(&ty.node, indent)),
 
         Expr::For { binding, iter, body, .. } => {
-            format!("for {} in {} {{\n{}{}\n{}}}",
+            format!("for {} in {} {}",
                 binding.node,
                 fmt_expr(&iter.node, indent),
-                ind(indent + 1),
-                fmt_expr(&body.node, indent + 1),
-                ind(indent))
+                fmt_braced_body(&body.node, indent))
         }
 
         Expr::While { cond, body, .. } => {
-            format!("while {} {{\n{}{}\n{}}}",
-                fmt_expr(&cond.node, indent),
-                ind(indent + 1),
-                fmt_expr(&body.node, indent + 1),
-                ind(indent))
+            format!("while {} {}", fmt_expr(&cond.node, indent), fmt_braced_body(&body.node, indent))
         }
         Expr::Age { expr, .. } => {
-            format!("{}.age", fmt_expr(&expr.node, indent))
+            format!("{}.age", fmt_receiver(&expr.node, indent))
         }
         Expr::ExpectAssertion { actual, matcher, .. } => {
-            let base = fmt_expr(&actual.node, indent);
+            let base = fmt_receiver(&actual.node, indent);
             match matcher {
                 ExpectMatcher::ToBe(y)  => format!("{}.toBe({})", base, fmt_expr(&y.node, indent)),
                 ExpectMatcher::ToBeTrue  => format!("{}.toBeTrue()", base),
@@ -219,12 +302,25 @@ pub fn fmt_expr(expr: &Expr, indent: usize) -> String {
     }
 }
 
+/// Print the body of a `for`/`while`/`unsafe`/`db.transaction`/`defer`, which
+/// the parser reads as an `Expr::Block` — braces included. Wrapping it in
+/// braces again produced `{ { ... } }` and added another layer on every
+/// `certo fmt` run, so a file grew each time it was formatted.
+pub(crate) fn fmt_braced_body(body: &Expr, indent: usize) -> String {
+    match body {
+        Expr::Block { .. } => fmt_expr(body, indent),
+        other => format!("{{\n{}{}\n{}}}", ind(indent + 1), fmt_expr(other, indent + 1), ind(indent)),
+    }
+}
+
 pub fn fmt_stmt(stmt: &Stmt, indent: usize) -> String {
     match stmt {
         Stmt::Val { pattern, ty, value, .. } => {
             let pat = fmt_pat(&pattern.node, indent);
             let ty_str = ty.as_ref().map(|t| format!(": {}", fmt_type(&t.node, indent))).unwrap_or_default();
-            format!("val{} {} = {}", ty_str, pat, fmt_expr(&value.node, indent))
+            // The annotation follows the pattern: `val n: Int = 1`. It used to be
+            // printed before it (`val: Int n = 1`), which doesn't parse.
+            format!("val {}{} = {}", pat, ty_str, fmt_expr(&value.node, indent))
         }
         Stmt::Var { name, ty, value, .. } => {
             let ty_str = ty.as_ref().map(|t| format!(": {}", fmt_type(&t.node, indent))).unwrap_or_default();
@@ -233,7 +329,7 @@ pub fn fmt_stmt(stmt: &Stmt, indent: usize) -> String {
         Stmt::Assign { target, value, .. } =>
             format!("{} = {}", target.node, fmt_expr(&value.node, indent)),
         Stmt::Defer { body, .. } =>
-            format!("defer {{\n{}{}\n{}}}", ind(indent + 1), fmt_expr(&body.node, indent + 1), ind(indent)),
+            format!("defer {}", fmt_braced_body(&body.node, indent)),
         Stmt::Expr { expr, .. } =>
             fmt_expr(&expr.node, indent),
     }
@@ -344,9 +440,14 @@ fn fmt_lit(lit: &Lit) -> String {
         Lit::Bool(b)       => if *b { "true".into() } else { "false".into() },
         Lit::String(s)     => format!("\"{}\"", escape_str(s)),
         Lit::FString(parts) => {
+            // Literal parts are kept as the raw source text the parser sliced
+            // out (escapes still unprocessed), so they print back verbatim —
+            // re-escaping them turned `\n` into `\\n`. Interpolation is plain
+            // `{expr}`; a `$` before the brace would become literal text
+            // (BACKLOG item 404).
             let inner: String = parts.iter().map(|p| match p {
-                FStringPart::Literal(s) => escape_str(s),
-                FStringPart::Interpolated(e) => format!("${{{}}}", fmt_expr(&e.node, 0)),
+                FStringPart::Literal(s) => s.clone(),
+                FStringPart::Interpolated(e) => format!("{{{}}}", fmt_expr(&e.node, 0)),
             }).collect();
             format!("f\"{}\"", inner)
         }

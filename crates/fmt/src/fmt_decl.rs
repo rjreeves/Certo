@@ -1,7 +1,7 @@
 use certo_ast::decl::*;
 use crate::printer::ind;
 use crate::fmt_type::{fmt_type, fmt_type_params, fmt_effects};
-use crate::fmt_expr::{fmt_expr, fmt_pat};
+use crate::fmt_expr::{fmt_expr, fmt_pat, fmt_braced_body};
 
 pub fn fmt_decl(decl: &Decl, indent: usize) -> String {
     match decl {
@@ -252,7 +252,7 @@ fn fmt_test_decl(kw: &str, name: &str, params: &[FnParam], body: &certo_ast::exp
     } else {
         format!("({})", params.iter().map(fmt_fn_param).collect::<Vec<_>>().join(", "))
     };
-    format!("{} \"{}\"{} {{\n{}{}\n{}}}", kw, name, params_str, ind(indent + 1), fmt_expr(body, indent + 1), ind(indent))
+    format!("{} \"{}\"{} {}", kw, name, params_str, fmt_braced_body(body, indent))
 }
 
 // ------------------------------------------------------------------ //
