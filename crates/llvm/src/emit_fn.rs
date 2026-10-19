@@ -237,6 +237,10 @@ impl<'ctx> FnEmitter<'ctx> {
             }
             Operand::Const(c) => self.emit_const(c),
             Operand::Global(n) => {
+                // `None` is a null pointer, and `match` on an Option compares with `__NULL`.
+                if n == "None" || n == "__NULL" {
+                    return ("ptr".into(), "null".into());
+                }
                 // A variant's tag, as `match` compares it: `__tag__Type__Variant`.
                 if let Some(rest) = n.strip_prefix("__tag__") {
                     let tag = rest.split_once("__")
@@ -293,6 +297,10 @@ impl<'ctx> FnEmitter<'ctx> {
                 self.w(&format!("  store {lty} {val}, ptr {dest_ptr}"));
             }
 
+            Rvalue::BinOp { op: BinOp::NullCoalesce, lhs, rhs } => {
+                self.emit_coalesce(&lhs, &rhs, &dest_lty, &dest_ptr);
+            }
+
             Rvalue::BinOp { op, lhs, rhs } => {
                 let (lty, lv) = self.load(&lhs);
                 let (_, rv)   = self.load(&rhs);
@@ -342,12 +350,39 @@ impl<'ctx> FnEmitter<'ctx> {
 
             // Concurrency (`spawn`/`await`) not supported by the experimental
             // LLVM backend — emit null placeholders (the C backend is canonical).
+            // `Some(v)`: heap-box the payload in an 8-byte slot (`None` is null).
+            Rvalue::BoxSome { value, .. } => {
+                let (vty, vval) = self.load(&value);
+                self.ctx.declare_extern(crate::rt::ALLOC.into(), "ptr".into(), vec!["i64".into()]);
+                let b = self.fresh();
+                self.w(&format!("  %v{b} = call ptr @{}(i64 8)", crate::rt::ALLOC));
+                self.w(&format!("  store {vty} {vval}, ptr %v{b}"));
+                self.store_converted("ptr", &format!("%v{b}"), &dest_lty, &dest_ptr);
+            }
+
+            // Read the payload out of a non-null Option box, as the destination's type.
+            Rvalue::UnboxSome { opt, .. } => {
+                let (oty, oval) = self.load(&opt);
+                let p = self.as_ptr(&oty, &oval);
+                let v = self.fresh();
+                self.w(&format!("  %v{v} = load {dest_lty}, ptr {p}"));
+                self.w(&format!("  store {dest_lty} %v{v}, ptr {dest_ptr}"));
+            }
+
+            // Pack into / recover from a pointer-sized generic slot, bit-preserving.
+            Rvalue::Box { value, .. } => {
+                let (vty, vval) = self.load(&value);
+                self.store_converted(&vty, &vval, &dest_lty, &dest_ptr);
+            }
+            Rvalue::Unbox { value, .. } => {
+                let (vty, vval) = self.load(&value);
+                self.store_converted(&vty, &vval, &dest_lty, &dest_ptr);
+            }
+
             Rvalue::Spawn { .. } | Rvalue::Join { .. } | Rvalue::JoinTimed { .. }
             | Rvalue::JoinTimedCancel { .. }
-            | Rvalue::BoxSome { .. } | Rvalue::UnboxSome { .. }
-            | Rvalue::Box { .. } | Rvalue::Unbox { .. }
             | Rvalue::UnwrapOptStructBox { .. } => {
-                self.unsupported("spawn/await, options and boxed values are not supported by the LLVM backend");
+                self.unsupported("spawn/await and struct-boxed values are not supported by the LLVM backend");
                 let v = self.fresh();
                 self.w(&format!("  %v{v} = inttoptr i64 0 to ptr"));
                 self.w(&format!("  store ptr %v{v}, ptr {dest_ptr}"));
@@ -391,6 +426,10 @@ impl<'ctx> FnEmitter<'ctx> {
                     crate::rt::INT_POW.into(), "i64".into(),
                     vec!["i64".into(), "i64".into()]);
                 (format!("  {name} = call i64 @{}(i64 {lv}, i64 {rv})", crate::rt::INT_POW), "i64")
+            }
+            BinOp::Eq | BinOp::NotEq if lty == "ptr" && (lv == "null" || rv == "null") => {
+                // Is it present? `match` on an Option tests the pointer against null.
+                (format!("  {name} = icmp {} ptr {lv}, {rv}", if matches!(op, BinOp::Eq) { "eq" } else { "ne" }), "i1")
             }
             BinOp::Eq | BinOp::NotEq if lty == "ptr" => {
                 // Comparing two `ptr` values compares addresses, which is wrong
@@ -471,6 +510,21 @@ impl<'ctx> FnEmitter<'ctx> {
             _ => None,
         };
 
+        // `Ok`/`Err` and the two intrinsics `match` on a Result lowers to.
+        if let (Operand::Global(n), None) = (func, &local_sig) {
+            match n.as_str() {
+                "Ok" | "Err" => {
+                    self.emit_result_ctor(n == "Ok", &arg_pairs, dest_lty, dest_ptr);
+                    return;
+                }
+                "__result_is_ok" | "__result_unwrap" => {
+                    self.emit_result_read(n == "__result_is_ok", &arg_pairs, dest_lty, dest_ptr);
+                    return;
+                }
+                _ => {}
+            }
+        }
+
         // A call to a variant's constructor builds a sum-type value.
         if let (Operand::Global(n), None) = (func, &local_sig) {
             if let Some(ty) = self.ctx.variant_enum.get(n).cloned() {
@@ -523,6 +577,122 @@ impl<'ctx> FnEmitter<'ctx> {
         match &local.ty {
             Ty::Named { name, .. } if self.ctx.records.contains_key(name) => Some(name.clone()),
             _ => None,
+        }
+    }
+
+    /// Convert a value between the representations a generic slot can hold: a
+    /// pointer, or an integer, float or bool packed into one. Used where MIR
+    /// treats a payload as a pointer-sized slot (`Box`/`Unbox`, `Ok`/`Err`) and
+    /// where one local's type is a pun for another (`__result_unwrap`'s result).
+    fn convert(&mut self, from: &str, val: &str, to: &str) -> Option<String> {
+        if from == to { return Some(val.to_string()); }
+        let v = self.fresh();
+        let narrow = |t: &str| matches!(t, "i1" | "i8" | "i16" | "i32");
+        match (from, to) {
+            ("ptr", "i64") => self.w(&format!("  %v{v} = ptrtoint ptr {val} to i64")),
+            ("ptr", "double") => {
+                self.w(&format!("  %v{v} = ptrtoint ptr {val} to i64"));
+                let w = self.fresh();
+                self.w(&format!("  %v{w} = bitcast i64 %v{v} to double"));
+                return Some(format!("%v{w}"));
+            }
+            ("ptr", t) if narrow(t) => {
+                self.w(&format!("  %v{v} = ptrtoint ptr {val} to i64"));
+                let w = self.fresh();
+                self.w(&format!("  %v{w} = trunc i64 %v{v} to {t}"));
+                return Some(format!("%v{w}"));
+            }
+            ("i64", "ptr") => self.w(&format!("  %v{v} = inttoptr i64 {val} to ptr")),
+            ("double", "ptr") => {
+                self.w(&format!("  %v{v} = bitcast double {val} to i64"));
+                let w = self.fresh();
+                self.w(&format!("  %v{w} = inttoptr i64 %v{v} to ptr"));
+                return Some(format!("%v{w}"));
+            }
+            (f, "ptr") if narrow(f) => {
+                self.w(&format!("  %v{v} = zext {f} {val} to i64"));
+                let w = self.fresh();
+                self.w(&format!("  %v{w} = inttoptr i64 %v{v} to ptr"));
+                return Some(format!("%v{w}"));
+            }
+            _ => {
+                self.unsupported(&format!("cannot move a `{from}` value through a `{to}` slot in the LLVM backend"));
+                return None;
+            }
+        }
+        Some(format!("%v{v}"))
+    }
+
+    /// `val` as a pointer (a `ptr` already, or an integer standing in for one).
+    fn as_ptr(&mut self, ty: &str, val: &str) -> String {
+        self.convert(ty, val, "ptr").unwrap_or_else(|| "null".into())
+    }
+
+    /// Store `val` (of type `from`) into a local of type `to`, converting if they differ.
+    fn store_converted(&mut self, from: &str, val: &str, to: &str, dest_ptr: &str) {
+        if let Some(v) = self.convert(from, val, to) {
+            self.w(&format!("  store {to} {v}, ptr {dest_ptr}"));
+        }
+    }
+
+    /// `a ?? b`: if the Option `a` is present, its payload (loaded as the
+    /// destination's type); otherwise `b`. Mirrors the C backend.
+    fn emit_coalesce(&mut self, lhs: &Operand, rhs: &Operand, dest_lty: &str, dest_ptr: &str) {
+        let (lty, lv) = self.load(lhs);
+        let (rty, rv) = self.load(rhs);
+        let opt = self.as_ptr(&lty, &lv);
+        let Some(dflt) = self.convert(&rty, &rv, dest_lty) else { return };
+        let n = self.fresh();
+        self.w(&format!("  %v{n} = icmp eq ptr {opt}, null"));
+        self.w(&format!("  br i1 %v{n}, label %nc.none{n}, label %nc.some{n}"));
+        self.w(&format!("nc.some{n}:"));
+        self.w(&format!("  %v{n}.payload = load {dest_lty}, ptr {opt}"));
+        self.w(&format!("  br label %nc.end{n}"));
+        self.w(&format!("nc.none{n}:"));
+        self.w(&format!("  br label %nc.end{n}"));
+        self.w(&format!("nc.end{n}:"));
+        self.w(&format!("  %v{n}.r = phi {dest_lty} [ %v{n}.payload, %nc.some{n} ], [ {dflt}, %nc.none{n} ]"));
+        self.w(&format!("  store {dest_lty} %v{n}.r, ptr {dest_ptr}"));
+    }
+
+    /// `Ok(x)` / `Err(x)`: a 16-byte block, `is_ok` in slot 0 and the
+    /// pointer-sized payload in slot 1 (the C backend's `certo_result_t`).
+    fn emit_result_ctor(&mut self, is_ok: bool, args: &[(String, String)], dest_lty: &str, dest_ptr: &str) {
+        let name = if is_ok { "Ok" } else { "Err" };
+        let Some((aty, aval)) = args.first().filter(|_| args.len() == 1) else {
+            self.unsupported(&format!("`{name}` called with {} argument(s), it takes one", args.len()));
+            return;
+        };
+        let Some(payload) = self.convert(aty, aval, "ptr") else { return };
+        self.ctx.declare_extern(crate::rt::ALLOC.into(), "ptr".into(), vec!["i64".into()]);
+        let b = self.fresh();
+        self.w(&format!("  %v{b} = call ptr @{}(i64 16)", crate::rt::ALLOC));
+        self.w(&format!("  store i64 {}, ptr %v{b}", if is_ok { 1 } else { 0 }));
+        let g = self.fresh();
+        self.w(&format!("  %v{g} = getelementptr i8, ptr %v{b}, i64 8"));
+        self.w(&format!("  store ptr {payload}, ptr %v{g}"));
+        self.store_converted("ptr", &format!("%v{b}"), dest_lty, dest_ptr);
+    }
+
+    /// `__result_is_ok(r)` (slot 0 != 0) and `__result_unwrap(r)` (slot 1).
+    fn emit_result_read(&mut self, is_ok: bool, args: &[(String, String)], dest_lty: &str, dest_ptr: &str) {
+        let Some((rty, rval)) = args.first().cloned() else {
+            self.unsupported("a Result read with no argument");
+            return;
+        };
+        let r = self.as_ptr(&rty, &rval);
+        if is_ok {
+            let t = self.fresh();
+            self.w(&format!("  %v{t} = load i64, ptr {r}"));
+            let c = self.fresh();
+            self.w(&format!("  %v{c} = icmp ne i64 %v{t}, 0"));
+            self.store_converted("i1", &format!("%v{c}"), dest_lty, dest_ptr);
+        } else {
+            let g = self.fresh();
+            self.w(&format!("  %v{g} = getelementptr i8, ptr {r}, i64 8"));
+            let p = self.fresh();
+            self.w(&format!("  %v{p} = load ptr, ptr %v{g}"));
+            self.store_converted("ptr", &format!("%v{p}"), dest_lty, dest_ptr);
         }
     }
 

@@ -232,3 +232,68 @@ fn main(): Unit [io] = {
         assert_eq!(llvm, c_out, "the LLVM and C backends disagree");
     }
 }
+
+#[test]
+fn option_result_and_coalesce_build_run_and_match_the_c_backend() {
+    if !clang_available() { return; }
+    let dir = tempfile::tempdir().unwrap();
+    // Options and Results over Int, Text, Float, Bool and a record, `match` on
+    // both, and `??` — payloads of every width go through the same 8-byte slot.
+    let src = r#"module O
+import Stdlib.Core
+
+type Item = { name: Text, qty: Int }
+
+fn find(n: Int): Int? = if n > 0 then Some(n * 10) else None
+fn pick(o: Int?): Int = match o {
+    Some(v) => v
+    None => 0
+}
+fn dflt(o: Int?): Int = o ?? 7
+fn label(o: Text?): Text = o ?? "none"
+fn scale(o: Float?): Float = o ?? 1.5
+fn flag(o: Bool?): Bool = o ?? false
+
+fn half(n: Int): Result<Int, Text> = if n % 2 == 0 then Ok(n / 2) else Err("odd")
+fn show(r: Result<Int, Text>): Text = match r {
+    Ok(v) => "ok " ++ intToText(v)
+    Err(e) => "err " ++ e
+}
+fn find_item(n: Int): Item? = if n > 0 then Some(Item { name: "widget", qty: n }) else None
+fn qty_of(o: Item?): Int = match o {
+    Some(i) => i.qty
+    None => -1
+}
+
+fn main(): Unit [io] = {
+    println(intToText(pick(find(4))))
+    println(intToText(pick(find(0))))
+    println(intToText(dflt(find(2))))
+    println(intToText(dflt(None)))
+    println(label(Some("x")))
+    println(label(None))
+    println(floatToText(scale(Some(2.25))))
+    println(floatToText(scale(None)))
+    println(boolToText(flag(Some(true))))
+    println(boolToText(flag(None)))
+    println(show(half(10)))
+    println(show(half(7)))
+    println(intToText(qty_of(find_item(3))))
+    println(intToText(qty_of(find_item(0))))
+}
+"#;
+    let expected = "40\n0\n20\n7\nx\nnone\n2.25\n1.5\ntrue\nfalse\nok 5\nerr odd\n3\n-1\n";
+    let llvm = build_and_run(dir.path(), src, "opt_llvm");
+    assert_eq!(llvm, expected);
+
+    let certo = Path::new(env!("CARGO_BIN_EXE_certo-llvm")).with_file_name(if cfg!(windows) { "certo.exe" } else { "certo" });
+    if certo.exists() {
+        let c_file = dir.path().join("opt_c.cto");
+        fs::write(&c_file, src).unwrap();
+        let c_exe = dir.path().join(if cfg!(windows) { "opt_c.exe" } else { "opt_c" });
+        let build = Command::new(&certo).arg("build").arg(&c_file).arg("-o").arg(&c_exe).output().unwrap();
+        assert!(build.status.success(), "{}", String::from_utf8_lossy(&build.stderr));
+        let c_out = String::from_utf8_lossy(&Command::new(&c_exe).output().unwrap().stdout).replace("\r\n", "\n");
+        assert_eq!(llvm, c_out, "the LLVM and C backends disagree");
+    }
+}

@@ -569,14 +569,12 @@ fn run(): Unit [io] = println(getEnv(\"HOME\") ?? \"none\")
     }
 
     #[test]
-    fn coalesce_lists_and_text_equality_are_reported() {
+    fn lists_and_text_equality_are_reported() {
         let err = emit_err("module T
-fn a(): Int = 1 ?? 2
 fn b(): Int = { val xs = [1, 2, 3]
 1 }
 fn c(): Bool = \"a\" == \"b\"
 ");
-        assert!(err.contains("`??`"), "{err}");
         assert!(err.contains("list or tuple"), "{err}");
         assert!(err.contains("Text.eq"), "{err}");
     }
@@ -624,7 +622,8 @@ import Stdlib.Core
 fn run(): Text = getEnv(\"HOME\") ?? \"none\"
 "), &opts).unwrap();
         assert!(ir.contains("declare ptr @certo_getEnv("), "{ir}");
-        assert!(ir.contains("@certo_coalesce"), "{ir}");
+        assert!(!ir.contains("@certo_coalesce"), "`??` is compiled inline now
+{ir}");
     }
 
     #[test]
@@ -711,5 +710,91 @@ fn f(m: Maybe<Int>): Int = match m {
 }
 ");
         assert!(err.contains("type parameters"), "{err}");
+    }
+
+    // ------------------------------------------------------------------ //
+    // Option and Result. Option is a nullable pointer to a boxed payload
+    // (`None` is null); Result is a block {is_ok, payload}; `??` is inline.
+    // ------------------------------------------------------------------ //
+
+    #[test]
+    fn some_boxes_the_payload_and_none_is_null() {
+        let ir = ir_of("module T
+fn find(n: Int): Int? = if n > 0 then Some(n) else None
+");
+        assert!(ir.contains("call ptr @certo_rt_alloc(i64 8)"), "Some allocates an 8-byte slot
+{ir}");
+        assert!(ir.contains("store ptr null") || ir.contains("ptr null"), "None is the null pointer
+{ir}");
+    }
+
+    #[test]
+    fn match_on_an_option_tests_the_pointer_against_null() {
+        let ir = ir_of("module T
+fn pick(o: Int?): Int = match o {
+ Some(v) => v
+ None => 0
+}
+");
+        assert!(ir.contains("icmp ne ptr %v") && ir.contains(", null"), "present means non-null
+{ir}");
+        assert!(ir.contains("load i64, ptr %v"), "the payload is read back as an Int
+{ir}");
+    }
+
+    #[test]
+    fn coalesce_branches_on_null_and_loads_the_payload_as_the_result_type() {
+        let ir = ir_of("module T
+fn dflt(o: Int?): Int = o ?? 7
+fn scale(o: Float?): Float = o ?? 1.5
+");
+        assert!(ir.contains("icmp eq ptr %v") && ir.contains("br i1"), "{ir}");
+        assert!(ir.contains(".payload = load i64, ptr %v"), "an Int option loads an i64
+{ir}");
+        assert!(ir.contains(".payload = load double, ptr %v"), "a Float option loads a double
+{ir}");
+        assert!(ir.contains("phi i64 [") && ir.contains("phi double ["), "the two paths are joined with a phi
+{ir}");
+        assert!(!ir.contains("@certo_coalesce"), "no external helper
+{ir}");
+    }
+
+    #[test]
+    fn ok_and_err_build_a_two_slot_block_with_the_flag_first() {
+        let ir = ir_of("module T
+fn half(n: Int): Result<Int, Text> = if n % 2 == 0 then Ok(n / 2) else Err(\"odd\")
+");
+        assert!(ir.matches("call ptr @certo_rt_alloc(i64 16)").count() == 2, "one block per constructor
+{ir}");
+        assert!(ir.contains("store i64 1, ptr %v"), "Ok sets the flag
+{ir}");
+        assert!(ir.contains("store i64 0, ptr %v"), "Err clears it
+{ir}");
+    }
+
+    #[test]
+    fn match_on_a_result_reads_the_flag_and_the_payload_slot() {
+        let ir = ir_of("module T
+import Stdlib.Core
+fn show(r: Result<Int, Text>): Text = match r {
+ Ok(v) => intToText(v)
+ Err(e) => e
+}
+");
+        assert!(ir.contains("icmp ne i64 %v"), "is_ok is slot 0 != 0
+{ir}");
+        assert!(ir.contains("getelementptr i8, ptr %v") && ir.contains(", i64 8"), "the payload is slot 1
+{ir}");
+        assert!(!ir.contains("__result"), "the intrinsics are compiled inline
+{ir}");
+    }
+
+    #[test]
+    fn other_option_and_result_helpers_are_still_reported() {
+        let err = emit_err("module T
+import Stdlib.Core
+fn f(o: Int?): Int = Option.unwrapOr(o, 0)
+");
+        assert!(err.contains("call to `Option.unwrapOr` is not supported"), "{err}");
     }
 }

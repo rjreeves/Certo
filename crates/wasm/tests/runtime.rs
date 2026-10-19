@@ -65,3 +65,14 @@ fn enums_and_match_build_for_the_browser() {
     let Some(wasm) = build_browser(src) else { return };
     assert!(contains(&wasm, "certo_write"));
 }
+
+#[test]
+fn options_results_and_coalesce_build_for_the_browser() {
+    let src = "module O\nimport Stdlib.Core\n\
+               fn find(n: Int): Int? = if n > 0 then Some(n) else None\n\
+               fn half(n: Int): Result<Int, Text> = if n % 2 == 0 then Ok(n / 2) else Err(\"odd\")\n\
+               fn show(r: Result<Int, Text>): Text = match r {\n Ok(v) => intToText(v)\n Err(e) => e\n}\n\
+               pub fn main(): Unit [io] = {\n    println(intToText(find(3) ?? 0))\n    println(show(half(8)))\n}\n";
+    let Some(wasm) = build_browser(src) else { return };
+    assert!(contains(&wasm, "certo_write"));
+}
