@@ -563,6 +563,43 @@ List.map(xs, (x) => {
 List.map(xs, (x) => if x > 0 then x * 2 else 0)
 ```
 
+### E0224  Module-level `var` is not supported
+
+```
+error[E0224]: module-level `var counter` is not supported
+  --> src/main.cto:3:1
+   |
+ 3 | var counter = 0
+   | ^^^^^^^^^^^^^^^ the compiler does not generate mutable globals
+   |
+   = note: use a module-level `val` for a constant, or keep the state in a `var` inside a function
+```
+
+**Cause:** A `var` declared outside any function. The parser and type checker
+accept it, but no later stage generates a mutable global, so a program using one
+used to fail in the C compiler with `use of undeclared identifier 'certo_counter'`
+and no pointer back to the Certo source (BACKLOG item 433). Mutable globals are
+not supported yet — they need a rule for tasks that share one.
+
+**Fix:** Use a module-level `val` for a constant, or keep the state in a `var`
+inside a function and pass it where it is needed:
+
+```certo
+// Rejected:
+var counter = 0
+fn bump(): Int = { counter = counter + 1  counter }
+
+// Instead:
+fn bump(n: Int): Int = n + 1
+fn main(): Unit [io] = {
+    var counter = 0
+    counter = bump(counter)
+    println(intToText(counter))
+}
+```
+
+---
+
 ### E0223  Or-pattern alternatives bind different names
 
 ```
