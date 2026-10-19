@@ -32,7 +32,7 @@ use certo_mir::lower_fn;
 
 use crate::ctx::ModuleCtx;
 use crate::emit_fn::emit_fn;
-use crate::ty::llvm_escape;
+use crate::ty::{ast_ret_ty_to_llvm, ast_ty_to_llvm, llvm_escape, llvm_fn_name};
 
 // ------------------------------------------------------------------ //
 // Options
@@ -74,6 +74,21 @@ pub fn emit_module(module: &Module, opts: &LlvmOptions) -> Result<String, String
     let hir_fn_map: std::collections::HashMap<&str, &certo_hir::HirFn> = hir.items.iter()
         .filter_map(|item| if let HirItem::Fn(f) = item { Some((f.name.as_str(), f)) } else { None })
         .collect();
+
+    // Record every function we are about to define *before* emitting any
+    // body, so a call to a function defined later in the file (or to itself)
+    // is recognised as a local call rather than declared as an external one.
+    for sdecl in &module.decls {
+        if let Decl::Fn(ast_fn) = &sdecl.node {
+            if hir_fn_map.contains_key(ast_fn.name.node.as_str()) {
+                ctx.register_fn(
+                    llvm_fn_name(&ast_fn.name.node),
+                    ast_ret_ty_to_llvm(ast_fn.ret_ty.as_ref().map(|s| &s.node)),
+                    ast_fn.params.iter().map(|p| ast_ty_to_llvm(&p.ty.node)).collect(),
+                );
+            }
+        }
+    }
 
     // ── MIR lowering + IR emission per function ───────────────────────
     // Iterate AST decls (not HIR) to access declared param/ret types.
@@ -245,5 +260,64 @@ mod tests {
         let m   = module_from(src);
         let ir  = emit_module(&m, &LlvmOptions::default()).unwrap();
         assert!(ir.contains("declare i64 @certo_pow(i64, i64)"), "missing pow declare");
+    }
+
+    // ------------------------------------------------------------------ //
+    // Calls between functions defined in the same module (BACKLOG item 429).
+    // Before: every callee was `declare`d extern *and* defined, which clang
+    // rejects ("invalid redefinition of function"), and the call's result was
+    // typed `ptr` rather than the callee's real return type.
+    // ------------------------------------------------------------------ //
+
+    fn ir_of(src: &str) -> String {
+        emit_module(&module_from(src), &LlvmOptions::default()).unwrap()
+    }
+
+    #[test]
+    fn call_to_a_user_fn_is_not_declared_extern() {
+        let ir = ir_of("module T
+fn add(a: Int, b: Int): Int = a + b
+fn run(): Int = add(1, 2)
+");
+        assert!(ir.contains("define i64 @certo_add("), "missing define
+{ir}");
+        assert!(!ir.contains("declare"), "a function the module defines must not also be declared
+{ir}");
+        assert!(ir.contains("call i64 @certo_add(i64 1, i64 2)"), "call must use the callee's i64 return type
+{ir}");
+    }
+
+    #[test]
+    fn forward_reference_and_recursion_are_local_calls() {
+        let ir = ir_of(
+            "module T
+fn main(): Int = fact(4)
+fn fact(n: Int): Int = if n <= 1 then 1 else n * fact(n - 1)
+");
+        assert!(!ir.contains("declare"), "callee defined after its caller / itself must not be declared
+{ir}");
+        assert_eq!(ir.matches("call i64 @certo_fact(").count(), 2, "one call from main, one recursive
+{ir}");
+    }
+
+    #[test]
+    fn unit_returning_user_fn_is_called_as_void() {
+        let ir = ir_of("module T
+fn noop(x: Int): Unit = ()
+fn run(): Unit = noop(1)
+");
+        assert!(ir.contains("define void @certo_noop("), "{ir}");
+        assert!(ir.contains("call void @certo_noop(i64 1)"), "{ir}");
+        assert!(!ir.contains("declare"), "{ir}");
+    }
+
+    #[test]
+    fn stdlib_calls_are_still_declared_extern() {
+        // Not defined in this module, so it keeps the old behaviour.
+        let ir = ir_of("module T
+import Stdlib.Core
+fn run(): Text = intToText(5)
+");
+        assert!(ir.contains("declare ptr @certo_intToText("), "{ir}");
     }
 }
