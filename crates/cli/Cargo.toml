@@ -1,6 +1,6 @@
 [package]
 name    = "certo"
-version = "1.0.74"
+version = "1.0.76"
 edition = "2024"
 license = "MIT"
 
