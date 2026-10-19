@@ -17,8 +17,9 @@
 #include <stdlib.h>
 #include <string.h>
 
-static void *certo_rt_alloc(size_t n) {
-    void *p = malloc(n);
+/* Also called by compiled code to allocate a record's block. */
+void *certo_rt_alloc(int64_t n) {
+    void *p = malloc((size_t)n);
     if (!p) {
         fputs("certo: out of memory\n", stderr);
         exit(1);

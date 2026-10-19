@@ -93,6 +93,24 @@ pub fn emit_module(module: &Module, opts: &LlvmOptions) -> Result<String, String
         .filter_map(|item| if let HirItem::Fn(f) = item { Some((f.name.as_str(), f)) } else { None })
         .collect();
 
+    // Layout of every record type, in declared field order. The field types
+    // come from HIR (already resolved); the names from the declaration.
+    for sdecl in &module.decls {
+        if let Decl::Type(t) = &sdecl.node {
+            if let certo_ast::decl::TypeBody::Record(rec) = &t.body {
+                if let Some(tys) = hir.record_field_types.get(&t.name.node) {
+                    if tys.len() == rec.fields.len() {
+                        ctx.records.insert(t.name.node.clone(), crate::ctx::RecordLayout {
+                            fields: rec.fields.iter().zip(tys)
+                                .map(|(f, ty)| (f.name.node.clone(), crate::ty::llvm_ty(ty)))
+                                .collect(),
+                        });
+                    }
+                }
+            }
+        }
+    }
+
     // Record every function we are about to define *before* emitting any
     // body, so a call to a function defined later in the file (or to itself)
     // is recognised as a local call rather than declared as an external one.
@@ -512,29 +530,51 @@ fn run(): Unit [io] = println(getEnv(\"HOME\") ?? \"none\")
     }
 
     #[test]
-    fn coalesce_records_and_text_equality_are_reported() {
+    fn coalesce_lists_and_text_equality_are_reported() {
         let err = emit_err("module T
-type P = { x: Int }
 fn a(): Int = 1 ?? 2
-fn b(): Int = { val p = P { x: 1 }
-p.x }
+fn b(): Int = { val xs = [1, 2, 3]
+1 }
 fn c(): Bool = \"a\" == \"b\"
 ");
         assert!(err.contains("`??`"), "{err}");
-        assert!(err.contains("record"), "{err}");
+        assert!(err.contains("list, tuple or enum"), "{err}");
         assert!(err.contains("Text.eq"), "{err}");
     }
 
-    #[test]
-    fn a_supported_call_with_arguments_of_unknown_type_is_an_error() {
-        // `p.x` can't be typed here, so `intToText(p.x)` would be a ptr
-        // passed where the shim expects an i64.
-        let err = emit_err("module T
+    // ------------------------------------------------------------------ //
+    // Records: a heap block with one 8-byte slot per field, in declared order.
+    // ------------------------------------------------------------------ //
+
+    const POINT: &str = "module T
 import Stdlib.Core
-type P = { x: Int }
-fn f(p: P): Text = intToText(p.x)
-");
-        assert!(err.contains("call to `intToText` has arguments (ptr) where (i64) are needed"), "{err}");
+type Point = { x: Int, y: Int, label: Text }
+";
+
+    #[test]
+    fn a_record_literal_allocates_a_block_and_stores_each_field() {
+        let ir = ir_of(&format!("{POINT}fn mk(a: Int): Point = Point {{ x: a, y: 2, label: \"p\" }}\n"));
+        assert!(ir.contains("declare ptr @certo_rt_alloc(i64)"), "{ir}");
+        assert!(ir.contains("call ptr @certo_rt_alloc(i64 24)"), "three 8-byte slots\n{ir}");
+        assert!(ir.contains("getelementptr i8, ptr %v0, i64 0"), "{ir}");
+        assert!(ir.contains("getelementptr i8, ptr %v") && ir.contains("i64 16"), "the third slot\n{ir}");
+    }
+
+    #[test]
+    fn field_access_loads_from_the_fields_declared_slot() {
+        let ir = ir_of(&format!("{POINT}fn gety(p: Point): Int = p.y\nfn getl(p: Point): Text = p.label\n"));
+        assert!(ir.contains("i64 8") && ir.contains("load i64, ptr %v"), "y is slot 1, an i64\n{ir}");
+        assert!(ir.contains("i64 16") && ir.contains("load ptr, ptr %v"), "label is slot 2, a ptr\n{ir}");
+    }
+
+    #[test]
+    fn a_literal_in_a_different_field_order_uses_the_declared_slots() {
+        // Same layout whichever order the literal lists its fields in, or a
+        // field read would pick up the wrong slot.
+        let ir = ir_of(&format!("{POINT}fn mk(): Point = Point {{ label: \"p\", y: 2, x: 1 }}\n"));
+        assert!(ir.contains("i64 0\n  store i64 1"), "x (declared first) must be stored at slot 0\n{ir}");
+        assert!(ir.contains("i64 8\n  store i64 2"), "y must be stored at slot 1\n{ir}");
+        assert!(ir.contains("i64 16\n  store ptr "), "label (listed first in the literal) must be stored at slot 2\n{ir}");
     }
 
     #[test]

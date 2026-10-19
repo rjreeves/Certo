@@ -45,3 +45,14 @@ fn a_numeric_only_module_gets_no_runtime_and_no_imports() {
     assert!(!contains(&wasm, "certo_write"), "no shim should be linked into a numeric-only module");
     assert!(contains(&wasm, "certo_add"));
 }
+
+#[test]
+fn records_build_for_the_browser() {
+    // Record blocks come from the shim's allocator, which has no libc to lean on.
+    let src = "module R\nimport Stdlib.Core\ntype P = { x: Int, label: Text }\n\
+               fn mk(a: Int): P = P { label: \"p\", x: a }\n\
+               pub fn main(): Unit [io] = {\n    val p = mk(5)\n    println(p.label ++ intToText(p.x))\n}\n";
+    let Some(wasm) = build_browser(src) else { return };
+    assert!(contains(&wasm, "certo_write"));
+    assert!(contains(&wasm, "certo_rt_alloc"), "the allocator is exported from the shim");
+}

@@ -23,7 +23,9 @@ extern unsigned char __heap_base;
 static unsigned char *heap_ptr;
 static unsigned char *heap_end;
 
-static void *certo_rt_alloc(size_t n) {
+/* Also called by compiled code to allocate a record's block. */
+void *certo_rt_alloc(int64_t size) {
+    size_t n = (size_t)size;
     if (!heap_ptr) {
         heap_ptr = &__heap_base;
         heap_end = (unsigned char *)(__builtin_wasm_memory_size(0) * 65536UL);

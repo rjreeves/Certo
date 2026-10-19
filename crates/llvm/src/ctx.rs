@@ -13,6 +13,25 @@ pub struct FnSig {
     pub params: Vec<String>,
 }
 
+/// How a record type is laid out in memory: a heap block with one 8-byte slot
+/// per field, in declared order (so a literal that lists its fields in a
+/// different order still agrees with every field access).
+#[derive(Debug, Clone)]
+pub struct RecordLayout {
+    /// `(field name, LLVM type)` in declared order.
+    pub fields: Vec<(String, String)>,
+}
+
+impl RecordLayout {
+    /// Byte size of the block.
+    pub fn size(&self) -> usize { self.fields.len().max(1) * 8 }
+
+    /// Slot index and LLVM type of a field.
+    pub fn field(&self, name: &str) -> Option<(usize, &str)> {
+        self.fields.iter().position(|(n, _)| n == name).map(|i| (i, self.fields[i].1.as_str()))
+    }
+}
+
 /// Module-level accumulated state: string literals and external declarations.
 #[derive(Debug, Default)]
 pub struct ModuleCtx {
@@ -22,6 +41,9 @@ pub struct ModuleCtx {
     /// extern (LLVM rejects a `declare` plus a `define` of the same symbol)
     /// and take their return type from here, not from the call site.
     pub fn_sigs: HashMap<String, FnSig>,
+
+    /// Layout of every record type the module declares, by type name.
+    pub records: HashMap<String, RecordLayout>,
 
     /// String contents (raw Certo string, without null terminator).
     /// Index into this vec corresponds to the `@.str.N` global.

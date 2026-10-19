@@ -19,10 +19,12 @@ use std::collections::HashMap;
 
 use certo_ast::decl::FnDecl;
 use certo_hir::{BinOp, UnOp};
-use certo_mir::{MirFn, MirLocal, MirStmt, Rvalue, Operand, MirConst, Terminator, SwitchTarget};
+use certo_mir::{MirFn, MirLocal, MirStmt, Rvalue, Operand, MirConst, Terminator, SwitchTarget, AggregateKind};
+
+use certo_typeck::Ty;
 
 use crate::ctx::{FnSig, ModuleCtx};
-use crate::ty::{ast_ty_to_llvm, ast_ret_ty_to_llvm, llvm_fn_name};
+use crate::ty::{ast_ty_to_llvm, ast_ret_ty_to_llvm, llvm_fn_name, llvm_ty};
 
 // ------------------------------------------------------------------ //
 // Public entry point
@@ -63,6 +65,14 @@ fn compute_local_types(
         let llty = ast_ty_to_llvm(&ast_param.ty.node);
         if let Some(ml) = mir_fn.locals.iter().find(|l| l.name == ast_param.name.node) {
             map.insert(ml.id, llty);
+        }
+    }
+
+    // MIR already knows each local's type (records, Text, Int, ...); use it
+    // wherever it is concrete. The propagation below only fills the rest.
+    for local in &mir_fn.locals {
+        if !matches!(local.ty, Ty::Error | Ty::Var(_)) {
+            map.insert(local.id, llvm_ty(&local.ty));
         }
     }
 
@@ -295,17 +305,16 @@ impl<'ctx> FnEmitter<'ctx> {
                 self.emit_call_store(&func, &args, dest, &dest_lty, &dest_ptr);
             }
 
-            Rvalue::Field { .. } => {
-                // Field access on structs isn't supported: an error, or (with
-                // `allow_unresolved`) a null placeholder.
-                self.unsupported("field access on a record is not supported by the LLVM backend");
-                let v = self.fresh();
-                self.w(&format!("  %v{v} = inttoptr i64 0 to ptr"));
-                self.w(&format!("  store ptr %v{v}, ptr {dest_ptr}"));
+            Rvalue::Field { base, field } => {
+                self.emit_field(&base, &field, &dest_lty, &dest_ptr);
+            }
+
+            Rvalue::Aggregate(AggregateKind::Record(names), ops) => {
+                self.emit_record(&names, &ops, dest, &dest_ptr);
             }
 
             Rvalue::Aggregate(_, _) => {
-                self.unsupported("constructing a record, list, tuple or enum value is not supported by the LLVM backend");
+                self.unsupported("constructing a list, tuple or enum value is not supported by the LLVM backend (records are)");
                 let v = self.fresh();
                 self.w(&format!("  %v{v} = inttoptr i64 0 to ptr"));
                 self.w(&format!("  store ptr %v{v}, ptr {dest_ptr}"));
@@ -478,6 +487,63 @@ impl<'ctx> FnEmitter<'ctx> {
             self.w(&format!("  %v{v} = call {dest_lty} {callee}({arg_str})"));
             self.w(&format!("  store {dest_lty} %v{v}, ptr {dest_ptr}"));
         }
+    }
+
+    /// The record type a local holds, if its MIR type is a declared record.
+    fn record_of_local(&self, id: MirLocal) -> Option<String> {
+        let local = self.mir_fn.locals.iter().find(|l| l.id == id)?;
+        match &local.ty {
+            Ty::Named { name, .. } if self.ctx.records.contains_key(name) => Some(name.clone()),
+            _ => None,
+        }
+    }
+
+    /// Build a record: allocate its block, store each operand at the slot of
+    /// the field it names (declared order, whatever order the literal used).
+    fn emit_record(&mut self, names: &[String], ops: &[Operand], dest: MirLocal, dest_ptr: &str) {
+        let Some(rec) = self.record_of_local(dest) else {
+            self.unsupported("constructing a record whose type the backend could not determine");
+            let v = self.fresh();
+            self.w(&format!("  %v{v} = inttoptr i64 0 to ptr"));
+            self.w(&format!("  store ptr %v{v}, ptr {dest_ptr}"));
+            return;
+        };
+        let layout = self.ctx.records[&rec].clone();
+        self.ctx.declare_extern(crate::rt::ALLOC.into(), "ptr".into(), vec!["i64".into()]);
+        let base = self.fresh();
+        self.w(&format!("  %v{base} = call ptr @{}(i64 {})", crate::rt::ALLOC, layout.size()));
+        for (name, op) in names.iter().zip(ops) {
+            let (ty, val) = self.load(op);
+            let Some((slot, _)) = layout.field(name) else {
+                self.unsupported(&format!("record `{rec}` has no field `{name}`"));
+                continue;
+            };
+            let g = self.fresh();
+            self.w(&format!("  %v{g} = getelementptr i8, ptr %v{base}, i64 {}", slot * 8));
+            self.w(&format!("  store {ty} {val}, ptr %v{g}"));
+        }
+        self.w(&format!("  store ptr %v{base}, ptr {dest_ptr}"));
+    }
+
+    /// Read a record field: `base.field` becomes a load from the field's slot.
+    fn emit_field(&mut self, base: &Operand, field: &str, dest_lty: &str, dest_ptr: &str) {
+        let layout = match base {
+            Operand::Local(id) => self.record_of_local(*id).map(|r| self.ctx.records[&r].clone()),
+            _ => None,
+        };
+        let slot = layout.as_ref().and_then(|l| l.field(field)).map(|(i, _)| i);
+        let (Some(slot), (_, bv)) = (slot, self.load(base)) else {
+            self.unsupported(&format!("field access `.{field}` on a value that is not a declared record is not supported by the LLVM backend"));
+            let v = self.fresh();
+            self.w(&format!("  %v{v} = inttoptr i64 0 to ptr"));
+            self.w(&format!("  store ptr %v{v}, ptr {dest_ptr}"));
+            return;
+        };
+        let g = self.fresh();
+        self.w(&format!("  %v{g} = getelementptr i8, ptr {bv}, i64 {}", slot * 8));
+        let v = self.fresh();
+        self.w(&format!("  %v{v} = load {dest_lty}, ptr %v{g}"));
+        self.w(&format!("  store {dest_lty} %v{v}, ptr {dest_ptr}"));
     }
 
     /// Emit a call to a runtime function the shim implements, checking that

@@ -52,6 +52,8 @@ pub const RT_FNS: &[RtFn] = &[
 /// Symbols for operators the emitter lowers to runtime calls itself.
 pub const TEXT_CONCAT: &str = "certo_rt_text_concat";
 pub const INT_POW: &str = "certo_rt_pow";
+/// Allocates a record's heap block: `ptr certo_rt_alloc(i64 bytes)`.
+pub const ALLOC: &str = "certo_rt_alloc";
 
 /// The supported runtime function for a Certo name, if there is one.
 pub fn lookup(certo_name: &str) -> Option<&'static RtFn> {
@@ -131,6 +133,7 @@ mod tests {
         let mut symbols: Vec<&str> = RT_FNS.iter().map(|f| f.symbol).collect();
         symbols.push(TEXT_CONCAT);
         symbols.push(INT_POW);
+        symbols.push(ALLOC);
         for sym in symbols {
             assert!(
                 RUNTIME_SHIM_C.contains(&format!(" {sym}(")) || RUNTIME_SHIM_C.contains(&format!("*{sym}(")),
@@ -144,6 +147,7 @@ mod tests {
         let mut symbols: Vec<&str> = RT_FNS.iter().map(|f| f.symbol).collect();
         symbols.push(TEXT_CONCAT);
         symbols.push(INT_POW);
+        symbols.push(ALLOC);
         for sym in symbols {
             assert!(
                 RUNTIME_SHIM_WASM_BROWSER_C.contains(&format!(" {sym}(")) || RUNTIME_SHIM_WASM_BROWSER_C.contains(&format!("*{sym}(")),

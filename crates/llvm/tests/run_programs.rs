@@ -121,3 +121,45 @@ fn an_unsupported_call_fails_the_build_with_a_clear_error() {
     assert!(err.contains("call to `getEnv` is not supported"), "{err}");
     assert!(!dir.path().join("u.ll").exists(), "no IR should be written when emission fails");
 }
+
+#[test]
+fn records_build_run_and_match_the_c_backend() {
+    if !clang_available() { return; }
+    let dir = tempfile::tempdir().unwrap();
+    // Fields listed out of declared order on purpose, plus a nested record.
+    let src = r#"module R
+import Stdlib.Core
+
+type Point = { x: Int, y: Int, label: Text, scale: Float, active: Bool }
+type Line = { from: Point, to: Point }
+
+fn mk(a: Int, b: Int): Point = Point { label: "pt", y: b, x: a, active: true, scale: 1.5 }
+fn sumxy(p: Point): Int = p.x + p.y
+fn show(p: Point): Text = p.label ++ "(" ++ intToText(p.x) ++ "," ++ intToText(p.y) ++ ")"
+
+fn main(): Unit [io] = {
+    val p = mk(3, 4)
+    println(show(p))
+    println(intToText(sumxy(p)))
+    println(floatToText(p.scale * 2.0))
+    println(boolToText(p.active))
+    val l = Line { from: p, to: mk(10, 20) }
+    println(show(l.to))
+    println(intToText(l.from.x + l.to.y))
+}
+"#;
+    let expected = "pt(3,4)\n7\n3\ntrue\npt(10,20)\n23\n";
+    let llvm = build_and_run(dir.path(), src, "rec_llvm");
+    assert_eq!(llvm, expected);
+
+    let certo = Path::new(env!("CARGO_BIN_EXE_certo-llvm")).with_file_name(if cfg!(windows) { "certo.exe" } else { "certo" });
+    if certo.exists() {
+        let c_file = dir.path().join("rec_c.cto");
+        fs::write(&c_file, src).unwrap();
+        let c_exe = dir.path().join(if cfg!(windows) { "rec_c.exe" } else { "rec_c" });
+        let build = Command::new(&certo).arg("build").arg(&c_file).arg("-o").arg(&c_exe).output().unwrap();
+        assert!(build.status.success(), "{}", String::from_utf8_lossy(&build.stderr));
+        let c_out = String::from_utf8_lossy(&Command::new(&c_exe).output().unwrap().stdout).replace("\r\n", "\n");
+        assert_eq!(llvm, c_out, "the LLVM and C backends disagree");
+    }
+}
