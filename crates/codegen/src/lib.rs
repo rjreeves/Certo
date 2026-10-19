@@ -7,7 +7,7 @@ mod span_rewrite;
 pub mod expand;
 
 pub use emit_module::{emit_module, CodegenOptions, RUNTIME_HEADER};
-pub use emit_mir::{emit_fn_with_prefix, c_fn_name};
+pub use emit_mir::{emit_fn_with_prefix, c_fn_name, user_fn_c_name};
 pub use ty_to_c::c_ident;
 pub use emit_validator::{emit_validator, build_constraint_bodies, ValidatorOutput};
 pub use emit_statemachine::emit_state_machine;

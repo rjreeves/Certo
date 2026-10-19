@@ -11,5 +11,8 @@ path = "src/main.rs"
 [dependencies]
 certo-ast    = { path = "../ast" }
 certo-parser = { path = "../parser" }
+# Predicts the exported symbol name, including codegen's `certo_user_` rename
+# for functions that would collide with a C-runtime helper.
+certo-codegen = { path = "../codegen" }
 serde        = { version = "1", features = ["derive"] }
 serde_json   = "1"

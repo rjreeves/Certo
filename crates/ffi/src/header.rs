@@ -32,7 +32,7 @@ use std::fmt::Write as _;
 use certo_ast::decl::{Decl, FnDecl};
 use certo_ast::module::Module;
 
-use crate::ty::{ty_to_c, ret_ty_to_c, c_ident, camel_to_snake};
+use crate::ty::{ty_to_c, ret_ty_to_c, c_ident};
 
 /// Generate a C header for all `pub fn` declarations in `module`.
 ///
@@ -89,13 +89,13 @@ fn c_prototype(f: &FnDecl) -> String {
     let ret = ret_ty_to_c(f.ret_ty.as_ref().map(|t| &t.node));
     // `@export("name")` overrides the default `certo_<name>` symbol — matches
     // the exported wrapper codegen emits (see `emit_module.rs`'s `export_wrappers`).
-    // The default case snake_cases the name first (`camel_to_snake`) to match
-    // what codegen's own `c_fn_name` actually exports for a multi-word
-    // camelCase pub fn — an explicit `@export(...)` name is used verbatim,
-    // same as codegen treats it, so no case conversion applies there.
+    // The default case asks codegen itself (`user_fn_c_name`) so it can't drift:
+    // that snake_cases a multi-word camelCase pub fn and renames one that would
+    // collide with a C-runtime helper (`certo_user_identity`) — an explicit
+    // `@export(...)` name is used verbatim, same as codegen treats it.
     let name = match &f.export_name {
         Some(n) => c_ident(n),
-        None    => format!("certo_{}", c_ident(&camel_to_snake(&f.name.node))),
+        None    => certo_codegen::user_fn_c_name(&f.name.node),
     };
     let params: Vec<String> = f.params.iter()
         .map(|p| format!("{} {}", ty_to_c(&p.ty.node), c_ident(&p.name.node)))
@@ -201,6 +201,18 @@ mod tests {
         // own previous, wrong prediction, confirmed live against a real
         // compiled DLL's export table before fixing.
         assert!(h.contains("void certo_do_thing(void);"), "Unit should map to void\n{}", h);
+    }
+
+    #[test]
+    fn pub_fn_named_like_a_runtime_helper_predicts_the_renamed_symbol() {
+        // codegen emits `identity` as `certo_user_identity` because the C
+        // runtime already defines `certo_identity` (confirmed live against a
+        // real --emit-dll build), so the header must point at the former.
+        let m = module("module M\npub fn identity(x: Int): Int = x\npub fn plain(x: Int): Int = x\n");
+        let h = generate_header(&m, None);
+        assert!(h.contains("int64_t certo_user_identity(int64_t x);"), "expected renamed symbol\n{}", h);
+        assert!(!h.contains(" certo_identity("), "must not predict the colliding name\n{}", h);
+        assert!(h.contains("int64_t certo_plain(int64_t x);"), "ordinary names keep the plain prefix\n{}", h);
     }
 
     #[test]

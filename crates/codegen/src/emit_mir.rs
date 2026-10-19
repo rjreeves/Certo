@@ -944,6 +944,20 @@ pub fn plain_c_fn_name(name: &str) -> String {
     format!("certo_{}", snake.replace('.', "_").replace('-', "_"))
 }
 
+/// The C symbol a user-declared (non-extern, non-`@export`) function is
+/// emitted under: `certo_<name>`, or `certo_user_<name>` when that plain name
+/// is one the C runtime already defines. The same rule `emit_module` applies
+/// per module — exposed so tools that predict exported symbols (the FFI
+/// header generator) stay in step with it.
+pub fn user_fn_c_name(name: &str) -> String {
+    let plain = plain_c_fn_name(name);
+    if runtime_c_symbols().contains(&plain) {
+        format!("certo_user_{}", &plain["certo_".len()..])
+    } else {
+        plain
+    }
+}
+
 /// Every `certo_*` function or macro name the C runtime defines at file
 /// scope (the base header plus all stdlib C, DB included). Over-approximating
 /// is harmless — a spurious hit only gives a user function a `certo_user_`

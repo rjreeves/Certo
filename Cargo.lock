@@ -345,6 +345,7 @@ name = "certo-ffi"
 version = "0.1.0"
 dependencies = [
  "certo-ast",
+ "certo-codegen",
  "certo-parser",
  "serde",
  "serde_json",
