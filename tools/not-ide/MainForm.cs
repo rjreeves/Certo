@@ -734,13 +734,14 @@ sealed class MainForm : Form
         Append($"▶ {title}   ({certo})\n", Color.FromArgb(120, 190, 255));
 
         bool keepGoing = _keepBtn.Checked;
-        int ran = 0, failed = 0;
+        int ran = 0, failed = 0, warned = 0;
         foreach (var step in steps)
         {
             if (ct.IsCancellationRequested) break;
             ran++;
             Append($"\n==> certo {string.Join(' ', step.Args.Select(Quote))}\n", Color.FromArgb(86, 156, 214));
             var parser = new DiagnosticParser();
+            int errorsBefore = _errors, warningsBefore = _warnings;
             int code;
             try
             {
@@ -755,7 +756,14 @@ sealed class MainForm : Form
             if (parser.Flush() is { } rest) AddDiagnostic(rest);
 
             if (ct.IsCancellationRequested) { Append("Stopped.\n", Color.Orange); break; }
+            // lint and fmt --check exit 1 when they only found warnings; that isn't a failure.
+            bool warnOnly = code == 1 && _errors == errorsBefore && _warnings > warningsBefore;
             if (code == 0) Append($"✔ {step.Title} — ok\n", Color.FromArgb(106, 190, 106));
+            else if (warnOnly)
+            {
+                warned++;
+                Append($"⚠ {step.Title} — {_warnings - warningsBefore} warning(s)\n", Color.FromArgb(230, 190, 90));
+            }
             else
             {
                 failed++;
@@ -768,9 +776,11 @@ sealed class MainForm : Form
 
         _clock.Stop();
         bool cancelled = ct.IsCancellationRequested;
-        string summary = cancelled ? "Stopped" : failed == 0 ? "Succeeded" : $"Failed ({failed} of {ran} step{(ran == 1 ? "" : "s")})";
+        string summary = cancelled ? "Stopped"
+            : failed > 0 ? $"Failed ({failed} of {ran} step{(ran == 1 ? "" : "s")})"
+            : warned > 0 ? "Finished with warnings" : "Succeeded";
         Append($"\n{summary} — {_errors} error(s), {_warnings} warning(s) in {FormatElapsed(_clock.Elapsed)}\n",
-            failed == 0 && !cancelled ? Color.FromArgb(106, 190, 106) : Color.IndianRed);
+            cancelled || failed > 0 ? Color.IndianRed : warned > 0 ? Color.FromArgb(230, 190, 90) : Color.FromArgb(106, 190, 106));
         SetBusy(false, $"{title}: {summary}");
         _cts.Dispose(); _cts = null;
     }
