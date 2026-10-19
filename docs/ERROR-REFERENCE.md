@@ -563,6 +563,31 @@ List.map(xs, (x) => {
 List.map(xs, (x) => if x > 0 then x * 2 else 0)
 ```
 
+### E0225  Two names compile to the same C name
+
+```
+error[E0225]: `fooBar` and `foo_bar` both compile to the C name `certo_foo_bar`
+  --> src/main.cto:5:4
+   |
+ 5 | fn foo_bar(): Int = 2
+   |    ^^^^^^^ same C name as `fooBar`
+   |
+   = note: names are lower-cased and snake-cased in the generated C (`fooBar` and `foo_bar` are the same) — rename one of them
+```
+
+**Cause:** The C backend names every function, global `val`, sum-type variant and
+impl method `certo_<snake_case_name>`, so two names that differ only in case style
+end up as one C symbol. `val fooBar` and `fn foo_bar` both become `certo_foo_bar`; a
+variant `FooBar` and a function `fooBar` clash the same way. Before this check the C
+compiler reported a redefinition in generated code with no pointer back to the Certo
+source (BACKLOG item 432).
+
+**Fix:** Rename one of the two. The check runs on the names after the compiler has
+already given a name that collides with a runtime helper or a variant its own prefix
+(item 358), so only a clash that would really reach the C output is reported.
+
+---
+
 ### E0224  Module-level `var` is not supported
 
 ```
