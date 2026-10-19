@@ -3,7 +3,7 @@ use certo_ast::decl::{Decl, TypeBody, StateMachineDecl};
 use certo_ast::module::Module;
 use certo_hir::{HirFn, HirItem, lower_module};
 use certo_mir::lower_fn;
-use crate::emit_mir::{emit_fn_with_prefix, c_fn_name, collect_spawn_sites, emit_spawn_support, set_extern_names, LineMap};
+use crate::emit_mir::{emit_fn_with_prefix, c_fn_name, collect_spawn_sites, emit_spawn_support, set_extern_names, set_user_renames, plain_c_fn_name, runtime_c_symbols, LineMap};
 use crate::ty_to_c::{ty_to_c, ret_ty_to_c, c_ident};
 
 /// Options controlling C output.
@@ -33,6 +33,14 @@ pub fn emit_module(module: &Module, opts: &CodegenOptions) -> String {
     // `c_fn_name` consults this registry on every call.
     set_extern_names(module.decls.iter().filter_map(|sdecl| match &sdecl.node {
         Decl::Fn(f) if f.is_extern => Some(f.name.node.clone()),
+        _ => None,
+    }).collect());
+
+    // A user function named like a runtime helper (`identity`, `expect`, …)
+    // would emit a second, conflicting `certo_<name>`; give it its own prefix.
+    let runtime = runtime_c_symbols();
+    set_user_renames(module.decls.iter().filter_map(|sdecl| match &sdecl.node {
+        Decl::Fn(f) if !f.is_extern && runtime.contains(&plain_c_fn_name(&f.name.node)) => Some(f.name.node.clone()),
         _ => None,
     }).collect());
 

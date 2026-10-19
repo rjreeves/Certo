@@ -2941,8 +2941,39 @@ fn bare_record_pattern_match_arm_compiles_the_same_as_the_prefixed_form() {
 #[test]
 fn char_typed_function_signature_uses_int32_not_a_byte() {
     let c = codegen("module A\nfn identity(c: Char): Char = c");
-    assert_contains(&c, "int32_t certo_identity(int32_t");
-    assert_not_contains(&c, "char certo_identity");
+    // (`identity` is also a runtime helper's name, so the user function is
+    // emitted as `certo_user_identity` — see the collision tests below.)
+    assert_contains(&c, "int32_t certo_user_identity(int32_t");
+    assert_not_contains(&c, "char certo_user_identity");
+}
+
+// ------------------------------------------------------------------ //
+// A user function named like a C-runtime helper must not redefine it.
+// Regression: `fn identity<T>` emitted `certo_identity`, which the runtime
+// already defines, so `certo run` failed with a C "redefinition" error.
+// ------------------------------------------------------------------ //
+
+#[test]
+fn user_fn_named_identity_does_not_collide_with_runtime_helper() {
+    let c = codegen("module A\nfn identity<T>(x: T): T = x\nfn run(): Int = identity(1)");
+    assert_contains(&c, "certo_user_identity(");
+    assert_not_contains(&c, " certo_identity(");
+}
+
+#[test]
+fn user_fn_named_expect_does_not_collide_with_runtime_macro() {
+    // The runtime has `#define certo_expect certo_identity`, which would
+    // silently rewrite a user `certo_expect` into the wrong function.
+    let c = codegen("module A\nfn expect(x: Int): Int = x\nfn run(): Int = expect(1)");
+    assert_contains(&c, "certo_user_expect(");
+    assert_not_contains(&c, " certo_expect(");
+}
+
+#[test]
+fn ordinary_user_fn_names_keep_the_plain_certo_prefix() {
+    let c = codegen("module A\nfn run(): Int = 1");
+    assert_contains(&c, "certo_run(");
+    assert_not_contains(&c, "certo_user_run");
 }
 
 // ------------------------------------------------------------------ //

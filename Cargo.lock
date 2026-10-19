@@ -312,6 +312,7 @@ dependencies = [
  "certo-mir",
  "certo-parser",
  "certo-resolve",
+ "certo-stdlib",
  "certo-typeck",
 ]
 

@@ -923,6 +923,60 @@ pub fn set_extern_names(names: HashSet<String>) {
     EXTERN_NAMES.with(|s| *s.borrow_mut() = names);
 }
 
+thread_local! {
+    // User-declared functions whose plain `certo_<name>` would collide with a
+    // symbol the C runtime itself defines (e.g. a user `identity` vs the
+    // runtime's `certo_identity`, or `expect` vs `#define certo_expect`).
+    // Same lifecycle and rationale as `EXTERN_NAMES`: `c_fn_name` has no
+    // per-call context, so `emit_module` populates this once up front.
+    static USER_RENAMES: std::cell::RefCell<HashSet<String>> = std::cell::RefCell::new(HashSet::new());
+}
+
+/// Populate the set of user function names `c_fn_name` must emit as
+/// `certo_user_<name>` instead of `certo_<name>`.
+pub fn set_user_renames(names: HashSet<String>) {
+    USER_RENAMES.with(|s| *s.borrow_mut() = names);
+}
+
+/// The plain (collision-unaware) C name a Certo name mangles to.
+pub fn plain_c_fn_name(name: &str) -> String {
+    let snake = camel_to_snake(name);
+    format!("certo_{}", snake.replace('.', "_").replace('-', "_"))
+}
+
+/// Every `certo_*` function or macro name the C runtime defines at file
+/// scope (the base header plus all stdlib C, DB included). Over-approximating
+/// is harmless — a spurious hit only gives a user function a `certo_user_`
+/// prefix — so this is a line scan rather than a C parse.
+pub fn runtime_c_symbols() -> &'static HashSet<String> {
+    static SYMS: std::sync::OnceLock<HashSet<String>> = std::sync::OnceLock::new();
+    SYMS.get_or_init(|| {
+        let mut set = HashSet::new();
+        let stdlib = certo_stdlib::full_c_runtime_with_db(true);
+        for text in [crate::emit_module::RUNTIME_HEADER, stdlib.as_str()] {
+            for line in text.lines() {
+                if let Some(rest) = line.strip_prefix("#define ") {
+                    let ident: String = rest.trim_start().chars().take_while(|c| c.is_alphanumeric() || *c == '_').collect();
+                    if ident.starts_with("certo_") { set.insert(ident); }
+                    continue;
+                }
+                // Function definitions/declarations start at column 0.
+                if line.starts_with(|c: char| c.is_whitespace() || c == '#' || c == '/' || c == '*' || c == '}') { continue; }
+                let mut from = 0;
+                while let Some(pos) = line[from..].find("certo_") {
+                    let start = from + pos;
+                    let at_boundary = start == 0 || !line.as_bytes()[start - 1].is_ascii_alphanumeric() && line.as_bytes()[start - 1] != b'_';
+                    let ident: String = line[start..].chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '_').collect();
+                    let after = start + ident.len();
+                    if at_boundary && line[after..].trim_start().starts_with('(') { set.insert(ident.clone()); }
+                    from = after.max(start + 1);
+                }
+            }
+        }
+        set
+    })
+}
+
 pub fn c_fn_name(name: &str) -> String {
     // Sum-type variant tag constant: `__tag__TypeName__VariantName` → `TypeName_VariantName`
     if let Some(rest) = name.strip_prefix("__tag__") {
@@ -933,9 +987,12 @@ pub fn c_fn_name(name: &str) -> String {
     // `extern "C"` declarations name a real, already-compiled external C
     // symbol verbatim — never mangled (BACKLOG item 242).
     if EXTERN_NAMES.with(|s| s.borrow().contains(name)) { return name.to_string(); }
-    // Convert camelCase to snake_case so Certo names match C stdlib conventions.
-    let snake = camel_to_snake(name);
-    format!("certo_{}", snake.replace('.', "_").replace('-', "_"))
+    let plain = plain_c_fn_name(name);
+    // A user function that would shadow a runtime symbol gets its own prefix.
+    if USER_RENAMES.with(|s| s.borrow().contains(name)) {
+        return format!("certo_user_{}", &plain["certo_".len()..]);
+    }
+    plain
 }
 
 fn camel_to_snake(s: &str) -> String {

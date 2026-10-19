@@ -14,6 +14,9 @@ certo-fmt    = { path = "../fmt" }
 # `expand_state_machines` re-parse their own generated source, so a real
 # (non-test) dependency on the parser is now needed.
 certo-parser = { path = "../parser" }
+# Name-collision check: a user function whose mangled C name matches a symbol
+# the C runtime already defines (`identity`, `expect`, …) must be renamed.
+certo-stdlib = { path = "../stdlib" }
 
 [dev-dependencies]
 certo-resolve = { path = "../resolve" }
