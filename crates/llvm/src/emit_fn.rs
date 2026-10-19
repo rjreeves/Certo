@@ -236,7 +236,27 @@ impl<'ctx> FnEmitter<'ctx> {
                 (lty, format!("%v{}", v))
             }
             Operand::Const(c) => self.emit_const(c),
-            Operand::Global(n) => ("ptr".into(), format!("@{}", llvm_fn_name(n))),
+            Operand::Global(n) => {
+                // A variant's tag, as `match` compares it: `__tag__Type__Variant`.
+                if let Some(rest) = n.strip_prefix("__tag__") {
+                    let tag = rest.split_once("__")
+                        .and_then(|(t, v)| self.ctx.enums.get(t).and_then(|e| e.variant(v)))
+                        .map(|v| v.tag);
+                    return match tag {
+                        Some(tag) => ("i64".into(), tag.to_string()),
+                        None => {
+                            self.unsupported(&format!("`match` on `{rest}`: sum types with type parameters are not supported by the LLVM backend"));
+                            ("i64".into(), "0".into())
+                        }
+                    };
+                }
+                // A payload-free variant used as a value.
+                if let Some(ty) = self.ctx.variant_enum.get(n).cloned() {
+                    self.ctx.used_variant_consts.insert((ty.clone(), n.clone()));
+                    return ("ptr".into(), format!("@certo_variant_{ty}_{n}"));
+                }
+                ("ptr".into(), format!("@{}", llvm_fn_name(n)))
+            }
         }
     }
 
@@ -314,7 +334,7 @@ impl<'ctx> FnEmitter<'ctx> {
             }
 
             Rvalue::Aggregate(_, _) => {
-                self.unsupported("constructing a list, tuple or enum value is not supported by the LLVM backend (records are)");
+                self.unsupported("constructing a list or tuple value is not supported by the LLVM backend (records and non-generic enums are)");
                 let v = self.fresh();
                 self.w(&format!("  %v{v} = inttoptr i64 0 to ptr"));
                 self.w(&format!("  store ptr %v{v}, ptr {dest_ptr}"));
@@ -451,6 +471,14 @@ impl<'ctx> FnEmitter<'ctx> {
             _ => None,
         };
 
+        // A call to a variant's constructor builds a sum-type value.
+        if let (Operand::Global(n), None) = (func, &local_sig) {
+            if let Some(ty) = self.ctx.variant_enum.get(n).cloned() {
+                self.emit_variant_ctor(&ty, n, &arg_pairs, dest_ptr);
+                return;
+            }
+        }
+
         // A call to a runtime function the shim implements gets its real
         // signature rather than one guessed from the call site.
         if let (Operand::Global(n), None) = (func, &local_sig) {
@@ -498,6 +526,46 @@ impl<'ctx> FnEmitter<'ctx> {
         }
     }
 
+    /// The sum type a local holds, if its MIR type is a declared (non-generic) one.
+    fn enum_of_local(&self, id: MirLocal) -> Option<String> {
+        let local = self.mir_fn.locals.iter().find(|l| l.id == id)?;
+        match &local.ty {
+            Ty::Named { name, .. } if self.ctx.enums.contains_key(name) => Some(name.clone()),
+            _ => None,
+        }
+    }
+
+    /// The slot a MIR field read names on a sum-type value: `tag` -> 0, and
+    /// `variant.field` (variant lower-cased, positional fields `f0`, `f1`, ...)
+    /// -> 1 + the field's index in that variant.
+    fn enum_slot(&self, id: MirLocal, field: &str) -> Option<usize> {
+        let layout = &self.ctx.enums[&self.enum_of_local(id)?];
+        if field == "tag" { return Some(0); }
+        let (variant, fname) = field.split_once('.')?;
+        let v = layout.variants.iter().find(|v| v.name.to_lowercase() == variant)?;
+        v.fields.iter().position(|(n, _)| n == fname).map(|i| 1 + i)
+    }
+
+    /// Build a payload variant: allocate the type's block, store the tag, then
+    /// each argument at its payload slot.
+    fn emit_variant_ctor(&mut self, ty: &str, variant: &str, args: &[(String, String)], dest_ptr: &str) {
+        let layout = self.ctx.enums[ty].clone();
+        let v = layout.variant(variant).expect("variant of a known type").clone();
+        if args.len() != v.fields.len() {
+            self.unsupported(&format!("variant `{variant}` called with {} argument(s), it has {} field(s)", args.len(), v.fields.len()));
+        }
+        self.ctx.declare_extern(crate::rt::ALLOC.into(), "ptr".into(), vec!["i64".into()]);
+        let base = self.fresh();
+        self.w(&format!("  %v{base} = call ptr @{}(i64 {})", crate::rt::ALLOC, layout.size()));
+        self.w(&format!("  store i64 {}, ptr %v{base}", v.tag));
+        for (i, (ty, val)) in args.iter().enumerate() {
+            let g = self.fresh();
+            self.w(&format!("  %v{g} = getelementptr i8, ptr %v{base}, i64 {}", (1 + i) * 8));
+            self.w(&format!("  store {ty} {val}, ptr %v{g}"));
+        }
+        self.w(&format!("  store ptr %v{base}, ptr {dest_ptr}"));
+    }
+
     /// Build a record: allocate its block, store each operand at the slot of
     /// the field it names (declared order, whatever order the literal used).
     fn emit_record(&mut self, names: &[String], ops: &[Operand], dest: MirLocal, dest_ptr: &str) {
@@ -531,7 +599,12 @@ impl<'ctx> FnEmitter<'ctx> {
             Operand::Local(id) => self.record_of_local(*id).map(|r| self.ctx.records[&r].clone()),
             _ => None,
         };
-        let slot = layout.as_ref().and_then(|l| l.field(field)).map(|(i, _)| i);
+        // A sum-type value: `tag` is slot 0, `variant.field` a payload slot.
+        let enum_slot = match base {
+            Operand::Local(id) if layout.is_none() => self.enum_slot(*id, field),
+            _ => None,
+        };
+        let slot = layout.as_ref().and_then(|l| l.field(field)).map(|(i, _)| i).or(enum_slot);
         let (Some(slot), (_, bv)) = (slot, self.load(base)) else {
             self.unsupported(&format!("field access `.{field}` on a value that is not a declared record is not supported by the LLVM backend"));
             let v = self.fresh();

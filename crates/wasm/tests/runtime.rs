@@ -56,3 +56,12 @@ fn records_build_for_the_browser() {
     assert!(contains(&wasm, "certo_write"));
     assert!(contains(&wasm, "certo_rt_alloc"), "the allocator is exported from the shim");
 }
+
+#[test]
+fn enums_and_match_build_for_the_browser() {
+    let src = "module E\nimport Stdlib.Core\ntype Shape = Circle(r: Int) | Rect(w: Int, h: Int) | Dot\n\
+               fn area(s: Shape): Int = match s {\n Circle(r) => r * r * 3\n Rect(w, h) => w * h\n Dot => 0\n}\n\
+               pub fn main(): Unit [io] = println(intToText(area(Rect(3, 4))))\n";
+    let Some(wasm) = build_browser(src) else { return };
+    assert!(contains(&wasm, "certo_write"));
+}

@@ -163,3 +163,72 @@ fn main(): Unit [io] = {
         assert_eq!(llvm, c_out, "the LLVM and C backends disagree");
     }
 }
+
+#[test]
+fn enums_and_match_build_run_and_match_the_c_backend() {
+    if !clang_available() { return; }
+    let dir = tempfile::tempdir().unwrap();
+    // A payload-free enum, a payload enum with named fields of Int, Text and
+    // Float, payload-free values used where a payload type is expected, and an
+    // enum stored in a record.
+    let src = r#"module E
+import Stdlib.Core
+
+type Color = Red | Green | Blue
+type Shape = Circle(r: Int) | Rect(w: Int, h: Int) | Label(text: Text, scale: Float) | Dot
+type Tagged = { color: Color, shape: Shape }
+
+fn name(c: Color): Text = match c {
+    Red => "red"
+    Green => "green"
+    Blue => "blue"
+}
+
+fn area(s: Shape): Int = match s {
+    Circle(r) => r * r * 3
+    Rect(w, h) => w * h
+    Label(t, k) => Text.len(t)
+    Dot => 0
+}
+
+fn describe(s: Shape): Text = match s {
+    Circle(r) => "circle " ++ intToText(r)
+    Rect(w, h) => "rect " ++ intToText(w) ++ "x" ++ intToText(h)
+    Label(t, k) => t ++ "@" ++ floatToText(k)
+    Dot => "dot"
+}
+
+fn next(c: Color): Color = match c {
+    Red => Green
+    Green => Blue
+    Blue => Red
+}
+
+fn main(): Unit [io] = {
+    println(name(Green))
+    println(name(next(Blue)))
+    println(intToText(area(Rect(3, 4))))
+    println(intToText(area(Circle(5))))
+    println(intToText(area(Dot)))
+    println(describe(Label("hi", 1.5)))
+    println(describe(Rect(2, 7)))
+    println(describe(Dot))
+    val t = Tagged { color: Blue, shape: Circle(2) }
+    println(name(t.color) ++ " " ++ describe(t.shape))
+}
+"#;
+    let expected = "green\nred\n12\n75\n0\nhi@1.5\nrect 2x7\ndot\nblue circle 2\n";
+    let llvm = build_and_run(dir.path(), src, "enum_llvm");
+    assert_eq!(llvm, expected);
+
+    let certo = Path::new(env!("CARGO_BIN_EXE_certo-llvm")).with_file_name(if cfg!(windows) { "certo.exe" } else { "certo" });
+    if certo.exists() {
+        let c_file = dir.path().join("enum_c.cto");
+        fs::write(&c_file, src).unwrap();
+        let c_exe = dir.path().join(if cfg!(windows) { "enum_c.exe" } else { "enum_c" });
+        let build = Command::new(&certo).arg("build").arg(&c_file).arg("-o").arg(&c_exe).output().unwrap();
+        assert!(build.status.success(), "{}", String::from_utf8_lossy(&build.stderr));
+        let c_out = String::from_utf8_lossy(&Command::new(&c_exe).output().unwrap().stdout).replace("\r\n", "\n");
+        assert_eq!(llvm, c_out, "the LLVM and C backends disagree");
+    }
+}

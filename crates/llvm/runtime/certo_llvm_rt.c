@@ -19,7 +19,7 @@
 
 /* Also called by compiled code to allocate a record's block. */
 void *certo_rt_alloc(int64_t n) {
-    void *p = malloc((size_t)n);
+    void *p = calloc(1, (size_t)n);  /* zeroed: a match may read unused payload slots */
     if (!p) {
         fputs("certo: out of memory\n", stderr);
         exit(1);

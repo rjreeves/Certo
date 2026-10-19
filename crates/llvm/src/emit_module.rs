@@ -111,6 +111,30 @@ pub fn emit_module(module: &Module, opts: &LlvmOptions) -> Result<String, String
         }
     }
 
+    // Layout of every non-generic sum type. A generic one (`Maybe<T>`) is left
+    // out, so using it is reported as unsupported; so is one whose payload
+    // types HIR could not give us.
+    for sdecl in &module.decls {
+        if let Decl::Type(t) = &sdecl.node {
+            let certo_ast::decl::TypeBody::Sum(variants) = &t.body else { continue };
+            if !t.type_params.is_empty() { continue; }
+            let mut layout = Vec::new();
+            let mut ok = true;
+            for (tag, v) in variants.iter().enumerate() {
+                let tys = hir.variant_field_types.get(&v.name.node);
+                if !v.fields.is_empty() && tys.map(|t| t.len()) != Some(v.fields.len()) { ok = false; break; }
+                let fields = v.fields.iter().enumerate().map(|(i, f)| (
+                    f.name.as_ref().map(|n| n.node.clone()).unwrap_or_else(|| format!("f{i}")),
+                    crate::ty::llvm_ty(&tys.unwrap()[i]),
+                )).collect();
+                layout.push(crate::ctx::VariantLayout { name: v.name.node.clone(), tag, fields });
+            }
+            if !ok { continue; }
+            for v in &layout { ctx.variant_enum.insert(v.name.clone(), t.name.node.clone()); }
+            ctx.enums.insert(t.name.node.clone(), crate::ctx::EnumLayout { variants: layout });
+        }
+    }
+
     // Record every function we are about to define *before* emitting any
     // body, so a call to a function defined later in the file (or to itself)
     // is recognised as a local call rather than declared as an external one.
@@ -202,6 +226,21 @@ pub fn emit_module(module: &Module, opts: &LlvmOptions) -> Result<String, String
         ).unwrap();
     }
     if !ctx.str_lits.is_empty() {
+        writeln!(out).unwrap();
+    }
+
+    // Payload-free variants used as values: one shared, zero-padded block each,
+    // as large as any value of their type so a `match` can read payload slots
+    // from it safely.
+    for (ty, variant) in &ctx.used_variant_consts {
+        let layout = &ctx.enums[ty];
+        let tag = layout.variant(variant).map(|v| v.tag).unwrap_or(0);
+        let mut slots = vec![format!("i64 {tag}")];
+        slots.extend((1..layout.slots()).map(|_| "i64 0".to_string()));
+        writeln!(out, "@certo_variant_{ty}_{variant} = internal constant [{} x i64] [{}]",
+            layout.slots(), slots.join(", ")).unwrap();
+    }
+    if !ctx.used_variant_consts.is_empty() {
         writeln!(out).unwrap();
     }
 
@@ -538,7 +577,7 @@ fn b(): Int = { val xs = [1, 2, 3]
 fn c(): Bool = \"a\" == \"b\"
 ");
         assert!(err.contains("`??`"), "{err}");
-        assert!(err.contains("list, tuple or enum"), "{err}");
+        assert!(err.contains("list or tuple"), "{err}");
         assert!(err.contains("Text.eq"), "{err}");
     }
 
@@ -596,5 +635,81 @@ fn add(a: Int, b: Int): Int = a + b
 fn run(): Int = add(1, 2)
 ");
         assert!(!ir.contains("declare"), "{ir}");
+    }
+
+    // ------------------------------------------------------------------ //
+    // Sum types: a heap block of 8-byte slots, tag in slot 0, payload after.
+    // ------------------------------------------------------------------ //
+
+    const SHAPES: &str = "module T
+import Stdlib.Core
+type Color = Red | Green | Blue
+type Shape = Circle(r: Int) | Rect(w: Int, h: Int) | Dot
+";
+
+    #[test]
+    fn a_payload_free_variant_is_a_shared_constant_sized_for_its_type() {
+        let ir = ir_of(&format!("{SHAPES}fn pick(): Shape = Dot
+"));
+        // Shape's widest variant (Rect) has two fields: tag + 2 = 3 slots, so a
+        // match can read payload slots from Dot without running off the end.
+        assert!(ir.contains("@certo_variant_Shape_Dot = internal constant [3 x i64] [i64 2, i64 0, i64 0]"), "{ir}");
+        assert!(ir.contains("ret ptr"), "{ir}");
+    }
+
+    #[test]
+    fn only_the_variant_constants_that_are_used_are_emitted() {
+        let ir = ir_of(&format!("{SHAPES}fn pick(): Color = Green
+"));
+        assert!(ir.contains("@certo_variant_Color_Green"), "{ir}");
+        assert!(!ir.contains("@certo_variant_Color_Red") && !ir.contains("@certo_variant_Shape_Dot"), "{ir}");
+    }
+
+    #[test]
+    fn a_payload_variant_allocates_a_block_and_stores_tag_then_fields() {
+        let ir = ir_of(&format!("{SHAPES}fn mk(a: Int, b: Int): Shape = Rect(a, b)
+"));
+        assert!(ir.contains("call ptr @certo_rt_alloc(i64 24)"), "tag + two payload slots
+{ir}");
+        assert!(ir.contains("@certo_rt_alloc(i64 24)
+  store i64 1, ptr %v"), "Rect is the second variant: tag 1 goes in slot 0
+{ir}");
+        assert!(ir.contains("i64 8
+  store i64 %"), "first field in slot 1
+{ir}");
+        assert!(ir.contains("i64 16
+  store i64 %"), "second field in slot 2
+{ir}");
+    }
+
+    #[test]
+    fn match_compares_the_tag_slot_with_the_variants_ordinal() {
+        let ir = ir_of(&format!("{SHAPES}fn tell(s: Shape): Int = match s {{
+ Circle(r) => r
+ Rect(w, h) => w
+ Dot => 0
+}}
+"));
+        assert!(ir.contains("getelementptr i8, ptr %v0, i64 0"), "the tag is read from slot 0
+{ir}");
+        assert!(ir.contains("icmp eq i64 %") && ir.contains(", 1
+"), "Rect's tag is 1
+{ir}");
+        assert!(ir.contains("i64 8
+") && ir.contains("i64 16
+"), "payload fields read from slots 1 and 2
+{ir}");
+    }
+
+    #[test]
+    fn a_sum_type_with_type_parameters_is_reported() {
+        let err = emit_err("module T
+type Maybe<T> = Just(v: T) | Nothing
+fn f(m: Maybe<Int>): Int = match m {
+ Just(v) => v
+ Nothing => 0
+}
+");
+        assert!(err.contains("type parameters"), "{err}");
     }
 }

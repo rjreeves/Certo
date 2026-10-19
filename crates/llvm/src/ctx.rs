@@ -32,6 +32,38 @@ impl RecordLayout {
     }
 }
 
+/// One variant of a sum type: its tag (declaration order, like the C backend's
+/// enum) and its payload fields, `(field name, LLVM type)`.
+#[derive(Debug, Clone)]
+pub struct VariantLayout {
+    pub name: String,
+    pub tag: usize,
+    pub fields: Vec<(String, String)>,
+}
+
+/// How a (non-generic) sum type is laid out: a heap block of 8-byte slots with
+/// the tag in slot 0 and a variant's payload fields from slot 1, so every value
+/// of the type is the same size whichever variant it holds. A payload-free
+/// variant is a shared constant of that size.
+#[derive(Debug, Clone)]
+pub struct EnumLayout {
+    pub variants: Vec<VariantLayout>,
+}
+
+impl EnumLayout {
+    /// Slots in a block: the tag plus the widest variant's payload.
+    pub fn slots(&self) -> usize {
+        1 + self.variants.iter().map(|v| v.fields.len()).max().unwrap_or(0)
+    }
+
+    /// Byte size of a block.
+    pub fn size(&self) -> usize { self.slots() * 8 }
+
+    pub fn variant(&self, name: &str) -> Option<&VariantLayout> {
+        self.variants.iter().find(|v| v.name == name)
+    }
+}
+
 /// Module-level accumulated state: string literals and external declarations.
 #[derive(Debug, Default)]
 pub struct ModuleCtx {
@@ -44,6 +76,16 @@ pub struct ModuleCtx {
 
     /// Layout of every record type the module declares, by type name.
     pub records: HashMap<String, RecordLayout>,
+
+    /// Layout of every non-generic sum type the module declares, by type name.
+    pub enums: HashMap<String, EnumLayout>,
+
+    /// Variant name -> the sum type it belongs to (only types in `enums`).
+    pub variant_enum: HashMap<String, String>,
+
+    /// Payload-free variants that are used as values; each gets a constant
+    /// `@certo_variant_<Type>_<Variant>` in the output.
+    pub used_variant_consts: std::collections::BTreeSet<(String, String)>,
 
     /// String contents (raw Certo string, without null terminator).
     /// Index into this vec corresponds to the `@.str.N` global.
