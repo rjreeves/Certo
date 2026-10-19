@@ -32,6 +32,12 @@ sealed class DiagnosticParser
     static readonly Regex Inline = new(@"^(.+?\.cto):(\d+):(\d+):?\s*(error|warning|note)?(?:\[([A-Za-z0-9_]+)\])?:?\s*(.*)$",
         RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
+    // C compiler output for certo's generated C: "<temp>.c:LINE:COL: error: msg". The file is a
+    // throwaway temp file, so these become location-less rows (nothing to open) that keep the
+    // generated-C line in the message.
+    static readonly Regex CcDiag = new(@"^(?:.+?)\.[ch]:(\d+):\d+:\s*(fatal error|error|warning|note):\s*(.*)$",
+        RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
     static readonly Regex Reformat = new(@"^\s*would reformat:\s*(.+?)\s*$", RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
     (Sev Sev, string Code, string Msg)? _pending;
@@ -55,8 +61,31 @@ sealed class DiagnosticParser
         _ => Sev.Note,
     };
 
-    /// <summary>Feed one output line; returns a finished diagnostic when one completes.</summary>
+    readonly Queue<Diagnostic> _queue = new();
+    Diagnostic? _extra;
+
+    /// <summary>
+    /// Feed one output line; returns a finished diagnostic when one completes. A line can finish two
+    /// (a pending header plus the line's own); the extra is queued and comes back on a later Feed or
+    /// from <see cref="Flush"/>, so callers should loop on Flush when the stream ends.
+    /// </summary>
     public Diagnostic? Feed(string line)
+    {
+        _extra = null;
+        var r = FeedCore(line);
+        if (r is not null) _queue.Enqueue(r);
+        if (_extra is not null) { _queue.Enqueue(_extra); _extra = null; }
+        return _queue.Count > 0 ? _queue.Dequeue() : null;
+    }
+
+    Diagnostic? Both(Diagnostic? flushed, Diagnostic d)
+    {
+        if (flushed is null) return d;
+        _extra = d;
+        return flushed;
+    }
+
+    Diagnostic? FeedCore(string line)
     {
         var fmt = Reformat.Match(line);
         if (fmt.Success)
@@ -71,10 +100,24 @@ sealed class DiagnosticParser
                 int.Parse(arrow.Groups[2].Value), col);
         }
 
+        var cc = CcDiag.Match(line);
+        if (cc.Success)
+        {
+            var flushed = FlushPending();
+            var sev = cc.Groups[2].Value.ToLowerInvariant() switch
+            {
+                "note" => Sev.Note,
+                "warning" => Sev.Warning,
+                _ => Sev.Error,
+            };
+            var d = new Diagnostic(sev, "cc", $"{cc.Groups[3].Value.Trim()}  (generated C, line {cc.Groups[1].Value})", null, 0, 0);
+            return Both(flushed, d);
+        }
+
         var h = Header.Match(line);
         if (h.Success)
         {
-            var flushed = Flush();
+            var flushed = FlushPending();
             _pending = (ParseSev(h.Groups[1].Value), h.Groups[2].Value, h.Groups[3].Value.Trim());
             return flushed;
         }
@@ -84,18 +127,24 @@ sealed class DiagnosticParser
             var inl = Inline.Match(line);
             if (inl.Success)
             {
-                var flushed = Flush();
+                var flushed = FlushPending();
                 var sev = inl.Groups[4].Success && inl.Groups[4].Value.Length > 0 ? ParseSev(inl.Groups[4].Value) : Sev.Error;
                 var d = new Diagnostic(sev, inl.Groups[5].Value, inl.Groups[6].Value.Trim(), inl.Groups[1].Value.Trim(),
                     int.Parse(inl.Groups[2].Value), int.Parse(inl.Groups[3].Value));
-                // Only one result can be returned per line; the single-line form wins.
-                return flushed ?? d;
+                return Both(flushed, d);
             }
         }
         return null;
     }
 
+    /// <summary>Returns queued diagnostics, then any still-pending header; call until it returns null.</summary>
     public Diagnostic? Flush()
+    {
+        if (_queue.Count > 0) return _queue.Dequeue();
+        return FlushPending();
+    }
+
+    Diagnostic? FlushPending()
     {
         if (_pending is not { } p) return null;
         _pending = null;

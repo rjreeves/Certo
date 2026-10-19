@@ -753,7 +753,7 @@ sealed class MainForm : Form
                 Append($"Could not start certo: {ex.Message}\n", Color.IndianRed);
                 code = -2;
             }
-            if (parser.Flush() is { } rest) AddDiagnostic(rest);
+            while (parser.Flush() is { } rest) AddDiagnostic(rest);
 
             if (ct.IsCancellationRequested) { Append("Stopped.\n", Color.Orange); break; }
             // lint and fmt --check exit 1 when they only found warnings; that isn't a failure.
