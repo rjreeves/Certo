@@ -21,7 +21,7 @@ use certo_ast::decl::FnDecl;
 use certo_hir::{BinOp, UnOp};
 use certo_mir::{MirFn, MirLocal, MirStmt, Rvalue, Operand, MirConst, Terminator, SwitchTarget};
 
-use crate::ctx::ModuleCtx;
+use crate::ctx::{FnSig, ModuleCtx};
 use crate::ty::{ast_ty_to_llvm, ast_ret_ty_to_llvm, llvm_fn_name};
 
 // ------------------------------------------------------------------ //
@@ -44,7 +44,11 @@ pub fn emit_fn(ast_fn: &FnDecl, mir_fn: &MirFn, ctx: &mut ModuleCtx) -> String {
 /// Infer LLVM type strings for every MIR local by:
 ///  1. Seeding from AST param/ret declarations.
 ///  2. Propagating through assignments until stable.
-fn compute_local_types(ast_fn: &FnDecl, mir_fn: &MirFn) -> HashMap<MirLocal, String> {
+fn compute_local_types(
+    ast_fn: &FnDecl,
+    mir_fn: &MirFn,
+    sigs: &HashMap<String, FnSig>,
+) -> HashMap<MirLocal, String> {
     let mut map: HashMap<MirLocal, String> = HashMap::new();
 
     // Ret slot (local 0) ← declared return type
@@ -70,15 +74,16 @@ fn compute_local_types(ast_fn: &FnDecl, mir_fn: &MirFn) -> HashMap<MirLocal, Str
             for stmt in &bb.stmts {
                 let MirStmt::Assign { dest, rvalue, .. } = stmt;
                 if map.contains_key(dest) { continue; }
-                if let Some(t) = infer_rvalue(&map, rvalue) {
+                if let Some(t) = infer_rvalue(&map, sigs, rvalue) {
                     map.insert(*dest, t);
                     changed = true;
                 }
             }
-            // Call terminator destinations default to ptr
-            if let Some(Terminator::Call { dest, .. }) = &bb.terminator {
+            // Call terminator destinations: the callee's real return type when
+            // it's a function this module defines, otherwise ptr.
+            if let Some(Terminator::Call { func, dest, .. }) = &bb.terminator {
                 if !map.contains_key(dest) {
-                    map.insert(*dest, "ptr".into());
+                    map.insert(*dest, call_result_llty(sigs, func));
                     changed = true;
                 }
             }
@@ -93,7 +98,19 @@ fn compute_local_types(ast_fn: &FnDecl, mir_fn: &MirFn) -> HashMap<MirLocal, Str
     map
 }
 
-fn infer_rvalue(map: &HashMap<MirLocal, String>, rv: &Rvalue) -> Option<String> {
+/// The type of a call's result local: the callee's real return type if the
+/// module defines it (`Unit` is held in an `i8` slot, like the return slot),
+/// else `ptr` — the erased type every unresolved runtime call gets.
+fn call_result_llty(sigs: &HashMap<String, FnSig>, func: &Operand) -> String {
+    if let Operand::Global(n) = func {
+        if let Some(sig) = sigs.get(&llvm_fn_name(n)) {
+            return if sig.ret == "void" { "i8".into() } else { sig.ret.clone() };
+        }
+    }
+    "ptr".into()
+}
+
+fn infer_rvalue(map: &HashMap<MirLocal, String>, sigs: &HashMap<String, FnSig>, rv: &Rvalue) -> Option<String> {
     match rv {
         Rvalue::Use(op)          => operand_llty(map, op),
         Rvalue::UnOp { arg, .. } => operand_llty(map, arg),
@@ -101,7 +118,7 @@ fn infer_rvalue(map: &HashMap<MirLocal, String>, rv: &Rvalue) -> Option<String> 
             let lty = operand_llty(map, lhs)?;
             Some(binop_result_llty(op, &lty))
         }
-        Rvalue::Call { .. }      => Some("ptr".into()),
+        Rvalue::Call { func, .. } => Some(call_result_llty(sigs, func)),
         Rvalue::Field { .. }     => Some("ptr".into()),
         Rvalue::Aggregate(_, _)  => Some("ptr".into()),
         // Concurrency is not supported by the experimental LLVM backend.
@@ -163,7 +180,7 @@ struct FnEmitter<'ctx> {
 
 impl<'ctx> FnEmitter<'ctx> {
     fn new(ast_fn: &FnDecl, mir_fn: &MirFn, ctx: &'ctx mut ModuleCtx) -> Self {
-        let local_ty = compute_local_types(ast_fn, mir_fn);
+        let local_ty = compute_local_types(ast_fn, mir_fn, &ctx.fn_sigs);
         Self {
             ast_fn: ast_fn.clone(),
             mir_fn: mir_fn.clone(),
@@ -393,17 +410,29 @@ impl<'ctx> FnEmitter<'ctx> {
             .map(|(t, v)| format!("{t} {v}"))
             .collect::<Vec<_>>().join(", ");
 
+        // A function this module defines is a local call: no `declare` (LLVM
+        // rejects declare + define of one symbol) and its own return type.
+        let local_sig = match func {
+            Operand::Global(n) => self.ctx.fn_sigs.get(&llvm_fn_name(n)).cloned(),
+            _ => None,
+        };
+
         let callee = match func {
             Operand::Global(n) => {
                 let ln = llvm_fn_name(n);
-                let arg_tys: Vec<String> = arg_pairs.iter().map(|(t, _)| t.clone()).collect();
-                self.ctx.declare_extern(ln.clone(), dest_lty.to_string(), arg_tys);
+                if local_sig.is_none() {
+                    let arg_tys: Vec<String> = arg_pairs.iter().map(|(t, _)| t.clone()).collect();
+                    self.ctx.declare_extern(ln.clone(), dest_lty.to_string(), arg_tys);
+                }
                 format!("@{}", ln)
             }
             _ => self.load(func).1,
         };
 
-        let is_void = dest_lty == "void" || dest_lty == "i8";
+        let is_void = match &local_sig {
+            Some(sig) => sig.ret == "void",
+            None => dest_lty == "void" || dest_lty == "i8",
+        };
         if is_void {
             self.w(&format!("  call void {callee}({arg_str})"));
             self.w(&format!("  store i8 0, ptr {dest_ptr}"));
