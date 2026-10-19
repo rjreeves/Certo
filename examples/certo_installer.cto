@@ -1,0 +1,75 @@
+module SyntraInstaller
+
+extern "C" {
+    fn certo_wisp_show_form_json(json: Text): Int
+    fn certo_wisp_error_with_title(title: Text, text: Text): Int
+    fn certo_wisp_last_error(): Text
+}
+
+fn showFailure(action: Text, code: Int): Unit [io, unsafe] = {
+    val details = unsafe { certo_wisp_last_error() }
+    println(action ++ " failed (status " ++ intToText(code) ++ "): " ++ details)
+    val ignored = unsafe {
+        certo_wisp_error_with_title(
+            "Syntra Installer",
+            action ++ " failed (status " ++ intToText(code) ++ ").\n\n" ++ details
+        )
+    }
+    println("Wisp error status: " ++ intToText(ignored))
+}
+
+fn welcomePage(): Text =
+    "{" ++
+    "\"title\":\"Syntra Installer\"," ++
+    "\"theme\":\"system\"," ++
+    "\"backdrop\":\"mica\"," ++
+    "\"icon\":{\"type\":\"information\"}," ++
+    "\"submit_label\":\"Continue\"," ++
+    "\"sections\":[" ++
+        "{\"title\":\"Welcome to Syntra\",\"first_field\":1}," ++
+        "{\"title\":\"How the installer works\",\"first_field\":3}" ++
+    "]," ++
+    "\"fields\":[" ++
+        "{\"id\":\"\",\"label\":\"\",\"kind\":{\"type\":\"image\",\"path\":\"assets/syntra-banner.png\",\"height\":120}}," ++
+        "{\"id\":\"\",\"label\":\"\",\"kind\":{\"type\":\"paragraph\",\"text\":\"Syntra brings together a family of focused developer tools. Choose only the products you need and this installer will prepare them as one compatible toolchain.\"}}," ++
+        "{\"id\":\"\",\"label\":\"\",\"kind\":{\"type\":\"paragraph\",\"text\":\"The family includes Certo for building software, Wisp for native desktop dialogs, and XEQ for running Syntra programs and tools.\"}}," ++
+        "{\"id\":\"\",\"label\":\"\",\"kind\":{\"type\":\"paragraph\",\"text\":\"1. Select the Syntra products you want.\\n2. Review requirements and installation locations.\\n3. Confirm the summary before any changes are made.\\n4. Let setup install and verify each selected product.\"}}," ++
+        "{\"id\":\"\",\"label\":\"\",\"kind\":{\"type\":\"paragraph\",\"text\":\"You can cancel at any time before installation begins. Select Continue to choose your products.\"}}" ++
+    "]}"
+
+fn productPage(): Text =
+    "{" ++
+    "\"title\":\"Syntra Installer - Choose products\"," ++
+    "\"theme\":\"system\"," ++
+    "\"backdrop\":\"mica\"," ++
+    "\"icon\":{\"type\":\"information\"}," ++
+    "\"submit_label\":\"Review\"," ++
+    "\"sections\":[" ++
+        "{\"title\":\"Core components\",\"first_field\":0}," ++
+        "{\"title\":\"Products\",\"first_field\":2}" ++
+    "]," ++
+    "\"fields\":[" ++
+        "{\"id\":\"shim\",\"label\":\"Syntra SHIM (required)\",\"enabled\":false,\"kind\":{\"type\":\"checkbox\",\"checked\":true}}," ++
+        "{\"id\":\"\",\"label\":\"\",\"kind\":{\"type\":\"paragraph\",\"text\":\"SHIM prepares the shared runtime and checks the system prerequisites used by every Syntra product.\"}}," ++
+        "{\"id\":\"certo\",\"label\":\"Certo - compiler and command-line toolchain\",\"kind\":{\"type\":\"checkbox\",\"checked\":true}}," ++
+        "{\"id\":\"wisp\",\"label\":\"Wisp - native Windows dialogs for developer tools\",\"kind\":{\"type\":\"checkbox\",\"checked\":true}}," ++
+        "{\"id\":\"xeq\",\"label\":\"XEQ - Syntra program and tool runner\",\"kind\":{\"type\":\"checkbox\",\"checked\":true}}" ++
+    "]}"
+
+fn main(): Unit [io, unsafe] = {
+    val status = unsafe { certo_wisp_show_form_json(welcomePage()) }
+    if status == -1 then {
+        println("Syntra Installer was cancelled.")
+    } else if status < 0 then {
+        showFailure("The welcome page", status)
+    } else {
+        val productStatus = unsafe { certo_wisp_show_form_json(productPage()) }
+        if productStatus == -1 then {
+            println("Syntra Installer was cancelled on the product selection page.")
+        } else if productStatus < 0 then {
+            showFailure("The product selection page", productStatus)
+        } else {
+            println("Product selection completed. The review page can now be added.")
+        }
+    }
+}
