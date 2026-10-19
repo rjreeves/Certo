@@ -95,7 +95,7 @@ complete, and are excluded from the v1.0 stability guarantee.
 
 | Crate | State | Gaps |
 |---|---|---|
-| `certo-llvm` | Experimental | Struct field access emits `null`; `spawn`/`await` emit placeholder `i64 0`; types are not fully resolved pre-typeck. Covers basic arithmetic, calls, `if`/`match`, records only. |
+| `certo-llvm` | Experimental | Runs programs built from arithmetic, `if`, recursion, your own functions and a handful of runtime calls (`print`/`println`/`eprint`/`eprintln`, `intToText`/`floatToText`/`boolToText`, `Text.eq`/`Text.len`, `++` on Text); `--exe` builds one with clang. Records, lists, options, `??`, `==` on Text, `spawn`/`await` and every other stdlib call are reported as errors. The C backend's runtime is not linked. |
 | `certo-wasm` | Experimental | WebAssembly backend; incomplete. |
 | `certo-xeq` | Experimental | Bytecode interpreter; incomplete. |
 

@@ -136,13 +136,26 @@ certo-llvm [options] <file.cto>
   --data-layout <layout>   LLVM data layout string
   --wasm                   Shorthand for --target wasm32-wasi
   --annotate               Emit comment annotations in the IR
+  --no-entry               Don't emit a program entry point (`main`)
+  --exe <file>             Also build a native executable (IR + bundled runtime, via clang)
+  --allow-unresolved       Emit IR even for constructs the backend can't compile
 ```
 
 ```powershell
 certo-llvm examples\math.cto               # produces math.ll
 certo-llvm --wasm examples\math.cto        # WASM IR
 certo-llvm -o - examples\math.cto         # dump to stdout
+certo-llvm hello.cto --exe hello.exe      # build and link a runnable program
 ```
+
+**What it can run.** The backend does not use the C backend's runtime (that one passes `Text` as a
+struct; this one uses a plain `ptr`). `--exe` instead compiles the IR together with a small C shim
+(`crates/llvm/runtime/certo_llvm_rt.c`) that provides `print`, `println`, `eprint`, `eprintln`,
+`intToText`, `floatToText`, `boolToText`, `Text.eq`, `Text.len`, `++` on Text and `**` on Int. Calls
+between your own functions, arithmetic, `if` and recursion work. Anything else — other stdlib calls,
+records, lists, options, `??`, `==` on Text — is reported as an error naming the construct, rather than
+left as an unresolved external. `--allow-unresolved` restores the old behaviour for IR you link against
+your own runtime. `--exe` needs `clang` (on PATH, or in `C:\Program Files\LLVM\bin`).
 
 ---
 
