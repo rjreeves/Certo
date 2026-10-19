@@ -23,25 +23,11 @@ pub struct CodegenOptions {
     pub line_directives: Option<(String, String)>,
 }
 
-/// Emit a complete C translation unit for the given module.
-pub fn emit_module(module: &Module, opts: &CodegenOptions) -> String {
-    let mut out = String::new();
-    let line_map: Option<LineMap> = opts.line_directives.as_ref()
-        .map(|(filename, source)| LineMap::new(filename, source));
-
-    // BACKLOG item 242 — must run before any codegen call below, since
-    // `c_fn_name` consults this registry on every call.
-    set_extern_names(module.decls.iter().filter_map(|sdecl| match &sdecl.node {
-        Decl::Fn(f) if f.is_extern => Some(f.name.node.clone()),
-        _ => None,
-    }).collect());
-
-    // A user function, global `val`/`var` or sum-type variant constant named
-    // like a runtime helper (`identity`, `expect`, …) would emit a second,
-    // conflicting `certo_<name>`; give it its own prefix. A function or global
-    // named like a variant (`val admin` next to `Admin`) collides with that
-    // variant's constant the same way (both mangle to `certo_admin`), so it
-    // is renamed too — BACKLOG item 358.
+/// The user names that must be emitted under their own prefix because their
+/// plain `certo_<name>` is taken: by a runtime helper (`identity`, `expect`, …),
+/// or by a sum-type variant of the same mangled name (`val admin` next to
+/// `Admin` — both would be `certo_admin`). BACKLOG item 358.
+fn user_renames(module: &Module) -> std::collections::HashSet<String> {
     let runtime = runtime_c_symbols();
     let variant_plain: std::collections::HashSet<String> = module.decls.iter()
         .filter_map(|d| if let Decl::Type(t) = &d.node { Some(t) } else { None })
@@ -72,7 +58,90 @@ pub fn emit_module(module: &Module, opts: &CodegenOptions) -> String {
             _ => {}
         }
     }
-    set_user_renames(renames);
+    renames
+}
+
+/// Two different user names that compile to the same C symbol.
+#[derive(Debug, Clone, PartialEq)]
+pub struct NameCollision {
+    /// The C name both end up with.
+    pub c_name: String,
+    /// The one declared first.
+    pub first: (String, certo_ast::span::Span),
+    /// The later one — where the clash is reported.
+    pub second: (String, certo_ast::span::Span),
+}
+
+/// Names the module declares that become C symbols — functions, global
+/// `val`/`var`, sum-type variants and impl methods — that differ in the Certo
+/// source yet mangle to one C name. The mangling lower-cases and snake-cases
+/// (`fooBar` -> `certo_foo_bar`), so `val fooBar` and `fn foo_bar` clash, and
+/// the C compiler then fails with a redefinition error that points at
+/// generated code. BACKLOG item 432.
+///
+/// Uses the same renames `emit_module` applies, so a clash is reported only if
+/// it would really survive into the C output.
+pub fn name_collisions(module: &Module) -> Vec<NameCollision> {
+    use certo_ast::span::Span;
+    set_extern_names(module.decls.iter().filter_map(|sdecl| match &sdecl.node {
+        Decl::Fn(f) if f.is_extern => Some(f.name.node.clone()),
+        _ => None,
+    }).collect());
+    set_user_renames(user_renames(module));
+
+    let mut entities: Vec<(String, Span)> = Vec::new();
+    for sdecl in &module.decls {
+        match &sdecl.node {
+            Decl::Fn(f) if !f.is_extern => entities.push((f.name.node.clone(), f.name.span)),
+            Decl::Val(v) => {
+                if let certo_ast::pattern::Pattern::Ident { name, .. } = &v.pattern.node {
+                    entities.push((name.node.clone(), name.span));
+                }
+            }
+            Decl::Var(v) => entities.push((v.name.node.clone(), v.name.span)),
+            Decl::Type(t) => {
+                if let TypeBody::Sum(variants) = &t.body {
+                    for v in variants { entities.push((v.name.node.clone(), v.name.span)); }
+                }
+            }
+            Decl::Impl(i) => {
+                let ty = i.type_path.segments.last().map(|s| s.node.clone()).unwrap_or_default();
+                for m in i.methods.iter().filter(|m| m.body.is_some()) {
+                    entities.push((format!("{}.{}", ty, m.name.node), m.name.span));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let mut seen: std::collections::HashMap<String, (String, Span)> = std::collections::HashMap::new();
+    let mut out = Vec::new();
+    for (name, span) in entities {
+        let c_name = c_fn_name(&name);
+        match seen.get(&c_name) {
+            // The same Certo name twice is a duplicate definition, reported elsewhere.
+            Some((first, _)) if *first == name => {}
+            Some(first) => out.push(NameCollision { c_name, first: first.clone(), second: (name, span) }),
+            None => { seen.insert(c_name, (name, span)); }
+        }
+    }
+    out
+}
+
+/// Emit a complete C translation unit for the given module.
+pub fn emit_module(module: &Module, opts: &CodegenOptions) -> String {
+    let mut out = String::new();
+    let line_map: Option<LineMap> = opts.line_directives.as_ref()
+        .map(|(filename, source)| LineMap::new(filename, source));
+
+    // BACKLOG item 242 — must run before any codegen call below, since
+    // `c_fn_name` consults this registry on every call.
+    set_extern_names(module.decls.iter().filter_map(|sdecl| match &sdecl.node {
+        Decl::Fn(f) if f.is_extern => Some(f.name.node.clone()),
+        _ => None,
+    }).collect());
+
+    set_user_renames(user_renames(module));
 
     // All-nullary enums are represented as plain int enums (not structs). The
     // function emitters need to know which, so `match`'s `.tag` read on such a

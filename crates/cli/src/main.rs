@@ -1696,6 +1696,24 @@ fn run_typeck_inner(
         process::exit(1);
     }
 
+    // BACKLOG item 432 — two different names that compile to one C symbol
+    // (`val fooBar` and `fn foo_bar`) used to reach the C compiler and fail with
+    // a redefinition error pointing at generated code.
+    let clashes = certo_codegen::name_collisions(module);
+    if !clashes.is_empty() {
+        let diags: Vec<Diagnostic> = clashes.iter().map(|c| {
+            Diagnostic::error("E0225",
+                format!("`{}` and `{}` both compile to the C name `{}`", c.first.0, c.second.0, c.c_name))
+                .with_span(c.second.1)
+                .with_label(format!("same C name as `{}`", c.first.0))
+                .with_note("names are lower-cased and snake-cased in the generated C (`fooBar` and `foo_bar` are the same) — rename one of them")
+        }).collect();
+        eprint!("{}", render_all(&diags, src, filename, colour));
+        eprintln!("aborting due to {} error(s)", diags.len());
+        if explain { print_explanations(&diags); }
+        process::exit(1);
+    }
+
     let schema = match certo_dbschema::check_module(module) {
         Ok(schema) => schema,
         Err(errs) => {

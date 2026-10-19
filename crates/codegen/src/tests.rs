@@ -3160,3 +3160,41 @@ fn ordinary_global_val_names_keep_the_plain_certo_prefix() {
     assert_contains(&c, "certo_limit");
     assert_not_contains(&c, "certo_user_limit");
 }
+
+// ------------------------------------------------------------------ //
+// Two different user names that compile to one C symbol (item 432).
+// ------------------------------------------------------------------ //
+
+fn collisions(src: &str) -> Vec<crate::NameCollision> {
+    crate::name_collisions(&certo_parser::parse(src).expect("parse failed"))
+}
+
+#[test]
+fn a_val_and_a_fn_that_differ_only_in_case_style_collide() {
+    let c = collisions("module A\nval fooBar = 1\nfn foo_bar(): Int = 2");
+    assert_eq!(c.len(), 1, "{c:?}");
+    assert_eq!(c[0].c_name, "certo_foo_bar");
+    assert_eq!(c[0].first.0, "fooBar");
+    assert_eq!(c[0].second.0, "foo_bar");
+}
+
+#[test]
+fn an_impl_method_and_a_fn_can_collide() {
+    // `Shape.area` mangles to `certo_shape_area`.
+    let c = collisions("module A\ntype Shape = { w: Int }\nimpl Shape {\n fn area(self): Int = self.w\n}\nfn shape_area(): Int = 1");
+    assert_eq!(c.len(), 1, "{c:?}");
+    assert_eq!(c[0].c_name, "certo_shape_area");
+}
+
+#[test]
+fn a_fn_named_like_a_variant_is_renamed_not_reported() {
+    // Item 358 gives it a `certo_user_` prefix, so there is no clash left to report.
+    assert!(collisions("module A\ntype Role = FooBar | Other\nfn fooBar(): Int = 1").is_empty());
+}
+
+#[test]
+fn unrelated_names_and_a_repeated_name_are_not_collisions() {
+    assert!(collisions("module A\nfn alpha(): Int = 1\nfn beta(): Int = 2\nval gamma = 3").is_empty());
+    // The same Certo name twice is a duplicate definition, reported elsewhere.
+    assert!(collisions("module A\nfn same(): Int = 1\nfn same(): Int = 2").is_empty());
+}
