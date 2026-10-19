@@ -152,9 +152,10 @@ certo-llvm hello.cto --exe hello.exe      # build and link a runnable program
 struct; this one uses a plain `ptr`). `--exe` instead compiles the IR together with a small C shim
 (`crates/llvm/runtime/certo_llvm_rt.c`) that provides `print`, `println`, `eprint`, `eprintln`,
 `intToText`, `floatToText`, `boolToText`, `Text.eq`, `Text.len`, `++` on Text and `**` on Int. Calls
-between your own functions, arithmetic, `if`, recursion and records (construction, field access,
-nested records) work. Anything else — other stdlib calls, lists, tuples, enums, options, `??`,
-`==` on Text — is reported as an error naming the construct, rather than
+between your own functions, arithmetic, `if`, recursion, records (construction, field access,
+nested records) and sum types with `match` (payload-free and payload variants, in records and
+as arguments) work. Anything else — other stdlib calls, lists, tuples, generic sum types,
+`Option`/`Result`, `??`, `==` on Text or on enums — is reported as an error naming the construct, rather than
 left as an unresolved external. `--allow-unresolved` restores the old behaviour for IR you link against
 your own runtime. `--exe` needs `clang` (on PATH, or in `C:\Program Files\LLVM\bin`).
 
