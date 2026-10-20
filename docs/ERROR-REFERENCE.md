@@ -411,7 +411,7 @@ error[E0219]: cannot assign to `y` — it was never declared with `var`
    = note: declare it with `var y = ...` instead of `val`, or don't reassign it
 ```
 
-**Cause:** `name = expr` where `name` was declared with `val`, is an
+**Cause:** `name = expr` where `name` was declared with `val` (a module-level `val` too), is an
 ordinary function/lambda parameter, or a match-arm binding — none of which
 are ever reassignable in Certo. Only a `var name = ...` binding is.
 Reassigning anything else was previously accepted silently everywhere in
@@ -585,43 +585,6 @@ source (BACKLOG item 432).
 **Fix:** Rename one of the two. The check runs on the names after the compiler has
 already given a name that collides with a runtime helper or a variant its own prefix
 (item 358), so only a clash that would really reach the C output is reported.
-
----
-
-### E0224  Module-level `var` is not supported
-
-```
-error[E0224]: module-level `var counter` is not supported
-  --> src/main.cto:3:1
-   |
- 3 | var counter = 0
-   | ^^^^^^^^^^^^^^^ the compiler does not generate mutable globals
-   |
-   = note: use a module-level `val` for a constant, or keep the state in a `var` inside a function
-```
-
-**Cause:** A `var` declared outside any function. The parser and type checker
-accept it, but no later stage generates a mutable global, so a program using one
-used to fail in the C compiler with `use of undeclared identifier 'certo_counter'`
-and no pointer back to the Certo source (BACKLOG item 433). Mutable globals are
-not supported yet — they need a rule for tasks that share one.
-
-**Fix:** Use a module-level `val` for a constant, or keep the state in a `var`
-inside a function and pass it where it is needed:
-
-```certo
-// Rejected:
-var counter = 0
-fn bump(): Int = { counter = counter + 1  counter }
-
-// Instead:
-fn bump(n: Int): Int = n + 1
-fn main(): Unit [io] = {
-    var counter = 0
-    counter = bump(counter)
-    println(intToText(counter))
-}
-```
 
 ---
 

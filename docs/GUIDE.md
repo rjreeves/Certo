@@ -191,6 +191,36 @@ fn countDown(n: Int): Unit = {
 }
 ```
 
+### Module-level values and state
+
+A `val` or `var` written outside any function is a global, visible to every function and lambda
+in the module:
+
+```
+val limit = 100           // a constant
+var counter = 0           // state the program may reassign
+
+fn bump(): Int = {
+    counter = counter + 1
+    counter
+}
+```
+
+- A global can be declared below the functions that use it, and its initialiser may call
+  functions and use earlier globals (`var seed = compute(5)`); every initialiser runs once,
+  before `main`.
+- `name = expr` works on a `var` from any function or lambda and the new value is seen by every
+  later read. Assigning a module-level `val` is error E0219, as for any `val`. A local binding
+  with the same name shadows the global.
+- Any type works, including records and lists, and f-strings can interpolate them
+  (`f"{counter}"`).
+- **A global `var` is not synchronised.** Two tasks (`spawn`, `parallel`, `every`) that write
+  the same `var` race, and nothing prevents it — the usual parallel-shared-state warning only
+  sees a name assigned within one function. Keep global state out of concurrent code, or pass
+  state through values.
+- Only the module that declares a `var` can assign it, and the LLVM and WebAssembly backends do
+  not support module-level `var` yet.
+
 ### Operators
 
 | Operator | Meaning |
