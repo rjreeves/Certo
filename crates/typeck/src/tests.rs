@@ -3489,20 +3489,51 @@ fn or_pattern_alternatives_binding_one_name_at_different_types_are_an_e0200_mism
 }
 
 // ------------------------------------------------------------------ //
-// E0224 — a module-level `var` is rejected (BACKLOG item 433). Nothing
-// downstream generates a mutable global, so it used to fail in the C compiler.
+// Module-level `var` (BACKLOG item 434): a global the program may reassign. It used to
+// be rejected with E0224 (item 433), when nothing downstream could emit one.
 // ------------------------------------------------------------------ //
 
 #[test]
-fn a_module_level_var_is_rejected_with_its_name() {
-    let kind = first_error_kind("module A\nvar counter = 0\nfn f(): Int = counter");
-    match kind {
-        TypeErrorKind::ModuleLevelVar { name } => assert_eq!(name, "counter"),
-        other => panic!("expected E0224, got {other:?}"),
-    }
+fn a_module_level_var_can_be_read_and_assigned_from_functions() {
+    check("module A
+var counter = 0
+fn bump(): Int = {
+ counter = counter + 1
+ counter
+}").unwrap();
+}
+
+#[test]
+fn assigning_a_module_level_val_is_still_an_error() {
+    let kind = first_error_kind("module A
+val limit = 10
+fn f(): Int = {
+ limit = 5
+ limit
+}");
+    assert!(matches!(kind, TypeErrorKind::AssignToImmutable { ref name } if name == "limit"), "expected E0219, got {kind:?}");
+}
+
+#[test]
+fn a_local_binding_shadows_a_module_level_var_for_assignment() {
+    // The local `val counter` is immutable even though the global `var counter` is not.
+    let kind = first_error_kind("module A
+var counter = 0
+fn f(): Int = {
+ val counter = 1
+ counter = 2
+ counter
+}");
+    assert!(matches!(kind, TypeErrorKind::AssignToImmutable { ref name } if name == "counter"), "expected E0219, got {kind:?}");
 }
 
 #[test]
 fn a_module_level_val_and_a_local_var_are_still_fine() {
-    check("module A\nval limit = 10\nfn f(): Int = {\n var n = 0\n n = n + limit\n n\n}").unwrap();
+    check("module A
+val limit = 10
+fn f(): Int = {
+ var n = 0
+ n = n + limit
+ n
+}").unwrap();
 }

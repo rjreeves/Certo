@@ -536,6 +536,25 @@ pub fn emit_module(module: &Module, opts: &CodegenOptions) -> String {
         let ret_c  = ret_ty_to_c(ret_ty);
         writeln!(out, "static {} {}(void);", ret_c, c_fn_name(&mir.name)).unwrap();
     }
+    // Forward-declare every module-level `val`/`var` and each `var`'s setter (BACKLOG item
+    // 434), as C tentative definitions: the real definition, with its initial value, still
+    // comes later at the declaration's place in the source. Without this a global could only
+    // be used by code emitted after it — a function written above the `var`, or any lambda
+    // (lifted functions are emitted before the globals), failed with "undeclared identifier".
+    for item in &hir.items {
+        let HirItem::Const(c) = item else { continue };
+        let cty = if let Some((_, init_mir)) = const_init_fns.iter().find(|(n, _)| n == &c.name) {
+            init_mir.locals.first().map(|l| ty_to_c(&l.ty)).unwrap_or_else(|| "void*".into())
+        } else if matches!(c.ty, certo_typeck::Ty::Error) {
+            const_expr_ty(&c.value)
+        } else {
+            ty_to_c(&c.ty)
+        };
+        writeln!(out, "static {} {};", cty, c_fn_name(&c.name)).unwrap();
+        if c.mutable {
+            writeln!(out, "static inline int64_t __certo_set_{}({} v);", c.name, cty).unwrap();
+        }
+    }
     writeln!(out).unwrap();
 
     // Concurrency support: per-spawn-call-site context structs + thread workers.
@@ -608,6 +627,12 @@ pub fn emit_module(module: &Module, opts: &CodegenOptions) -> String {
                     // fallback (`void*` for anything it doesn't recognize).
                     let cty = init_mir.locals.first().map(|l| ty_to_c(&l.ty)).unwrap_or_else(|| "void*".into());
                     writeln!(out, "static {} {};", cty, c_fn_name(&c.name)).unwrap();
+                    // A module-level `var` (BACKLOG item 434) also gets the setter its
+                    // (it returns 0 because MIR stores every call's result in a local)
+                    // assignments call; `__`-prefixed names are emitted verbatim.
+                    if c.mutable {
+                        writeln!(out, "static inline int64_t __certo_set_{}({} v) {{ {} = v; return 0; }}", c.name, cty, c_fn_name(&c.name)).unwrap();
+                    }
                     // The init function's own body, emitted here (not in one
                     // early batch) so any *other* global it references has
                     // already been declared, per the doc comment above.
@@ -622,6 +647,9 @@ pub fn emit_module(module: &Module, opts: &CodegenOptions) -> String {
                     };
                     writeln!(out, "static {} {} = {};", cty, c_fn_name(&c.name),
                         const_expr_to_c(&c.value)).unwrap();
+                    if c.mutable {
+                        writeln!(out, "static inline int64_t __certo_set_{}({} v) {{ {} = v; return 0; }}", c.name, cty, c_fn_name(&c.name)).unwrap();
+                    }
                 }
             }
             }

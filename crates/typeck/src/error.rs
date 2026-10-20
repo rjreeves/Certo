@@ -223,14 +223,6 @@ pub enum TypeErrorKind {
     /// matched. (Alternatives that bind the *same* name at *different types*
     /// are reported as an ordinary E0200 mismatch instead.)
     OrPatternBindingMismatch { name: String },
-
-    /// E0224 — a `var` declared at module level (BACKLOG item 433). The
-    /// parser and type checker accept it, but nothing downstream (HIR, MIR,
-    /// either backend) generates a mutable global, so using one failed in the
-    /// C compiler with `use of undeclared identifier`. Rejected here instead,
-    /// until mutable globals are designed (they need a story for tasks that
-    /// share one).
-    ModuleLevelVar { name: String },
 }
 
 impl TypeError {
@@ -311,8 +303,6 @@ impl TypeError {
                 format!("E0702: rule `{}` has `overrides {}` but `{}` does not exist in this validator", rule_name, overrides_name, overrides_name),
             TypeErrorKind::OrPatternBindingMismatch { name } =>
                 format!("E0223: every alternative of an or-pattern must bind the same names — `{}` is bound in only one of them", name),
-            TypeErrorKind::ModuleLevelVar { name } =>
-                format!("E0224: module-level `var {name}` is not supported — the compiler does not generate mutable globals; use a module-level `val` for a constant, or keep the state in a `var` inside a function"),
             TypeErrorKind::GuardOutsideFunction =>
                 "E0222: `guard` returns from the enclosing function, so it can only be used directly in a function or method body — not inside a lambda, a `spawn`/`parallel`/`withTimeout` block, or a body with no function to return from".to_string(),
             TypeErrorKind::DbAccessorNotFound { table, method, expected_fn } =>

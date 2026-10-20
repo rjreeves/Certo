@@ -79,6 +79,8 @@ pub struct HirConst {
     pub ty:    Ty,
     pub value: HirExpr,
     pub span:  Span,
+    /// A module-level `var` (BACKLOG item 434): assignable, so a setter is emitted for it.
+    pub mutable: bool,
 }
 
 // ------------------------------------------------------------------ //

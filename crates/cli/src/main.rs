@@ -2534,14 +2534,6 @@ pub(crate) fn type_error_to_diagnostic(e: &TypeError) -> Diagnostic {
                 .with_note("the arm body can't know which alternative matched, so each `|` side must bind exactly the same names")
         }
 
-        TypeErrorKind::ModuleLevelVar { name } => {
-            Diagnostic::error("E0224",
-                format!("module-level `var {name}` is not supported"))
-                .with_span(e.span)
-                .with_label("the compiler does not generate mutable globals")
-                .with_note("use a module-level `val` for a constant, or keep the state in a `var` inside a function")
-        }
-
         TypeErrorKind::GuardOutsideFunction => {
             Diagnostic::error("E0222",
                 "`guard` can only be used directly in a function or method body")

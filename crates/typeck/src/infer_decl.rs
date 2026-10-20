@@ -610,17 +610,32 @@ fn dfs_rule_cycle<'a>(
 // ------------------------------------------------------------------ //
 
 fn check_mutable_assignments(module: &Module, errors: &mut Vec<TypeError>) {
+    // The outermost scope holds the module's own `val`s (immutable) and `var`s (mutable),
+    // so `limit = 5` on a module-level `val` is E0219 and on a `var` is fine — BACKLOG item
+    // 434. A local binding of the same name shadows it, as everywhere else in this walk.
+    let mut globals: std::collections::HashMap<String, bool> = std::collections::HashMap::new();
+    for sdecl in &module.decls {
+        match &sdecl.node {
+            Decl::Val(v) => {
+                let mut names = Vec::new();
+                collect_pattern_names(&v.pattern.node, &mut names);
+                for n in names { globals.insert(n, false); }
+            }
+            Decl::Var(v) => { globals.insert(v.name.node.clone(), true); }
+            _ => {}
+        }
+    }
     for sdecl in &module.decls {
         match &sdecl.node {
             Decl::Fn(f) => {
                 if let Some(body) = &f.body {
-                    check_mutable_assignments_in_expr(&body.node, &mut vec![std::collections::HashMap::new()], errors);
+                    check_mutable_assignments_in_expr(&body.node, &mut vec![globals.clone()], errors);
                 }
             }
             Decl::Impl(i) => {
                 for m in &i.methods {
                     if let Some(body) = &m.body {
-                        check_mutable_assignments_in_expr(&body.node, &mut vec![std::collections::HashMap::new()], errors);
+                        check_mutable_assignments_in_expr(&body.node, &mut vec![globals.clone()], errors);
                     }
                 }
             }
@@ -1865,10 +1880,6 @@ fn check_decl(decl: &Decl, ctx: &mut Ctx<'_>) {
         }
 
         Decl::Var(v) => {
-            ctx.errors.push(TypeError {
-                kind: TypeErrorKind::ModuleLevelVar { name: v.name.node.clone() },
-                span: v.span,
-            });
             let inferred = infer(&v.value, ctx);
             let inferred = if let Some(ann) = &v.ty {
                 let declared = type_expr_to_ty(&ann.node, ctx);

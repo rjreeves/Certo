@@ -41,8 +41,16 @@ struct Cx {
     /// User-defined function names → declared param types, as written (a
     /// bare type-param param is `Ty::Var(0)`) — BACKLOG item 120.
     fn_param_tys:  HashMap<String, Vec<Ty>>,
-    /// Global value types — for sum variant constants like `Red`, `Green`.
+    /// Global value types — for sum variant constants like `Red`, `Green`, and for
+    /// every module-level `val`/`var` (BACKLOG item 434), so a reference to one has its
+    /// real type instead of `Ty::Error` (which made `f"{limit}"` read an Int as Text).
     global_types:  HashMap<String, Ty>,
+    /// Module-level `var` names (BACKLOG item 434): `name = expr` on one lowers to a
+    /// call to the generated setter `__certo_set_<name>`.
+    mutable_globals: std::collections::HashSet<String>,
+    /// Every module-level `val`/`var` name (BACKLOG item 434): a read of one is wrapped in a
+    /// typed temporary, because a bare `Operand::Global` carries no type through MIR.
+    global_values: std::collections::HashSet<String>,
     /// Sum variant name → parent type name (e.g. "Red" → "Color").
     variant_to_type: HashMap<String, String>,
     /// Sum variant name → ordered C field names for its payload (the real
@@ -174,6 +182,8 @@ impl Cx {
             fn_ret_types:  HashMap::new(),
             fn_param_tys:  HashMap::new(),
             global_types:        HashMap::new(),
+            mutable_globals:     std::collections::HashSet::new(),
+            global_values:       std::collections::HashSet::new(),
             variant_to_type:     HashMap::new(),
             variant_field_names: HashMap::new(),
             variant_field_types: HashMap::new(),
@@ -1213,6 +1223,38 @@ pub fn lower_module(module: &Module) -> Result<HirModule, Vec<LowerError>> {
         }
     }
 
+    // Module-level `val`/`var` initialisers, lowered once up front and in source order
+    // (BACKLOG item 434). A function body that mentions one — even one declared further
+    // down the file — then sees its real type (an annotation wins; otherwise the lowered
+    // initialiser's), where it used to be `Ty::Error`: an f-string interpolating a global
+    // Int read it as a Text pointer and printed nothing. The lowered value is reused when
+    // the declaration's own item is built below, so nothing is lowered twice.
+    let mut global_inits: HashMap<String, HirExpr> = HashMap::new();
+    for sdecl in &module.decls {
+        let (name, value, annotation) = match &sdecl.node {
+            Decl::Val(v) => match &v.pattern.node {
+                Pattern::Ident { name, .. } => (name.node.clone(), &v.value, v.ty.as_ref()),
+                _ => continue,
+            },
+            Decl::Var(v) => {
+                cx.mutable_globals.insert(v.name.node.clone());
+                (v.name.node.clone(), &v.value, v.ty.as_ref())
+            }
+            _ => continue,
+        };
+        cx.global_values.insert(name.clone());
+        let lowered = lower_expr(value, &mut cx);
+        let declared = annotation.map(|t| ast_ty_to_ty_with_params(&t.node, &[], &cx.type_aliases));
+        let known = match declared {
+            Some(t) if !matches!(t, Ty::Error) => t,
+            _ => lowered.ty.clone(),
+        };
+        if !matches!(known, Ty::Error) {
+            cx.global_types.insert(name.clone(), known);
+        }
+        global_inits.insert(name, lowered);
+    }
+
     let mut items = Vec::new();
     for sdecl in &module.decls {
         match &sdecl.node {
@@ -1262,16 +1304,38 @@ pub fn lower_module(module: &Module) -> Result<HirModule, Vec<LowerError>> {
             }
 
             Decl::Val(v) => {
-                let value = lower_expr(&v.value, &mut cx);
                 let name = match &v.pattern.node {
                     Pattern::Ident { name, .. } => name.node.clone(),
                     _ => "<pattern>".to_string(),
+                };
+                let value = match global_inits.remove(&name) {
+                    Some(lowered) => lowered,
+                    None => lower_expr(&v.value, &mut cx),
                 };
                 items.push(HirItem::Const(HirConst {
                     name,
                     ty:    Ty::Error,
                     value,
                     span:  v.span,
+                    mutable: false,
+                }));
+            }
+
+            // A module-level `var` (BACKLOG item 434): a global the program may reassign.
+            // It is emitted like a `val` (a static C variable, initialised before `main`);
+            // the setter that `name = expr` calls is generated beside it.
+            Decl::Var(v) => {
+                let name = v.name.node.clone();
+                let value = match global_inits.remove(&name) {
+                    Some(lowered) => lowered,
+                    None => lower_expr(&v.value, &mut cx),
+                };
+                items.push(HirItem::Const(HirConst {
+                    name,
+                    ty:    Ty::Error,
+                    value,
+                    span:  v.span,
+                    mutable: true,
                 }));
             }
 
@@ -1499,7 +1563,25 @@ fn lower_expr(expr: &S<Expr>, cx: &mut Cx) -> HirExpr {
                         },
                     }
                 });
-                HirExpr { kind: HirExprKind::Global(name.to_string()), ty, span }
+                let global_ref = HirExpr { kind: HirExprKind::Global(name.to_string()), ty: ty.clone(), span };
+                // A module-level `val`/`var` of a known type is read through a typed temporary
+                // (BACKLOG item 434): a bare `Operand::Global` has no type in MIR, so an f-string
+                // interpolating a global Int or Float chose the Text conversion and read garbage.
+                if cx.global_values.contains(name) && !matches!(ty, Ty::Error | Ty::Fn { .. }) {
+                    let tmp = cx.fresh_local();
+                    cx.local_types.insert(tmp, ty.clone());
+                    let tail = HirExpr { kind: HirExprKind::Local(tmp), ty: ty.clone(), span };
+                    HirExpr {
+                        kind: HirExprKind::Block {
+                            stmts: vec![HirStmt::Let { local: tmp, name: format!("_global_{name}"), ty: ty.clone(), init: global_ref }],
+                            tail: Box::new(tail),
+                        },
+                        ty,
+                        span,
+                    }
+                } else {
+                    global_ref
+                }
             }
         }
 
@@ -3196,6 +3278,12 @@ fn lower_block(stmts: &[Stmt], span: Span, cx: &mut Cx) -> HirExpr {
                 let v = lower_expr(value, cx);
                 if let Some(local) = cx.lookup_local(&target.node) {
                     hir_stmts.push(HirStmt::Assign { local, value: v });
+                } else if cx.mutable_globals.contains(&target.node) {
+                    // Assigning a module-level `var` (BACKLOG item 434) is a call to its
+                    // generated setter, so no new statement kind is needed downstream.
+                    let func = HirExpr { kind: HirExprKind::Global(format!("__certo_set_{}", target.node)), ty: Ty::Error, span: target.span };
+                    let call = HirExpr { kind: HirExprKind::Call { func: Box::new(func), args: vec![v] }, ty: Ty::Unit, span: target.span };
+                    hir_stmts.push(HirStmt::Expr(call));
                 } else {
                     cx.err(LowerErrorKind::UnresolvedName(target.node.clone()), target.span);
                 }
