@@ -13,7 +13,7 @@ pub use fmt_type::fmt_type;
 /// original source unchanged if parsing fails (so `certo fmt` never
 /// corrupts a file it can't parse).
 pub fn format_source(src: &str) -> Result<String, Vec<certo_parser::ParseError>> {
-    let module = certo_parser::parse(src)?;
+    let module = certo_parser::parse_verbatim(src)?;
     Ok(fmt_module(&module))
 }
 

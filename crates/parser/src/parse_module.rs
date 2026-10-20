@@ -7,17 +7,122 @@ use crate::parse_type::parse_module_path;
 use crate::parse_decl::{parse_decl, parse_extern_block};
 
 /// Top-level entry point: lex + parse a complete source file.
+///
+/// BACKLOG item 357 - when two sum types in the file declare a variant with the same name, each
+/// such variant is renamed `Variant_of_Type` (declaration and qualified uses `Type.Variant`), and an
+/// unqualified use of the shared name is an error asking for the qualified form. Everything after
+/// the parser then sees distinct variant names.
 pub fn parse(source: &str) -> Result<Module, Vec<ParseError>> {
-    let tokens = match certo_lexer::lex(source) {
-        Ok(t) => t,
-        Err(errs) => {
-            return Err(errs.into_iter().map(|(span, text)| ParseError {
-                kind: ParseErrorKind::Custom(format!("unrecognised token `{text}`")),
-                span: span.into(),
-            }).collect());
-        }
-    };
+    let tokens = lex_or_errors(source)?;
+    let module = parse_tokens(tokens.clone())?;
+    let ambiguous = ambiguous_variants(&module);
+    if ambiguous.is_empty() {
+        return Ok(module);
+    }
+    let tokens = qualify_variants(tokens, &module, &ambiguous)?;
+    parse_tokens(tokens)
+}
 
+/// Like `parse`, but never renames anything: for the formatter, which must print the source as
+/// written.
+pub fn parse_verbatim(source: &str) -> Result<Module, Vec<ParseError>> {
+    parse_tokens(lex_or_errors(source)?)
+}
+
+fn lex_or_errors(source: &str) -> Result<Vec<certo_lexer::Spanned<'_>>, Vec<ParseError>> {
+    match certo_lexer::lex(source) {
+        Ok(t) => Ok(t),
+        Err(errs) => Err(errs.into_iter().map(|(span, text)| ParseError {
+            kind: ParseErrorKind::Custom(format!("unrecognised token `{text}`")),
+            span: span.into(),
+        }).collect()),
+    }
+}
+
+/// Variant name -> the sum types (in declaration order) that declare it, for names declared more
+/// than once.
+fn ambiguous_variants(module: &Module) -> std::collections::BTreeMap<String, Vec<String>> {
+    let mut by_variant: std::collections::BTreeMap<String, Vec<String>> = std::collections::BTreeMap::new();
+    for d in &module.decls {
+        if let certo_ast::decl::Decl::Type(t) = &d.node {
+            if let certo_ast::decl::TypeBody::Sum(vs) = &t.body {
+                for v in vs {
+                    by_variant.entry(v.name.node.clone()).or_default().push(t.name.node.clone());
+                }
+            }
+        }
+    }
+    by_variant.retain(|_, types| types.len() > 1);
+    by_variant
+}
+
+fn qualify_variants<'src>(
+    tokens: Vec<certo_lexer::Spanned<'src>>,
+    module: &Module,
+    ambiguous: &std::collections::BTreeMap<String, Vec<String>>,
+) -> Result<Vec<certo_lexer::Spanned<'src>>, Vec<ParseError>> {
+    // Declaration sites, by byte span.
+    let mut decl_sites: std::collections::HashMap<(usize, usize), &'static str> = std::collections::HashMap::new();
+    for d in &module.decls {
+        if let certo_ast::decl::Decl::Type(t) = &d.node {
+            if let certo_ast::decl::TypeBody::Sum(vs) = &t.body {
+                for v in vs {
+                    if ambiguous.contains_key(&v.name.node) {
+                        let mangled: &'static str = Box::leak(format!("{}_of_{}", v.name.node, t.name.node).into_boxed_str());
+                        decl_sites.insert((v.name.span.start as usize, v.name.span.end as usize), mangled);
+                    }
+                }
+            }
+        }
+    }
+    let declares = |ty: &str, variant: &str| ambiguous.get(variant).is_some_and(|ts| ts.iter().any(|t| t == ty));
+
+    let mut out: Vec<certo_lexer::Spanned<'src>> = Vec::with_capacity(tokens.len());
+    let mut errors = Vec::new();
+    let mut i = 0;
+    while i < tokens.len() {
+        let t = &tokens[i];
+        if let Token::Ident(name) = &t.token {
+            if let Some(m) = decl_sites.get(&(t.span.start, t.span.end)) {
+                out.push(certo_lexer::Spanned { token: Token::Ident(m), span: t.span.clone(), newline_before: t.newline_before });
+                i += 1;
+                continue;
+            }
+            // `Type.Variant`
+            if i + 2 < tokens.len() && tokens[i + 1].token == Token::Dot {
+                if let Token::Ident(variant) = &tokens[i + 2].token {
+                    if declares(name, variant) {
+                        let m: &'static str = Box::leak(format!("{variant}_of_{name}").into_boxed_str());
+                        out.push(certo_lexer::Spanned {
+                            token: Token::Ident(m),
+                            span: t.span.start..tokens[i + 2].span.end,
+                            newline_before: t.newline_before,
+                        });
+                        i += 3;
+                        continue;
+                    }
+                }
+            }
+            if let Some(types) = ambiguous.get(*name) {
+                let after_dot = out.last().is_some_and(|p| p.token == Token::Dot);
+                if !after_dot {
+                    let qualified: Vec<String> = types.iter().map(|ty| format!("`{ty}.{name}`")).collect();
+                    errors.push(ParseError {
+                        kind: ParseErrorKind::Custom(format!(
+                            "the variant `{name}` is declared by more than one type ({}) - write {}",
+                            types.join(", "), qualified.join(" or "))),
+                        span: t.span.clone().into(),
+                    });
+                }
+            }
+        }
+        out.push(t.clone());
+        i += 1;
+    }
+    if errors.is_empty() { Ok(out) } else { Err(errors) }
+}
+
+fn parse_tokens(tokens: Vec<certo_lexer::Spanned<'_>>) -> Result<Module, Vec<ParseError>> {
     let mut cur = Cursor::new(tokens);
     let mut errors = Vec::new();
 

@@ -7,7 +7,7 @@ mod parse_decl;
 mod parse_module;
 
 pub use error::{ParseError, ParseErrorKind};
-pub use parse_module::parse;
+pub use parse_module::{parse, parse_verbatim};
 
 #[cfg(test)]
 mod tests;
