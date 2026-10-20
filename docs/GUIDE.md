@@ -135,6 +135,22 @@ certo hello.cto -o hello.exe --watch
 | `Decimal` | scaled int64 | Exact decimal arithmetic |
 | `Result<T,E>` | `void*` → `certo_result_t*` | Either `Ok(T)` or `Err(E)`; `?` propagates errors |
 
+**Variants shared by two types.** Two sum types in the same file may declare a variant with the same
+name, such as `Pending` in both an order status and a payment status. A shared name must then be
+written with its type, `OrderStatus.Pending`, in expressions and in `match` patterns; writing a bare
+`Pending` is an error that lists the choices. Variants whose names are unique can still be written
+bare.
+
+```
+type OrderStatus = Pending | Shipped
+type PayStatus   = Pending | Paid
+
+fn label(s: OrderStatus): Text = match s {
+    OrderStatus.Pending => "waiting"
+    Shipped             => "on its way"
+}
+```
+
 ### Functions
 
 ```
