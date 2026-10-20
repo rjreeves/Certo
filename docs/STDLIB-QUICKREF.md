@@ -53,7 +53,7 @@ sleep(ms: Int): Unit [io]           // block the current thread for ms milliseco
 
 ```
 intToText(n: Int): Text
-floatToText(f: Float): Text
+floatToText(f: Float): Text         // shortest text that reads back as exactly f (see below)
 boolToText(b: Bool): Text           // "true" | "false"
 floatToInt(f: Float): Int           // truncates toward zero
 intToFloat(n: Int): Float
@@ -68,6 +68,14 @@ intToFloat32(n: Int): Float32
 float32ToFloat(f: Float32): Float   // widen
 floatToFloat32(f: Float): Float32   // narrow, may lose precision
 ```
+
+**Float formatting.** `floatToText`, `float32ToText` and `{x}` in an f-string print the fewest
+significant digits that read back as exactly the same number, so no precision is lost:
+`3.14159265358979` prints as `3.14159265358979`, `0.1 + 0.2` as `0.30000000000000004`. Whole numbers
+print without a fractional part (`3`), an exponent from -5 up to 16 is written as plain decimal
+(`100000000`, `0.00001234`), and beyond that as an exponent (`1e+24`, `1.5e-07`). A `Float32` needs
+at most 9 digits. Before this, Floats printed with 6 significant digits (`3.14159`) and lost the rest.
+
 
 ### Arithmetic helpers
 
