@@ -1144,6 +1144,16 @@ pub fn infer(expr: &S<Expr>, ctx: &mut Ctx<'_>) -> Ty {
         Expr::Age { expr, span } => {
             let base_ty = infer(expr, ctx);
             let base_ty = ctx.uf.apply(&base_ty);
+            // BACKLOG item 355 - `.age` is the Timestamp operator only when the receiver is not a
+            // record with a field of that name.
+            if let Ty::Named { name, .. } = &base_ty {
+                if let Some(fty) = ctx.env.record_fields.get(name.as_str())
+                    .and_then(|fs| fs.iter().find(|(n, _)| n == "age"))
+                    .map(|(_, t)| t.clone())
+                {
+                    return fty;
+                }
+            }
             let is_timestamp = match &base_ty {
                 Ty::Named { name, .. } if name == "Timestamp" => true,
                 Ty::Option(inner) => matches!(inner.as_ref(), Ty::Named { name, .. } if name == "Timestamp"),

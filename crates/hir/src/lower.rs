@@ -2901,8 +2901,18 @@ fn lower_expr(expr: &S<Expr>, cx: &mut Cx) -> HirExpr {
         // representation from `DateTime` (identical C type, see
         // `crates/codegen/src/ty_to_c.rs`), so the base expression is
         // passed into `DateTime.diff` with no conversion needed.
-        Expr::Age { expr, .. } => {
+        Expr::Age { expr, span: age_span } => {
             let base = lower_expr(expr, cx);
+            // BACKLOG item 355 - a record with a field named `age` reads that field.
+            if let Ty::Named { name, .. } = &base.ty {
+                if cx.record_field_names.get(name).is_some_and(|ns| ns.iter().any(|n| n == "age")) {
+                    let field_expr = S::new(
+                        Expr::Field { expr: expr.clone(), field: S::new("age".to_string(), *age_span), span: *age_span },
+                        *age_span,
+                    );
+                    return lower_expr(&field_expr, cx);
+                }
+            }
             let duration_ty = Ty::Named { name: "Duration".into(), args: vec![] };
             let now_call = HirExpr {
                 kind: HirExprKind::Call {
