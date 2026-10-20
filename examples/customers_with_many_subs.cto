@@ -39,7 +39,7 @@ fn queryCustomers(minSubs: Text): List<List<Text?>> [io] = {
 
 fn parseMinParam(query: Text): Text =
     if Text.startsWith(query, "min=") then
-        Text.slice(query, 4, Text.len(query))
+        Text.slice(query, 4, Text.length(query))
     else
         "10"
 

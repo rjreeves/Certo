@@ -19,9 +19,9 @@ fn main(): Unit [io] = {
     val verStr    = arg(2) ?? "9.1"
 
     // Parse "major.minor" by splitting on "." via indexOf + slice
-    val dotPos    = Text.indexOf(verStr, ".") ?? Text.len(verStr)
+    val dotPos    = Text.indexOf(verStr, ".") ?? Text.length(verStr)
     val wantMajor = parseInt(Text.slice(verStr, 0, dotPos)) ?? 9
-    val wantMinor = parseInt(Text.slice(verStr, dotPos + 1, Text.len(verStr))) ?? 1
+    val wantMinor = parseInt(Text.slice(verStr, dotPos + 1, Text.length(verStr))) ?? 1
 
     println(f"Connecting to PostgreSQL...")
     println(f"  connection string : {connstr}")

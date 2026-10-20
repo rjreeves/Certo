@@ -332,6 +332,40 @@ int64_t certo_text_length(certo_text_t s) {
     return count;
 }
 
+/* BACKLOG item 402 — `slice`, `indexOf` and `split("")` take and return CHARACTER
+   positions, matching `length`/`charAt` above (they used to count bytes, so
+   `Text.slice("héllo", 0, Text.length("héllo"))` dropped the last character and
+   `Text.slice(s, 2, 4)` could cut a multi-byte character in half). Positions are
+   counted exactly as `certo_text_length` counts: an invalid UTF-8 byte is not a
+   character. The byte-level escape hatches (`Text.len`, `Text.byteLength`,
+   `Text.sliceUnchecked`, `Text.byteAtUnchecked`) are unchanged. */
+
+/* Byte offset where the `ci`-th character begins, or the string's byte length
+   when `ci` is at or past the character count. */
+static size_t __certo_text_char_offset(const char* s, size_t len, int64_t ci) {
+    size_t pos = 0;
+    int64_t idx = 0;
+    while (pos < len) {
+        size_t start = pos;
+        int32_t cp = __certo_utf8_decode_at((const unsigned char*)s, len, &pos);
+        if (cp < 0) continue;            /* invalid byte: not a character */
+        if (idx == ci) return start;
+        idx++;
+    }
+    return len;
+}
+
+/* Number of characters in the first `bytes` bytes of `s`. */
+static int64_t __certo_text_char_count_before(const char* s, size_t len, size_t bytes) {
+    size_t pos = 0;
+    int64_t count = 0;
+    while (pos < bytes && pos < len) {
+        int32_t cp = __certo_utf8_decode_at((const unsigned char*)s, len, &pos);
+        if (cp >= 0) count++;
+    }
+    return count;
+}
+
 /* BACKLOG item 269 — spec §9.4's own `text.toInt()` example; a namespaced
    alias for the already-working `certo_parse_int` (crates/stdlib/src/
    core.rs, defined earlier in the same generated translation unit),
@@ -430,14 +464,16 @@ certo_text_t certo_text_trim_end(certo_text_t s) {
 
 certo_text_t certo_text_slice(certo_text_t s, int64_t start, int64_t end) {
     if (!s) return "";
-    int64_t n = (int64_t)strlen(s);
     if (start < 0) start = 0;
-    if (end > n) end = n;
     if (start >= end) return "";
-    int64_t len = end - start;
-    char* out = (char*)malloc((size_t)len + 1);
+    size_t n = strlen(s);
+    size_t from = __certo_text_char_offset(s, n, start);
+    size_t to   = __certo_text_char_offset(s, n, end);   /* past the end -> n */
+    if (from >= to) return "";
+    size_t len = to - from;
+    char* out = (char*)malloc(len + 1);
     if (!out) certo_panic("out of memory");
-    memcpy(out, s + start, (size_t)len);
+    memcpy(out, s + from, len);
     out[len] = '\0';
     return out;
 }
@@ -468,7 +504,9 @@ void* certo_text_index_of(certo_text_t haystack, certo_text_t needle) {
     if (!p) return NULL;
     int64_t* idx = (int64_t*)malloc(sizeof(int64_t));
     if (!idx) certo_panic("out of memory");
-    *idx = (int64_t)(p - haystack);
+    /* A character index, not a byte offset (item 402). UTF-8 is self-synchronising,
+       so a match always starts on a character boundary. */
+    *idx = __certo_text_char_count_before(haystack, strlen(haystack), (size_t)(p - haystack));
     return idx;
 }
 
@@ -504,11 +542,19 @@ void* certo_text_split(certo_text_t s, certo_text_t sep) {
     CertoList* out = list_alloc(8);
     if (!s) return out;
     if (!sep || strlen(sep) == 0) {
-        /* split into individual characters */
-        for (size_t i = 0; s[i]; i++) {
-            char* ch = (char*)malloc(2);
+        /* Split into individual characters (item 402): one entry per Unicode
+           character, so the list has `Text.length(s)` entries and no multi-byte
+           character is torn apart. */
+        size_t n = strlen(s), pos = 0;
+        while (pos < n) {
+            size_t start = pos;
+            int32_t cp = __certo_utf8_decode_at((const unsigned char*)s, n, &pos);
+            if (cp < 0) continue;        /* invalid byte: not a character */
+            size_t clen = pos - start;
+            char* ch = (char*)malloc(clen + 1);
             if (!ch) certo_panic("out of memory");
-            ch[0] = s[i]; ch[1] = '\0';
+            memcpy(ch, s + start, clen);
+            ch[clen] = '\0';
             out = certo_list_push_mut(out, ch);
         }
         return out;

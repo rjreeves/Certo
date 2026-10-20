@@ -486,7 +486,7 @@ fn emit_api_list_handler(type_name: &str, table: &str, out: &mut String) {
     writeln!(out, "    else if i == n - 1 then \"[\" ++ rowToJson(List.getOrPanic(rows, i), cols) ++ \"]\"").unwrap();
     writeln!(out, "    else {{").unwrap();
     writeln!(out, "        val rest = rowsToJsonArray(rows, cols, i + 1, n)").unwrap();
-    writeln!(out, "        \"[\" ++ rowToJson(List.getOrPanic(rows, i), cols) ++ \",\" ++ Text.slice(rest, 1, Text.len(rest))").unwrap();
+    writeln!(out, "        \"[\" ++ rowToJson(List.getOrPanic(rows, i), cols) ++ \",\" ++ Text.slice(rest, 1, Text.length(rest))").unwrap();
     writeln!(out, "    }}").unwrap();
     writeln!(out).unwrap();
 }
