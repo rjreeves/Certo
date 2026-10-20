@@ -588,6 +588,28 @@ already given a name that collides with a runtime helper or a variant its own pr
 
 ---
 
+### E0226  Record literal is missing a required field
+
+```
+error[E0226]: `User` is missing the required field `name`
+  --> src/main.cto:4:11
+   |
+ 4 |   val u = User { id: 1 }
+   |           ^^^^^^^^^^^^^^
+   |
+   = note: add `name: ...`, or declare the field optional (`name?: ...`) in `User`
+```
+
+**Cause:** Every field of a record is required unless it is declared optional (`name?: T`),
+has an optional type (`name: T?`), or is a `computed` property. A literal `User { ... }`
+that leaves one out used to compile, and reading the field gave a null or empty value
+(BACKLOG item 353).
+
+**Fix:** Give the field a value, or make it optional in the type declaration. A
+`.with(...)` copy-update is not checked, because the original value supplies the rest.
+
+---
+
 ### E0223  Or-pattern alternatives bind different names
 
 ```
