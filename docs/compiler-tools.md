@@ -151,15 +151,18 @@ certo-llvm hello.cto --exe hello.exe      # build and link a runnable program
 **What it can run.** The backend does not use the C backend's runtime (that one passes `Text` as a
 struct; this one uses a plain `ptr`). `--exe` instead compiles the IR together with a small C shim
 (`crates/llvm/runtime/certo_llvm_rt.c`) that provides `print`, `println`, `eprint`, `eprintln`,
-`intToText`, `floatToText`, `boolToText`, `Text.eq`, `Text.len`, `++` on Text, `**` on Int, and the list
-functions `List.len`, `List.get`, `List.getOrPanic`, `List.first`, `List.last`, `List.push` and `List.empty`. Calls
+`intToText`, `floatToText`, `boolToText`, `Text.eq`, `Text.len`, `++` on Text, `**` on Int, the list
+functions `List.len`, `List.get`, `List.getOrPanic`, `List.first`, `List.last`, `List.push` and
+`List.empty`, and `arg`, `getEnv`, `parseInt` and `Process.quit`. `==` and `!=` on two Text values compare
+contents. In a browser module `arg` and `getEnv` are always `None` and `Process.quit` traps. Calls
 between your own functions, arithmetic, `if`, recursion, records (construction, field access,
 nested records) and sum types with `match` (payload-free and payload variants, in records and
 as arguments), `Option`, `Result` and `??` (`Some`/`None`/`Ok`/`Err`, `match` on them, any payload
 type), lists (literals, `for` loops, the functions above) and tuples (construction and destructuring)
 work. Anything else — other stdlib calls (including the `Option.*` / `Result.*` helpers and the list
-functions that take closures, such as `List.map`), generic sum types of your own, `==` on Text or on
-enums — is reported as an error naming the construct, rather than
+functions that take closures, such as `List.map`), generic sum types of your own, `==` on records, enums
+or lists, and the DB, HTTP, JSON and process-execution layers — is reported as an error naming the
+construct, rather than
 left as an unresolved external. `--allow-unresolved` restores the old behaviour for IR you link against
 your own runtime. `--exe` needs `clang` (on PATH, or in `C:\Program Files\LLVM\bin`).
 
