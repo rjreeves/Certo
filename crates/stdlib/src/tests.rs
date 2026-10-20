@@ -936,56 +936,24 @@ fn datetime_c_does_not_change_the_still_panicking_date_time_parse_iso() {
 }
 
 #[test]
-fn regex_captures_reassigns_the_pushed_list() {
-    // BACKLOG item 213 — certo_list_push returns a *new* list (functional
-    // update, see certo_list_flat_map's own identical convention); the
-    // previous code called it as a bare statement and discarded the
-    // result, so certo_regex_captures always returned the original empty
-    // list regardless of real matches.
-    assert!(REGEX_C.contains("list = certo_list_push(list, s);"),
-        "certo_regex_captures must reassign list = certo_list_push(...), not discard it");
-}
-
-#[test]
-fn regex_split_reassigns_every_pushed_list() {
-    let n = REGEX_C.matches("list = certo_list_push(list, seg);").count();
-    assert_eq!(n, 4, "certo_regex_split has 4 push call sites, all must reassign `list`");
-}
-
-#[test]
-fn regex_c_no_longer_discards_list_push_results() {
-    // Every `certo_list_push(list, ...)` call site in this file must be
-    // reassigned (`list = certo_list_push(list, ...)`) — a bare,
-    // non-reassigning call would mean this bug is still present somewhere.
+fn regex_c_never_discards_list_push_results() {
+    // BACKLOG item 213 — certo_list_push returns a *new* list, so every call site in the regex
+    // runtime must reassign `list`. (The engine was rewritten for item 401: one push site in
+    // captures, three in split.)
     let total = REGEX_C.matches("certo_list_push(list,").count();
     let reassigned = REGEX_C.matches("list = certo_list_push(list,").count();
     assert_eq!(total, reassigned, "found a certo_list_push(list, ...) call whose result is discarded");
-    assert_eq!(total, 5, "expected exactly 5 certo_list_push call sites (1 in captures, 4 in split)");
+    assert_eq!(total, 4, "expected exactly 4 certo_list_push call sites (1 in captures, 3 in split)");
 }
 
-// ------------------------------------------------------------------ //
-// BACKLOG item 276 — the regex engine didn't support `{n,m}` bounded-
-// repetition quantifiers at all, silently mismatching instead of erroring.
-// Actual matching behavior (bounded/exact/open-ended forms, and that a
-// malformed `{` still falls back to a literal character) is verified live
-// via the real compiled `certo.exe`, not re-derivable from a Rust-level
-// string check on the embedded C source — these are regression guards on
-// the engine's own generated code shape.
-// ------------------------------------------------------------------ //
-
+// BACKLOG items 276 and 401 — brace quantifiers `{n}`, `{n,}`, `{n,m}` are parsed by
+// certo_re_interval (a `{` that does not begin a valid interval stays an ordinary character).
+// Matching behaviour is covered end to end in crates/cli/tests/regex_engine.rs.
 #[test]
-fn regex_engine_now_recognizes_brace_quantifiers() {
-    assert!(REGEX_C.contains("quant == '{'"),
-        "the backtracker must now recognize '{{' as a real quantifier, not just a literal character");
-}
-
-#[test]
-fn regex_engine_parses_all_three_brace_quantifier_shapes() {
-    // {n}, {n,}, {n,m} — confirmed by the presence of the digit-parsing and
-    // comma-branch logic that distinguishes all three shapes.
-    assert!(REGEX_C.contains("has_n1"), "missing the leading-digit parse for {{n...}}");
-    assert!(REGEX_C.contains("*b == ','"), "missing the comma branch distinguishing {{n,}} / {{n,m}} from {{n}}");
-    assert!(REGEX_C.contains("*b == '}'"), "missing the closing-brace check that gates real-quantifier recognition");
+fn regex_engine_parses_brace_quantifiers() {
+    assert!(REGEX_C.contains("certo_re_interval"), "missing the interval parser");
+    assert!(REGEX_C.contains("*b == ','") && REGEX_C.contains("*b != '}'"),
+        "missing the comma / closing-brace checks distinguishing {{n}}, {{n,}}, {{n,m}}");
 }
 
 #[test]
