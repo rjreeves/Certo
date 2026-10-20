@@ -57,11 +57,9 @@ fn main(): Unit [io] = {
 
 #[test]
 fn callbacks_over_other_element_types_are_unchanged() {
-    // Only Text params are hinted. Ints and Floats go through the same functions
-    // exactly as before: a native double or struct param on these callbacks would
-    // use the wrong ABI, because the runtime passes raw `void*` elements. (A Float
-    // accumulator in `fold`, and a struct field read inside a callback, are
-    // separate, older limitations that this change does not touch.)
+    // Int and Float callbacks give the same answers as before. (Records, and a Float
+    // accumulator in `fold`, are covered by `list_callback_types.rs`: they used to fail
+    // to compile, see BACKLOG item 438.)
     let out = run(r#"module T
 import Stdlib.Core
 

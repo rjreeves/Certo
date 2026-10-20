@@ -723,19 +723,19 @@ fn lower_lambda_with_param_hint(params: &[certo_ast::expr::LambdaParam], body: &
     lower_lambda_with_param_hints(params, body, std::slice::from_ref(hint), &Ty::Error, cx, span)
 }
 
-/// Stdlib callbacks that get a *Text-only* param hint (BACKLOG item 423), and the
-/// position of the lambda: `filter`/`find`/`any`/`all`/`partition` take it second,
+/// Stdlib callbacks whose params are hinted with their real types, and the position
+/// of the lambda: `filter`/`find`/`any`/`all`/`partition` take it second,
 /// `fold`/`reduce` third.
 ///
-/// An unhinted lambda param stays `Ty::Error`, so `w < acc` in
-/// `List.reduce(words, "zzz", (acc, w) => if w < acc then w else acc)` could not be
-/// recognised as a Text comparison and compared pointers (it returned `"zzz"`).
-/// Only `Text` is hinted: these callbacks are called by the runtime with raw
-/// erased `void*` elements, so a native `double` or struct-by-value param would
-/// read the wrong register, while a `Text` is a pointer either way (the same
-/// reasoning as `List.sort` in `lower_hinted_callback`). The general fix — types
-/// from typeck, with the callback ABI settled per callee — is still open.
-fn text_hint_lambda_pos(fn_path: Option<&str>) -> Option<usize> {
+/// An unhinted lambda param stays `Ty::Error` through HIR, which had two silent
+/// consequences (BACKLOG items 423 and 438): `w < acc` on two Text params could not
+/// be recognised as a Text comparison and compared pointers, and a Float field read
+/// inside the callback (`p.price > 2.5`) was typed `Error`, so MIR read it as an
+/// `int64_t` and truncated it. All of these functions are `BOXED_ABI_CALLEES` in MIR,
+/// whose lifted callbacks unbox each param to its real type, so any element type is
+/// safe to hint here (this used to be Text-only, when the callbacks were still called
+/// with raw `void*` elements).
+fn callback_hint_lambda_pos(fn_path: Option<&str>) -> Option<usize> {
     match fn_path {
         Some("List.filter") | Some("List.find") | Some("List.any")
         | Some("List.all") | Some("List.partition") => Some(1),
@@ -744,19 +744,22 @@ fn text_hint_lambda_pos(fn_path: Option<&str>) -> Option<usize> {
     }
 }
 
-/// The per-param hints for those callbacks: `Text` where the param is known to be
-/// Text — the list's element, and for `fold`/`reduce` the accumulator, taken from
-/// the already-lowered `init` argument — and `Ty::Error` (no hint) elsewhere.
-/// Empty when nothing is Text.
-fn text_only_param_hints(fn_path: Option<&str>, lowered_args: &[HirExpr]) -> Vec<Ty> {
-    let only_text = |t: Option<Ty>| if matches!(t, Some(Ty::Text)) { Ty::Text } else { Ty::Error };
+/// The per-param hints for those callbacks: the list's element type and, for
+/// `fold`/`reduce`, the accumulator's type first, taken from the already-lowered `init`
+/// argument. A type that is unknown (`Ty::Error`) or still generic (`Ty::Var`) is left
+/// unhinted, as before. Empty when nothing is known.
+fn callback_param_hints(fn_path: Option<&str>, lowered_args: &[HirExpr]) -> Vec<Ty> {
+    let known = |t: Option<Ty>| match t {
+        Some(t) if !matches!(t, Ty::Error | Ty::Var(_)) => t,
+        _ => Ty::Error,
+    };
     let elem = lowered_args.first().and_then(|a| match &a.ty {
         Ty::List(inner) => Some((**inner).clone()),
         _ => None,
     });
     let hints = match fn_path {
-        Some("List.fold") | Some("List.reduce") => vec![only_text(lowered_args.get(1).map(|a| a.ty.clone())), only_text(elem)],
-        _ => vec![only_text(elem)],
+        Some("List.fold") | Some("List.reduce") => vec![known(lowered_args.get(1).map(|a| a.ty.clone())), known(elem)],
+        _ => vec![known(elem)],
     };
     if hints.iter().all(|h| matches!(h, Ty::Error)) { Vec::new() } else { hints }
 }
@@ -1920,11 +1923,11 @@ fn lower_expr(expr: &S<Expr>, cx: &mut Cx) -> HirExpr {
                                 continue;
                             }
                         }
-                        // BACKLOG item 423 — a callback whose params are `Text`
-                        // (see `text_hint_lambda_pos`).
-                        if text_hint_lambda_pos(fn_full_path.as_deref()) == Some(i) {
+                        // BACKLOG items 423/438 — type the callback's params
+                        // (see `callback_hint_lambda_pos`).
+                        if callback_hint_lambda_pos(fn_full_path.as_deref()) == Some(i) {
                             if let Expr::Lambda { params, body, .. } = &arg.value.node {
-                                let hints = text_only_param_hints(fn_full_path.as_deref(), &out);
+                                let hints = callback_param_hints(fn_full_path.as_deref(), &out);
                                 if !hints.is_empty() {
                                     out.push(lower_lambda_with_param_hints(params, body, &hints, &Ty::Error, cx, arg.value.span));
                                     continue;

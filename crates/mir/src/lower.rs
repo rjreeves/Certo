@@ -298,6 +298,14 @@ pub fn lower_fn(
 /// type is a struct, not a pointer-sized value.
 const BOXED_ABI_CALLEES: &[&str] = &[
     "List.map", "List.filter", "List.find", "List.any", "List.all", "List.groupBy",
+    // `List.partition` — the same single-element predicate as `filter`. `List.fold`
+    // and its alias `List.reduce` (BACKLOG item 438) take a *two*-param callback,
+    // `(acc, elem) => acc`, whose params have different types; see
+    // `lower_lambda_boxed`'s per-param hints, the boxed `init` argument and the
+    // raw-return unbox below. Before this, a Float accumulator, a record element or
+    // a record accumulator failed in the C compiler (`double` passed as `void*`,
+    // a field read on an erased `int64_t`).
+    "List.partition", "List.fold", "List.reduce",
     // `Option.map` (BACKLOG item 256) — the exact same single-element-typed-
     // param-closure shape as `List.map` immediately above, just over an
     // `Option<A>` receiver instead of a `List<A>` one.
@@ -1302,7 +1310,7 @@ fn cancel_token_ty() -> Ty {
 /// params — a real capture, if any, is unboxed from it exactly like an
 /// ordinary parameter, just recovered from the enclosing scope instead of
 /// the call site.
-fn lower_lambda_boxed(params: &[certo_hir::HirParam], body: &HirExpr, captures: &[LocalId], param_ty_hint: Option<&Ty>, b: &mut Builder) -> Operand {
+fn lower_lambda_boxed(params: &[certo_hir::HirParam], body: &HirExpr, captures: &[LocalId], param_ty_hints: &[Ty], b: &mut Builder) -> Operand {
     let idx = b.lambda_count;
     b.lambda_count += 1;
     let lam_name = format!("__lam_{}_{}_boxed", b.fn_name, idx);
@@ -1324,9 +1332,12 @@ fn lower_lambda_boxed(params: &[certo_hir::HirParam], body: &HirExpr, captures: 
         .map(|p| lb.declare_local(&format!("{}_boxed", p.name), Ty::Var(0)))
         .collect();
     bind_captures(captures, &capture_tys, env_param, &mut lb);
-    for (p, raw) in params.iter().zip(raw_locals.iter()) {
+    for (i, (p, raw)) in params.iter().zip(raw_locals.iter()).enumerate() {
+        // One hint per param when the callee's callback params differ in type
+        // (`fold`'s accumulator and element); a single hint (the list's element
+        // type) otherwise applies to every param.
         let real_ty = if matches!(p.ty, Ty::Error) {
-            param_ty_hint.cloned().unwrap_or(Ty::Error)
+            param_ty_hints.get(i).or_else(|| param_ty_hints.last()).cloned().unwrap_or(Ty::Error)
         } else {
             p.ty.clone()
         };
@@ -2148,10 +2159,27 @@ fn lower_expr(expr: &HirExpr, b: &mut Builder) -> Operand {
                 HirExprKind::Global(name) => b.variant_to_type.get(name).cloned(),
                 _ => None,
             };
+            // `List.fold`/`List.reduce` (BACKLOG item 438): the callback is
+            // `(acc, elem) => acc`, so its first param has the accumulator's type
+            // (the `init` argument's) and its second the list's element type.
+            let is_fold = matches!(&func.kind, HirExprKind::Global(n) if n == "List.fold" || n == "List.reduce");
+            let param_ty_hints: Vec<Ty> = match &elem_ty_hint {
+                Some(elem) if is_fold => vec![args.get(1).map(|a| a.ty.clone()).unwrap_or(Ty::Error), elem.clone()],
+                Some(elem) => vec![elem.clone()],
+                None => Vec::new(),
+            };
             let arg_ops: Vec<Operand> = args.iter().enumerate().map(|(i, a)| {
+                // A Float or record `init` goes into `fold`'s `void*` slot boxed,
+                // like a callback argument (an Int or a pointer already fits).
+                if is_fold && i == 1 && (matches!(a.ty, Ty::Float | Ty::Float32) || a.ty.needs_heap_box()) {
+                    let value = lower_value_expr(a, b);
+                    let boxed = b.declare_local("_boxed_init", Ty::Var(0));
+                    b.assign(boxed, Rvalue::Box { value, ty: a.ty.clone() });
+                    return Operand::Local(boxed);
+                }
                 if needs_boxed_callback {
                     if let HirExprKind::Lambda { params, body, captures, .. } = &a.kind {
-                        return lower_lambda_boxed(params, body, captures, elem_ty_hint.as_ref(), b);
+                        return lower_lambda_boxed(params, body, captures, &param_ty_hints, b);
                     }
                     // A bare reference to `Some`/`Ok`/`Err` (`List.map(xs,
                     // Some)`, BACKLOG item 339) — unlike an ordinary named
@@ -2282,7 +2310,9 @@ fn lower_expr(expr: &HirExpr, b: &mut Builder) -> Operand {
             // BACKLOG item 134), the raw pointer must be unboxed rather than
             // assigned directly, or the bits get numeric-converted (Float)
             // or the assignment doesn't even compile (a struct).
-            const RAW_RETURN_CALLEES: &[&str] = &["List.getOrPanic"];
+            // `List.fold`/`List.reduce` return their accumulator as a raw `void*` too
+            // (BACKLOG item 438), so a Float or record result is unboxed the same way.
+            const RAW_RETURN_CALLEES: &[&str] = &["List.getOrPanic", "List.fold", "List.reduce"];
             let stdlib_raw_return = matches!(&func.kind, HirExprKind::Global(name) if RAW_RETURN_CALLEES.contains(&name.as_str()))
                 && (matches!(expr.ty, Ty::Float) || expr.ty.needs_heap_box());
             // Same idea, generalized to any user-defined generic function
