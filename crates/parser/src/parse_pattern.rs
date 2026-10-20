@@ -5,6 +5,21 @@ use crate::cursor::Cursor;
 use crate::error::{ParseError, ParseErrorKind};
 
 
+/// The pattern after `val`/`let`: like `parse_pattern`, except that a lone capitalised name followed
+/// by `=` or `:` is a binding, not a unit constructor - `val MAX_RETRIES = 3` (spec section 2.2's
+/// constant convention; BACKLOG item 356). A `match` arm keeps the constructor reading.
+pub fn parse_binding_pattern(cur: &mut Cursor<'_>) -> Result<S<Pattern>, ParseError> {
+    if let (Some(Token::Ident(name)), Some(next)) = (cur.peek(), cur.peek2()) {
+        if name.chars().next().map(|c| c.is_uppercase()).unwrap_or(false)
+            && matches!(next, Token::Eq | Token::Colon)
+        {
+            let (name, span) = cur.expect_ident()?;
+            return Ok(S::new(Pattern::Ident { name: S::new(name, span), span }, span));
+        }
+    }
+    parse_pattern(cur)
+}
+
 /// Parse a pattern. Handles or-patterns (`p1 | p2`) at the top level.
 pub fn parse_pattern(cur: &mut Cursor<'_>) -> Result<S<Pattern>, ParseError> {
     let left = parse_pattern_atom(cur)?;

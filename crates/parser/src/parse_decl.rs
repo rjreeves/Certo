@@ -9,7 +9,7 @@ use crate::cursor::Cursor;
 use crate::error::{ParseError, ParseErrorKind};
 use crate::parse_type::{parse_type, parse_type_params, parse_module_path, parse_effect_set};
 use crate::parse_expr::{parse_expr, parse_block};
-use crate::parse_pattern::parse_pattern;
+use crate::parse_pattern::{parse_binding_pattern, parse_pattern};
 
 /// Returns more than one declaration only for `extern` blocks (handled
 /// separately in `parse_module.rs`, before this function is ever called)
@@ -864,7 +864,7 @@ fn parse_sum_variants_no_leading_bar(cur: &mut Cursor<'_>) -> Result<Vec<SumVari
 
 fn parse_val_decl(cur: &mut Cursor<'_>, is_pub: bool) -> Result<ValDecl, ParseError> {
     let start = cur.expect(&Token::Val)?;
-    let pattern = parse_pattern(cur)?;
+    let pattern = parse_binding_pattern(cur)?;
     let ty = if cur.eat(|t| matches!(t, Token::Colon)).is_some() {
         Some(parse_type(cur)?)
     } else {

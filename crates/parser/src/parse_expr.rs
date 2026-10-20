@@ -7,7 +7,7 @@ use certo_lexer::Token;
 use crate::cursor::Cursor;
 use crate::error::{ParseError, ParseErrorKind};
 use crate::parse_type::{parse_type, parse_module_path};
-use crate::parse_pattern::parse_pattern;
+use crate::parse_pattern::{parse_binding_pattern, parse_pattern};
 
 // ------------------------------------------------------------------ //
 // Entry point — parse a full expression
@@ -783,7 +783,7 @@ fn parse_stmt(cur: &mut Cursor<'_>) -> Result<Stmt, ParseError> {
     match cur.peek() {
         Some(Token::Val) | Some(Token::Let) => {
             cur.bump();
-            let pattern = parse_pattern(cur)?;
+            let pattern = parse_binding_pattern(cur)?;
             let ty = if cur.eat(|t| matches!(t, Token::Colon)).is_some() {
                 Some(parse_type(cur)?)
             } else {
