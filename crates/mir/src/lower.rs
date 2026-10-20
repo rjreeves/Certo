@@ -1506,8 +1506,8 @@ fn infer_operand_ty(op: &Operand, b: &Builder) -> Ty {
             MirConst::Float(_)   => Ty::Float,
             MirConst::Bool(_)    => Ty::Bool,
             MirConst::Str(_)     => Ty::Text,
-            MirConst::Decimal(_) => Ty::Float, // Decimal compiles as double
-            MirConst::Uuid(_)    => Ty::Text,
+            MirConst::Decimal(_) => Ty::Decimal(None),
+            MirConst::Uuid(_)    => Ty::Uuid,
         },
         Operand::Local(id) => b.locals
             .get(*id as usize)
