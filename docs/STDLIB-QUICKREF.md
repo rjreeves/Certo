@@ -1441,7 +1441,12 @@ matches; `matches.help()` and `matches.version()` select the active command.
 
 `import Stdlib.Regex`
 
-Patterns use POSIX extended regular expression syntax.
+Patterns use extended regular expression syntax: literals, `.`, `[abc]` / `[^a-z]` / `[[:digit:]]`,
+`\d \w \s` (and `\D \W \S`), `\b \B`, `^ $`, groups `( )` and `(?: )`, alternation `|`, and
+`* + ? {n} {n,} {n,m}` on any atom or group (add `?` for a lazy match). Matching is leftmost-first
+(`cat|category` finds `cat`), text is UTF-8, `\d \w \s` are ASCII. In a Certo string literal write
+the backslash twice: `"\\d+"`. No backreferences. An **invalid pattern stops the program** with
+`invalid regular expression "…": <reason>`; so does a match that backtracks past 50 million steps.
 
 ```
 Regex.match(pattern: Text, input: Text): Bool
@@ -1451,7 +1456,7 @@ Regex.find(pattern: Text, input: Text): Text
     // first match substring, or "" if none
 
 Regex.captures(pattern: Text, input: Text): List<Text>
-    // all capture groups of the first match
+    // one entry per group of the first match ("" for a group that did not take part); [] if no match
 
 Regex.replace(pattern: Text, input: Text, replacement: Text): Text
     // replace first match with replacement
