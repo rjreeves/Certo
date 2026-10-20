@@ -441,6 +441,12 @@ fn generic_container_ret(full: Option<&str>, args: &[HirExpr]) -> Option<Ty> {
         Some("List.partition") => {
             args.first().map(|a| Ty::Tuple(vec![a.ty.clone(), a.ty.clone()]))
         }
+        // `List.zip` (BACKLOG item 389) — `List<(A, B)>` from the two lists' element types.
+        Some("List.zip") => {
+            let a = args.first().and_then(list_elem)?;
+            let b = args.get(1).and_then(list_elem)?;
+            Some(Ty::List(Box::new(Ty::Tuple(vec![a, b]))))
+        }
         Some("List.chunked") => args.first().map(|a| Ty::List(Box::new(a.ty.clone()))),
         // The callback (args[1]) was lowered via `lower_lambda_with_param_hint`,
         // so its body's type is now recoverable (not guaranteed — only when the

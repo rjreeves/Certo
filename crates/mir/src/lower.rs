@@ -1651,6 +1651,28 @@ fn unwrap_result_payload(b: &mut Builder, scrut: &Operand, hir_local: LocalId, n
 /// which must branch to `next_arm_bb` on a null scrutinee *before*
 /// attempting to unbox its payload) must issue that final `Goto`
 /// themselves — see the built-in `Constructor("Some", ...)` arm above.
+/// Read element `i` of a tuple into a local of its real type when the tuple's type is known
+/// (BACKLOG item 389: a `Float` element is stored as bits and used to be read back as an
+/// integer). Returns the operand and its type; `Ty::Error` when the type is not known.
+fn read_tuple_elem(b: &mut Builder, tuple: &Operand, tuple_ty: &Ty, i: usize) -> (Operand, Ty) {
+    let elem_ty = match tuple_ty { Ty::Tuple(ts) => ts.get(i).cloned().unwrap_or(Ty::Error), _ => Ty::Error };
+    let known = !matches!(elem_ty, Ty::Error | Ty::Var(_));
+    let raw_ty = if known && elem_ty.needs_heap_box() { Ty::Var(0) } else { Ty::Error };
+    let raw = b.declare_local("_tuple_elem", raw_ty);
+    let next_bb = b.new_block();
+    b.terminate(Terminator::Call {
+        func: Operand::Global("__tuple_get".into()),
+        args: vec![tuple.clone(), Operand::Const(MirConst::Int(i as i64))],
+        dest: raw,
+        next: next_bb,
+    });
+    b.switch_to(next_bb);
+    if !known { return (Operand::Local(raw), Ty::Error); }
+    let typed = b.declare_local("_tuple_elem_val", elem_ty.clone());
+    b.assign(typed, Rvalue::Unbox { value: Operand::Local(raw), ty: elem_ty.clone() });
+    (Operand::Local(typed), elem_ty)
+}
+
 fn check_nested_pattern(b: &mut Builder, pat: &HirPat, op: &Operand, ty: &Ty, next_arm_bb: BlockId) {
     match pat {
         HirPat::Wildcard => {}
@@ -1814,16 +1836,8 @@ fn check_nested_pattern(b: &mut Builder, pat: &HirPat, op: &Operand, ty: &Ty, ne
         }
         HirPat::Tuple(fields) => {
             for (i, field_pat) in fields.iter().enumerate() {
-                let elem_local = b.declare_local("_tuple_elem", Ty::Error);
-                let next_bb = b.new_block();
-                b.terminate(Terminator::Call {
-                    func: Operand::Global("__tuple_get".into()),
-                    args: vec![op.clone(), Operand::Const(MirConst::Int(i as i64))],
-                    dest: elem_local,
-                    next: next_bb,
-                });
-                b.switch_to(next_bb);
-                check_nested_pattern(b, field_pat, &Operand::Local(elem_local), &Ty::Error, next_arm_bb);
+                let (elem_op, elem_ty) = read_tuple_elem(b, op, ty, i);
+                check_nested_pattern(b, field_pat, &elem_op, &elem_ty, next_arm_bb);
             }
         }
         HirPat::List { head, tail, elem_ty } => {
@@ -2932,24 +2946,9 @@ fn lower_expr(expr: &HirExpr, b: &mut Builder) -> Operand {
                             // above: a non-`Bind` element sub-pattern (`(Some(x), y)`
                             // vs `(None, y)`) used to be silently skipped.
                             if matches!(field_pat, HirPat::Wildcard) { continue; }
-                            let elem_local = match field_pat {
-                                HirPat::Bind { local, name: fname } => b.bind_pattern_local(*local, fname, Ty::Error),
-                                _ => b.declare_local("_tuple_elem", Ty::Error),
-                            };
-                            let next_bb = b.new_block();
-                            b.terminate(Terminator::Call {
-                                func: Operand::Global("__tuple_get".into()),
-                                args: vec![
-                                    scrut_op.clone(),
-                                    Operand::Const(MirConst::Int(i as i64)),
-                                ],
-                                dest: elem_local,
-                                next: next_bb,
-                            });
-                            b.switch_to(next_bb);
-                            if !matches!(field_pat, HirPat::Bind { .. }) {
-                                check_nested_pattern(b, field_pat, &Operand::Local(elem_local), &Ty::Error, next_arm_bb);
-                            }
+                            // A known tuple type (item 389) reads each element at its real type.
+                            let (elem_op, elem_ty) = read_tuple_elem(b, &scrut_op, &scrutinee.ty, i);
+                            check_nested_pattern(b, field_pat, &elem_op, &elem_ty, next_arm_bb);
                         }
                         let after_pat = if arm.guard.is_some() { b.new_block() } else { arm_bb };
                         b.terminate(Terminator::Goto(after_pat));
