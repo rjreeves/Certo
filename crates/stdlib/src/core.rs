@@ -287,6 +287,16 @@ static inline uint64_t certo_urem(uint64_t a, uint64_t b) {
     return a % b;
 }
 
+/* ---- shared cells for closure-assigned `var`s (BACKLOG item 354) ---- */
+void* __certo_cell_new(void* v) {
+    void** c = (void**)malloc(sizeof(void*));
+    if (!c) certo_panic("out of memory");
+    *c = v;
+    return (void*)c;
+}
+void* __certo_cell_get(void* c) { return *(void**)c; }
+int64_t __certo_cell_set(void* c, void* v) { *(void**)c = v; return 0; }
+
 /* ---- null coalesce / coerce ---- */
 void* certo_coalesce(void* opt, void* fallback) {
     return opt ? opt : fallback;

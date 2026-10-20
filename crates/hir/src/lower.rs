@@ -4114,7 +4114,11 @@ fn collect_lambda_captures(body: &HirExpr, threshold: LocalId) -> Vec<LocalId> {
 fn collect_free_locals(expr: &HirExpr, threshold: LocalId, out: &mut Vec<LocalId>) {
     let visit_stmt = |s: &HirStmt, out: &mut Vec<LocalId>| match s {
         HirStmt::Let { init, .. } => collect_free_locals(init, threshold, out),
-        HirStmt::Assign { value, .. } => collect_free_locals(value, threshold, out),
+        HirStmt::Assign { local, value } => {
+            // Assigning to an outer variable is a use of it (BACKLOG item 354).
+            if *local < threshold { out.push(*local); }
+            collect_free_locals(value, threshold, out);
+        }
         HirStmt::Expr(e) => collect_free_locals(e, threshold, out),
         HirStmt::Defer { body } => collect_free_locals(body, threshold, out),
     };
@@ -4148,7 +4152,11 @@ fn collect_free_locals(expr: &HirExpr, threshold: LocalId, out: &mut Vec<LocalId
             for s in stmts { visit_stmt(s, out); }
             collect_free_locals(tail, threshold, out);
         }
-        HirExprKind::Lambda { .. } => {} // own independent check — see doc comment
+        // A nested lambda's own captures that come from outside this lambda are captures of this
+        // lambda too, or its environment would not hold them (BACKLOG item 354).
+        HirExprKind::Lambda { captures, .. } => {
+            for c in captures { if *c < threshold { out.push(*c); } }
+        }
         HirExprKind::Match { scrutinee, arms } => {
             collect_free_locals(scrutinee, threshold, out);
             for arm in arms {

@@ -249,6 +249,8 @@ pub fn lower_fn(
     variant_to_type:     &std::collections::HashMap<String, String>,
 ) -> (MirFn, Vec<MirFn>) {
     let mut b = Builder::new(&f.name, record_field_types.clone(), variant_field_types.clone(), fn_param_tys.clone(), fn_ret_tys.clone(), variant_to_type.clone());
+    let cells = f.body.as_ref().map(find_cell_vars).unwrap_or_default();
+    CELL_VARS.with(|c| *c.borrow_mut() = cells);
 
     // Declare params as locals (index 0 = return slot, type patched below).
     let ret_slot = b.declare_local("_ret", Ty::Error);
@@ -275,6 +277,7 @@ pub fn lower_fn(
     }
     emit_defers_then_return(Operand::Local(ret_slot), &mut b);
 
+    CELL_VARS.with(|c| c.borrow_mut().clear());
     let lifted = b.lifted_fns;
     (MirFn { name: f.name.clone(), param_count: f.params.len(), locals: b.locals, blocks: b.blocks }, lifted)
 }
@@ -333,6 +336,82 @@ const BOXED_ABI_CALLEES: &[&str] = &[
 /// Recover the MIR types of a lambda's captured HIR locals from the
 /// *enclosing* builder — the lambda's own fresh builder has no record of
 /// them (BACKLOG item 140).
+// BACKLOG item 354 - a `var` that a lambda assigns to is shared with its enclosing function
+// through a heap cell instead of being copied into the closure. The set (HIR local -> the
+// variable's real type) is computed once per top-level function and read by every lifted lambda
+// lowered inside it.
+thread_local! {
+    static CELL_VARS: std::cell::RefCell<std::collections::HashMap<LocalId, Ty>> =
+        std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+fn cell_var_ty(id: LocalId) -> Option<Ty> {
+    CELL_VARS.with(|c| c.borrow().get(&id).cloned())
+}
+
+fn walk_hir(e: &HirExpr, f: &mut dyn FnMut(&HirExpr)) {
+    f(e);
+    match &e.kind {
+        HirExprKind::Call { func, args } => { walk_hir(func, f); args.iter().for_each(|a| walk_hir(a, f)); }
+        HirExprKind::BinOp { lhs, rhs, .. } => { walk_hir(lhs, f); walk_hir(rhs, f); }
+        HirExprKind::UnOp { arg, .. } => walk_hir(arg, f),
+        HirExprKind::Field { base, .. } => walk_hir(base, f),
+        HirExprKind::Record { fields, .. } => fields.iter().for_each(|(_, v)| walk_hir(v, f)),
+        HirExprKind::Tuple(xs) | HirExprKind::List(xs) => xs.iter().for_each(|x| walk_hir(x, f)),
+        HirExprKind::If { cond, then_expr, else_expr } => { walk_hir(cond, f); walk_hir(then_expr, f); walk_hir(else_expr, f); }
+        HirExprKind::Block { stmts, tail } => {
+            for st in stmts {
+                match st {
+                    HirStmt::Let { init, .. } => walk_hir(init, f),
+                    HirStmt::Assign { value, .. } => walk_hir(value, f),
+                    HirStmt::Expr(x) => walk_hir(x, f),
+                    HirStmt::Defer { body } => walk_hir(body, f),
+                }
+            }
+            walk_hir(tail, f);
+        }
+        HirExprKind::Lambda { body, .. } => walk_hir(body, f),
+        HirExprKind::Match { scrutinee, arms } => {
+            walk_hir(scrutinee, f);
+            for a in arms { if let Some(g) = &a.guard { walk_hir(g, f); } walk_hir(&a.body, f); }
+        }
+        HirExprKind::Try(x) | HirExprKind::Return(x) | HirExprKind::Unsafe(x) | HirExprKind::Await(x) => walk_hir(x, f),
+        HirExprKind::For { iter, body, .. } => { walk_hir(iter, f); walk_hir(body, f); }
+        HirExprKind::While { cond, body } => { walk_hir(cond, f); walk_hir(body, f); }
+        HirExprKind::Spawn { args, .. } => args.iter().for_each(|a| walk_hir(a, f)),
+        HirExprKind::AwaitTimed { task, .. } | HirExprKind::JoinTimedCancel { task, .. } => walk_hir(task, f),
+        _ => {}
+    }
+}
+
+/// Locals assigned inside a lambda that captures them, with each one's declared type.
+fn find_cell_vars(body: &HirExpr) -> std::collections::HashMap<LocalId, Ty> {
+    let mut let_tys: std::collections::HashMap<LocalId, Ty> = std::collections::HashMap::new();
+    let mut assigned_in_lambda: std::collections::HashSet<LocalId> = std::collections::HashSet::new();
+    walk_hir(body, &mut |e| {
+        if let HirExprKind::Block { stmts, .. } = &e.kind {
+            for st in stmts {
+                if let HirStmt::Let { local, ty, init, .. } = st {
+                    let t = if matches!(ty, Ty::Error) { init.ty.clone() } else { ty.clone() };
+                    let_tys.insert(*local, t);
+                }
+            }
+        }
+        if let HirExprKind::Lambda { body, captures, .. } = &e.kind {
+            walk_hir(body, &mut |x| {
+                if let HirExprKind::Block { stmts, .. } = &x.kind {
+                    for st in stmts {
+                        if let HirStmt::Assign { local, .. } = st {
+                            if captures.contains(local) { assigned_in_lambda.insert(*local); }
+                        }
+                    }
+                }
+            });
+        }
+    });
+    let_tys.into_iter().filter(|(id, _)| assigned_in_lambda.contains(id)).collect()
+}
+
 fn capture_types(captures: &[LocalId], b: &Builder) -> Vec<Ty> {
     captures.iter().map(|cid| {
         let mir_id = b.get_local(*cid);
@@ -1936,7 +2015,19 @@ fn lower_expr(expr: &HirExpr, b: &mut Builder) -> Operand {
         HirExprKind::Uuid(u)    => Operand::Const(MirConst::Uuid(u.clone())),
         HirExprKind::Unit       => Operand::Const(MirConst::Unit),
 
-        HirExprKind::Local(id)    => Operand::Local(b.get_local(*id)),
+        HirExprKind::Local(id)    => {
+            if let Some(ty) = cell_var_ty(*id) {
+                let cell = Operand::Local(b.get_local(*id));
+                let raw = b.declare_local("_cell_raw", Ty::Var(0));
+                let next = b.new_block();
+                b.terminate(Terminator::Call { func: Operand::Global("__certo_cell_get".into()), args: vec![cell], dest: raw, next });
+                b.switch_to(next);
+                let val = b.declare_local("_cell_val", ty.clone());
+                b.assign(val, Rvalue::Unbox { value: Operand::Local(raw), ty });
+                return Operand::Local(val);
+            }
+            Operand::Local(b.get_local(*id))
+        }
         HirExprKind::Global(name) => Operand::Global(name.clone()),
 
         HirExprKind::BinOp { op, lhs, rhs } => {
@@ -3600,6 +3691,16 @@ fn lower_stmt(stmt: &HirStmt, b: &mut Builder) {
             // initialiser. This preserves e.g. a `__CertoTask<R>` spawn handle so
             // a later `await` can join it with the right result type.
             let decl_ty = if matches!(ty, Ty::Error) { infer_operand_ty(&init_op, b) } else { ty.clone() };
+            if let Some(cell_ty) = cell_var_ty(*local) {
+                let cell_ty = if matches!(cell_ty, Ty::Error) { decl_ty } else { cell_ty };
+                let boxed = b.declare_local("_cell_init", Ty::Var(0));
+                b.assign(boxed, Rvalue::Box { value: init_op, ty: cell_ty });
+                let mir_local = b.map_hir_local(*local, name, Ty::Var(0));
+                let next = b.new_block();
+                b.terminate(Terminator::Call { func: Operand::Global("__certo_cell_new".into()), args: vec![Operand::Local(boxed)], dest: mir_local, next });
+                b.switch_to(next);
+                return;
+            }
             let mir_local = b.map_hir_local(*local, name, decl_ty);
             b.assign(mir_local, Rvalue::Use(init_op));
         }
@@ -3607,6 +3708,16 @@ fn lower_stmt(stmt: &HirStmt, b: &mut Builder) {
             b.current_span = value.span;
             let val_op   = lower_value_expr(value, b);
             let mir_local = b.get_local(*local);
+            if let Some(cell_ty) = cell_var_ty(*local) {
+                let cell_ty = if matches!(cell_ty, Ty::Error) { infer_operand_ty(&val_op, b) } else { cell_ty };
+                let boxed = b.declare_local("_cell_new_val", Ty::Var(0));
+                b.assign(boxed, Rvalue::Box { value: val_op, ty: cell_ty });
+                let done = b.declare_local("_cell_set", Ty::Int);
+                let next = b.new_block();
+                b.terminate(Terminator::Call { func: Operand::Global("__certo_cell_set".into()), args: vec![Operand::Local(mir_local), Operand::Local(boxed)], dest: done, next });
+                b.switch_to(next);
+                return;
+            }
             b.assign(mir_local, Rvalue::Use(val_op));
         }
         HirStmt::Expr(e) => {
