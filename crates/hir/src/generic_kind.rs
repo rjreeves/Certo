@@ -126,6 +126,25 @@ fn is_erased_compare(e: &HirExpr) -> bool {
             && matches!(lhs.ty, Ty::Var(_)) && matches!(rhs.ty, Ty::Var(_)))
 }
 
+/// The erased-closure parameters of `f`: `keep: A => Bool` style parameters whose argument is
+/// declared with a type variable but whose result is concrete.
+fn erased_pred_params(f: &HirFn) -> HashSet<LocalId> {
+    f.params.iter().filter(|p| matches!(&p.ty, Ty::Fn { params, ret }
+        if params.len() == 1 && matches!(params[0], Ty::Var(_)) && !matches!(**ret, Ty::Var(_) | Ty::Error)))
+        .map(|p| p.local).collect()
+}
+
+/// `List.filter(xs, keep)` (or `find`/`any`/`all`/`partition`) where `keep` is one of the
+/// enclosing function's own erased-closure parameters (BACKLOG item 439). `keep` expects a cell
+/// for its argument, the stdlib function hands it a raw element word.
+fn is_forwarded_pred(e: &HirExpr, preds: &HashSet<LocalId>) -> bool {
+    let HirExprKind::Call { func, args } = &e.kind else { return false };
+    if args.len() != 2 { return false; }
+    let HirExprKind::Global(n) = &func.kind else { return false };
+    if !matches!(n.as_str(), "List.filter" | "List.find" | "List.any" | "List.all" | "List.partition") { return false; }
+    matches!(&args[1].kind, HirExprKind::Local(l) if preds.contains(l))
+}
+
 /// The kind a call to `callee` passes, or `None` if its type parameter cannot be determined here.
 fn call_kind(callee: &str, args: &[HirExpr], call_ty: &Ty, fn_param_tys: &HashMap<String, Vec<Ty>>, fn_ret_tys: &HashMap<String, Ty>) -> Option<i64> {
     let decl = fn_param_tys.get(callee)?;
@@ -145,7 +164,8 @@ pub fn add_kind_arguments(items: &mut [HirItem], fn_param_tys: &mut HashMap<Stri
         if let HirItem::Fn(f) = it {
             let Some(body) = &f.body else { continue };
             let mut found = false;
-            visit_mut(&mut body.clone(), &mut |e| { if is_raw_some_map(e) || is_erased_compare(e) { found = true; } });
+            let preds = erased_pred_params(f);
+            visit_mut(&mut body.clone(), &mut |e| { if is_raw_some_map(e) || is_erased_compare(e) || is_forwarded_pred(e, &preds) { found = true; } });
             if found && is_generic(f) { flagged.insert(f.name.clone()); }
         }
     }
@@ -192,6 +212,7 @@ pub fn add_kind_arguments(items: &mut [HirItem], fn_param_tys: &mut HashMap<Stri
     for it in items.iter_mut() {
         let HirItem::Fn(f) = it else { continue };
         let own_kind = kind_local.get(&f.name).copied();
+        let preds = erased_pred_params(f);
         let Some(body) = &mut f.body else { continue };
         let mut rewrite = |e: &mut HirExpr| {
             // Raw-Some sites: replace the callback with a lambda that builds the cell.
@@ -219,6 +240,44 @@ pub fn add_kind_arguments(items: &mut [HirItem], fn_param_tys: &mut HashMap<Stri
                         ret_hint: Ty::Error,
                     },
                     ty: lam_ty,
+                    span,
+                };
+            }
+            // A forwarded erased predicate: wrap it so the raw element becomes the cell it expects.
+            if let (Some(kid), true) = (own_kind, is_forwarded_pred(e, &preds)) {
+                let HirExprKind::Call { args, .. } = &mut e.kind else { unreachable!() };
+                let span = args[1].span;
+                let fid = match &args[1].kind { HirExprKind::Local(l) => *l, _ => unreachable!() };
+                let fty = args[1].ty.clone();
+                let ret_ty = match &fty { Ty::Fn { ret, .. } => (**ret).clone(), _ => Ty::Error };
+                let x = LAMBDA_LOCAL_BASE + lambda_n; lambda_n += 1;
+                let cell = HirExpr {
+                    kind: HirExprKind::Call {
+                        func: Box::new(HirExpr { kind: HirExprKind::Global("__certo_some_raw".into()), ty: Ty::Error, span }),
+                        args: vec![
+                            HirExpr { kind: HirExprKind::Local(x), ty: Ty::Var(0), span },
+                            HirExpr { kind: HirExprKind::Local(kid), ty: Ty::Int, span },
+                        ],
+                    },
+                    ty: Ty::Var(0),
+                    span,
+                };
+                let call_f = HirExpr {
+                    kind: HirExprKind::Call {
+                        func: Box::new(HirExpr { kind: HirExprKind::Local(fid), ty: fty.clone(), span }),
+                        args: vec![cell],
+                    },
+                    ty: ret_ty,
+                    span,
+                };
+                args[1] = HirExpr {
+                    kind: HirExprKind::Lambda {
+                        params: vec![HirParam { local: x, name: "__x".into(), ty: Ty::Var(0), span }],
+                        body: Box::new(call_f),
+                        captures: vec![fid, kid],
+                        ret_hint: Ty::Error,
+                    },
+                    ty: fty,
                     span,
                 };
             }

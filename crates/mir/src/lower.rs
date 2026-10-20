@@ -601,7 +601,11 @@ fn wrap_named_fn_as_closure(name: &str, real_param_tys: &[Ty], real_ret_ty: &Ty,
 /// stdlib-callback convention — see `lower_named_fn_boxed` — a different,
 /// incompatible boxing scheme from the one a sum-type constructor call
 /// like `Box(v)` actually uses for its own bare-`T` payload).
-fn wrap_named_fn_as_erased_closure(name: &str, real_param_tys: &[Ty], real_ret_ty: &Ty, b: &mut Builder) -> Operand {
+fn wrap_named_fn_as_erased_closure(name: &str, real_param_tys: &[Ty], real_ret_ty: &Ty, decl_params: &[Ty], decl_ret: &Ty, b: &mut Builder) -> Operand {
+    // BACKLOG item 439 - only a position declared as a type variable crosses as a cell; a
+    // concrete one (`A => Bool`'s `Bool`) is native, as the calling generic body reads it.
+    let cell_param = |i: usize| matches!(decl_params.get(i), Some(Ty::Var(_)) | None);
+    let cell_result = matches!(decl_ret, Ty::Var(_));
     let idx = b.lambda_count;
     b.lambda_count += 1;
     let wrap_name = format!("__fnref_erased_{}_{}", b.fn_name, idx);
@@ -610,13 +614,17 @@ fn wrap_named_fn_as_erased_closure(name: &str, real_param_tys: &[Ty], real_ret_t
     let ret_slot = lb.declare_local("_ret", Ty::Var(0));
     let _env_param = lb.declare_local("_env", Ty::Error);
 
-    let raw_locals: Vec<MirLocal> = real_param_tys.iter()
-        .map(|_| lb.declare_local("_p_erased", Ty::Var(0)))
+    let raw_locals: Vec<MirLocal> = real_param_tys.iter().enumerate()
+        .map(|(i, ty)| lb.declare_local("_p_erased", if cell_param(i) { Ty::Var(0) } else { ty.clone() }))
         .collect();
-    let real_locals: Vec<MirLocal> = real_param_tys.iter().zip(raw_locals.iter())
-        .map(|(ty, raw)| {
+    let real_locals: Vec<MirLocal> = real_param_tys.iter().zip(raw_locals.iter()).enumerate()
+        .map(|(i, (ty, raw))| {
             let real = lb.declare_local("_p_real", ty.clone());
-            lb.assign(real, Rvalue::UnboxSome { opt: Operand::Local(*raw), ty: ty.clone() });
+            if cell_param(i) {
+                lb.assign(real, Rvalue::UnboxSome { opt: Operand::Local(*raw), ty: ty.clone() });
+            } else {
+                lb.assign(real, Rvalue::Use(Operand::Local(*raw)));
+            }
             real
         })
         .collect();
@@ -626,6 +634,9 @@ fn wrap_named_fn_as_erased_closure(name: &str, real_param_tys: &[Ty], real_ret_t
 
     if matches!(real_ret_ty, Ty::Unit) {
         lb.locals[ret_slot as usize].ty = Ty::Var(0);
+    } else if !cell_result {
+        lb.locals[ret_slot as usize].ty = real_ret_ty.clone();
+        lb.assign(ret_slot, Rvalue::Use(Operand::Local(call_dest)));
     } else {
         lb.assign(ret_slot, Rvalue::BoxSome { value: Operand::Local(call_dest), ty: real_ret_ty.clone() });
     }
@@ -1390,13 +1401,21 @@ fn cancel_token_ty() -> Ty {
 /// ordinary parameter, just recovered from the enclosing scope instead of
 /// the call site.
 fn lower_lambda_boxed(params: &[certo_hir::HirParam], body: &HirExpr, captures: &[LocalId], param_ty_hints: &[Ty], raw_int_return: bool, b: &mut Builder) -> Operand {
-    lower_lambda_boxed_ex(params, body, captures, param_ty_hints, raw_int_return, false, b)
+    lower_lambda_boxed_ex(params, body, captures, param_ty_hints, raw_int_return, None, b)
 }
 
 /// `cells`: the lambda is passed to a user-defined generic function's erased `Fn` parameter
 /// (BACKLOG item 348), which hands it `BoxSome`-style cells and expects a cell back, instead of
-/// the stdlib callbacks' raw element words.
-fn lower_lambda_boxed_ex(params: &[certo_hir::HirParam], body: &HirExpr, captures: &[LocalId], param_ty_hints: &[Ty], raw_int_return: bool, cells: bool, b: &mut Builder) -> Operand {
+/// the stdlib callbacks' raw element words. It carries that parameter's declared parameter and
+/// result types: only a position declared as a type variable uses a cell (BACKLOG item 439) - a
+/// concrete one (`A => Bool`'s `Bool`) is passed natively, which is how the generic body, which
+/// calls the closure through its declared `Ty::Fn`, reads it.
+fn lower_lambda_boxed_ex(params: &[certo_hir::HirParam], body: &HirExpr, captures: &[LocalId], param_ty_hints: &[Ty], raw_int_return: bool, cells: Option<(&[Ty], &Ty)>, b: &mut Builder) -> Operand {
+    let is_cell_param = |i: usize| match cells {
+        Some((dp, _)) => matches!(dp.get(i), Some(Ty::Var(_)) | None),
+        None => false,
+    };
+    let cell_result = match cells { Some((_, dr)) => matches!(dr, Ty::Var(_)), None => false };
     let idx = b.lambda_count;
     b.lambda_count += 1;
     let lam_name = format!("__lam_{}_{}_boxed", b.fn_name, idx);
@@ -1417,21 +1436,29 @@ fn lower_lambda_boxed_ex(params: &[certo_hir::HirParam], body: &HirExpr, capture
     // always unannotated (`(x) => ...`), so `p.ty` is `Ty::Error`; fall back
     // to `param_ty_hint` (the callee's scrutinee element type, known at the
     // call site) rather than mis-unboxing as a raw pointer cast.
-    let raw_locals: Vec<MirLocal> = params.iter()
-        .map(|p| lb.declare_local(&format!("{}_boxed", p.name), Ty::Var(0)))
-        .collect();
-    bind_captures(captures, &capture_tys, env_param, &mut lb);
-    for (i, (p, raw)) in params.iter().zip(raw_locals.iter()).enumerate() {
-        // One hint per param when the callee's callback params differ in type
-        // (`fold`'s accumulator and element); a single hint (the list's element
-        // type) otherwise applies to every param.
-        let real_ty = if matches!(p.ty, Ty::Error) || (cells && matches!(p.ty, Ty::Var(_))) {
+    // One hint per param when the callee's callback params differ in type
+    // (`fold`'s accumulator and element); a single hint (the list's element
+    // type) otherwise applies to every param.
+    let real_tys: Vec<Ty> = params.iter().enumerate().map(|(i, p)| {
+        if matches!(p.ty, Ty::Error) || (cells.is_some() && matches!(p.ty, Ty::Var(_))) {
             param_ty_hints.get(i).or_else(|| param_ty_hints.last()).cloned().unwrap_or(Ty::Error)
         } else {
             p.ty.clone()
-        };
+        }
+    }).collect();
+    let raw_locals: Vec<MirLocal> = params.iter().enumerate()
+        .map(|(i, p)| {
+            let raw_ty = if cells.is_some() && !is_cell_param(i) { real_tys[i].clone() } else { Ty::Var(0) };
+            lb.declare_local(&format!("{}_boxed", p.name), raw_ty)
+        })
+        .collect();
+    bind_captures(captures, &capture_tys, env_param, &mut lb);
+    for (i, (p, raw)) in params.iter().zip(raw_locals.iter()).enumerate() {
+        let real_ty = real_tys[i].clone();
         let real = lb.map_hir_local(p.local, &p.name, real_ty.clone());
-        if cells {
+        if cells.is_some() && !is_cell_param(i) {
+            lb.assign(real, Rvalue::Use(Operand::Local(*raw)));
+        } else if cells.is_some() {
             lb.assign(real, Rvalue::UnboxSome { opt: Operand::Local(*raw), ty: real_ty });
         } else {
             lb.assign(real, Rvalue::Unbox { value: Operand::Local(*raw), ty: real_ty });
@@ -1445,7 +1472,10 @@ fn lower_lambda_boxed_ex(params: &[certo_hir::HirParam], body: &HirExpr, capture
         lb.assign(ret_slot, Rvalue::Use(lam_result));
     } else if matches!(lam_ret_ty, Ty::Unit) {
         lb.locals[ret_slot as usize].ty = Ty::Var(0);
-    } else if cells {
+    } else if cells.is_some() && !cell_result {
+        lb.locals[ret_slot as usize].ty = lam_ret_ty;
+        lb.assign(ret_slot, Rvalue::Use(lam_result));
+    } else if cells.is_some() {
         lb.assign(ret_slot, Rvalue::BoxSome { value: lam_result, ty: lam_ret_ty });
     } else {
         lb.assign(ret_slot, Rvalue::Box { value: lam_result, ty: lam_ret_ty });
@@ -2398,7 +2428,7 @@ fn lower_expr(expr: &HirExpr, b: &mut Builder) -> Operand {
                     if let Some(Ty::Fn { params: decl_params, ret: decl_ret }) = declared {
                         let erased = decl_params.iter().any(|t| matches!(t, Ty::Var(_))) || matches!(**decl_ret, Ty::Var(_));
                         if erased {
-                            return wrap_named_fn_as_erased_closure(fn_name, real_params, real_ret, b);
+                            return wrap_named_fn_as_erased_closure(fn_name, real_params, real_ret, decl_params, decl_ret, b);
                         }
                     }
                 }
@@ -2418,7 +2448,7 @@ fn lower_expr(expr: &HirExpr, b: &mut Builder) -> Operand {
                             !matches!(p.ty, Ty::Error | Ty::Var(_)) || !matches!(hints.get(i), None | Some(Ty::Error | Ty::Var(_)))
                         };
                         if params.iter().enumerate().all(|(i, p)| resolved(i, p)) {
-                            return lower_lambda_boxed_ex(params, body, captures, &hints, false, true, b);
+                            return lower_lambda_boxed_ex(params, body, captures, &hints, false, Some((decl_params.as_slice(), &**decl_ret)), b);
                         }
                     }
                 }
