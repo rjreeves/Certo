@@ -233,7 +233,8 @@ double certo_pow_float(double base, double exp) { return pow(base, exp); }
 /* BACKLOG item 426 — build an Option cell from a raw container-element word inside a generic
    function. `size` is the byte size of a non-struct payload (the word's low bytes are the
    value), or 0 when the payload is pointer-like (a struct: the word already is the cell). */
-void* __certo_some_raw(void* raw, int64_t size) {
+void* __certo_some_raw(void* raw, int64_t kind) {
+    int64_t size = kind & 0xff;
     if (size == 0) return raw;
     void* cell = malloc((size_t)size);
     memcpy(cell, &raw, (size_t)size);
@@ -285,6 +286,37 @@ static inline uint64_t certo_udiv(uint64_t a, uint64_t b) {
 static inline uint64_t certo_urem(uint64_t a, uint64_t b) {
     if (b == 0) certo_panic("integer remainder by zero");
     return a % b;
+}
+
+/* BACKLOG item 423 - compare two boxed cells of an erased `T` by its kind (byte size in the low
+   byte, class in bits 8..: 0 signed, 1 unsigned/bool, 2 float, 3 text). Returns <0, 0 or >0.
+   A struct-like kind (size 0) compares by identity. */
+int64_t __certo_cell_cmp(void* a, void* b, int64_t kind) {
+    int size = (int)(kind & 0xff), cls = (int)((kind >> 8) & 0xff);
+    if (size == 0) return a == b ? 0 : (a < b ? -1 : 1);
+    if (cls == 3) {
+        const char* x = *(const char* const*)a; const char* y = *(const char* const*)b;
+        int c = strcmp(x ? x : "", y ? y : "");
+        return c < 0 ? -1 : (c > 0 ? 1 : 0);
+    }
+    if (cls == 2) {
+        double x = size == 4 ? (double)*(float*)a : *(double*)a;
+        double y = size == 4 ? (double)*(float*)b : *(double*)b;
+        return x < y ? -1 : (x > y ? 1 : 0);
+    }
+    if (cls == 1) {
+        uint64_t x = 0, y = 0;
+        memcpy(&x, a, (size_t)size); memcpy(&y, b, (size_t)size);
+        return x < y ? -1 : (x > y ? 1 : 0);
+    }
+    int64_t x = 0, y = 0;
+    switch (size) {
+        case 1: x = *(int8_t*)a;  y = *(int8_t*)b;  break;
+        case 2: x = *(int16_t*)a; y = *(int16_t*)b; break;
+        case 4: x = *(int32_t*)a; y = *(int32_t*)b; break;
+        default: x = *(int64_t*)a; y = *(int64_t*)b; break;
+    }
+    return x < y ? -1 : (x > y ? 1 : 0);
 }
 
 /* ---- shared cells for closure-assigned `var`s (BACKLOG item 354) ---- */

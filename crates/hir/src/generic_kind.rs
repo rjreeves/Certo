@@ -28,14 +28,22 @@ fn has_var(t: &Ty) -> bool {
     s.contains("Var(") || s.contains("Error")
 }
 
+/// The kind passed for a concrete type: its byte size in the low byte (0 for a pointer-like
+/// struct) and a class in bits 8..: 0 signed integer, 1 unsigned/bool, 2 float, 3 text.
 fn size_kind(t: &Ty) -> i64 {
     if t.needs_heap_box() { return 0; }
-    match t {
-        Ty::Bool | Ty::Int8 => 1,
-        Ty::Int16 => 2,
-        Ty::Int32 | Ty::Char | Ty::Float32 => 4,
-        _ => 8,
-    }
+    let (size, class) = match t {
+        Ty::Bool => (1, 1),
+        Ty::Int8 => (1, 0),
+        Ty::Int16 => (2, 0),
+        Ty::Int32 | Ty::Char => (4, 0),
+        Ty::Float32 => (4, 2),
+        Ty::Float => (8, 2),
+        Ty::UInt => (8, 1),
+        Ty::Text | Ty::BoundedText(_) => (8, 3),
+        _ => (8, 0),
+    };
+    size | (class << 8)
 }
 
 /// Find what the (single) erased type parameter is, by walking a declared type against an
@@ -110,6 +118,14 @@ fn is_raw_some_map(e: &HirExpr) -> bool {
     }
 }
 
+/// `a < b`, `a == b`, ... where both operands are erased (`T`): they are boxed cells, so the plain
+/// comparison would compare pointers (BACKLOG item 423).
+fn is_erased_compare(e: &HirExpr) -> bool {
+    matches!(&e.kind, HirExprKind::BinOp { op, lhs, rhs }
+        if matches!(op, BinOp::Lt | BinOp::LtEq | BinOp::Gt | BinOp::GtEq | BinOp::Eq | BinOp::NotEq)
+            && matches!(lhs.ty, Ty::Var(_)) && matches!(rhs.ty, Ty::Var(_)))
+}
+
 /// The kind a call to `callee` passes, or `None` if its type parameter cannot be determined here.
 fn call_kind(callee: &str, args: &[HirExpr], call_ty: &Ty, fn_param_tys: &HashMap<String, Vec<Ty>>, fn_ret_tys: &HashMap<String, Ty>) -> Option<i64> {
     let decl = fn_param_tys.get(callee)?;
@@ -129,7 +145,7 @@ pub fn add_kind_arguments(items: &mut [HirItem], fn_param_tys: &mut HashMap<Stri
         if let HirItem::Fn(f) = it {
             let Some(body) = &f.body else { continue };
             let mut found = false;
-            visit_mut(&mut body.clone(), &mut |e| { if is_raw_some_map(e) { found = true; } });
+            visit_mut(&mut body.clone(), &mut |e| { if is_raw_some_map(e) || is_erased_compare(e) { found = true; } });
             if found && is_generic(f) { flagged.insert(f.name.clone()); }
         }
     }
@@ -205,6 +221,24 @@ pub fn add_kind_arguments(items: &mut [HirItem], fn_param_tys: &mut HashMap<Stri
                     ty: lam_ty,
                     span,
                 };
+            }
+            // Erased comparisons: compare the cells by the type's kind.
+            if let (Some(kid), true) = (own_kind, is_erased_compare(e)) {
+                let span = e.span;
+                let HirExprKind::BinOp { op, lhs, rhs } = &mut e.kind else { unreachable!() };
+                let lhs_e = std::mem::replace(&mut **lhs, HirExpr { kind: HirExprKind::Unit, ty: Ty::Unit, span });
+                let rhs_e = std::mem::replace(&mut **rhs, HirExpr { kind: HirExprKind::Unit, ty: Ty::Unit, span });
+                let call = HirExpr {
+                    kind: HirExprKind::Call {
+                        func: Box::new(HirExpr { kind: HirExprKind::Global("__certo_cell_cmp".into()), ty: Ty::Error, span }),
+                        args: vec![lhs_e, rhs_e, HirExpr { kind: HirExprKind::Local(kid), ty: Ty::Int, span }],
+                    },
+                    ty: Ty::Int,
+                    span,
+                };
+                **lhs = call;
+                **rhs = HirExpr { kind: HirExprKind::Int(0), ty: Ty::Int, span };
+                let _ = op;
             }
             // Calls of flagged functions: pass the kind.
             if let HirExprKind::Call { func, args } = &mut e.kind {

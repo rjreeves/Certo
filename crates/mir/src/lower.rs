@@ -2298,10 +2298,19 @@ fn lower_expr(expr: &HirExpr, b: &mut Builder) -> Operand {
             let erased_arg_ty: Option<Ty> = fn_param_tys.as_ref().and_then(|decl| {
                 let mut found: Option<Ty> = None;
                 for (d, a) in decl.iter().zip(args.iter()) {
-                    if !matches!(d, Ty::Var(_)) || matches!(a.ty, Ty::Var(_) | Ty::Error | Ty::Fn { .. } | Ty::Named { .. }) { continue; }
+                    // A bare erased parameter gives its argument's type (a record there could be
+                    // a higher-kinded `F<A>`, so only scalars count); a `List<A>`/`A?` parameter
+                    // gives the element type, records included.
+                    let candidate: Option<Ty> = match (d, &a.ty) {
+                        (Ty::Var(_), t) if !matches!(t, Ty::Var(_) | Ty::Error | Ty::Fn { .. } | Ty::Named { .. }) => Some(t.clone()),
+                        (Ty::List(di), Ty::List(ai)) | (Ty::Option(di), Ty::Option(ai))
+                            if matches!(**di, Ty::Var(_)) && !matches!(**ai, Ty::Var(_) | Ty::Error | Ty::Fn { .. }) => Some((**ai).clone()),
+                        _ => None,
+                    };
+                    let Some(c) = candidate else { continue };
                     match &found {
-                        None => found = Some(a.ty.clone()),
-                        Some(t) if *t == a.ty => {}
+                        None => found = Some(c),
+                        Some(t) if *t == c => {}
                         Some(_) => return None,
                     }
                 }
