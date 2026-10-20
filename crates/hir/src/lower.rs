@@ -723,6 +723,44 @@ fn lower_lambda_with_param_hint(params: &[certo_ast::expr::LambdaParam], body: &
     lower_lambda_with_param_hints(params, body, std::slice::from_ref(hint), &Ty::Error, cx, span)
 }
 
+/// Stdlib callbacks that get a *Text-only* param hint (BACKLOG item 423), and the
+/// position of the lambda: `filter`/`find`/`any`/`all`/`partition` take it second,
+/// `fold`/`reduce` third.
+///
+/// An unhinted lambda param stays `Ty::Error`, so `w < acc` in
+/// `List.reduce(words, "zzz", (acc, w) => if w < acc then w else acc)` could not be
+/// recognised as a Text comparison and compared pointers (it returned `"zzz"`).
+/// Only `Text` is hinted: these callbacks are called by the runtime with raw
+/// erased `void*` elements, so a native `double` or struct-by-value param would
+/// read the wrong register, while a `Text` is a pointer either way (the same
+/// reasoning as `List.sort` in `lower_hinted_callback`). The general fix — types
+/// from typeck, with the callback ABI settled per callee — is still open.
+fn text_hint_lambda_pos(fn_path: Option<&str>) -> Option<usize> {
+    match fn_path {
+        Some("List.filter") | Some("List.find") | Some("List.any")
+        | Some("List.all") | Some("List.partition") => Some(1),
+        Some("List.fold") | Some("List.reduce") => Some(2),
+        _ => None,
+    }
+}
+
+/// The per-param hints for those callbacks: `Text` where the param is known to be
+/// Text — the list's element, and for `fold`/`reduce` the accumulator, taken from
+/// the already-lowered `init` argument — and `Ty::Error` (no hint) elsewhere.
+/// Empty when nothing is Text.
+fn text_only_param_hints(fn_path: Option<&str>, lowered_args: &[HirExpr]) -> Vec<Ty> {
+    let only_text = |t: Option<Ty>| if matches!(t, Some(Ty::Text)) { Ty::Text } else { Ty::Error };
+    let elem = lowered_args.first().and_then(|a| match &a.ty {
+        Ty::List(inner) => Some((**inner).clone()),
+        _ => None,
+    });
+    let hints = match fn_path {
+        Some("List.fold") | Some("List.reduce") => vec![only_text(lowered_args.get(1).map(|a| a.ty.clone())), only_text(elem)],
+        _ => vec![only_text(elem)],
+    };
+    if hints.iter().all(|h| matches!(h, Ty::Error)) { Vec::new() } else { hints }
+}
+
 /// `lower_lambda_with_param_hint`, except that `List.sort`'s two-param
 /// comparator has *every* param hinted with the element type (both sides of
 /// the comparison are elements), not just param 0 — and only when that
@@ -852,6 +890,10 @@ fn stdlib_param_names() -> HashMap<&'static str, &'static [&'static str]> {
     m.insert("List.forEach",    &["list", "f"]);
     m.insert("List.filter",     &["list", "pred"]);
     m.insert("List.fold",       &["list", "init", "f"]);
+    // BACKLOG item 423 — `reduce` (fold under the spec's own name) and `partition` were
+    // missing, so a lambda passed to them never went through the stdlib-callback path.
+    m.insert("List.reduce",     &["list", "init", "f"]);
+    m.insert("List.partition",  &["list", "pred"]);
     m.insert("List.find",       &["list", "pred"]);
     m.insert("List.any",        &["list", "pred"]);
     m.insert("List.all",        &["list", "pred"]);
@@ -1876,6 +1918,17 @@ fn lower_expr(expr: &S<Expr>, cx: &mut Cx) -> HirExpr {
                                 }
                                 out.push(lowered);
                                 continue;
+                            }
+                        }
+                        // BACKLOG item 423 — a callback whose params are `Text`
+                        // (see `text_hint_lambda_pos`).
+                        if text_hint_lambda_pos(fn_full_path.as_deref()) == Some(i) {
+                            if let Expr::Lambda { params, body, .. } = &arg.value.node {
+                                let hints = text_only_param_hints(fn_full_path.as_deref(), &out);
+                                if !hints.is_empty() {
+                                    out.push(lower_lambda_with_param_hints(params, body, &hints, &Ty::Error, cx, arg.value.span));
+                                    continue;
+                                }
                             }
                         }
                         out.push(lower_expr(&arg.value, cx));
