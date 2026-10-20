@@ -160,6 +160,141 @@ static int certo_system_hidden(const char* command) {
 }
 #endif
 
+#ifdef _WIN32
+#include <io.h>
+#include <fcntl.h>
+
+/* BACKLOG item 428 — the pipe-based Process APIs (`execWithInput`, `lines`) used
+   _popen, which starts `cmd.exe` with no way to pass CREATE_NO_WINDOW, so from a
+   GUI-subsystem program every call flashed a console window (item 427 fixed the same
+   thing for `exec`/`run`). These helpers start the same `cmd.exe /c <command>` as
+   certo_system_hidden — hidden, same quoting — but with an optional pipe on the
+   child's stdin (`stdin_pipe`: the caller writes to `pipe`) or stdout (`stdout_pipe`:
+   the caller reads from `pipe`), at most one. stderr is NUL (the command redirects it).
+   Returns 0, or -1 if the process could not be started. */
+typedef struct { HANDLE process; HANDLE pipe; } CertoHiddenProc;
+
+static int certo_hidden_start(const char* command, int stdin_pipe, int stdout_pipe, CertoHiddenProc* h) {
+    const char* comspec = getenv("COMSPEC");
+    if (!comspec || !*comspec) comspec = "cmd.exe";
+    size_t n = strlen(command) + 32;
+    char* line = (char*)malloc(n);
+    if (!line) certo_panic("out of memory");
+    snprintf(line, n, "cmd.exe /c %s", command);
+
+    SECURITY_ATTRIBUTES sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.nLength = sizeof(sa);
+    sa.bInheritHandle = TRUE;
+    HANDLE hNul = CreateFileA("NUL", GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                              &sa, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+
+    HANDLE hIn = hNul, hOut = hNul, hInDup = NULL;
+    HANDLE pipe_child = NULL, pipe_parent = NULL;
+    if (stdin_pipe || stdout_pipe) {
+        HANDLE rd = NULL, wr = NULL;
+        if (!CreatePipe(&rd, &wr, &sa, 0)) {
+            free(line);
+            if (hNul != INVALID_HANDLE_VALUE) CloseHandle(hNul);
+            return -1;
+        }
+        if (stdin_pipe) { pipe_child = rd; pipe_parent = wr; hIn = rd; }
+        else            { pipe_child = wr; pipe_parent = rd; hOut = wr; }
+        /* Our end must not be inherited: a child that held it open would keep the
+           pipe from ever reaching end-of-file. */
+        SetHandleInformation(pipe_parent, HANDLE_FLAG_INHERIT, 0);
+    }
+    if (!stdin_pipe) {
+        /* Hand the child our stdin when we have a usable one, as certo_system_hidden does. */
+        HANDLE hOwnIn = GetStdHandle(STD_INPUT_HANDLE);
+        if (hOwnIn && hOwnIn != INVALID_HANDLE_VALUE &&
+            DuplicateHandle(GetCurrentProcess(), hOwnIn, GetCurrentProcess(), &hInDup, 0, TRUE, DUPLICATE_SAME_ACCESS)) {
+            hIn = hInDup;
+        }
+    }
+
+    STARTUPINFOA si;
+    PROCESS_INFORMATION pi;
+    memset(&si, 0, sizeof(si));
+    memset(&pi, 0, sizeof(pi));
+    si.cb = sizeof(si);
+    si.dwFlags    = STARTF_USESTDHANDLES;
+    si.hStdInput  = hIn;
+    si.hStdOutput = hOut;
+    si.hStdError  = hNul;
+
+    BOOL ok = CreateProcessA(comspec, line, NULL, NULL, TRUE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi);
+    free(line);
+    if (hInDup) CloseHandle(hInDup);
+    if (pipe_child) CloseHandle(pipe_child);
+    if (hNul != INVALID_HANDLE_VALUE) CloseHandle(hNul);
+    if (!ok) {
+        if (pipe_parent) CloseHandle(pipe_parent);
+        return -1;
+    }
+    CloseHandle(pi.hThread);
+    h->process = pi.hProcess;
+    h->pipe    = pipe_parent;
+    return 0;
+}
+
+/* Close the pipe if still open, wait for the child, return its exit code. */
+static int certo_hidden_finish(CertoHiddenProc* h) {
+    if (h->pipe) { CloseHandle(h->pipe); h->pipe = NULL; }
+    WaitForSingleObject(h->process, INFINITE);
+    DWORD code = 0;
+    GetExitCodeProcess(h->process, &code);
+    CloseHandle(h->process);
+    h->process = NULL;
+    return (int)code;
+}
+
+/* _popen(command, "r") without the console window: a text-mode stream over the child's
+   stdout, and the process handle to give back to certo_pclose_hidden. NULL on failure. */
+static FILE* certo_popen_hidden_r(const char* command, HANDLE* proc) {
+    CertoHiddenProc h = { NULL, NULL };
+    if (certo_hidden_start(command, 0, 1, &h) != 0) return NULL;
+    int fd = _open_osfhandle((intptr_t)h.pipe, _O_RDONLY | _O_TEXT);
+    FILE* f = fd < 0 ? NULL : _fdopen(fd, "r");
+    if (!f) {
+        if (fd < 0) { CloseHandle(h.pipe); }
+        h.pipe = NULL;
+        certo_hidden_finish(&h);
+        return NULL;
+    }
+    *proc = h.process;
+    return f;
+}
+
+/* _pclose for certo_popen_hidden_r: close the stream (and with it the pipe), then
+   wait for the child and return its exit code. */
+static int certo_pclose_hidden(FILE* f, HANDLE process) {
+    fclose(f);
+    CertoHiddenProc h = { process, NULL };
+    return certo_hidden_finish(&h);
+}
+
+/* Write `text` to the child's stdin pipe the way fputs on a text-mode _popen stream did:
+   each LF becomes CRLF. */
+static void certo_hidden_write_text(HANDLE pipe, const char* text) {
+    size_t len = strlen(text);
+    char* buf = (char*)malloc(len * 2 + 1);
+    if (!buf) certo_panic("out of memory");
+    size_t n = 0;
+    for (size_t i = 0; i < len; i++) {
+        if (text[i] == '\n' && (i == 0 || text[i - 1] != '\r')) buf[n++] = '\r';
+        buf[n++] = text[i];
+    }
+    size_t off = 0;
+    while (off < n) {
+        DWORD w = 0;
+        if (!WriteFile(pipe, buf + off, (DWORD)(n - off), &w, NULL) || w == 0) break;
+        off += w;
+    }
+    free(buf);
+}
+#endif
+
 CertoProcessResult* certo_process_exec(certo_text_t cmd, CertoList* args) {
     /* Build command string: cmd "arg1" "arg2" ... */
     size_t cap = 256;
@@ -491,21 +626,26 @@ CertoProcessResult* certo_process_exec_with_input(certo_text_t cmd, CertoList* a
 #endif
     free(cbuf);
 
+    int rc = 0;
 #ifdef _WIN32
-    FILE* proc = _popen(full_cmd, "w");
+    /* BACKLOG item 428: a hidden child with a stdin pipe instead of _popen. */
+    {
+        CertoHiddenProc hp = { NULL, NULL };
+        if (certo_hidden_start(full_cmd, 1, 0, &hp) == 0) {
+            if (input && *input) certo_hidden_write_text(hp.pipe, input);
+            rc = certo_hidden_finish(&hp);   /* closes the pipe (end of input), then waits */
+        } else {
+            rc = -1;
+        }
+    }
+    free(full_cmd);
 #else
     FILE* proc = popen(full_cmd, "w");
-#endif
     free(full_cmd);
 
     if (proc && input && *input) {
         fputs(input, proc);
     }
-
-    int rc = 0;
-#ifdef _WIN32
-    if (proc) rc = _pclose(proc);
-#else
     if (proc) rc = pclose(proc);
 #endif
 
@@ -558,7 +698,8 @@ int64_t certo_process_lines(certo_text_t cmd, CertoList* args, certo_fn_t handle
     size_t full_cap = pos + 20;
     char* full_cmd = (char*)malloc(full_cap);
     snprintf(full_cmd, full_cap, "%s 2>NUL", cbuf);
-    FILE* proc = _popen(full_cmd, "r");
+    HANDLE hproc = NULL;   /* BACKLOG item 428: hidden, not _popen */
+    FILE* proc = certo_popen_hidden_r(full_cmd, &hproc);
 #else
     size_t full_cap = pos + 20;
     char* full_cmd = (char*)malloc(full_cap);
@@ -581,7 +722,7 @@ int64_t certo_process_lines(certo_text_t cmd, CertoList* args, certo_fn_t handle
 
     int rc = 0;
 #ifdef _WIN32
-    rc = _pclose(proc);
+    rc = certo_pclose_hidden(proc, hproc);
     return (int64_t)rc;
 #else
     rc = pclose(proc);
@@ -614,7 +755,8 @@ int64_t certo_process_lines_certo(certo_text_t cmd, CertoList* args, CertoFnText
     size_t full_cap = pos + 20;
     char* full_cmd = (char*)malloc(full_cap);
     snprintf(full_cmd, full_cap, "%s 2>NUL", cbuf);
-    FILE* proc = _popen(full_cmd, "r");
+    HANDLE hproc = NULL;   /* BACKLOG item 428: hidden, not _popen */
+    FILE* proc = certo_popen_hidden_r(full_cmd, &hproc);
 #else
     size_t full_cap = pos + 20;
     char* full_cmd = (char*)malloc(full_cap);
@@ -638,7 +780,7 @@ int64_t certo_process_lines_certo(certo_text_t cmd, CertoList* args, CertoFnText
 
     int rc = 0;
 #ifdef _WIN32
-    rc = _pclose(proc);
+    rc = certo_pclose_hidden(proc, hproc);
     return (int64_t)rc;
 #else
     rc = pclose(proc);

@@ -3560,3 +3560,37 @@ fn process_run_creates_its_child_without_a_console_window() {
     let call = &p[create..create + 400];
     assert!(call.contains("CREATE_NO_WINDOW"), "Process.run's CreateProcessA must pass CREATE_NO_WINDOW");
 }
+
+// BACKLOG item 428 — Process.execWithInput / Process.lines / Process.linesCerto used _popen,
+// which flashed a console window from a GUI-subsystem program (item 427 fixed exec/run).
+#[test]
+fn the_pipe_based_process_apis_no_longer_call_popen_on_windows() {
+    let p = crate::process::PROCESS_C;
+    // The hidden-process helper creates the shell with CREATE_NO_WINDOW and keeps the
+    // `cmd.exe /c <command>` semantics `_popen` had.
+    let start = p.find("static int certo_hidden_start").expect("hidden-process helper with pipes");
+    let body = &p[start..start + p[start..].find("\n}\n").unwrap()];
+    assert!(body.contains("CREATE_NO_WINDOW"), "must be created with CREATE_NO_WINDOW");
+    assert!(body.contains("cmd.exe /c %s"), "must keep `cmd.exe /c <command>`");
+    assert!(body.contains("CreatePipe"), "needs a pipe for the child's stdin or stdout");
+    assert!(body.contains("HANDLE_FLAG_INHERIT"), "our end of the pipe must not be inherited, or EOF never arrives");
+
+    // Every `_popen(` call is gone from the Windows code paths (only comments mention it).
+    let code: String = p.lines().filter(|l| !l.trim_start().starts_with("/*") && !l.trim_start().starts_with('*')
+        && !l.trim_start().starts_with("//")).collect::<Vec<_>>().join("\n");
+    assert!(!code.contains("_popen("), "a _popen call remains:\n{}", code.lines().filter(|l| l.contains("_popen(")).collect::<Vec<_>>().join("\n"));
+
+    // execWithInput feeds the pipe; both `lines` variants read through the hidden stream.
+    assert!(p.contains("certo_hidden_start(full_cmd, 1, 0, &hp)"), "execWithInput must use a stdin pipe");
+    assert_eq!(p.matches("certo_popen_hidden_r(full_cmd, &hproc)").count(), 2, "Process.lines and linesCerto");
+    assert_eq!(p.matches("certo_pclose_hidden(proc, hproc)").count(), 2);
+}
+
+#[test]
+fn execwith_input_keeps_text_mode_line_endings_on_windows() {
+    // fputs on the old text-mode stream turned each LF into CRLF; the raw pipe write must too.
+    let p = crate::process::PROCESS_C;
+    let w = p.find("static void certo_hidden_write_text").expect("text writer");
+    let body = &p[w..w + p[w..].find("\n}\n").unwrap()];
+    assert!(body.contains("'\\r'"), "LF must be written as CRLF");
+}
