@@ -41,6 +41,10 @@ pub enum TypeErrorKind {
     /// pre-existing gap in `.with(...)`'s own validation, not fixed here).
     ComputedFieldNotSettable { field: String, type_name: String },
 
+    /// E0226 - a record literal `T { .. }` leaves out a field that is neither optional (`T?`)
+    /// nor computed (BACKLOG item 353).
+    MissingRecordField { field: String, type_name: String },
+
     /// E0210 — a call to an `extern "C"` (FFI) function must be inside an `unsafe { }` block.
     FfiCallOutsideUnsafe { name: String },
 
@@ -244,6 +248,8 @@ impl TypeError {
                 format!("E0206: unbound name `{}`", name),
             TypeErrorKind::ComputedFieldNotSettable { field, type_name } =>
                 format!("E0217: `{}` is a computed property of `{}` — it's derived, not stored, and can't be set directly", field, type_name),
+            TypeErrorKind::MissingRecordField { field, type_name } =>
+                format!("E0226: `{}` is missing the required field `{}`", type_name, field),
             TypeErrorKind::FfiCallOutsideUnsafe { name } =>
                 format!("E0210: call to extern function `{}` must be inside an `unsafe {{ }}` block", name),
             TypeErrorKind::NonDisplayableInterpolation { ty } =>

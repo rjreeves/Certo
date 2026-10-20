@@ -21,6 +21,8 @@ pub struct TypeEnv {
     pub param_meta: HashMap<String, Vec<(String, bool)>>,
     /// Record type definitions: type_name → [(field_name, field_type)].
     pub record_fields: HashMap<String, Vec<(String, Ty)>>,
+    /// Record type name -> the fields declared `name?: T`, which a literal may omit (BACKLOG item 353).
+    pub record_optional: HashMap<String, Vec<String>>,
     /// `computed` record properties (BACKLOG item 143): type_name →
     /// [(computed_name, declared_type)]. Deliberately kept separate from
     /// `record_fields` rather than merged in — a computed name has a type
@@ -140,6 +142,7 @@ impl TypeEnv {
             constructor_vars: HashSet::new(),
             param_meta: HashMap::new(),
             record_fields: HashMap::new(),
+            record_optional: HashMap::new(),
             computed_fields: HashMap::new(),
             type_param_vars: HashMap::new(),
             row_bounds: HashMap::new(),

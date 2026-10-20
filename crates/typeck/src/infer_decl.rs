@@ -1528,6 +1528,10 @@ fn hoist_decl(
                     .map(|f| (f.name.node.clone(), type_expr_to_ty(&f.ty.node, &mut ctx)))
                     .collect();
                 ctx.env.record_fields.insert(t.name.node.clone(), fields);
+                ctx.env.record_optional.insert(
+                    t.name.node.clone(),
+                    rec.fields.iter().filter(|f| f.optional).map(|f| f.name.node.clone()).collect(),
+                );
 
                 // `computed` properties (BACKLOG item 143) — registered
                 // separately from `record_fields` on purpose (see

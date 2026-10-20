@@ -2343,6 +2343,13 @@ pub(crate) fn type_error_to_diagnostic(e: &TypeError) -> Diagnostic {
                 .with_note(format!("remove `{field}: ...` — it's computed automatically from `{type_name}`'s other fields"))
         }
 
+        TypeErrorKind::MissingRecordField { field, type_name } => {
+            Diagnostic::error("E0226",
+                format!("`{}` is missing the required field `{}`", type_name, field))
+                .with_span(e.span)
+                .with_note(format!("add `{field}: ...`, or declare the field optional (`{field}?: ...`) in `{type_name}`"))
+        }
+
         TypeErrorKind::ElseTypeMismatch { rule_name, expected, found } => {
             let names = assign_var_names(&[expected, found]);
             Diagnostic::error("E0703",

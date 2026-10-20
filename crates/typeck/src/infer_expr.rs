@@ -951,6 +951,26 @@ pub fn infer(expr: &S<Expr>, ctx: &mut Ctx<'_>) -> Ty {
                     }
                 }
             }
+            // BACKLOG item 353 - a direct literal must give every field that is not optional
+            // (`T?`) and not computed. Not checked for `.with(...)` copy-updates (the base
+            // supplies the rest).
+            if let (Some(tn), None) = (ty_name, &base_named) {
+                if let Some(declared) = ctx.env.record_fields.get(tn.as_str()) {
+                    let computed: Vec<&str> = ctx.env.computed_fields.get(tn.as_str())
+                        .map(|cs| cs.iter().map(|(n, _)| n.as_str()).collect())
+                        .unwrap_or_default();
+                    let optional: Vec<String> = ctx.env.record_optional.get(tn.as_str()).cloned().unwrap_or_default();
+                    for (dname, dty) in declared.iter() {
+                        let given = fields.iter().any(|f| f.name.node == *dname);
+                        if !given && !matches!(dty, Ty::Option(_)) && !computed.contains(&dname.as_str()) && !optional.contains(dname) {
+                            ctx.errors.push(TypeError {
+                                kind: TypeErrorKind::MissingRecordField { field: dname.clone(), type_name: tn.clone() },
+                                span: *span,
+                            });
+                        }
+                    }
+                }
+            }
             // When written as `TypeName { ... }`, unify each field value against
             // the declared field type so mismatches are caught at compile time.
             if let Some(name) = ty_name {
