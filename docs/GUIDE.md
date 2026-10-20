@@ -301,6 +301,16 @@ List.fold(xs, 0) { acc, x => acc + x }
 List.forEach(xs) { x => println(x) }
 ```
 
+**Capturing variables** — a lambda sees the variables of the function around it. A `val` is
+copied. A `var` that the lambda assigns to is *shared*: the lambda and the enclosing function
+read and write the same variable, so the change is visible after the call:
+
+```
+var total = 0
+List.forEach(xs, (x) => { total = total + x })
+println(total)      // the sum of xs
+```
+
 ### Error handling with Result and ?
 
 Functions that can fail return `Result<T, E>`. Use `Ok` and `Err` to construct
