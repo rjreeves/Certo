@@ -452,7 +452,8 @@ fn map_insert_boxes_a_struct_value_like_list_push_does() {
     let c = codegen(
         "module A\nimport Stdlib.Collections.{ Map }\ntype Item = { id: Int }\n\
          fn f(m: Map<Text, Item>, k: Text, it: Item): Map<Text, Item> = Map.insert(m, k, it)");
-    assert_contains(&c, "certo_map_insert(");
+    // Text keys use the content-comparing variant (BACKLOG item 392).
+    assert_contains(&c, "certo_map_insert_text(");
     assert_contains(&c, "malloc(sizeof(Item))");
 }
 

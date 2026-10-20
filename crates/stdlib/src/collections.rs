@@ -277,6 +277,17 @@ bool certo_list_contains(CertoList* l, void* item) {
     return false;
 }
 
+/* Text elements compare by content (BACKLOG item 392); the compiler picks this for List<Text>. */
+bool certo_list_contains_text(CertoList* l, const char* item) {
+    if (!l) return false;
+    const char* want = item ? (const char*)item : "";
+    for (int64_t i = 0; i < l->len; i++) {
+        const char* have = l->data[i] ? (const char*)l->data[i] : "";
+        if (strcmp(have, want) == 0) return true;
+    }
+    return false;
+}
+
 void* certo_list_find(CertoList* l, certo_fn_t f) {
     if (!l) return NULL;   /* find heap-boxes its Some result just below */
     CertoPred pred = (CertoPred)f.fn;
@@ -343,6 +354,21 @@ CertoList* certo_list_distinct(CertoList* l) {
         bool seen = false;
         for (int64_t j = 0; j < n->len; j++) {
             if (n->data[j] == l->data[i]) { seen = true; break; }
+        }
+        if (!seen) n->data[n->len++] = l->data[i];
+    }
+    return n;
+}
+
+CertoList* certo_list_distinct_text(CertoList* l) {
+    if (!l) return list_alloc(0);
+    CertoList* n = list_alloc(l->len);
+    for (int64_t i = 0; i < l->len; i++) {
+        const char* a = l->data[i] ? (const char*)l->data[i] : "";
+        bool seen = false;
+        for (int64_t j = 0; j < n->len; j++) {
+            const char* b = n->data[j] ? (const char*)n->data[j] : "";
+            if (strcmp(a, b) == 0) { seen = true; break; }
         }
         if (!seen) n->data[n->len++] = l->data[i];
     }
@@ -439,6 +465,7 @@ typedef struct {
     int64_t   len;
     int64_t   cap;
     MapEntry* entries;
+    int       text;   /* 1: keys are Text and compare by content (BACKLOG item 392) */
 } CertoMap;
 
 static CertoMap* map_alloc(int64_t cap) {
@@ -446,6 +473,7 @@ static CertoMap* map_alloc(int64_t cap) {
     CertoMap* m = (CertoMap*)malloc(sizeof(CertoMap));
     if (!m) certo_panic("out of memory");
     m->len     = 0;
+    m->text    = 0;
     m->cap     = cap;
     m->entries = (MapEntry*)calloc((size_t)cap, sizeof(MapEntry));
     if (!m->entries) certo_panic("out of memory");
@@ -461,16 +489,35 @@ CertoMap* certo_map_empty(void) {
     return certo_map_new();
 }
 
+/* Text keys (BACKLOG item 392): a map whose keys were inserted through `Map.insertText` (the
+   compiler picks it when the key type is Text) hashes and compares them by content; every
+   other map keeps the original pointer identity, which is what Int/Bool/Float keys need. */
+static const char* map_text(void* k) { return k ? (const char*)k : ""; }
+
+static int64_t map_hash(CertoMap* m, void* key) {
+    if (m->text) {
+        uint64_t h = 1469598103934665603ULL;
+        for (const unsigned char* p = (const unsigned char*)map_text(key); *p; p++) { h ^= *p; h *= 1099511628211ULL; }
+        return (int64_t)(h % (uint64_t)m->cap);
+    }
+    return (int64_t)((uintptr_t)key >> 3) % m->cap;
+}
+
+static bool map_key_eq(CertoMap* m, void* a, void* b) {
+    return m->text ? strcmp(map_text(a), map_text(b)) == 0 : a == b;
+}
+
 static int64_t map_probe(CertoMap* m, void* key) {
-    int64_t h = (int64_t)((uintptr_t)key >> 3) % m->cap;
-    while (m->entries[h].occupied && m->entries[h].key != key)
+    int64_t h = map_hash(m, key);
+    while (m->entries[h].occupied && !map_key_eq(m, m->entries[h].key, key))
         h = (h + 1) % m->cap;
     return h;
 }
 
-CertoMap* certo_map_insert(CertoMap* m, void* key, void* value) {
+static CertoMap* map_insert_mode(CertoMap* m, void* key, void* value, int text) {
     /* Copy-on-write: return a new map */
     CertoMap* n = map_alloc(m ? (m->len + 1) * 2 : 16);
+    n->text = text || (m && m->text);
     if (m) {
         for (int64_t i = 0; i < m->cap; i++) {
             if (!m->entries[i].occupied) continue;
@@ -484,6 +531,9 @@ CertoMap* certo_map_insert(CertoMap* m, void* key, void* value) {
     n->entries[h] = (MapEntry){ .key = key, .value = value, .occupied = true };
     return n;
 }
+
+CertoMap* certo_map_insert(CertoMap* m, void* key, void* value) { return map_insert_mode(m, key, value, 0); }
+CertoMap* certo_map_insert_text(CertoMap* m, const char* key, void* value) { return map_insert_mode(m, (void*)key, value, 1); }
 
 void* certo_map_get(CertoMap* m, void* key) {
     if (!m) return NULL;
@@ -543,9 +593,10 @@ CertoMap* certo_map_from_list(CertoList* l) {
  * `len*2` slots (worst case: every element has a distinct key) since, unlike
  * certo_map_insert, this builds the map in place rather than growing it via
  * copy-on-write per insert. */
-CertoMap* certo_list_group_by(CertoList* l, certo_fn_t f) {
+static CertoMap* group_by_mode(CertoList* l, certo_fn_t f, int text) {
     CertoFn1 key = (CertoFn1)f.fn;
     CertoMap* m = map_alloc(l && l->len > 0 ? l->len * 2 : 16);
+    m->text = text;
     if (!l) return m;
     for (int64_t i = 0; i < l->len; i++) {
         void* k = key(f.env, l->data[i]);
@@ -560,11 +611,15 @@ CertoMap* certo_list_group_by(CertoList* l, certo_fn_t f) {
     return m;
 }
 
+CertoMap* certo_list_group_by(CertoList* l, certo_fn_t f) { return group_by_mode(l, f, 0); }
+CertoMap* certo_list_group_by_text(CertoList* l, certo_fn_t f) { return group_by_mode(l, f, 1); }
+
 CertoMap* certo_map_remove(CertoMap* m, void* key) {
     if (!m) return map_alloc(16);
     CertoMap* n = map_alloc(m->len > 0 ? m->len * 2 : 16);
+    n->text = m->text;
     for (int64_t i = 0; i < m->cap; i++) {
-        if (!m->entries[i].occupied || m->entries[i].key == key) continue;
+        if (!m->entries[i].occupied || map_key_eq(m, m->entries[i].key, key)) continue;
         int64_t h = map_probe(n, m->entries[i].key);
         n->entries[h] = m->entries[i];
         n->len++;

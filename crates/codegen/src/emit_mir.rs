@@ -667,7 +667,7 @@ fn emit_call_arg(func_c: &str, idx: usize, arg: &Operand, locals: &[MirLocalDecl
         // hit by the original repro, but needs the identical treatment for
         // the identical reason, so all four get it uniformly here rather
         // than fixing only the one confirmed case.
-        ("certo_map_insert", 1) | ("certo_map_insert", 2)
+        ("certo_map_insert", 1) | ("certo_map_insert", 2) | ("certo_map_insert_text", 1) | ("certo_map_insert_text", 2)
         | ("certo_map_get", 1) | ("certo_map_contains", 1) | ("certo_map_remove", 1)
             => box_value(&expr, &operand_ty(arg, locals)),
         _ => expr,

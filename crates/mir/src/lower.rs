@@ -297,7 +297,7 @@ pub fn lower_fn(
 /// which segfaulted (not just misread bits) since the real mapper's return
 /// type is a struct, not a pointer-sized value.
 const BOXED_ABI_CALLEES: &[&str] = &[
-    "List.map", "List.filter", "List.find", "List.any", "List.all", "List.groupBy",
+    "List.map", "List.filter", "List.find", "List.any", "List.all", "List.groupBy", "List.groupByText",
     // `List.partition` — the same single-element predicate as `filter`. `List.fold`
     // and its alias `List.reduce` (BACKLOG item 438) take a *two*-param callback,
     // `(acc, elem) => acc`, whose params have different types; see

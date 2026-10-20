@@ -3,6 +3,7 @@ mod lower;
 mod error;
 mod raw_return;
 mod generic_kind;
+mod text_keys;
 
 pub use hir::*;
 pub use error::{LowerError, LowerErrorKind};

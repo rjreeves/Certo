@@ -54,7 +54,7 @@ fn find_param(decl: &Ty, actual: &Ty) -> Option<Ty> {
 }
 
 /// Apply `f` to every expression in `e`, children first (including lambda bodies).
-fn visit_mut(e: &mut HirExpr, f: &mut dyn FnMut(&mut HirExpr)) {
+pub(crate) fn visit_mut(e: &mut HirExpr, f: &mut dyn FnMut(&mut HirExpr)) {
     match &mut e.kind {
         HirExprKind::Call { func, args } => { visit_mut(func, f); args.iter_mut().for_each(|a| visit_mut(a, f)); }
         HirExprKind::BinOp { lhs, rhs, .. } => { visit_mut(lhs, f); visit_mut(rhs, f); }
