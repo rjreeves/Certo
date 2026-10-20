@@ -1408,6 +1408,9 @@ pub fn lower_module(module: &Module) -> Result<HirModule, Vec<LowerError>> {
         // return is a raw container-element word; see `raw_return`.
         let mut fn_ret_tys = cx.fn_ret_types;
         let mut fn_param_tys = cx.fn_param_tys;
+        // BACKLOG item 426 — hidden representation argument for generics that build an Option
+        // from a raw element; see `generic_kind`.
+        crate::generic_kind::add_kind_arguments(&mut items, &mut fn_param_tys, &fn_ret_tys);
         crate::raw_return::classify_raw_returns(&items, &mut fn_ret_tys, &mut fn_param_tys);
         Ok(HirModule {
             name, items,

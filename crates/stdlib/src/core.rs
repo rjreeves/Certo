@@ -230,6 +230,16 @@ int64_t certo_pow(int64_t base, int64_t exp) {
    arguments (`2.0 ** 0.5` -> certo_pow(2, 0) -> 1). */
 double certo_pow_float(double base, double exp) { return pow(base, exp); }
 
+/* BACKLOG item 426 — build an Option cell from a raw container-element word inside a generic
+   function. `size` is the byte size of a non-struct payload (the word's low bytes are the
+   value), or 0 when the payload is pointer-like (a struct: the word already is the cell). */
+void* __certo_some_raw(void* raw, int64_t size) {
+    if (size == 0) return raw;
+    void* cell = malloc((size_t)size);
+    memcpy(cell, &raw, (size_t)size);
+    return cell;
+}
+
 int64_t certo_abs_int(int64_t n)   { return n < 0 ? -n : n; }
 double  certo_abs_float(double f)  { return f < 0.0 ? -f : f; }
 int64_t certo_min_int(int64_t a, int64_t b) { return a < b ? a : b; }

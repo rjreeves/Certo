@@ -2,6 +2,7 @@ mod hir;
 mod lower;
 mod error;
 mod raw_return;
+mod generic_kind;
 
 pub use hir::*;
 pub use error::{LowerError, LowerErrorKind};
