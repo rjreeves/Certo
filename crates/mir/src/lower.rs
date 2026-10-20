@@ -1310,7 +1310,7 @@ fn cancel_token_ty() -> Ty {
 /// params — a real capture, if any, is unboxed from it exactly like an
 /// ordinary parameter, just recovered from the enclosing scope instead of
 /// the call site.
-fn lower_lambda_boxed(params: &[certo_hir::HirParam], body: &HirExpr, captures: &[LocalId], param_ty_hints: &[Ty], b: &mut Builder) -> Operand {
+fn lower_lambda_boxed(params: &[certo_hir::HirParam], body: &HirExpr, captures: &[LocalId], param_ty_hints: &[Ty], raw_int_return: bool, b: &mut Builder) -> Operand {
     let idx = b.lambda_count;
     b.lambda_count += 1;
     let lam_name = format!("__lam_{}_{}_boxed", b.fn_name, idx);
@@ -1319,7 +1319,10 @@ fn lower_lambda_boxed(params: &[certo_hir::HirParam], body: &HirExpr, captures: 
     let env = build_capture_env(captures, &capture_tys, b);
 
     let mut lb = Builder::new(&lam_name, b.record_field_types.clone(), b.variant_field_types.clone(), b.fn_param_tys.clone(), b.fn_ret_tys.clone(), b.variant_to_type.clone());
-    let ret_slot = lb.declare_local("_ret", Ty::Var(0));
+    // A comparator (`List.sort`, BACKLOG item 424) returns a raw `int64_t`, not a boxed
+    // `void*` — `certo_list_sort` casts the closure to `int64_t (*)(void*, void*, void*)`,
+    // exactly the shape `lower_sort_by_call`'s own comparator has.
+    let ret_slot = lb.declare_local("_ret", if raw_int_return { Ty::Int } else { Ty::Var(0) });
     let env_param = lb.declare_local("_env", Ty::Error);
 
     // The C signature's params (locals 1..=param_count) are always void* —
@@ -1348,7 +1351,9 @@ fn lower_lambda_boxed(params: &[certo_hir::HirParam], body: &HirExpr, captures: 
     lb.current_span = body.span;
     let lam_result = lower_expr(body, &mut lb);
     let lam_ret_ty = infer_operand_ty(&lam_result, &lb);
-    if matches!(lam_ret_ty, Ty::Unit) {
+    if raw_int_return {
+        lb.assign(ret_slot, Rvalue::Use(lam_result));
+    } else if matches!(lam_ret_ty, Ty::Unit) {
         lb.locals[ret_slot as usize].ty = Ty::Var(0);
     } else {
         lb.assign(ret_slot, Rvalue::Box { value: lam_result, ty: lam_ret_ty });
@@ -2177,9 +2182,20 @@ fn lower_expr(expr: &HirExpr, b: &mut Builder) -> Operand {
                     b.assign(boxed, Rvalue::Box { value, ty: a.ty.clone() });
                     return Operand::Local(boxed);
                 }
+                // `List.sort`'s comparator `(a, b) => Int` (BACKLOG item 424): both params
+                // are elements, passed boxed, and the result is a raw Int.
+                if i == 1 && matches!(&func.kind, HirExprKind::Global(n) if n == "List.sort") {
+                    if let HirExprKind::Lambda { params, body, captures, .. } = &a.kind {
+                        let elem = match args.first().map(|x| &x.ty) {
+                            Some(Ty::List(inner)) => (**inner).clone(),
+                            _ => Ty::Error,
+                        };
+                        return lower_lambda_boxed(params, body, captures, std::slice::from_ref(&elem), true, b);
+                    }
+                }
                 if needs_boxed_callback {
                     if let HirExprKind::Lambda { params, body, captures, .. } = &a.kind {
-                        return lower_lambda_boxed(params, body, captures, &param_ty_hints, b);
+                        return lower_lambda_boxed(params, body, captures, &param_ty_hints, false, b);
                     }
                     // A bare reference to `Some`/`Ok`/`Err` (`List.map(xs,
                     // Some)`, BACKLOG item 339) — unlike an ordinary named

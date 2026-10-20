@@ -776,7 +776,12 @@ fn callback_param_hints(fn_path: Option<&str>, lowered_args: &[HirExpr]) -> Vec<
 /// comparison.
 fn lower_hinted_callback(fn_path: Option<&str>, params: &[certo_ast::expr::LambdaParam], body: &S<Expr>, hint: &Ty, cx: &mut Cx, span: Span) -> HirExpr {
     if fn_path == Some("List.sort") {
-        let hints = if matches!(hint, Ty::Text) { vec![hint.clone(); params.len()] } else { Vec::new() };
+        // Both comparator params are elements. Any known element type is safe to hint now:
+        // MIR lifts a `List.sort` lambda with boxed params that it unboxes to their real
+        // types (BACKLOG item 424); this used to be Text-only, when the comparator took the
+        // runtime's raw `void*` elements directly.
+        let known = !matches!(hint, Ty::Error | Ty::Var(_));
+        let hints = if known { vec![hint.clone(); params.len()] } else { Vec::new() };
         lower_lambda_with_param_hints(params, body, &hints, &Ty::Error, cx, span)
     } else {
         lower_lambda_with_param_hint(params, body, hint, cx, span)
