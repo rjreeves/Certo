@@ -367,8 +367,10 @@ Each `.cto` file declares exactly one module at the top:
 module MyApp.Utils
 ```
 
-Nested module names use `.` as a separator.  The module name is
-independent of the file path — it is purely a namespace.
+Nested module names use `.` as a separator.  A file that another file imports must
+declare the module path it is imported by: `import MyApp.Models.Order` looks for
+`MyApp/Models/Order.cto` next to the entry file, and that file must start with
+`module MyApp.Models.Order` (otherwise error E0104).
 
 ### Importing
 
@@ -381,6 +383,15 @@ import MyApp.Utils
 
 All names from `Stdlib.Core` are available automatically without an
 explicit import.
+
+An imported file may itself import others; its own imports are resolved first, so its
+functions can use them. A file reached more than once (or through an import cycle) is
+included once. `import Lib.{ other }` brings in only `other`; the helpers `other` calls
+still come along, but under hidden names the importing file cannot write.
+
+Currently every top-level name of an imported file, including names it imported
+itself, is visible to the importing file, and `pub` is not enforced across files
+(BACKLOG item 440).
 
 ---
 
