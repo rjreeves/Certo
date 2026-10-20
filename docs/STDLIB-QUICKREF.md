@@ -306,7 +306,8 @@ key/sum type is limited.
 `Text` keys (and `List<Text>` elements in `List.contains` / `List.distinct`) compare by **content**: the
 compiler picks the content-comparing runtime function when the key type is `Text`. `Int`, `Bool` and
 `Float` keys compare by value bits. Other key types (`Decimal`, records, sum types) still compare by
-pointer (BACKLOG items 391/392).
+pointer (BACKLOG items 391/392). `List.contains` / `in` and `List.distinct` use the language's `==` for
+`Float`, `Decimal`, records and sum types.
 
 ```
 Map.empty<K, V>(): Map<K, V>
