@@ -1010,8 +1010,19 @@ fn parse_file_or_exit(path: &Path, colour: bool) -> (Module, String) {
 /// and ran fine. Factored out so both commands share the exact same
 /// resolution logic rather than risking the two silently drifting apart.
 fn resolve_local_imports(module: &mut Module, input: &Path, colour: bool, verbose: bool) {
+    let base_dir = input.parent().unwrap_or(Path::new(".")).to_path_buf();
+    let mut visited: HashSet<PathBuf> = HashSet::new();
+    visited.insert(input.canonicalize().unwrap_or_else(|_| input.to_path_buf()));
+    resolve_imports_in(module, &base_dir, input, colour, verbose, &mut visited);
+}
+
+/// One level of import resolution. `importer` is the file `module` was parsed from (used to
+/// report errors against the right source); module paths are resolved from `base_dir`, the entry
+/// file's directory. BACKLOG item 359: an imported file's own imports are resolved first, so its
+/// declarations can use what it imported; each file is merged only once (a cycle or a diamond
+/// does not duplicate it); and the imported file's `module` line must mirror its path.
+fn resolve_imports_in(module: &mut Module, base_dir: &Path, importer: &Path, colour: bool, verbose: bool, visited: &mut HashSet<PathBuf>) {
     use certo_ast::module::ImportKind;
-    let base_dir = input.parent().unwrap_or(Path::new("."));
     let stdlib_prefixes = ["Stdlib", "Core", "Collections", "Text", "DateTime", "Money"];
     for imp in &module.imports.clone() {
         let first_seg = imp.path.segments.first().map(|s| s.node.as_str()).unwrap_or("");
@@ -1022,11 +1033,29 @@ fn resolve_local_imports(module: &mut Module, input: &Path, colour: bool, verbos
             .join("/")
             .into();
         let candidate = base_dir.join(rel).with_extension("cto");
+        let path_str = imp.path.segments.iter().map(|s| s.node.as_str()).collect::<Vec<_>>().join(".");
         if candidate.exists() {
+            // Already merged through another import (or an import cycle): nothing more to add.
+            if !visited.insert(candidate.canonicalize().unwrap_or_else(|_| candidate.clone())) { continue; }
             let (mut imp_module, imp_src) = parse_file_or_exit(&candidate, colour);
-            let imp_filename = candidate.display().to_string();
-            let _ = (imp_src, imp_filename); // already reported inside helper
+            let _ = imp_src; // already reported inside helper
             if verbose { eprintln!("importing {}", candidate.display()); }
+
+            // Spec 2.1: the module path mirrors the file path.
+            let declared = imp_module.path.segments.iter().map(|s| s.node.as_str()).collect::<Vec<_>>().join(".");
+            if declared != path_str {
+                let diag = Diagnostic::error("E0104",
+                    format!("`{}` declares `module {}`, but it is imported as `{}`", candidate.display(), declared, path_str))
+                    .with_span(imp.span)
+                    .with_note(format!("a file's `module` line must match the path it is imported by: use `module {path_str}` in {}", candidate.display()));
+                let src = std::fs::read_to_string(importer).unwrap_or_default();
+                eprint!("{}", render_all(&[diag], &src, &importer.display().to_string(), colour));
+                process::exit(1);
+            }
+
+            // The imported file's own imports first, so its declarations (and anything it
+            // re-exports) are all present before this import's filter is applied.
+            resolve_imports_in(&mut imp_module, base_dir, &candidate, colour, verbose, visited);
 
             match &imp.kind {
                 ImportKind::Whole => {
@@ -1034,48 +1063,46 @@ fn resolve_local_imports(module: &mut Module, input: &Path, colour: bool, verbos
                 }
                 ImportKind::Named(names) => {
                     // BACKLOG item 234 — `import X.{ a, b }` brings only the
-                    // listed names into scope; every other top-level
-                    // declaration in the imported file is dropped entirely
-                    // (not merged in unqualified, unlike `Whole`/`Aliased`).
-                    // A per-name `as` (`import X.{ a as b }`) renames the
-                    // matched decl to the new bare name and rewrites every
-                    // free (non-shadowed) reference to `a` inside the
-                    // imported file's own bodies to `b` first, so `a`'s own
-                    // internal self-references (if any) still resolve.
+                    // listed names into scope. A per-name `as` (`import X.{ a as b }`)
+                    // renames the matched decl to the new bare name and rewrites
+                    // every free (non-shadowed) reference to `a` inside the
+                    // imported file's own bodies to `b` first.
+                    //
+                    // BACKLOG item 359: a listed function still needs the helpers it calls,
+                    // so the unlisted functions and values are kept under a hidden
+                    // `__imp_<module>_<name>` name that the importer cannot write by accident,
+                    // instead of being dropped.
                     let mut renames: HashMap<String, RenameTo> = HashMap::new();
                     for n in names {
                         if let Some(alias) = &n.alias {
                             renames.insert(n.name.node.clone(), RenameTo::Bare(alias.node.clone()));
                         }
                     }
-                    rewrite_decls_free_refs(&mut imp_module.decls, &renames);
-                    imp_module.decls.retain_mut(|d| {
-                        let Some(own_name) = decl_own_name(&d.node).map(|s| s.to_string()) else { return false };
-                        match names.iter().find(|n| n.name.node == own_name) {
-                            None => false,
-                            Some(n) => {
-                                if let Some(alias) = &n.alias {
-                                    set_decl_own_name(&mut d.node, alias.node.clone());
-                                }
-                                true
+                    let prefix = path_str.replace('.', "_");
+                    for d in &imp_module.decls {
+                        if !matches!(&d.node, Decl::Fn(_) | Decl::Val(_) | Decl::Var(_)) { continue; }
+                        if let Some(own) = decl_own_name(&d.node) {
+                            if !names.iter().any(|n| n.name.node == own) {
+                                renames.insert(own.to_string(), RenameTo::Bare(format!("__imp_{prefix}_{own}")));
                             }
                         }
-                    });
+                    }
+                    rewrite_decls_free_refs(&mut imp_module.decls, &renames);
+                    for d in imp_module.decls.iter_mut() {
+                        let Some(own_name) = decl_own_name(&d.node).map(|s| s.to_string()) else { continue };
+                        if let Some(RenameTo::Bare(new)) = renames.get(&own_name) {
+                            if matches!(&d.node, Decl::Fn(_) | Decl::Val(_) | Decl::Var(_)) {
+                                set_decl_own_name(&mut d.node, new.clone());
+                            }
+                        }
+                    }
                     module.decls.extend(imp_module.decls);
                 }
                 ImportKind::Aliased(alias) => {
                     // BACKLOG item 234 — `import X as M` namespaces every
                     // function declared in X under `M.`, reusing the same
                     // dot-qualified-global convention `impl` methods and
-                    // `computed` properties already use (`Type.method`,
-                    // `crates/hir/src/lower.rs`) — so `M.fn(...)` reaches the
-                    // exact lookup path a `Type.method(...)` call already
-                    // does in both `crates/typeck` and `crates/hir`, with no
-                    // new alias-aware lookup logic needed in either crate.
-                    // Scoped to `Decl::Fn` only, matching this item's own
-                    // filed repro (`M.greet()`) — `val`/`var`/sum-variant
-                    // qualification under a module alias is a real,
-                    // narrower, still-open gap, not attempted here.
+                    // `computed` properties already use (`Type.method`).
                     let mut renames: HashMap<String, RenameTo> = HashMap::new();
                     for d in &imp_module.decls {
                         if let Decl::Fn(f) = &d.node {
@@ -1095,23 +1122,10 @@ fn resolve_local_imports(module: &mut Module, input: &Path, colour: bool, verbos
             }
         } else {
             // BACKLOG item 300 — an import path that doesn't resolve to any
-            // real file previously fell straight through this whole `if`
-            // silently: zero decls merged, zero error, no signal at all
-            // that the import itself was the problem. Confirmed live: a
-            // bogus import path and a real one both `check` clean, and only
-            // a later *use* of a name from it fails, with a generic,
-            // misleading "undefined name" that never points back to the
-            // import line. Deliberately not attempting real dotted-module-
-            // name resolution here (a separate, much larger feature —
-            // nothing in this codebase resolves an import by a candidate
-            // file's own declared `module X.Y.Z` name today, only by
-            // joining the import path directly into a directory path) —
-            // this is scoped to making the existing directory-path
-            // resolution's own failure loud and immediate instead of a
-            // silent no-op.
+            // real file is a loud, immediate error, not a silent no-op.
             let diag = unresolved_local_import_diagnostic(imp, &candidate);
-            let src = std::fs::read_to_string(input).unwrap_or_default();
-            eprint!("{}", render_all(&[diag], &src, &input.display().to_string(), colour));
+            let src = std::fs::read_to_string(importer).unwrap_or_default();
+            eprint!("{}", render_all(&[diag], &src, &importer.display().to_string(), colour));
             process::exit(1);
         }
     }
