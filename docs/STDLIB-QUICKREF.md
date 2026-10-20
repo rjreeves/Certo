@@ -177,6 +177,7 @@ Result.allSettled<T, E>(results: List<Result<T, E>>): List<Result<T, E>>
 `import Stdlib.Text`
 
 ```
+Text.length(s: Text): Int                  // character count (Unicode scalar values)
 Text.len(s: Text): Int                     // byte count
 Text.byteLength(s: Text): Int              // byte count (explicit alias — see Text.len)
 Text.concat(a: Text, b: Text): Text        // same as a ++ b
@@ -191,8 +192,8 @@ Text.toLowerLocale(s: Text, locale: Text): Text // same platform note as toUpper
 Text.trim(s: Text): Text                   // both ends
 Text.trimStart(s: Text): Text              // leading whitespace
 Text.trimEnd(s: Text): Text                // trailing whitespace
-Text.slice(s: Text, start: Int, end: Int): Text   // [start, end)
-Text.indexOf(s: Text, sub: Text): Int?     // byte offset, or None
+Text.slice(s: Text, start: Int, end: Int): Text   // [start, end), in characters
+Text.indexOf(s: Text, sub: Text): Int?     // character position, or None
 Text.replace(s: Text, from: Text, to: Text): Text // all occurrences
 Text.split(s: Text, sep: Text): List<Text> // empty sep → char list
 Text.join(parts: List<Text>, sep: Text): Text
@@ -200,19 +201,31 @@ Text.repeat(s: Text, n: Int): Text
 Text.charAt(s: Text, index: Int): Char?    // bounds-checked; None if out of range
 ```
 
+**Positions are characters.** `Text.length`, `Text.charAt`, `Text.slice`, `Text.indexOf` and
+`Text.split(s, "")` all count Unicode characters, so they agree with one another for any text:
+`Text.slice(s, 0, Text.length(s))` is always all of `s`, and `Text.indexOf` returns a position
+`Text.slice` accepts. `"héllo"` has length 5 and `Text.indexOf("héllo", "llo")` is 2. `Text.len` and
+`Text.byteLength` are the UTF-8 byte count (6 for `"héllo"`) — use them for sizes, not for slicing.
+A slice end past the end is clamped. (Before this, `slice`, `indexOf` and `split("")` counted bytes
+while `length` and `charAt` counted characters, so slicing non-ASCII text could drop characters or
+cut one in half.) Each of these scans the text from the start, so for repeated slicing of one very
+large text prefer the byte-level `Text.sliceUnchecked` / `Text.byteAtUnchecked`, whose caller
+supplies byte offsets within `0 <= start <= end <= Text.byteLength(s)`.
+
 ---
 
 ## Char
 
-`import Stdlib.Text` — `Char` is a single ASCII byte, the same byte-oriented
-convention as the rest of `Text` (`toUpper`/`toLower`/`len` are all
-byte-based, not real Unicode). There's no `Char` literal syntax yet —
-construct one via `Text.charAt` or `Char.fromInt`.
+`import Stdlib.Text` — `Char` is a Unicode scalar value (`Text.charAt("é日🙂", 1)` is `日`, code
+point 26085), not a byte. `Char.toInt` returns the code point and `Char.fromInt(n)` makes the `Char`
+for code point `n`. The classification and case functions below (`isAlpha`, `isLowerCase`,
+`toUpperCase`, …) only recognise ASCII: `Char.isAlpha` is false for `é`, and `toUpperCase` leaves it
+unchanged. There's no `Char` literal syntax yet — construct one via `Text.charAt` or `Char.fromInt`.
 
 ```
 Char.toText(c: Char): Text
-Char.toInt(c: Char): Int                   // 0-255
-Char.fromInt(n: Int): Char                 // truncates to a byte (n & 0xFF)
+Char.toInt(c: Char): Int                   // the Unicode code point
+Char.fromInt(n: Int): Char                 // the Char for code point n
 Char.isDigit(c: Char): Bool
 Char.isAlpha(c: Char): Bool
 Char.isUpperCase(c: Char): Bool
@@ -226,7 +239,7 @@ Char.toLowerCase(c: Char): Char
 fn countDigits(s: Text): Int = {
   var n = 0
   var i = 0
-  while i < Text.len(s) {
+  while i < Text.length(s) {
     match Text.charAt(s, i) {
       Some(c) => { if Char.isDigit(c) then n = n + 1 }
       None => {}
