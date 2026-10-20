@@ -113,12 +113,12 @@ fn main(): Unit [io] = {
 fn an_unsupported_call_fails_the_build_with_a_clear_error() {
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("u.cto");
-    fs::write(&file, "module U\nimport Stdlib.Core\nfn main(): Unit [io] = println(getEnv(\"HOME\") ?? \"none\")\n").unwrap();
+    fs::write(&file, "module U\nimport Stdlib.Core\nfn main(): Unit [io] = println(Json.stringify(Json.object()))\n").unwrap();
     let out = Command::new(env!("CARGO_BIN_EXE_certo-llvm"))
         .arg(&file).arg("-o").arg(dir.path().join("u.ll")).output().unwrap();
     assert!(!out.status.success());
     let err = String::from_utf8_lossy(&out.stderr);
-    assert!(err.contains("call to `getEnv` is not supported"), "{err}");
+    assert!(err.contains("call to `Json.stringify` is not supported"), "{err}");
     assert!(!dir.path().join("u.ll").exists(), "no IR should be written when emission fails");
 }
 
@@ -390,4 +390,72 @@ fn an_out_of_range_list_index_panics_like_the_c_backend() {
     let err = String::from_utf8_lossy(&run.stderr);
     assert_eq!(out, "before\n", "output written before the panic is flushed, nothing after it");
     assert!(err.contains("certo panic: list index out of bounds"), "{err}");
+}
+
+#[test]
+fn arguments_environment_parse_int_and_quit_match_the_c_backend() {
+    if !clang_available() { return; }
+    let dir = tempfile::tempdir().unwrap();
+    let src = r#"module A
+import Stdlib.Core
+
+fn describe(n: Int?): Text = match n {
+    Some(v) => "int " ++ intToText(v)
+    None => "not an int"
+}
+
+fn main(): Unit [io] = {
+    val first = arg(1) ?? "(none)"
+    println("first: " ++ first)
+    println("second: " ++ (arg(2) ?? "(none)"))
+    println(describe(parseInt("42")))
+    println(describe(parseInt("-7")))
+    println(describe(parseInt("  12")))
+    println(describe(parseInt("12abc")))
+    println(describe(parseInt("")))
+    println(describe(parseInt("9223372036854775807")))
+    println(describe(parseInt(first)))
+    println(getEnv("CERTO_TEST_VAR") ?? "unset")
+    println(getEnv("CERTO_SURELY_UNSET_VAR") ?? "unset")
+    if first == "quit" then Process.quit(3) else println("not quitting")
+    println("done")
+}
+"#;
+    let file = dir.path().join("a_llvm.cto");
+    fs::write(&file, src).unwrap();
+    let llvm_exe = dir.path().join(if cfg!(windows) { "a_llvm.exe" } else { "a_llvm" });
+    let build = Command::new(env!("CARGO_BIN_EXE_certo-llvm")).arg(&file).arg("--exe").arg(&llvm_exe).output().unwrap();
+    assert!(build.status.success(), "{}", String::from_utf8_lossy(&build.stderr));
+
+    let certo = Path::new(env!("CARGO_BIN_EXE_certo-llvm")).with_file_name(if cfg!(windows) { "certo.exe" } else { "certo" });
+    let c_exe = dir.path().join(if cfg!(windows) { "a_c.exe" } else { "a_c" });
+    let have_c = certo.exists() && {
+        let c_file = dir.path().join("a_c.cto");
+        fs::write(&c_file, src).unwrap();
+        Command::new(&certo).arg("build").arg(&c_file).arg("-o").arg(&c_exe).output().unwrap().status.success()
+    };
+
+    let run = |exe: &Path, args: &[&str]| {
+        let out = Command::new(exe).args(args).env("CERTO_TEST_VAR", "from_env").output().unwrap();
+        (String::from_utf8_lossy(&out.stdout).replace("\r\n", "\n"), out.status.code())
+    };
+
+    let (out, code) = run(&llvm_exe, &["hello", "world"]);
+    assert_eq!(out, "first: hello\nsecond: world\nint 42\nint -7\nint 12\nnot an int\nnot an int\nint 9223372036854775807\nnot an int\nfrom_env\nunset\nnot quitting\ndone\n");
+    assert_eq!(code, Some(0));
+
+    let (out, _) = run(&llvm_exe, &["17"]);
+    assert!(out.starts_with("first: 17\nsecond: (none)\n"), "{out}");
+    assert!(out.contains("int 17\nfrom_env"), "parseInt of an argument\n{out}");
+
+    // Process.quit stops the program with its exit code, before "done".
+    let (out, code) = run(&llvm_exe, &["quit"]);
+    assert_eq!(code, Some(3));
+    assert!(!out.contains("done") && !out.contains("not quitting"), "{out}");
+
+    if have_c {
+        for args in [&["hello", "world"][..], &["17"], &["quit"], &[]] {
+            assert_eq!(run(&llvm_exe, args), run(&c_exe, args), "the backends disagree for {args:?}");
+        }
+    }
 }

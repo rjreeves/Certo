@@ -52,6 +52,10 @@ pub const RT_FNS: &[RtFn] = &[
     RtFn { certo: "List.first",  symbol: "certo_rt_list_first",    ret: "ptr",    params: &["ptr"] },
     RtFn { certo: "List.last",   symbol: "certo_rt_list_last",     ret: "ptr",    params: &["ptr"] },
     RtFn { certo: "List.empty",  symbol: "certo_rt_list_empty",    ret: "ptr",    params: &[] },
+    RtFn { certo: "arg",         symbol: "certo_rt_arg",           ret: "ptr",    params: &["i64"] },
+    RtFn { certo: "getEnv",      symbol: "certo_rt_get_env",       ret: "ptr",    params: &["ptr"] },
+    RtFn { certo: "parseInt",    symbol: "certo_rt_parse_int",     ret: "ptr",    params: &["ptr"] },
+    RtFn { certo: "Process.quit", symbol: "certo_rt_quit",         ret: "void",   params: &["i64"] },
 ];
 
 /// Symbols for operators the emitter lowers to runtime calls itself.
@@ -59,6 +63,9 @@ pub const TEXT_CONCAT: &str = "certo_rt_text_concat";
 pub const INT_POW: &str = "certo_rt_pow";
 /// Allocates a record's heap block: `ptr certo_rt_alloc(i64 bytes)`.
 pub const ALLOC: &str = "certo_rt_alloc";
+/// Hands the program's `argc`/`argv` to the runtime; the entry point calls it
+/// when the program uses `arg` (native only: a browser module has no arguments).
+pub const SET_ARGS: &str = "certo_rt_set_args";
 /// `ptr certo_rt_list_new(i64 n)`: a list of `n` zeroed slots, filled in by compiled code.
 pub const LIST_NEW: &str = "certo_rt_list_new";
 /// `ptr certo_rt_list_slot(ptr list, i64 i)`: a slot's address, panicking when out of range.
@@ -178,7 +185,7 @@ mod tests {
     fn lookup_finds_supported_names_only() {
         assert_eq!(lookup("println").unwrap().symbol, "certo_rt_println");
         assert_eq!(lookup("Text.len").unwrap().ret, "i64");
-        assert!(lookup("parseInt").is_none());
+        assert!(lookup("Json.parse").is_none());
     }
 
     #[test]

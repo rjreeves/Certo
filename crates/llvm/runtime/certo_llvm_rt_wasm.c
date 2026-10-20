@@ -146,6 +146,40 @@ void *certo_rt_list_push(void *l, int64_t item) {
     return out;
 }
 
+
+/* ---- Process and environment ----
+ * A browser has no argv and no environment, so `arg` and `getEnv` are always
+ * None; `Process.quit` stops the module by trapping. */
+void *certo_rt_arg(int64_t i) { (void)i; return 0; }
+void *certo_rt_get_env(const char *key) { (void)key; return 0; }
+
+/* parseInt(s): None unless the whole text is a base-10 integer, with the same
+ * rules as strtoll: leading whitespace, an optional sign, then digits. An
+ * out-of-range value clamps, as strtoll does. */
+void *certo_rt_parse_int(const char *s) {
+    if (!s) return 0;
+    const char *p = s;
+    while (*p == ' ' || (*p >= '\t' && *p <= '\r')) p++;
+    int neg = 0;
+    if (*p == '-') { neg = 1; p++; } else if (*p == '+') { p++; }
+    if (*p < '0' || *p > '9') return 0;
+    unsigned long long limit = neg ? 9223372036854775808ULL : 9223372036854775807ULL;
+    unsigned long long v = 0;
+    int clamped = 0;
+    while (*p >= '0' && *p <= '9') {
+        unsigned d = (unsigned)(*p - '0');
+        if (v > (limit - d) / 10) clamped = 1; else v = v * 10 + d;
+        p++;
+    }
+    if (*p) return 0;
+    if (clamped) v = limit;
+    int64_t *box = (int64_t *)certo_rt_alloc(8);
+    *box = neg ? (int64_t)(0ULL - v) : (int64_t)v;
+    return box;
+}
+
+void certo_rt_quit(int64_t code) { (void)code; __builtin_trap(); }
+
 int64_t certo_rt_pow(int64_t base, int64_t exp) {
     if (exp < 0) return 0;
     int64_t result = 1;

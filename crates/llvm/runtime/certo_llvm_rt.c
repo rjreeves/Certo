@@ -117,6 +117,49 @@ void *certo_rt_list_push(void *l, int64_t item) {
     return out;
 }
 
+
+/* ---- Process and environment ----
+ * Option<Text> is a pointer to an 8-byte box holding the text pointer, or NULL. */
+static int32_t certo_rt_argc_v;
+static char **certo_rt_argv_v;
+
+/* Called by the program entry point when the program uses `arg`. */
+void certo_rt_set_args(int32_t argc, char **argv) {
+    certo_rt_argc_v = argc;
+    certo_rt_argv_v = argv;
+}
+
+static void *certo_rt_some_text(const char *s) {
+    const char **box = (const char **)certo_rt_alloc(8);
+    *box = s;
+    return box;
+}
+
+/* arg(i): argv[i] (argv[0] is the program), None when out of range. */
+void *certo_rt_arg(int64_t i) {
+    if (i < 0 || i >= (int64_t)certo_rt_argc_v) return NULL;
+    return certo_rt_some_text(certo_rt_argv_v[i]);
+}
+
+/* getEnv(key): None when unset. */
+void *certo_rt_get_env(const char *key) {
+    const char *v = key ? getenv(key) : NULL;
+    return v ? certo_rt_some_text(v) : NULL;
+}
+
+/* parseInt(s): None unless the whole text is a base-10 integer (strtoll rules). */
+void *certo_rt_parse_int(const char *s) {
+    if (!s) return NULL;
+    char *end;
+    long long v = strtoll(s, &end, 10);
+    if (end == s || *end != '\0') return NULL;
+    int64_t *box = (int64_t *)certo_rt_alloc(8);
+    *box = (int64_t)v;
+    return box;
+}
+
+void certo_rt_quit(int64_t code) { fflush(stdout); exit((int)code); }
+
 int64_t certo_rt_pow(int64_t base, int64_t exp) {
     if (exp < 0) return 0;
     int64_t result = 1;

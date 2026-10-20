@@ -88,3 +88,14 @@ fn lists_and_tuples_build_for_the_browser() {
     assert!(contains(&wasm, "certo_write"));
     assert!(contains(&wasm, "certo_rt_list_slot"), "the list runtime is exported from the shim");
 }
+
+#[test]
+fn parse_int_arg_getenv_and_text_equality_build_for_the_browser() {
+    // The browser has no argv or environment, so `arg` and `getEnv` are always
+    // None there; parseInt is implemented in the shim without a libc.
+    let src = "module P\nimport Stdlib.Core\n\
+               pub fn main(): Unit [io] = {\n    val n = parseInt(\"123\") ?? -1\n    println(intToText(n))\n    println(arg(1) ?? \"no args\")\n    println(getEnv(\"HOME\") ?? \"no env\")\n    if \"a\" == \"a\" then println(\"equal\") else println(\"different\")\n}\n";
+    let Some(wasm) = build_browser(src) else { return };
+    assert!(contains(&wasm, "certo_write"));
+    assert!(contains(&wasm, "certo_rt_parse_int"));
+}

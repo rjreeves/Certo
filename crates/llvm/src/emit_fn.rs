@@ -312,6 +312,13 @@ impl<'ctx> FnEmitter<'ctx> {
                 self.w(&format!("  store {lty} {val}, ptr {dest_ptr}"));
             }
 
+            // `==`/`!=` where both sides are Text: compare contents, not addresses.
+            Rvalue::BinOp { op: op @ (BinOp::Eq | BinOp::NotEq), lhs, rhs }
+                if self.is_text_operand(&lhs) && self.is_text_operand(&rhs) =>
+            {
+                self.emit_text_compare(matches!(op, BinOp::NotEq), &lhs, &rhs, &dest_lty, &dest_ptr);
+            }
+
             Rvalue::BinOp { op: BinOp::NullCoalesce, lhs, rhs } => {
                 self.emit_coalesce(&lhs, &rhs, &dest_lty, &dest_ptr);
             }
@@ -457,7 +464,7 @@ impl<'ctx> FnEmitter<'ctx> {
             BinOp::Eq | BinOp::NotEq if lty == "ptr" => {
                 // Comparing two `ptr` values compares addresses, which is wrong
                 // for Text (and meaningless for the rest).
-                self.unsupported("`==`/`!=` on Text or other non-numeric values is not supported by the LLVM backend (use Text.eq for Text)");
+                self.unsupported("`==`/`!=` on records, enums, lists and other non-numeric values is not supported by the LLVM backend (Text is)");
                 (format!("  {name} = icmp {} ptr {lv}, {rv}", if matches!(op, BinOp::Eq) { "eq" } else { "ne" }), "i1")
             }
             BinOp::Eq    => (
@@ -735,6 +742,37 @@ impl<'ctx> FnEmitter<'ctx> {
             self.w(&format!("  %v{p} = load ptr, ptr %v{g}"));
             self.store_converted("ptr", &format!("%v{p}"), dest_lty, dest_ptr);
         }
+    }
+
+    /// Is this operand a Text value? (A Text local by its MIR type, or a string literal.)
+    fn is_text_operand(&self, op: &Operand) -> bool {
+        match op {
+            Operand::Const(MirConst::Str(_)) => true,
+            Operand::Local(id) => self.mir_fn.locals.iter()
+                .find(|l| l.id == *id)
+                .is_some_and(|l| matches!(l.ty, Ty::Text | Ty::BoundedText(_))),
+            _ => false,
+        }
+    }
+
+    /// `a == b` / `a != b` on Text, through the runtime's `Text.eq`.
+    fn emit_text_compare(&mut self, negate: bool, lhs: &Operand, rhs: &Operand, dest_lty: &str, dest_ptr: &str) {
+        let (lty, lv) = self.load(lhs);
+        let (rty, rv) = self.load(rhs);
+        let a = self.as_ptr(&lty, &lv);
+        let b = self.as_ptr(&rty, &rv);
+        let sym = crate::rt::lookup("Text.eq").expect("Text.eq is a runtime function").symbol;
+        self.ctx.declare_extern(sym.into(), crate::rt::abi_ret("i1"), vec!["ptr".into(), "ptr".into()]);
+        let r = self.fresh();
+        self.w(&format!("  %v{r} = call {} @{sym}(ptr {a}, ptr {b})", crate::rt::abi_ret("i1")));
+        let result = if negate {
+            let n = self.fresh();
+            self.w(&format!("  %v{n} = xor i1 %v{r}, 1"));
+            format!("%v{n}")
+        } else {
+            format!("%v{r}")
+        };
+        self.store_converted("i1", &result, dest_lty, dest_ptr);
     }
 
     /// The slot of tuple field `field` (`"0"`, `"1"`, ...), if `id` holds a tuple.

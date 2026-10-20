@@ -274,8 +274,18 @@ pub fn emit_module(module: &Module, opts: &LlvmOptions) -> Result<String, String
     // user's function is `@certo_main`, so this never clashes with it.
     if !opts.no_entry && !is_wasm_triple(opts.target_triple.as_deref()) {
         if let Some(sig) = ctx.fn_sigs.get("certo_main").filter(|s| s.params.is_empty()) {
-            writeln!(out, "define i32 @main() {{").unwrap();
+            // A program that reads its arguments gets them from the C `main`.
+            let uses_args = out.contains("@certo_rt_arg(");
+            if uses_args {
+                writeln!(out, "declare void @{}(i32, ptr)", crate::rt::SET_ARGS).unwrap();
+                writeln!(out, "define i32 @main(i32 %argc, ptr %argv) {{").unwrap();
+            } else {
+                writeln!(out, "define i32 @main() {{").unwrap();
+            }
             writeln!(out, "entry:").unwrap();
+            if uses_args {
+                writeln!(out, "  call void @{}(i32 %argc, ptr %argv)", crate::rt::SET_ARGS).unwrap();
+            }
             if sig.ret == "void" {
                 writeln!(out, "  call void @certo_main()").unwrap();
             } else {
@@ -561,19 +571,33 @@ fn half(x: Float): Float = x / 2.0
     fn an_unsupported_runtime_call_is_an_error_naming_the_call() {
         let err = emit_err("module T
 import Stdlib.Core
-fn run(): Unit [io] = println(getEnv(\"HOME\") ?? \"none\")
+fn run(): Unit [io] = println(Json.stringify(Json.object()))
 ");
-        assert!(err.contains("call to `getEnv` is not supported"), "{err}");
+        assert!(err.contains("call to `Json.stringify` is not supported"), "{err}");
         assert!(err.contains("in `run`"), "{err}");
         assert!(err.contains("println"), "the message lists what is supported: {err}");
     }
 
     #[test]
-    fn text_equality_is_reported() {
+    fn equality_on_records_is_still_reported() {
         let err = emit_err("module T
-fn c(): Bool = \"a\" == \"b\"
+type P = { x: Int }
+fn same(a: P, b: P): Bool = a == b
 ");
-        assert!(err.contains("Text.eq"), "{err}");
+        assert!(err.contains("records, enums, lists"), "{err}");
+    }
+
+    #[test]
+    fn text_equality_compares_contents_through_text_eq() {
+        let ir = ir_of("module T
+fn same(a: Text, b: Text): Bool = a == b
+fn differ(a: Text): Bool = a != \"x\"
+");
+        assert!(ir.contains("call zeroext i1 @certo_rt_text_eq(ptr "), "not an address comparison
+{ir}");
+        assert!(ir.contains("xor i1 %v"), "!= negates the result
+{ir}");
+        assert!(!ir.contains("icmp eq ptr") && !ir.contains("icmp ne ptr"), "{ir}");
     }
 
     // ------------------------------------------------------------------ //
@@ -616,9 +640,9 @@ type Point = { x: Int, y: Int, label: Text }
         let opts = LlvmOptions { allow_unresolved: true, ..Default::default() };
         let ir = emit_module(&module_from("module T
 import Stdlib.Core
-fn run(): Text = getEnv(\"HOME\") ?? \"none\"
+fn run(): Text = Json.stringify(Json.object())
 "), &opts).unwrap();
-        assert!(ir.contains("declare ptr @certo_getEnv("), "{ir}");
+        assert!(ir.contains("declare ptr @certo_Json_stringify("), "{ir}");
         assert!(!ir.contains("@certo_coalesce"), "`??` is compiled inline now
 {ir}");
     }
@@ -875,5 +899,41 @@ fn use_it(): Int = {
 fn f(xs: List<Int>): List<Int> = List.map(xs, (x) => x + 1)
 ");
         assert!(err.contains("`List.map`"), "{err}");
+    }
+
+    // ------------------------------------------------------------------ //
+    // arg, getEnv, parseInt, Process.quit
+    // ------------------------------------------------------------------ //
+
+    #[test]
+    fn arg_getenv_parseint_and_quit_are_runtime_calls() {
+        let ir = ir_of("module T
+import Stdlib.Core
+fn a(): Text? = arg(1)
+fn b(k: Text): Text? = getEnv(k)
+fn c(s: Text): Int? = parseInt(s)
+fn d(): Unit [io] = Process.quit(2)
+");
+        assert!(ir.contains("declare ptr @certo_rt_arg(i64)"), "{ir}");
+        assert!(ir.contains("declare ptr @certo_rt_get_env(ptr)"), "{ir}");
+        assert!(ir.contains("declare ptr @certo_rt_parse_int(ptr)"), "{ir}");
+        assert!(ir.contains("declare void @certo_rt_quit(i64)"), "{ir}");
+    }
+
+    #[test]
+    fn the_entry_point_takes_argc_and_argv_only_when_the_program_uses_arg() {
+        let with = ir_of("module T
+import Stdlib.Core
+fn main(): Unit [io] = println(arg(1) ?? \"none\")
+");
+        assert!(with.contains("define i32 @main(i32 %argc, ptr %argv) {"), "{with}");
+        assert!(with.contains("call void @certo_rt_set_args(i32 %argc, ptr %argv)"), "{with}");
+
+        let without = ir_of("module T
+fn main(): Unit = ()
+");
+        assert!(without.contains("define i32 @main() {"), "other programs keep the plain entry point
+{without}");
+        assert!(!without.contains("set_args"), "{without}");
     }
 }
