@@ -417,6 +417,12 @@ Decimal.mul(a: Decimal, b: Decimal): Decimal
 Decimal.div(a: Decimal, b: Decimal): Decimal [fallible]   // panics on zero
 ```
 
+A Decimal is a 64-bit integer value plus a scale (digits after the point). Addition and subtraction use
+the larger scale; multiplication adds the scales (trailing zeros are dropped if that avoids overflow);
+division keeps up to 6 extra digits, fewer if the quotient would not fit. Any result that does not fit
+64 bits **stops the program with `decimal overflow`**, as does a `d"..."` literal that does not fit
+(`Text.toDecimal` returns `None` instead).
+
 ### Comparison
 
 ```
@@ -432,7 +438,7 @@ Decimal.gte(a: Decimal, b: Decimal): Bool
 ```
 Decimal.abs(d: Decimal): Decimal
 Decimal.negate(d: Decimal): Decimal
-Decimal.round(d: Decimal, places: Int): Decimal   // half-up
+Decimal.round(d: Decimal, places: Int): Decimal   // half away from zero; negative places round to tens, hundreds, ...
 ```
 
 ### Conversion
