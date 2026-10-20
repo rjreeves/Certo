@@ -297,3 +297,97 @@ fn main(): Unit [io] = {
         assert_eq!(llvm, c_out, "the LLVM and C backends disagree");
     }
 }
+
+#[test]
+fn lists_and_tuples_build_run_and_match_the_c_backend() {
+    if !clang_available() { return; }
+    let dir = tempfile::tempdir().unwrap();
+    // List literals of Int, Float, Text and records; `for` over a list; len,
+    // getOrPanic, get, first, last, push (which must not change the original)
+    // and tuple destructuring. The last lines use integers past 32 bits.
+    let src = r#"module L
+import Stdlib.Core
+
+type Item = { name: Text, qty: Int }
+
+fn total(xs: List<Int>): Int = {
+    var t = 0
+    for x in xs {
+        t = t + x
+    }
+    t
+}
+fn names(xs: List<Item>): Text = {
+    var out = ""
+    for i in xs {
+        out = out ++ i.name ++ ","
+    }
+    out
+}
+fn fsum(xs: List<Float>): Float = {
+    var t = 0.0
+    for x in xs {
+        t = t + x
+    }
+    t
+}
+fn firstOr(xs: List<Int>): Int = List.first(xs) ?? -1
+fn lastOr(xs: List<Int>): Int = List.last(xs) ?? -1
+fn at(xs: List<Text>, i: Int): Text = List.get(xs, i) ?? "?"
+fn pair(): (Int, Text) = (7, "seven")
+fn grow(xs: List<Int>): List<Int> = List.push(List.push(xs, 100), 200)
+
+fn main(): Unit [io] = {
+    val nums = [1, 2, 3, 4]
+    println(intToText(total(nums)))
+    println(intToText(List.len(nums)))
+    println(intToText(List.getOrPanic(nums, 2)))
+    println(names([Item { name: "a", qty: 1 }, Item { name: "b", qty: 2 }]))
+    println(floatToText(fsum([1.5, 2.25])))
+    println(intToText(firstOr(nums)))
+    println(intToText(lastOr(nums)))
+    println(intToText(firstOr(List.empty())))
+    val words = ["x", "y"]
+    println(at(words, 1))
+    println(at(words, 9))
+    val g = grow(nums)
+    println(intToText(List.len(g)) ++ " " ++ intToText(List.getOrPanic(g, 5)))
+    println(intToText(List.len(nums)))
+    val (n, s) = pair()
+    println(intToText(n) ++ s)
+    val big = List.push([9000000000], 5000000000)
+    println(intToText(List.getOrPanic(big, 0) + List.getOrPanic(big, 1)))
+}
+"#;
+    let expected = "10\n4\n3\na,b,\n3.75\n1\n4\n-1\ny\n?\n6 200\n4\n7seven\n14000000000\n";
+    let llvm = build_and_run(dir.path(), src, "list_llvm");
+    assert_eq!(llvm, expected);
+
+    let certo = Path::new(env!("CARGO_BIN_EXE_certo-llvm")).with_file_name(if cfg!(windows) { "certo.exe" } else { "certo" });
+    if certo.exists() {
+        let c_file = dir.path().join("list_c.cto");
+        fs::write(&c_file, src).unwrap();
+        let c_exe = dir.path().join(if cfg!(windows) { "list_c.exe" } else { "list_c" });
+        let build = Command::new(&certo).arg("build").arg(&c_file).arg("-o").arg(&c_exe).output().unwrap();
+        assert!(build.status.success(), "{}", String::from_utf8_lossy(&build.stderr));
+        let c_out = String::from_utf8_lossy(&Command::new(&c_exe).output().unwrap().stdout).replace("\r\n", "\n");
+        assert_eq!(llvm, c_out, "the LLVM and C backends disagree");
+    }
+}
+
+#[test]
+fn an_out_of_range_list_index_panics_like_the_c_backend() {
+    if !clang_available() { return; }
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("p.cto");
+    fs::write(&file, "module P\nimport Stdlib.Core\nfn main(): Unit [io] = {\n    println(\"before\")\n    println(intToText(List.getOrPanic([1, 2], 5)))\n    println(\"after\")\n}\n").unwrap();
+    let exe = dir.path().join(if cfg!(windows) { "p.exe" } else { "p" });
+    let build = Command::new(env!("CARGO_BIN_EXE_certo-llvm")).arg(&file).arg("--exe").arg(&exe).output().unwrap();
+    assert!(build.status.success(), "{}", String::from_utf8_lossy(&build.stderr));
+    let run = Command::new(&exe).output().unwrap();
+    assert!(!run.status.success(), "an out-of-range index must not succeed");
+    let out = String::from_utf8_lossy(&run.stdout).replace("\r\n", "\n");
+    let err = String::from_utf8_lossy(&run.stderr);
+    assert_eq!(out, "before\n", "output written before the panic is flushed, nothing after it");
+    assert!(err.contains("certo panic: list index out of bounds"), "{err}");
+}

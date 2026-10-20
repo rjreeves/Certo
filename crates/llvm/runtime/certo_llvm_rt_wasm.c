@@ -106,6 +106,46 @@ const char *certo_rt_text_concat(const char *a, const char *b) {
     return buf;
 }
 
+
+/* ---- Lists ---- (same layout and semantics as certo_llvm_rt.c) */
+typedef struct { int64_t len; int64_t cap; int64_t *data; } certo_rt_list_t;
+
+static certo_rt_list_t *certo_rt_list_alloc(int64_t n) {
+    certo_rt_list_t *l = (certo_rt_list_t *)certo_rt_alloc((int64_t)sizeof *l);
+    l->len = n;
+    l->cap = n;
+    l->data = (int64_t *)certo_rt_alloc((n > 0 ? n : 1) * 8);
+    return l;
+}
+
+void *certo_rt_list_new(int64_t n) { return certo_rt_list_alloc(n); }
+void *certo_rt_list_empty(void) { return certo_rt_list_alloc(0); }
+int64_t certo_rt_list_len(void *l) { return l ? ((certo_rt_list_t *)l)->len : 0; }
+
+void *certo_rt_list_slot(void *l, int64_t i) {
+    certo_rt_list_t *list = (certo_rt_list_t *)l;
+    if (!list || i < 0 || i >= list->len) __builtin_trap();  /* list index out of bounds */
+    return &list->data[i];
+}
+
+void *certo_rt_list_get(void *l, int64_t i) {
+    certo_rt_list_t *list = (certo_rt_list_t *)l;
+    if (!list || i < 0 || i >= list->len) return 0;
+    return &list->data[i];
+}
+
+void *certo_rt_list_first(void *l) { return certo_rt_list_get(l, 0); }
+void *certo_rt_list_last(void *l)  { return certo_rt_list_get(l, certo_rt_list_len(l) - 1); }
+
+void *certo_rt_list_push(void *l, int64_t item) {
+    certo_rt_list_t *list = (certo_rt_list_t *)l;
+    int64_t n = list ? list->len : 0;
+    certo_rt_list_t *out = certo_rt_list_alloc(n + 1);
+    for (int64_t k = 0; k < n; k++) out->data[k] = list->data[k];
+    out->data[n] = item;
+    return out;
+}
+
 int64_t certo_rt_pow(int64_t base, int64_t exp) {
     if (exp < 0) return 0;
     int64_t result = 1;

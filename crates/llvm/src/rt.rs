@@ -47,6 +47,11 @@ pub const RT_FNS: &[RtFn] = &[
     RtFn { certo: "boolToText",  symbol: "certo_rt_bool_to_text",  ret: "ptr",    params: &["i1"] },
     RtFn { certo: "Text.eq",     symbol: "certo_rt_text_eq",       ret: "i1",     params: &["ptr", "ptr"] },
     RtFn { certo: "Text.len",    symbol: "certo_rt_text_len",      ret: "i64",    params: &["ptr"] },
+    RtFn { certo: "List.len",    symbol: "certo_rt_list_len",      ret: "i64",    params: &["ptr"] },
+    RtFn { certo: "List.get",    symbol: "certo_rt_list_get",      ret: "ptr",    params: &["ptr", "i64"] },
+    RtFn { certo: "List.first",  symbol: "certo_rt_list_first",    ret: "ptr",    params: &["ptr"] },
+    RtFn { certo: "List.last",   symbol: "certo_rt_list_last",     ret: "ptr",    params: &["ptr"] },
+    RtFn { certo: "List.empty",  symbol: "certo_rt_list_empty",    ret: "ptr",    params: &[] },
 ];
 
 /// Symbols for operators the emitter lowers to runtime calls itself.
@@ -54,6 +59,12 @@ pub const TEXT_CONCAT: &str = "certo_rt_text_concat";
 pub const INT_POW: &str = "certo_rt_pow";
 /// Allocates a record's heap block: `ptr certo_rt_alloc(i64 bytes)`.
 pub const ALLOC: &str = "certo_rt_alloc";
+/// `ptr certo_rt_list_new(i64 n)`: a list of `n` zeroed slots, filled in by compiled code.
+pub const LIST_NEW: &str = "certo_rt_list_new";
+/// `ptr certo_rt_list_slot(ptr list, i64 i)`: a slot's address, panicking when out of range.
+pub const LIST_SLOT: &str = "certo_rt_list_slot";
+/// `ptr certo_rt_list_push(ptr list, i64 item)`: a new list with `item` (an 8-byte slot value) appended.
+pub const LIST_PUSH: &str = "certo_rt_list_push";
 
 /// The supported runtime function for a Certo name, if there is one.
 pub fn lookup(certo_name: &str) -> Option<&'static RtFn> {
@@ -133,7 +144,7 @@ mod tests {
         let mut symbols: Vec<&str> = RT_FNS.iter().map(|f| f.symbol).collect();
         symbols.push(TEXT_CONCAT);
         symbols.push(INT_POW);
-        symbols.push(ALLOC);
+        symbols.extend([ALLOC, LIST_NEW, LIST_SLOT, LIST_PUSH]);
         for sym in symbols {
             assert!(
                 RUNTIME_SHIM_C.contains(&format!(" {sym}(")) || RUNTIME_SHIM_C.contains(&format!("*{sym}(")),
@@ -147,7 +158,7 @@ mod tests {
         let mut symbols: Vec<&str> = RT_FNS.iter().map(|f| f.symbol).collect();
         symbols.push(TEXT_CONCAT);
         symbols.push(INT_POW);
-        symbols.push(ALLOC);
+        symbols.extend([ALLOC, LIST_NEW, LIST_SLOT, LIST_PUSH]);
         for sym in symbols {
             assert!(
                 RUNTIME_SHIM_WASM_BROWSER_C.contains(&format!(" {sym}(")) || RUNTIME_SHIM_WASM_BROWSER_C.contains(&format!("*{sym}(")),

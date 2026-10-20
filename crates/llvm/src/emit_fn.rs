@@ -76,6 +76,21 @@ fn compute_local_types(
         }
     }
 
+    // A value MIR leaves untyped (a generic list element, say) and later
+    // `Unbox`es as a Float or integer really holds that scalar: type the local
+    // as it, so it is loaded directly rather than through a pointer-sized slot
+    // (which on a 32-bit target would cut a Float or Int in half).
+    for bb in &mir_fn.blocks {
+        for stmt in &bb.stmts {
+            let MirStmt::Assign { rvalue: Rvalue::Unbox { value: Operand::Local(id), ty }, .. } = stmt else { continue };
+            let untyped = mir_fn.locals.iter().find(|l| l.id == *id)
+                .is_some_and(|l| matches!(l.ty, Ty::Error | Ty::Var(_)));
+            if untyped && matches!(ty, Ty::Float | Ty::Float32 | Ty::Int | Ty::Int8 | Ty::Int16 | Ty::Int32 | Ty::UInt | Ty::Bool | Ty::Char) {
+                map.insert(*id, llvm_ty(ty));
+            }
+        }
+    }
+
     // Propagation: repeat until no new types are learned
     let mut changed = true;
     while changed {
@@ -341,8 +356,16 @@ impl<'ctx> FnEmitter<'ctx> {
                 self.emit_record(&names, &ops, dest, &dest_ptr);
             }
 
+            Rvalue::Aggregate(AggregateKind::Array, ops) => {
+                self.emit_list_literal(&ops, &dest_ptr);
+            }
+
+            Rvalue::Aggregate(AggregateKind::Tuple, ops) => {
+                self.emit_tuple(&ops, &dest_ptr);
+            }
+
             Rvalue::Aggregate(_, _) => {
-                self.unsupported("constructing a list or tuple value is not supported by the LLVM backend (records and non-generic enums are)");
+                self.unsupported("constructing this kind of aggregate is not supported by the LLVM backend");
                 let v = self.fresh();
                 self.w(&format!("  %v{v} = inttoptr i64 0 to ptr"));
                 self.w(&format!("  store ptr %v{v}, ptr {dest_ptr}"));
@@ -525,6 +548,22 @@ impl<'ctx> FnEmitter<'ctx> {
             }
         }
 
+        // `List.getOrPanic` and `List.push` need the element's type, which the
+        // table-driven calls below don't carry.
+        if let (Operand::Global(n), None) = (func, &local_sig) {
+            match n.as_str() {
+                "List.getOrPanic" => {
+                    self.emit_list_get_or_panic(&arg_pairs, dest_lty, dest_ptr);
+                    return;
+                }
+                "List.push" => {
+                    self.emit_list_push(&arg_pairs, dest_lty, dest_ptr);
+                    return;
+                }
+                _ => {}
+            }
+        }
+
         // A call to a variant's constructor builds a sum-type value.
         if let (Operand::Global(n), None) = (func, &local_sig) {
             if let Some(ty) = self.ctx.variant_enum.get(n).cloned() {
@@ -603,6 +642,8 @@ impl<'ctx> FnEmitter<'ctx> {
                 return Some(format!("%v{w}"));
             }
             ("i64", "ptr") => self.w(&format!("  %v{v} = inttoptr i64 {val} to ptr")),
+            ("double", "i64") => self.w(&format!("  %v{v} = bitcast double {val} to i64")),
+            (f, "i64") if narrow(f) => self.w(&format!("  %v{v} = zext {f} {val} to i64")),
             ("double", "ptr") => {
                 self.w(&format!("  %v{v} = bitcast double {val} to i64"));
                 let w = self.fresh();
@@ -696,6 +737,83 @@ impl<'ctx> FnEmitter<'ctx> {
         }
     }
 
+    /// The slot of tuple field `field` (`"0"`, `"1"`, ...), if `id` holds a tuple.
+    fn tuple_slot(&self, id: MirLocal, field: &str) -> Option<usize> {
+        let local = self.mir_fn.locals.iter().find(|l| l.id == id)?;
+        let Ty::Tuple(ts) = &local.ty else { return None };
+        let i: usize = field.parse().ok()?;
+        (i < ts.len()).then_some(i)
+    }
+
+    /// A tuple: a block with one 8-byte slot per element.
+    fn emit_tuple(&mut self, ops: &[Operand], dest_ptr: &str) {
+        self.ctx.declare_extern(crate::rt::ALLOC.into(), "ptr".into(), vec!["i64".into()]);
+        let base = self.fresh();
+        self.w(&format!("  %v{base} = call ptr @{}(i64 {})", crate::rt::ALLOC, ops.len().max(1) * 8));
+        for (i, op) in ops.iter().enumerate() {
+            let (ty, val) = self.load(op);
+            let g = self.fresh();
+            self.w(&format!("  %v{g} = getelementptr i8, ptr %v{base}, i64 {}", i * 8));
+            self.w(&format!("  store {ty} {val}, ptr %v{g}"));
+        }
+        self.w(&format!("  store ptr %v{base}, ptr {dest_ptr}"));
+    }
+
+    /// A list literal: a list of `n` zeroed slots from the runtime, with each
+    /// element stored into its slot as its own value.
+    fn emit_list_literal(&mut self, ops: &[Operand], dest_ptr: &str) {
+        self.ctx.declare_extern(crate::rt::LIST_NEW.into(), "ptr".into(), vec!["i64".into()]);
+        let list = self.fresh();
+        self.w(&format!("  %v{list} = call ptr @{}(i64 {})", crate::rt::LIST_NEW, ops.len()));
+        // The header is { len, cap, data }: the data pointer is at offset 16.
+        let dp = self.fresh();
+        self.w(&format!("  %v{dp} = getelementptr i8, ptr %v{list}, i64 16"));
+        let data = self.fresh();
+        self.w(&format!("  %v{data} = load ptr, ptr %v{dp}"));
+        for (i, op) in ops.iter().enumerate() {
+            let (ty, val) = self.load(op);
+            let g = self.fresh();
+            self.w(&format!("  %v{g} = getelementptr i8, ptr %v{data}, i64 {}", i * 8));
+            self.w(&format!("  store {ty} {val}, ptr %v{g}"));
+        }
+        self.w(&format!("  store ptr %v{list}, ptr {dest_ptr}"));
+    }
+
+    /// `List.getOrPanic(xs, i)`: the slot's address from the runtime (which
+    /// panics when out of range), then the element loaded as its real type.
+    fn emit_list_get_or_panic(&mut self, args: &[(String, String)], dest_lty: &str, dest_ptr: &str) {
+        let [(lty, lval), (ity, ival)] = args else {
+            self.unsupported("`List.getOrPanic` takes a list and an index");
+            return;
+        };
+        let list = self.as_ptr(lty, lval);
+        if ity != "i64" {
+            self.unsupported(&format!("`List.getOrPanic` index has type `{ity}`, expected i64"));
+        }
+        self.ctx.declare_extern(crate::rt::LIST_SLOT.into(), "ptr".into(), vec!["ptr".into(), "i64".into()]);
+        let slot = self.fresh();
+        self.w(&format!("  %v{slot} = call ptr @{}(ptr {list}, i64 {ival})", crate::rt::LIST_SLOT));
+        let v = self.fresh();
+        self.w(&format!("  %v{v} = load {dest_lty}, ptr %v{slot}"));
+        self.w(&format!("  store {dest_lty} %v{v}, ptr {dest_ptr}"));
+    }
+
+    /// `List.push(xs, item)`: a new list; the item goes through a pointer-sized slot.
+    fn emit_list_push(&mut self, args: &[(String, String)], dest_lty: &str, dest_ptr: &str) {
+        let [(lty, lval), (ity, ival)] = args else {
+            self.unsupported("`List.push` takes a list and an item");
+            return;
+        };
+        let list = self.as_ptr(lty, lval);
+        // A slot is 8 bytes wide whatever the pointer width, so the item travels
+        // as an i64 (a pointer is zero-extended, a Float is bit-cast).
+        let Some(item) = self.convert(ity, ival, "i64") else { return };
+        self.ctx.declare_extern(crate::rt::LIST_PUSH.into(), "ptr".into(), vec!["ptr".into(), "i64".into()]);
+        let r = self.fresh();
+        self.w(&format!("  %v{r} = call ptr @{}(ptr {list}, i64 {item})", crate::rt::LIST_PUSH));
+        self.store_converted("ptr", &format!("%v{r}"), dest_lty, dest_ptr);
+    }
+
     /// The sum type a local holds, if its MIR type is a declared (non-generic) one.
     fn enum_of_local(&self, id: MirLocal) -> Option<String> {
         let local = self.mir_fn.locals.iter().find(|l| l.id == id)?;
@@ -774,7 +892,12 @@ impl<'ctx> FnEmitter<'ctx> {
             Operand::Local(id) if layout.is_none() => self.enum_slot(*id, field),
             _ => None,
         };
-        let slot = layout.as_ref().and_then(|l| l.field(field)).map(|(i, _)| i).or(enum_slot);
+        // A tuple: field `"0"`, `"1"`, ... is slot 0, 1, ...
+        let tuple_slot = match base {
+            Operand::Local(id) if layout.is_none() && enum_slot.is_none() => self.tuple_slot(*id, field),
+            _ => None,
+        };
+        let slot = layout.as_ref().and_then(|l| l.field(field)).map(|(i, _)| i).or(enum_slot).or(tuple_slot);
         let (Some(slot), (_, bv)) = (slot, self.load(base)) else {
             self.unsupported(&format!("field access `.{field}` on a value that is not a declared record is not supported by the LLVM backend"));
             let v = self.fresh();

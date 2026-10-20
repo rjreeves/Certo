@@ -76,3 +76,15 @@ fn options_results_and_coalesce_build_for_the_browser() {
     let Some(wasm) = build_browser(src) else { return };
     assert!(contains(&wasm, "certo_write"));
 }
+
+#[test]
+fn lists_and_tuples_build_for_the_browser() {
+    // Slots are 8 bytes whatever the pointer width, and a Float list read must
+    // not go through a 4-byte pointer.
+    let src = "module L\nimport Stdlib.Core\n\
+               fn fsum(xs: List<Float>): Float = {\n var t = 0.0\n for x in xs {\n  t = t + x\n }\n t\n}\n\
+               pub fn main(): Unit [io] = {\n    val xs = List.push([1.5, 2.25], 4.0)\n    println(floatToText(fsum(xs)))\n    val (n, s) = (List.len(xs), \"items\")\n    println(intToText(n) ++ s)\n}\n";
+    let Some(wasm) = build_browser(src) else { return };
+    assert!(contains(&wasm, "certo_write"));
+    assert!(contains(&wasm, "certo_rt_list_slot"), "the list runtime is exported from the shim");
+}

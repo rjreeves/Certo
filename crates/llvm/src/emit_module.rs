@@ -569,13 +569,10 @@ fn run(): Unit [io] = println(getEnv(\"HOME\") ?? \"none\")
     }
 
     #[test]
-    fn lists_and_text_equality_are_reported() {
+    fn text_equality_is_reported() {
         let err = emit_err("module T
-fn b(): Int = { val xs = [1, 2, 3]
-1 }
 fn c(): Bool = \"a\" == \"b\"
 ");
-        assert!(err.contains("list or tuple"), "{err}");
         assert!(err.contains("Text.eq"), "{err}");
     }
 
@@ -796,5 +793,87 @@ import Stdlib.Core
 fn f(o: Int?): Int = Option.unwrapOr(o, 0)
 ");
         assert!(err.contains("call to `Option.unwrapOr` is not supported"), "{err}");
+    }
+
+    // ------------------------------------------------------------------ //
+    // Lists and tuples: a list is { len, cap, data } with one 8-byte slot per
+    // element, built and indexed through the runtime shim; a tuple is a block of
+    // 8-byte slots.
+    // ------------------------------------------------------------------ //
+
+    #[test]
+    fn a_list_literal_asks_the_runtime_for_a_list_and_stores_each_element() {
+        let ir = ir_of("module T
+fn nums(): List<Int> = [1, 2, 3]
+");
+        assert!(ir.contains("declare ptr @certo_rt_list_new(i64)"), "{ir}");
+        assert!(ir.contains("call ptr @certo_rt_list_new(i64 3)"), "{ir}");
+        assert!(ir.contains("getelementptr i8, ptr %v0, i64 16"), "the data pointer is at offset 16
+{ir}");
+        assert!(ir.contains("i64 8
+  store i64 2,") && ir.contains("i64 16
+  store i64 3,"), "elements go in 8-byte slots
+{ir}");
+    }
+
+    #[test]
+    fn list_len_and_get_or_panic_go_through_the_runtime_with_a_typed_load() {
+        let ir = ir_of("module T
+fn count(xs: List<Int>): Int = List.len(xs)
+fn second(xs: List<Float>): Float = List.getOrPanic(xs, 1)
+");
+        assert!(ir.contains("call i64 @certo_rt_list_len(ptr "), "{ir}");
+        assert!(ir.contains("call ptr @certo_rt_list_slot(ptr %v"), "the runtime bounds-checks and returns the slot
+{ir}");
+        assert!(ir.contains("load double, ptr %v"), "the element is loaded as its own type
+{ir}");
+    }
+
+    #[test]
+    fn list_get_first_and_last_return_the_slot_as_an_option() {
+        let ir = ir_of("module T
+fn a(xs: List<Int>): Int? = List.get(xs, 0)
+fn b(xs: List<Int>): Int? = List.first(xs)
+fn c(xs: List<Int>): Int? = List.last(xs)
+");
+        assert!(ir.contains("declare ptr @certo_rt_list_get(ptr, i64)"), "{ir}");
+        assert!(ir.contains("declare ptr @certo_rt_list_first(ptr)"), "{ir}");
+        assert!(ir.contains("declare ptr @certo_rt_list_last(ptr)"), "{ir}");
+    }
+
+    #[test]
+    fn list_push_passes_the_item_as_an_i64_slot_value() {
+        let ir = ir_of("module T
+fn grow(xs: List<Int>): List<Int> = List.push(xs, 4)
+fn growf(xs: List<Float>): List<Float> = List.push(xs, 1.5)
+");
+        assert!(ir.contains("declare ptr @certo_rt_list_push(ptr, i64)"), "{ir}");
+        assert!(ir.contains("bitcast double") && ir.contains("to i64"), "a Float travels as its bits
+{ir}");
+    }
+
+    #[test]
+    fn a_tuple_is_a_block_of_slots_read_by_position() {
+        let ir = ir_of("module T
+import Stdlib.Core
+fn pair(): (Int, Text) = (1, \"x\")
+fn use_it(): Int = {
+ val (a, b) = pair()
+ a + Text.len(b)
+}
+");
+        assert!(ir.contains("call ptr @certo_rt_alloc(i64 16)"), "two slots
+{ir}");
+        assert!(ir.contains("i64 8
+  %v") && ir.contains("load ptr, ptr %v"), "field 1 is slot 1
+{ir}");
+    }
+
+    #[test]
+    fn list_functions_that_take_closures_are_still_reported() {
+        let err = emit_err("module T
+fn f(xs: List<Int>): List<Int> = List.map(xs, (x) => x + 1)
+");
+        assert!(err.contains("`List.map`"), "{err}");
     }
 }
