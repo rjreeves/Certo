@@ -59,10 +59,35 @@ certo_text_t certo_int_to_text(int64_t n) {
     return buf;
 }
 
+/* Float -> text (BACKLOG item 400). Prints the fewest significant digits that
+   read back as exactly the same number, so no precision is lost: 3.14159265358979
+   stays whole, 1234567.891 is "1234567.891", 0.1 + 0.2 is "0.30000000000000004".
+   An exponent in [-5, 17) is written as plain decimal ("100000000", not "1e+08");
+   beyond that it uses %g-style exponents ("1e+21", "1.5e-07"). Whole numbers print
+   without a fractional part ("3"), as before. `is32` finds the digits for a
+   Float32, which needs at most 9. This rule is mirrored by the LLVM backend's
+   runtime shims (crates/llvm/runtime) and the JS loader certo-wasm generates. */
+static void __certo_fmt_float(char* buf, size_t cap, double f, int is32) {
+    if (f != f) { snprintf(buf, cap, "nan"); return; }
+    if (f - f != 0) { snprintf(buf, cap, f < 0 ? "-inf" : "inf"); return; }
+    if (f == 0) { snprintf(buf, cap, "%g", f); return; }   /* "0" or "-0" */
+    char t[64];
+    int maxp = is32 ? 9 : 17, p;
+    for (p = 1; p <= maxp; p++) {
+        snprintf(t, sizeof t, "%.*e", p - 1, f);
+        if (is32 ? (strtof(t, NULL) == (float)f) : (strtod(t, NULL) == f)) break;
+    }
+    if (p > maxp) p = maxp;
+    snprintf(t, sizeof t, "%.*e", p - 1, f);
+    int e = atoi(strchr(t, 'e') + 1);
+    if (e >= -5 && e < 17) snprintf(buf, cap, "%.*f", (p - 1 - e) > 0 ? (p - 1 - e) : 0, f);
+    else snprintf(buf, cap, "%.*g", p, f);
+}
+
 certo_text_t certo_float_to_text(double f) {
     char* buf = (char*)malloc(64);
     if (!buf) certo_panic("out of memory");
-    snprintf(buf, 64, "%g", f);
+    __certo_fmt_float(buf, 64, f, 0);
     return buf;
 }
 
@@ -86,7 +111,7 @@ double certo_int_to_float(int64_t n) {
 certo_text_t certo_float32_to_text(float f) {
     char* buf = (char*)malloc(64);
     if (!buf) certo_panic("out of memory");
-    snprintf(buf, 64, "%g", (double)f);
+    __certo_fmt_float(buf, 64, (double)f, 1);
     return buf;
 }
 

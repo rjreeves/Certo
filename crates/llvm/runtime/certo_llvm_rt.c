@@ -38,9 +38,31 @@ const char *certo_rt_int_to_text(int64_t n) {
     return buf;
 }
 
+/* Float -> text (BACKLOG item 400): the fewest significant digits that read back
+ * as exactly the same number; plain decimal for exponents in [-5, 17), %g-style
+ * exponents beyond; whole numbers without a fractional part. The same rule as the
+ * C backend's certo_float_to_text (crates/stdlib/src/core.rs) and the JS loader
+ * certo-wasm generates. */
+static void certo_rt_fmt_float(char *buf, size_t cap, double f) {
+    if (f != f) { snprintf(buf, cap, "nan"); return; }
+    if (f - f != 0) { snprintf(buf, cap, f < 0 ? "-inf" : "inf"); return; }
+    if (f == 0) { snprintf(buf, cap, "%g", f); return; }
+    char t[64];
+    int p;
+    for (p = 1; p <= 17; p++) {
+        snprintf(t, sizeof t, "%.*e", p - 1, f);
+        if (strtod(t, NULL) == f) break;
+    }
+    if (p > 17) p = 17;
+    snprintf(t, sizeof t, "%.*e", p - 1, f);
+    int e = atoi(strchr(t, 'e') + 1);
+    if (e >= -5 && e < 17) snprintf(buf, cap, "%.*f", (p - 1 - e) > 0 ? (p - 1 - e) : 0, f);
+    else snprintf(buf, cap, "%.*g", p, f);
+}
+
 const char *certo_rt_float_to_text(double f) {
     char *buf = (char *)certo_rt_alloc(64);
-    snprintf(buf, 64, "%g", f);
+    certo_rt_fmt_float(buf, 64, f);
     return buf;
 }
 

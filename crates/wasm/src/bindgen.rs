@@ -143,9 +143,9 @@ const JS_LOAD_HEAD: &str = r#"export async function load(path, io = {}) {
       pending[fd] = (pending[fd] ?? '') + decoder.decode(new Uint8Array(memory.buffer, ptr, len));
       emit(fd);
     },
-    // floatToText: formatted like C's %g, to match the native backends.
+    // floatToText: the same shortest-round-trip rule as the native backends.
     certo_float_to_text: (x, ptr, cap) => {
-      const b = encoder.encode(formatG(x));
+      const b = encoder.encode(formatFloat(x));
       const n = Math.min(b.length, cap);
       new Uint8Array(memory.buffer, ptr, n).set(b.subarray(0, n));
       return n;
@@ -160,20 +160,22 @@ const JS_LOAD_HEAD: &str = r#"export async function load(path, io = {}) {
   return {
 "#;
 
-const JS_HELPERS: &str = r#"// C's %g (6 significant digits, trailing zeros removed).
-function formatG(x) {
+const JS_HELPERS: &str = r#"// Float -> text, the same rule as the native backends (BACKLOG item 400): the
+// fewest significant digits that read back as exactly the same number; plain
+// decimal for exponents in [-5, 17), C-style exponents ("1e+21", "1.5e-07") beyond;
+// whole numbers without a fractional part.
+function formatFloat(x) {
   if (Number.isNaN(x)) return 'nan';
   if (!Number.isFinite(x)) return x < 0 ? '-inf' : 'inf';
   if (x === 0) return Object.is(x, -0) ? '-0' : '0';
-  const P = 6;
-  const [mant, ex] = x.toExponential(P - 1).split('e');
+  let p = 1;
+  while (p < 17 && Number(x.toExponential(p - 1)) !== x) p++;
+  const [mant, ex] = x.toExponential(p - 1).split('e');
   const exp = parseInt(ex, 10);
+  if (exp >= -5 && exp < 17) return x.toFixed(Math.max(0, p - 1 - exp));
   const trim = (t) => (t.includes('.') ? t.replace(/0+$/, '').replace(/\.$/, '') : t);
-  if (exp < -4 || exp >= P) {
-    const a = Math.abs(exp);
-    return `${trim(mant)}e${exp < 0 ? '-' : '+'}${a < 10 ? '0' : ''}${a}`;
-  }
-  return trim(x.toFixed(Math.max(0, P - 1 - exp)));
+  const a = Math.abs(exp);
+  return `${trim(mant)}e${exp < 0 ? '-' : '+'}${a < 10 ? '0' : ''}${a}`;
 }
 
 function makeWasiStub() {
@@ -318,7 +320,7 @@ mod tests {
         assert!(js.contains("certo_write"), "println needs env.certo_write\n{}", js);
         assert!(js.contains("certo_float_to_text"), "floatToText needs a host formatter\n{}", js);
         assert!(js.contains("stdout") && js.contains("stderr"), "output callbacks\n{}", js);
-        assert!(js.contains("function formatG"), "{}", js);
+        assert!(js.contains("function formatFloat"), "{}", js);
     }
 
     #[test]

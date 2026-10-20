@@ -459,3 +459,46 @@ fn main(): Unit [io] = {
         }
     }
 }
+
+#[test]
+fn float_text_matches_the_c_backend_for_awkward_values() {
+    // BACKLOG item 400: the shim's Float formatting must follow the same
+    // shortest-round-trip rule as the C runtime, including where it switches
+    // from plain decimal to exponents.
+    if !clang_available() { return; }
+    let dir = tempfile::tempdir().unwrap();
+    let src = r#"module Fl
+import Stdlib.Core
+
+fn show(xs: List<Float>): Unit [io] = {
+    for x in xs {
+        println(floatToText(x))
+    }
+}
+
+fn main(): Unit [io] = {
+    val big = 1000000.0 * 1000000.0 * 1000000.0 * 1000000.0
+    val tiny = 1.0 / 10000000.0
+    show([
+        3.14159265358979, 1234567.891, 123456789.125, 100000000.0, 0.1, 0.1 + 0.2,
+        2.5, 3.0, -1.5, 1.0 / 3.0, 2.0 / 3.0, 0.00001234, 0.000001234,
+        78.53981633974483, 1000000.0, 12345678901234567.0, 123456789012345678.0,
+        big, tiny, 1.5 * tiny, 100.0, 99999.99999, 0.5, 299792458.0, -273.15, 1.1 * 1.1
+    ])
+}
+"#;
+    let llvm = build_and_run(dir.path(), src, "fl_llvm");
+    assert!(llvm.starts_with("3.14159265358979\n1234567.891\n123456789.125\n100000000\n0.1\n0.30000000000000004\n"), "{llvm}");
+    assert!(llvm.contains("1.2345678901234568e+17\n1e+24\n1e-07\n1.5e-07\n"), "exponent form beyond the plain-decimal range\n{llvm}");
+
+    let certo = Path::new(env!("CARGO_BIN_EXE_certo-llvm")).with_file_name(if cfg!(windows) { "certo.exe" } else { "certo" });
+    if certo.exists() {
+        let c_file = dir.path().join("fl_c.cto");
+        fs::write(&c_file, src).unwrap();
+        let c_exe = dir.path().join(if cfg!(windows) { "fl_c.exe" } else { "fl_c" });
+        let build = Command::new(&certo).arg("build").arg(&c_file).arg("-o").arg(&c_exe).output().unwrap();
+        assert!(build.status.success(), "{}", String::from_utf8_lossy(&build.stderr));
+        let c_out = String::from_utf8_lossy(&Command::new(&c_exe).output().unwrap().stdout).replace("\r\n", "\n");
+        assert_eq!(llvm, c_out, "the LLVM shim and the C runtime format Floats differently");
+    }
+}

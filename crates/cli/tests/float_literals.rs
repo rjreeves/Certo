@@ -33,7 +33,7 @@ fn main(): Unit [io] = {
   println(floatToText(10.0 - 2.5))
 }
 "#);
-    assert_eq!(out, "3.5\n0.333333\n3.5\ntrue\ntrue\n7.5\n");
+    assert_eq!(out, "3.5\n0.3333333333333333\n3.5\ntrue\ntrue\n7.5\n");
 }
 
 #[test]

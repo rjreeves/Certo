@@ -36,7 +36,7 @@ fn main(): Unit [io] = {
   println(floatToText(b ** e))
 }
 "#);
-    assert_eq!(out, "1.41421\n6.25\n3\n0.01\n9\n4\n512\n3.375\n");
+    assert_eq!(out, "1.4142135623730951\n6.25\n3\n0.01\n9\n4\n512\n3.375\n");
 }
 
 #[test]
