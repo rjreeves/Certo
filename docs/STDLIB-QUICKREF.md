@@ -278,10 +278,10 @@ List.any<T>(list: List<T>, pred: T => Bool): Bool
 List.all<T>(list: List<T>, pred: T => Bool): Bool
 List.sort<T>(list: List<T>, cmp: (T, T) => Int): List<T>  // negative/0/positive
 List.zip<A, B>(a: List<A>, b: List<B>): List<(A, B)>      // length = min(len a, len b)
-List.distinct<T>(list: List<T>): List<T>                 // dedup, pointer equality (see Map note below)
+List.distinct<T>(list: List<T>): List<T>                 // dedup; Text compares by content (see Map note below)
 List.partition<T>(list: List<T>, pred: T => Bool): (List<T>, List<T>)  // (matches, non-matches)
 List.chunked<T>(list: List<T>, size: Int): List<List<T>>
-List.groupBy<T, K>(list: List<T>, key: T => K): Map<K, List<T>>  // K uses Map's pointer-equality keys — see below
+List.groupBy<T, K>(list: List<T>, key: T => K): Map<K, List<T>>  // Text keys compare by content — see Map note below
 List.flatMap<A, B>(list: List<A>, f: A => List<B>): List<B>  // map then flatten one level
 List.reduce<T, A>(list: List<T>, init: A, f: (A, T) => A): A  // same as List.fold, spec's own name
 List.sortBy<T, K>(list: List<T>, key: T => K): List<T>   // ascending by projected key
@@ -303,8 +303,10 @@ key/sum type is limited.
 
 ### Map\<K, V\>
 
-Map uses pointer equality for keys. Use `Text` keys carefully — intern
-identical strings or compare via `Map.get` semantics.
+`Text` keys (and `List<Text>` elements in `List.contains` / `List.distinct`) compare by **content**: the
+compiler picks the content-comparing runtime function when the key type is `Text`. `Int`, `Bool` and
+`Float` keys compare by value bits. Other key types (`Decimal`, records, sum types) still compare by
+pointer (BACKLOG items 391/392).
 
 ```
 Map.empty<K, V>(): Map<K, V>
