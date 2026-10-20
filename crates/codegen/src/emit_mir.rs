@@ -870,7 +870,9 @@ fn emit_binop(
         // operands: `2.0 ** 0.5` computed `certo_pow(2, 0)` = 1).
         BinOp::Pow  => {
             let is_float = |t: Ty| matches!(t, Ty::Float | Ty::Float32);
-            if is_float(operand_ty(l, locals)) || is_float(operand_ty(r, locals)) {
+            if matches!(operand_ty(l, locals), Ty::Decimal(_)) {
+                format!("certo_decimal_pow({}, {})", lhs, rhs)
+            } else if is_float(operand_ty(l, locals)) || is_float(operand_ty(r, locals)) {
                 format!("certo_pow_float({}, {})", lhs, rhs)
             } else {
                 format!("certo_pow({}, {})", lhs, rhs)

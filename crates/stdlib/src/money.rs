@@ -117,6 +117,16 @@ certo_decimal_t certo_decimal_mul(certo_decimal_t a, certo_decimal_t b) {
     return r;
 }
 
+/* Decimal ** Int (BACKLOG item 422): exact repeated multiplication, so the scale is
+   scale * n. A negative exponent, or a result whose scale would not fit, stops the program. */
+certo_decimal_t certo_decimal_pow(certo_decimal_t base, int64_t n) {
+    if (n < 0) certo_panic("decimal ** with a negative exponent is not supported");
+    if (n > 0 && (int64_t)base.scale * n > 127) certo_panic("decimal ** result scale out of range");
+    certo_decimal_t r = { .value = 1, .scale = 0 };
+    for (int64_t i = 0; i < n; i++) r = certo_decimal_mul(r, base);
+    return r;
+}
+
 certo_decimal_t certo_decimal_div(certo_decimal_t a, certo_decimal_t b) {
     if (b.value == 0) certo_panic("decimal division by zero");
     /* Multiply numerator by 10^scale to keep precision */

@@ -1506,6 +1506,11 @@ fn infer_binop(op: &BinOp, left: &S<Expr>, right: &S<Expr>, span: Span, ctx: &mu
     let rt = infer(right, ctx);
     match op {
         BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem | BinOp::Pow => {
+            // BACKLOG item 422 — `Decimal ** Int`: the exponent is an Int, not a Decimal.
+            if matches!(op, BinOp::Pow) && matches!(ctx.uf.apply(&lt), Ty::Decimal(_)) {
+                ctx.unify(rt, Ty::Int, span);
+                return lt;
+            }
             ctx.unify(lt.clone(), rt, span);
             // BACKLOG item 214 — `Timestamp`/`DateTime`/`Date` are opaque,
             // non-unifying nominal types with no operator overloading (see
