@@ -182,12 +182,36 @@ fn contains_return(e: &HirExpr) -> bool {
     }
 }
 
+/// How many times `Local(id)` is the value of the expression (in result position).
+fn tail_uses(e: &HirExpr, id: LocalId) -> usize {
+    match &e.kind {
+        HirExprKind::Local(l) => usize::from(*l == id),
+        HirExprKind::If { then_expr, else_expr, .. } => tail_uses(then_expr, id) + tail_uses(else_expr, id),
+        HirExprKind::Match { arms, .. } => arms.iter().map(|a| tail_uses(&a.body, id)).sum(),
+        HirExprKind::Block { tail, .. } => tail_uses(tail, id),
+        HirExprKind::Unsafe(inner) => tail_uses(inner, id),
+        _ => 0,
+    }
+}
+
+/// Every reference to `id` anywhere in `e` (counted on the debug text: `Local(7)` is only ever
+/// printed for a reference, and over-counting can only make the caller more conservative).
+fn all_uses(e: &HirExpr, id: LocalId) -> usize {
+    format!("{:?}", e).matches(&format!("Local({id})")).count()
+}
+
 /// Classify every generic function whose declared return is an erased type
 /// variable, rewriting its entry in `fn_ret_tys` to
 /// `Ty::Var(RAW_ELEM_RET_VAR)` when all of its result paths yield a raw
 /// container-element word. Iterated to a fixpoint so a generic that merely
 /// forwards another raw-returning generic is classified too.
-pub fn classify_raw_returns(items: &[HirItem], fn_ret_tys: &mut HashMap<String, Ty>) {
+///
+/// BACKLOG item 425 — a function whose result paths mix a raw element word with one of its own
+/// bare-`T` parameters (`match xs.first() { Some(v) => v  None => d }`) is also classified raw
+/// when each such parameter is used *only* as a result value: the caller is then told (by
+/// `Ty::Var(RAW_ELEM_RET_VAR)` in that parameter's slot of `fn_param_tys`) to pass the raw
+/// element word instead of a boxed cell, so every result path agrees.
+pub fn classify_raw_returns(items: &[HirItem], fn_ret_tys: &mut HashMap<String, Ty>, fn_param_tys: &mut HashMap<String, Vec<Ty>>) {
     let erased_fns: HashSet<String> = fn_ret_tys.iter()
         .filter(|(_, t)| matches!(t, Ty::Var(_)))
         .map(|(n, _)| n.clone())
@@ -200,18 +224,37 @@ pub fn classify_raw_returns(items: &[HirItem], fn_ret_tys: &mut HashMap<String, 
     }).collect();
 
     let mut raw_fns: HashSet<String> = HashSet::new();
+    let mut raw_params: HashMap<String, Vec<usize>> = HashMap::new();
     loop {
         let mut changed = false;
         for f in &fns {
             if raw_fns.contains(&f.name) { continue; }
             let body = f.body.as_ref().unwrap();
             if contains_return(body) { continue; }
-            let mut w = Walker { locals: HashMap::new(), raw_fns: &raw_fns, erased_fns: &erased_fns };
-            for p in &f.params {
-                if matches!(p.ty, Ty::Var(_)) { w.locals.insert(p.local, Origin::Boxed); }
-            }
-            if w.origin(body) == Origin::Raw {
+            let run = |raw_idx: &[usize], raw_fns: &HashSet<String>| {
+                let mut w = Walker { locals: HashMap::new(), raw_fns, erased_fns: &erased_fns };
+                for (i, p) in f.params.iter().enumerate() {
+                    if matches!(p.ty, Ty::Var(_)) {
+                        w.locals.insert(p.local, if raw_idx.contains(&i) { Origin::Raw } else { Origin::Boxed });
+                    }
+                }
+                w.origin(body)
+            };
+            let plain = run(&[], &raw_fns);
+            if plain == Origin::Raw {
                 raw_fns.insert(f.name.clone());
+                changed = true;
+                continue;
+            }
+            // Only a genuine mix is rescued; an all-boxed function keeps its boxed scheme.
+            if plain != Origin::Unknown { continue; }
+            let candidates: Vec<usize> = f.params.iter().enumerate()
+                .filter(|(_, p)| matches!(p.ty, Ty::Var(_)))
+                .filter(|(_, p)| { let t = tail_uses(body, p.local); t > 0 && t == all_uses(body, p.local) })
+                .map(|(i, _)| i).collect();
+            if !candidates.is_empty() && run(&candidates, &raw_fns) == Origin::Raw {
+                raw_fns.insert(f.name.clone());
+                raw_params.insert(f.name.clone(), candidates);
                 changed = true;
             }
         }
@@ -220,5 +263,10 @@ pub fn classify_raw_returns(items: &[HirItem], fn_ret_tys: &mut HashMap<String, 
 
     for name in raw_fns {
         fn_ret_tys.insert(name, Ty::Var(RAW_ELEM_RET_VAR));
+    }
+    for (name, idxs) in raw_params {
+        if let Some(tys) = fn_param_tys.get_mut(&name) {
+            for i in idxs { if i < tys.len() { tys[i] = Ty::Var(RAW_ELEM_RET_VAR); } }
+        }
     }
 }

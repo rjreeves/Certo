@@ -2271,7 +2271,13 @@ fn lower_expr(expr: &HirExpr, b: &mut Builder) -> Operand {
                 // class item 134 fixed for `List.first`/etc. — BACKLOG item 120.
                 if matches!(declared, Some(Ty::Var(_))) && !matches!(a.ty, Ty::Var(_)) {
                     let boxed = b.declare_local("_boxed_arg", Ty::Var(0));
-                    b.assign(boxed, Rvalue::BoxSome { value: value_op, ty: a.ty.clone() });
+                    // BACKLOG item 425 — a parameter the callee returns as a raw element word
+                    // takes the raw scheme (`Box`), not a `BoxSome` cell.
+                    if matches!(declared, Some(Ty::Var(v)) if *v == certo_hir::RAW_ELEM_RET_VAR) {
+                        b.assign(boxed, Rvalue::Box { value: value_op, ty: a.ty.clone() });
+                    } else {
+                        b.assign(boxed, Rvalue::BoxSome { value: value_op, ty: a.ty.clone() });
+                    }
                     return Operand::Local(boxed);
                 }
                 // BACKLOG item 277 — a *direct* self-referential variant

@@ -1407,12 +1407,13 @@ pub fn lower_module(module: &Module) -> Result<HirModule, Vec<LowerError>> {
         // BACKLOG items 350/340 — mark generic functions whose erased
         // return is a raw container-element word; see `raw_return`.
         let mut fn_ret_tys = cx.fn_ret_types;
-        crate::raw_return::classify_raw_returns(&items, &mut fn_ret_tys);
+        let mut fn_param_tys = cx.fn_param_tys;
+        crate::raw_return::classify_raw_returns(&items, &mut fn_ret_tys, &mut fn_param_tys);
         Ok(HirModule {
             name, items,
             record_field_types:  cx.record_field_types,
             variant_field_types: cx.variant_field_types,
-            fn_param_tys:        cx.fn_param_tys,
+            fn_param_tys,
             fn_ret_tys,
             variant_to_type:     cx.variant_to_type,
         })

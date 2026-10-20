@@ -3077,11 +3077,11 @@ fn generic_returning_get_or_panic_is_marked_raw_and_forwarders_follow() {
 }
 
 #[test]
-fn generics_returning_a_param_or_mixing_paths_are_not_marked_raw() {
-    // A returned parameter is a BoxSome cell; a function mixing a raw
-    // `Some(v)` path with a boxed-parameter path can't be classified either
-    // way, so it keeps the plain erased `Var(0)` it always had.
+fn generics_returning_a_param_stay_boxed_and_mixed_paths_are_raw() {
+    // A returned parameter is a BoxSome cell and stays boxed. A function mixing a raw `Some(v)`
+    // path with a boxed-parameter path (item 425) is raw, and its parameter is passed raw too.
     let m = lower("module A\nfn ident<T>(x: T): T = x\nfn headOr<T>(xs: List<T>, d: T): T = match xs.first() {\n Some(v) => v\n None => d\n}");
     assert_eq!(erased_ret(&m, "ident"), certo_typeck::Ty::Var(0));
-    assert_eq!(erased_ret(&m, "headOr"), certo_typeck::Ty::Var(0));
+    assert_eq!(erased_ret(&m, "headOr"), certo_typeck::Ty::Var(crate::RAW_ELEM_RET_VAR));
+    assert_eq!(m.fn_param_tys["headOr"][1], certo_typeck::Ty::Var(crate::RAW_ELEM_RET_VAR));
 }
