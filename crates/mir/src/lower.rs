@@ -1311,6 +1311,13 @@ fn cancel_token_ty() -> Ty {
 /// ordinary parameter, just recovered from the enclosing scope instead of
 /// the call site.
 fn lower_lambda_boxed(params: &[certo_hir::HirParam], body: &HirExpr, captures: &[LocalId], param_ty_hints: &[Ty], raw_int_return: bool, b: &mut Builder) -> Operand {
+    lower_lambda_boxed_ex(params, body, captures, param_ty_hints, raw_int_return, false, b)
+}
+
+/// `cells`: the lambda is passed to a user-defined generic function's erased `Fn` parameter
+/// (BACKLOG item 348), which hands it `BoxSome`-style cells and expects a cell back, instead of
+/// the stdlib callbacks' raw element words.
+fn lower_lambda_boxed_ex(params: &[certo_hir::HirParam], body: &HirExpr, captures: &[LocalId], param_ty_hints: &[Ty], raw_int_return: bool, cells: bool, b: &mut Builder) -> Operand {
     let idx = b.lambda_count;
     b.lambda_count += 1;
     let lam_name = format!("__lam_{}_{}_boxed", b.fn_name, idx);
@@ -1339,13 +1346,17 @@ fn lower_lambda_boxed(params: &[certo_hir::HirParam], body: &HirExpr, captures: 
         // One hint per param when the callee's callback params differ in type
         // (`fold`'s accumulator and element); a single hint (the list's element
         // type) otherwise applies to every param.
-        let real_ty = if matches!(p.ty, Ty::Error) {
+        let real_ty = if matches!(p.ty, Ty::Error) || (cells && matches!(p.ty, Ty::Var(_))) {
             param_ty_hints.get(i).or_else(|| param_ty_hints.last()).cloned().unwrap_or(Ty::Error)
         } else {
             p.ty.clone()
         };
         let real = lb.map_hir_local(p.local, &p.name, real_ty.clone());
-        lb.assign(real, Rvalue::Unbox { value: Operand::Local(*raw), ty: real_ty });
+        if cells {
+            lb.assign(real, Rvalue::UnboxSome { opt: Operand::Local(*raw), ty: real_ty });
+        } else {
+            lb.assign(real, Rvalue::Unbox { value: Operand::Local(*raw), ty: real_ty });
+        }
     }
 
     lb.current_span = body.span;
@@ -1355,6 +1366,8 @@ fn lower_lambda_boxed(params: &[certo_hir::HirParam], body: &HirExpr, captures: 
         lb.assign(ret_slot, Rvalue::Use(lam_result));
     } else if matches!(lam_ret_ty, Ty::Unit) {
         lb.locals[ret_slot as usize].ty = Ty::Var(0);
+    } else if cells {
+        lb.assign(ret_slot, Rvalue::BoxSome { value: lam_result, ty: lam_ret_ty });
     } else {
         lb.assign(ret_slot, Rvalue::Box { value: lam_result, ty: lam_ret_ty });
     }
@@ -2173,6 +2186,22 @@ fn lower_expr(expr: &HirExpr, b: &mut Builder) -> Operand {
                 Some(elem) => vec![elem.clone()],
                 None => Vec::new(),
             };
+            // BACKLOG item 348 — an unannotated lambda parameter handed to a user generic
+            // function takes the concrete type of the call's other erased arguments, when they
+            // all agree (every type parameter shares one placeholder, so only an unambiguous
+            // case can be resolved).
+            let erased_arg_ty: Option<Ty> = fn_param_tys.as_ref().and_then(|decl| {
+                let mut found: Option<Ty> = None;
+                for (d, a) in decl.iter().zip(args.iter()) {
+                    if !matches!(d, Ty::Var(_)) || matches!(a.ty, Ty::Var(_) | Ty::Error | Ty::Fn { .. } | Ty::Named { .. }) { continue; }
+                    match &found {
+                        None => found = Some(a.ty.clone()),
+                        Some(t) if *t == a.ty => {}
+                        Some(_) => return None,
+                    }
+                }
+                found
+            });
             let arg_ops: Vec<Operand> = args.iter().enumerate().map(|(i, a)| {
                 // A Float or record `init` goes into `fold`'s `void*` slot boxed,
                 // like a callback argument (an Int or a pointer already fits).
@@ -2256,6 +2285,26 @@ fn lower_expr(expr: &HirExpr, b: &mut Builder) -> Operand {
                         let erased = decl_params.iter().any(|t| matches!(t, Ty::Var(_))) || matches!(**decl_ret, Ty::Var(_));
                         if erased {
                             return wrap_named_fn_as_erased_closure(fn_name, real_params, real_ret, b);
+                        }
+                    }
+                }
+                // BACKLOG item 348 — an inline lambda passed to the same kind of erased `Fn`
+                // parameter: lift it with cell-scheme params and result.
+                if let (HirExprKind::Lambda { params, body, captures, .. }, Some(Ty::Fn { params: decl_params, ret: decl_ret })) = (&a.kind, declared) {
+                    let erased = decl_params.iter().any(|t| matches!(t, Ty::Var(_))) || matches!(**decl_ret, Ty::Var(_));
+                    if erased {
+                        let mut hints: Vec<Ty> = match &a.ty { Ty::Fn { params, .. } => params.clone(), _ => vec![] };
+                        if let Some(t) = &erased_arg_ty {
+                            hints.resize(params.len(), Ty::Error);
+                            for h in hints.iter_mut() { if matches!(h, Ty::Error | Ty::Var(_)) { *h = t.clone(); } }
+                        }
+                        // Only when every parameter's type is known; otherwise keep the older
+                        // erased treatment (higher-kinded `F<A>` callbacks, item 76/142).
+                        let resolved = |i: usize, p: &certo_hir::HirParam| {
+                            !matches!(p.ty, Ty::Error | Ty::Var(_)) || !matches!(hints.get(i), None | Some(Ty::Error | Ty::Var(_)))
+                        };
+                        if params.iter().enumerate().all(|(i, p)| resolved(i, p)) {
+                            return lower_lambda_boxed_ex(params, body, captures, &hints, false, true, b);
                         }
                     }
                 }
