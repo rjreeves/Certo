@@ -198,6 +198,7 @@ in the module:
 
 ```
 val limit = 100           // a constant
+val MAX_RETRIES = 3       // the UPPER_SNAKE_CASE constant convention works too
 var counter = 0           // state the program may reassign
 
 fn bump(): Int = {
