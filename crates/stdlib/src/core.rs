@@ -263,6 +263,30 @@ __attribute__((noreturn)) void certo_panic(certo_text_t msg) {
     abort();
 }
 
+/* ---- integer division (BACKLOG item 367) ----
+   A bare C `/` or `%` by zero is a hardware trap (SIGFPE) or, once the optimiser sees it,
+   undefined behaviour that printed garbage. Both now stop with a message (flushing stdout first,
+   like every panic). `INT64_MIN / -1` wraps instead of trapping, like the other integer
+   arithmetic. */
+static inline int64_t certo_idiv(int64_t a, int64_t b) {
+    if (b == 0) certo_panic("integer division by zero");
+    if (b == -1) return (int64_t)(0 - (uint64_t)a);
+    return a / b;
+}
+static inline int64_t certo_irem(int64_t a, int64_t b) {
+    if (b == 0) certo_panic("integer remainder by zero");
+    if (b == -1) return 0;
+    return a % b;
+}
+static inline uint64_t certo_udiv(uint64_t a, uint64_t b) {
+    if (b == 0) certo_panic("integer division by zero");
+    return a / b;
+}
+static inline uint64_t certo_urem(uint64_t a, uint64_t b) {
+    if (b == 0) certo_panic("integer remainder by zero");
+    return a % b;
+}
+
 /* ---- null coalesce / coerce ---- */
 void* certo_coalesce(void* opt, void* fallback) {
     return opt ? opt : fallback;

@@ -863,8 +863,22 @@ fn emit_binop(
         BinOp::Add  => format!("({} + {})", lhs, rhs),
         BinOp::Sub  => format!("({} - {})", lhs, rhs),
         BinOp::Mul  => format!("({} * {})", lhs, rhs),
-        BinOp::Div  => format!("({} / {})", lhs, rhs),
-        BinOp::Rem  => format!("({} % {})", lhs, rhs),
+        // BACKLOG item 367 — integer `/` and `%` go through checking helpers.
+        BinOp::Div | BinOp::Rem => {
+            let (lt, rt) = (operand_ty(l, locals), operand_ty(r, locals));
+            let is_int = |t: &Ty| matches!(t, Ty::Int | Ty::Int8 | Ty::Int16 | Ty::Int32);
+            let is_uint = |t: &Ty| matches!(t, Ty::UInt);
+            let div = matches!(op, BinOp::Div);
+            if is_uint(&lt) || is_uint(&rt) {
+                format!("{}({}, {})", if div { "certo_udiv" } else { "certo_urem" }, lhs, rhs)
+            } else if is_int(&lt) || is_int(&rt) {
+                format!("{}({}, {})", if div { "certo_idiv" } else { "certo_irem" }, lhs, rhs)
+            } else if div {
+                format!("({} / {})", lhs, rhs)
+            } else {
+                format!("({} % {})", lhs, rhs)
+            }
+        }
         // BACKLOG item 345 — a Float `**` goes to `pow`, not the integer-only
         // `certo_pow(int64_t, int64_t)` (which silently truncated both
         // operands: `2.0 ** 0.5` computed `certo_pow(2, 0)` = 1).
