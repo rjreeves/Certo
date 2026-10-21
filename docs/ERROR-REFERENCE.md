@@ -614,6 +614,33 @@ that leaves one out used to compile, and reading the field gave a null or empty 
 
 ---
 
+### E0227  Unknown argument name
+
+```
+error[E0227]: `Rect` has no parameter named `bogus`
+  = note: its parameters are: width, height
+```
+
+**Cause:** A call passes `name: value` for a name the function (or a record or variant constructor) does not
+declare. It used to bind to the next free position instead (BACKLOG item 352).
+
+**Fix:** Use one of the declared names.
+
+---
+
+### E0228  Argument given more than once
+
+```
+error[E0228]: argument `page` of `paged` is given more than once
+```
+
+**Cause:** The same parameter is supplied twice, by name twice or by name and by position
+(`paged(1, 2, page: 3)`). The last one used to win silently.
+
+**Fix:** Pass each parameter once.
+
+---
+
 ### E0223  Or-pattern alternatives bind different names
 
 ```
