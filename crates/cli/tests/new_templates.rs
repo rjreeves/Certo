@@ -21,6 +21,11 @@ fn every_template_checks_and_a_library_builds() {
     assert!(ok, "{out}");
     let (ok, out) = certo(&dir.path().join("p_default"), &["build"]);
     assert!(ok, "{out}");
+    // A new project is already formatted (the formatter keeps a block body on the signature line).
+    for t in ["default", "api", "lib", "cli"] {
+        let (ok, out) = certo(&dir.path().join(format!("p_{t}")), &["fmt", "--check"]);
+        assert!(ok && !out.contains("would reformat"), "{t}: {out}");
+    }
     let gi = std::fs::read_to_string(dir.path().join("p_default").join(".gitignore")).unwrap();
     assert!(gi.lines().any(|l| l == "dist/") && gi.lines().any(|l| l == ".cto/"), "{gi}");
 }

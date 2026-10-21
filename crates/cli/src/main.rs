@@ -3229,7 +3229,6 @@ fn cmd_new(args: &[String]) {
         "lib" => format!(
             "module {module_name}\n\
              \n\
-             /// The public API of this library.\n\
              pub fn greet(name: Text): Text =\n\
                  \"Hello, \" ++ name ++ \"!\"\n"
         ),
@@ -3263,6 +3262,13 @@ fn cmd_new(args: &[String]) {
              }}\n",
             name = name,
         ),
+    };
+    // BACKLOG item 407 - the hand-written templates go through the formatter, so a new project
+    // passes `certo fmt --check`. (The fullstack server is generated from `ui.cto`; left as is.)
+    let main_src = if template == "fullstack" {
+        main_src
+    } else {
+        certo_fmt::format_source(&main_src).unwrap_or(main_src)
     };
     write_file(&root.join("src").join("main.cto"), &main_src);
     if template == "fullstack" {

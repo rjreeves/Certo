@@ -56,7 +56,9 @@ pub fn fmt_fn(f: &FnDecl, indent: usize) -> String {
     if let Some(body) = &f.body {
         let body_str = fmt_expr(&body.node, indent);
         let inline = format!("{} = {}", s, body_str);
-        if inline.len() <= 80 {
+        // A block body keeps its `{` on the signature line however long it is (its length is
+        // the length of all its lines together, not of the signature).
+        if body_str.starts_with('{') || inline.len() <= 80 {
             s = inline;
         } else {
             s.push_str(" =\n");
