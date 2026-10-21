@@ -1353,11 +1353,30 @@ fn walk_priv_ctors(
                     }
                 }
             }
-            walk_priv_ctors(func, self_type, priv_ctors, errors);
+            // The callee itself was judged just above; a bare path would be judged again below.
+            if !matches!(&func.node, Expr::Path { .. }) {
+                walk_priv_ctors(func, self_type, priv_ctors, errors);
+            }
             for a in args { walk_priv_ctors(&a.value, self_type, priv_ctors, errors); }
         }
 
-        Expr::Lit { .. } | Expr::Path { .. } => {}
+        // BACKLOG item 369 - the constructor named as a value (`List.map(xs, Email)`,
+        // `val f = Email`) is as private as a direct call.
+        Expr::Path { path, span } => {
+            if let [seg] = path.segments.as_slice() {
+                let name = seg.node.as_str();
+                if priv_ctors.contains(name) && self_type != Some(name) {
+                    errors.push(TypeError {
+                        kind: TypeErrorKind::PrivConstructorCall { type_name: name.to_string() },
+                        span: *span,
+                    });
+                }
+            }
+        }
+        // `Email.new(..)` names the type only to reach its static method.
+        Expr::Field { expr, .. } if matches!(&expr.node, Expr::Path { .. }) => {}
+
+        Expr::Lit { .. } => {}
         Expr::Pipe { left, right, .. } | Expr::BinOp { left, right, .. } => {
             walk_priv_ctors(left, self_type, priv_ctors, errors);
             walk_priv_ctors(right, self_type, priv_ctors, errors);

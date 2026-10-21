@@ -245,3 +245,40 @@ fn with_checks_the_types_of_the_overriding_values() {
     let (ok, out) = certo("module W\ntype P = { name: Text, age: Int }\ntype Box<T> = { v: T, n: Int }\nfn main(): Unit [io] = {\n  val p = P { name: \"a\", age: 1 }\n  val q = p.with(age: 2)\n  val b = Box { v: 1.5, n: 1 }\n  val c = b.with(v: 2.5)\n  println(q.name)\n}\n", &["check"]);
     assert!(ok, "{out}");
 }
+
+// BACKLOG item 369 - a user constructor used as a function value works, and a `priv` one named as a
+// value outside its `impl` is E0214 like a direct call.
+#[test]
+fn constructors_as_function_values() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("main.cto");
+    fs::write(&file, r####"module K
+type W = W(Text)
+type Shape = Circle(Int) | Sq(Int, Int)
+type Pt = { x: Int, y: Int }
+fn show(w: W): Text = match w { W(t) => t }
+fn area(s: Shape): Int = match s {
+  Circle(r) => r
+  Sq(a, b) => a * b
+}
+fn main(): Unit [io] = {
+  val ws = List.map(["a", "b"], W)
+  println(List.fold(List.map(ws, show), "", (a, b) => a ++ b))
+  val cs = List.map([1, 2], Circle)
+  println(intToText(List.fold(List.map(cs, area), 0, (a, b) => a + b)))
+  val f = Circle
+  println(intToText(area(f(7))))
+  val g = Pt
+  println(intToText(g(1, 2).y))
+}
+"####).unwrap();
+    let exe = dir.path().join(if cfg!(windows) { "app.exe" } else { "app" });
+    let b = Command::new(env!("CARGO_BIN_EXE_certo")).arg("build").arg(&file).arg("-o").arg(&exe).output().unwrap();
+    assert!(b.status.success(), "{}", String::from_utf8_lossy(&b.stderr));
+    let r = Command::new(&exe).output().unwrap();
+    assert_eq!(String::from_utf8_lossy(&r.stdout).replace("\r\n", "\n"), "ab\n3\n7\n2\n");
+
+    let src = "module K\ntype Email = priv Email(Text)\nimpl Email {\n  fn new(raw: Text): Result<Email, Text> = if Text.len(raw) > 0 then Ok(Email(raw)) else Err(\"empty\")\n  fn mk(): List<Email> = List.map([\"a\"], Email)\n}\nfn bad1(): List<Email> = List.map([\"a\"], Email)\nfn bad2(): Unit = { val f = Email\n  () }\nfn ok(): Result<Email, Text> = Email.new(\"x\")\nfn main(): Unit [io] = println(\"x\")\n";
+    let (ok, out) = certo(src, &["check"]);
+    assert!(!ok && out.matches("E0214").count() == 2, "{out}");
+}

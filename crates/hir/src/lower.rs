@@ -1594,6 +1594,16 @@ fn lower_expr(expr: &S<Expr>, cx: &mut Cx) -> HirExpr {
                             params: vec![Ty::Var(0)],
                             ret: Box::new(Ty::Result(Box::new(Ty::Var(0)), Box::new(Ty::Var(0)))),
                         },
+                        // BACKLOG item 369 - a user constructor used as a value (`List.map(xs, W)`,
+                        // `val f = Circle`) is a function from its fields to its type.
+                        _ if cx.variant_field_types.get(name).is_some_and(|f| !f.is_empty()) && cx.variant_to_type.contains_key(name) => Ty::Fn {
+                            params: cx.variant_field_types[name].clone(),
+                            ret: Box::new(Ty::Named { name: cx.variant_to_type[name].clone(), args: vec![] }),
+                        },
+                        _ if cx.record_field_types.get(name).is_some_and(|f| !f.is_empty()) && !cx.fn_params.contains_key(name) => Ty::Fn {
+                            params: cx.record_field_types[name].clone(),
+                            ret: Box::new(Ty::Named { name: name.to_string(), args: vec![] }),
+                        },
                         _ => match (cx.fn_params.get(name), cx.fn_ret_types.get(name)) {
                             (Some(params), Some(ret)) => Ty::Fn {
                                 params: params.iter().map(|p| ast_ty_to_ty_with_params(&p.ty.node, &[], &cx.type_aliases)).collect(),
