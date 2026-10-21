@@ -76,3 +76,35 @@ fn bad_operands_unknown_pattern_fields_and_duplicate_declarations_are_errors() {
     let (ok, out) = certo("module A\ntype Pt = { a: Int }\nfn pt(): Int = 1\nfn d(a: Duration, b: Duration): Duration = a + b\nfn main(): Unit [io] = println(\"ok\")\n", &["check"]);
     assert!(ok, "{out}");
 }
+
+// BACKLOG item 361 - an anonymous record literal `{ x: 1, y: 2 }` is the record type its field
+// names pick out; none or several matches is E0233.
+#[test]
+fn anonymous_record_literals_resolve_by_field_names() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("main.cto");
+    fs::write(&file, r####"module R
+type Pt = { x: Int, y: Int }
+type Person = { name: Text, age: Int }
+fn sum(p: Pt): Int = p.x + p.y
+fn main(): Unit [io] = {
+  val a = { x: 1, y: 2 }
+  val who = { name: "Ann", age: 30 }
+  println(intToText(a.x + sum({ x: 3, y: 4 })))
+  println(who.name ++ intToText(who.age))
+  val block = { val z = 5
+    z + 1 }
+  println(intToText(block))
+}
+"####).unwrap();
+    let exe = dir.path().join(if cfg!(windows) { "app.exe" } else { "app" });
+    let b = Command::new(env!("CARGO_BIN_EXE_certo")).arg("build").arg(&file).arg("-o").arg(&exe).output().unwrap();
+    assert!(b.status.success(), "{}", String::from_utf8_lossy(&b.stderr));
+    let r = Command::new(&exe).output().unwrap();
+    assert_eq!(String::from_utf8_lossy(&r.stdout).replace("\r\n", "\n"), "8\nAnn30\n6\n");
+
+    let (ok, out) = certo("module R\ntype Pt = { x: Int, y: Int }\nfn main(): Unit [io] = { val a = { q: 1 }\n  println(\"x\") }\n", &["check"]);
+    assert!(!ok && out.contains("E0233"), "{out}");
+    let (ok, out) = certo("module R\ntype A = { x: Int, y: Int }\ntype B = { x: Int, z: Int }\nfn main(): Unit [io] = { val a = { x: 1 }\n  println(\"x\") }\n", &["check"]);
+    assert!(!ok && out.contains("E0233") && out.contains("A, B"), "{out}");
+}

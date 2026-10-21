@@ -885,6 +885,28 @@ pub fn infer(expr: &S<Expr>, ctx: &mut Ctx<'_>) -> Ty {
         }
 
         Expr::Record { ty_name, base, fields, span } => {
+            // BACKLOG item 361 - an anonymous literal `{ a: 1, b: 2 }` is the one record type
+            // whose fields it names (see `anonymous_record_type`).
+            let anon_name: Option<String> = if ty_name.is_none() && base.is_none() && !fields.is_empty() {
+                let given: Vec<&str> = fields.iter().map(|f| f.name.node.as_str()).collect();
+                let declared: Vec<(&str, Vec<&str>)> = ctx.env.record_fields.iter()
+                    .map(|(n, fs)| (n.as_str(), fs.iter().map(|(f, _)| f.as_str()).collect())).collect();
+                match anonymous_record_type(&given, &declared) {
+                    Ok(n) => Some(n.to_string()),
+                    Err(cands) => {
+                        ctx.errors.push(TypeError {
+                            kind: TypeErrorKind::AnonymousRecordUnresolved {
+                                fields: fields.iter().map(|f| f.name.node.clone()).collect(),
+                                candidates: cands.iter().map(|c| c.to_string()).collect(),
+                            },
+                            span: *span,
+                        });
+                        None
+                    }
+                }
+            } else { None };
+            let ty_name_owned: Option<String> = ty_name.clone().or(anon_name);
+            let ty_name: &Option<String> = &ty_name_owned;
             let mut field_tys: Vec<(String, Ty)> = fields
                 .iter()
                 .map(|f| (f.name.node.clone(), infer(&f.value, ctx)))
@@ -1563,6 +1585,23 @@ fn binop_symbol(op: &BinOp) -> &'static str {
         BinOp::NullCoalesce => "??", BinOp::Concat => "++",
         BinOp::In => "in",
     }
+}
+
+/// The record type an anonymous literal with these field names stands for: the only declared
+/// record containing all of them, or else the only one whose fields are exactly them. `Err`
+/// carries the candidate names (several matched, or none did). HIR lowering applies the same
+/// rule, so the two stages agree.
+pub fn anonymous_record_type<'a>(given: &[&str], declared: &[(&'a str, Vec<&str>)]) -> Result<&'a str, Vec<&'a str>> {
+    let mut containing: Vec<&'a str> = declared.iter()
+        .filter(|(_, fs)| given.iter().all(|g| fs.contains(g)))
+        .map(|(n, _)| *n).collect();
+    containing.sort_unstable();
+    if containing.len() == 1 { return Ok(containing[0]); }
+    let exact: Vec<&'a str> = declared.iter()
+        .filter(|(_, fs)| fs.len() == given.len() && given.iter().all(|g| fs.contains(g)))
+        .map(|(n, _)| *n).collect();
+    if exact.len() == 1 { return Ok(exact[0]); }
+    Err(containing)
 }
 
 fn infer_binop(op: &BinOp, left: &S<Expr>, right: &S<Expr>, span: Span, ctx: &mut Ctx<'_>) -> Ty {

@@ -2618,6 +2618,16 @@ fn lower_expr(expr: &S<Expr>, cx: &mut Cx) -> HirExpr {
         }
 
         Expr::Record { ty_name, base, fields, .. } => {
+            // BACKLOG item 361 - an anonymous literal is the record type its field names pick
+            // (the same rule typeck uses).
+            let anon_name: Option<String> = if ty_name.is_none() && base.is_none() && !fields.is_empty() {
+                let given: Vec<&str> = fields.iter().map(|f| f.name.node.as_str()).collect();
+                let declared: Vec<(&str, Vec<&str>)> = cx.record_field_names.iter()
+                    .map(|(n, fs)| (n.as_str(), fs.iter().map(|f| f.as_str()).collect())).collect();
+                certo_typeck::anonymous_record_type(&given, &declared).ok().map(|n| n.to_string())
+            } else { None };
+            let ty_name_owned: Option<String> = ty_name.clone().or(anon_name);
+            let ty_name: &Option<String> = &ty_name_owned;
             let record_ty = ty_name.as_deref()
                 .map(|n| Ty::Named { name: n.to_string(), args: vec![] })
                 .unwrap_or(Ty::Error);

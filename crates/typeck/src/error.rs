@@ -41,6 +41,9 @@ pub enum TypeErrorKind {
     /// pre-existing gap in `.with(...)`'s own validation, not fixed here).
     ComputedFieldNotSettable { field: String, type_name: String },
 
+    /// E0233 - an anonymous record literal `{ a: 1, b: 2 }` matches no record type, or several.
+    AnonymousRecordUnresolved { fields: Vec<String>, candidates: Vec<String> },
+
     /// E0230 - arithmetic (`+ - * / % **`) on a value that is not a number.
     NonNumericOperand { op: String, ty: Ty },
 
@@ -266,6 +269,8 @@ impl TypeError {
                 format!("E0206: unbound name `{}`", name),
             TypeErrorKind::ComputedFieldNotSettable { field, type_name } =>
                 format!("E0217: `{}` is a computed property of `{}` — it's derived, not stored, and can't be set directly", field, type_name),
+            TypeErrorKind::AnonymousRecordUnresolved { fields, .. } =>
+                format!("E0233: cannot tell which record type `{{ {} }}` is", fields.join(", ")),
             TypeErrorKind::NonNumericOperand { op, ty } =>
                 format!("E0230: `{op}` needs numbers, but this is `{}`", ty.display()),
             TypeErrorKind::UnknownPatternField { type_name, field } =>

@@ -2405,6 +2405,16 @@ pub(crate) fn type_error_to_diagnostic(e: &TypeError) -> Diagnostic {
                 .with_note(format!("remove `{field}: ...` — it's computed automatically from `{type_name}`'s other fields"))
         }
 
+        TypeErrorKind::AnonymousRecordUnresolved { fields, candidates } => {
+            Diagnostic::error("E0233", format!("cannot tell which record type `{{ {} }}` is", fields.join(", ")))
+                .with_span(e.span)
+                .with_note(if candidates.is_empty() {
+                    "no record type has these fields; write `TypeName { ... }` or declare the type".to_string()
+                } else {
+                    format!("it could be {}; write `TypeName {{ ... }}` to choose", candidates.join(", "))
+                })
+        }
+
         TypeErrorKind::NonNumericOperand { op, ty } => {
             Diagnostic::error("E0230", format!("`{op}` needs numbers, but this is `{}`", ty.display()))
                 .with_span(e.span)

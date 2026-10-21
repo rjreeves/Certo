@@ -770,6 +770,12 @@ fn parse_list(cur: &mut Cursor<'_>) -> Result<S<Expr>, ParseError> {
 ///
 /// Disambiguate by peeking: `{ ident: expr` → record; everything else → block.
 fn parse_block_or_record(cur: &mut Cursor<'_>) -> Result<S<Expr>, ParseError> {
+    // BACKLOG item 361 - `{ name: value, ... }` is an anonymous record literal; a block never
+    // starts with `ident :`. Which record type it is gets worked out from its field names.
+    if matches!(cur.peek2(), Some(Token::Ident(_))) && cur.peek3() == Some(&Token::Colon) {
+        let start = cur.peek_span();
+        return parse_record_body(cur, None, None, start);
+    }
     parse_block(cur)
 }
 
