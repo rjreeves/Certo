@@ -1716,7 +1716,7 @@ fn check_exhaustive(scrut_ty: &Ty, arms: &[certo_ast::expr::MatchArm], ctx: &mut
     }
 
     let resolved = ctx.uf.apply(scrut_ty);
-    let missing: Vec<String> = match &resolved {
+    let mut missing: Vec<String> = match &resolved {
         Ty::Var(_) | Ty::Error => return, // unresolved/erroneous — don't cascade a second error
 
         Ty::Bool => {
@@ -1754,11 +1754,50 @@ fn check_exhaustive(scrut_ty: &Ty, arms: &[certo_ast::expr::MatchArm], ctx: &mut
         _ => vec!["_".to_string()],
     };
 
+    // BACKLOG item 349 - the checks above look only at top-level constructors. The matrix check
+    // looks at nested patterns too: it clears matches the shortcut rejects (a tuple of bools, a
+    // record pattern, `[]` and `[x, ...rest]`) and finds the nested gaps it accepts.
+    let view = EnvView { env: &*ctx.env };
+    let rows: Vec<crate::exhaustive::P> = arms.iter().filter(|a| a.guard.is_none())
+        .map(|a| crate::exhaustive::lower(&a.pattern.node, &view)).collect();
+    match crate::exhaustive::missing(rows, &view) {
+        None => return,
+        Some(witness) => {
+            if missing.is_empty() || missing == ["_".to_string()] { missing = vec![witness]; }
+        }
+    }
+
     if !missing.is_empty() {
         ctx.errors.push(TypeError {
             kind: TypeErrorKind::NonExhaustiveMatch { ty: resolved, missing },
             span,
         });
+    }
+}
+
+/// What the type environment knows about constructors, for `crate::exhaustive`.
+struct EnvView<'a> { env: &'a crate::env::TypeEnv }
+
+impl crate::exhaustive::Env for EnvView<'_> {
+    fn ctor_info(&self, name: &str) -> Option<crate::exhaustive::CtorInfo> {
+        if let Some((_, variants)) = self.env.sum_variants.iter().find(|(_, vs)| vs.iter().any(|v| v == name)) {
+            return Some(crate::exhaustive::CtorInfo {
+                siblings: variants.iter().map(|v| (v.clone(), self.arity(v))).collect(),
+            });
+        }
+        // A record type's pattern `P { .. }` is its only constructor.
+        self.env.record_fields.get(name).map(|fs| crate::exhaustive::CtorInfo { siblings: vec![(name.to_string(), fs.len())] })
+    }
+
+    fn arity(&self, name: &str) -> usize {
+        fn params(ty: &Ty) -> usize {
+            match ty {
+                Ty::Fn { params, .. } => params.len(),
+                Ty::Forall { body, .. } => params(body),
+                _ => 0,
+            }
+        }
+        self.env.lookup(name).map(params).unwrap_or(0)
     }
 }
 

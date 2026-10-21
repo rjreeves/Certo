@@ -2,6 +2,7 @@ mod ty;
 mod unify;
 mod env;
 mod infer_expr;
+mod exhaustive;
 mod infer_decl;
 mod error;
 
