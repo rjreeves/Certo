@@ -356,3 +356,34 @@ fn main(): Unit [io] = {
     assert!(ok, "{err}");
     assert_eq!(out, "42 5 5 -7 3\n9223372036854775807 none -9223372036854775808 none\nnone none none none none\n3.14 0.5 5 1000 -0.025 7\nnone none none none none none none none\nnan\n");
 }
+
+// BACKLOG items 393/394 - `expect(x).toBe(y)` works for every value type, and test bodies are
+// type-checked.
+#[test]
+fn expect_to_be_compares_any_value_and_test_bodies_are_checked() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("main.cto");
+    fs::write(&file, r####"module T
+type Pt = { x: Int, y: Int }
+type Shape = Circle(Int) | Dot
+test "float" { expect(0.5 + 0.25).toBe(0.75) }
+test "decimal" { expect(Decimal.add(d"10.00", d"12.00")).toBe(d"22.00") }
+test "record" { expect(Pt { x: 1, y: 2 }).toBe(Pt { x: 1, y: 2 }) }
+test "sum" { expect(Circle(2)).toBe(Circle(2)) }
+test "option" { expect(Some(3)).toBe(Some(3)) }
+test "option text" { expect(Some("a" ++ "b")).toBe(Some("ab")) }
+test "option none" {
+  val a: Int? = None
+  expect(a).toBe(None)
+}
+test "option record" { expect(Some(Pt { x: 1, y: 2 })).toBe(Some(Pt { x: 1, y: 2 })) }
+test "list" { expect([1, 2]).toBe([1, 2]) }
+test "tuple" { expect((1, "a")).toBe((1, "a")) }
+test "option differs" { assert(Some(3) != Some(4), "differs") }
+"####).unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_certo")).arg("test").arg(&file).output().unwrap();
+    let text = String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success() && text.contains("All 11 tests passed"), "{text}");
+    let (ok, out) = certo("module T\ntest \"t\" { val n: Int = \"hello\" }\nproperty \"p\" { undefinedFn(1) }\n", &["check"]);
+    assert!(!ok && out.contains("E0200") && out.contains("E0206"), "{out}");
+}

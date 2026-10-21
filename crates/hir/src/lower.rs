@@ -3061,7 +3061,17 @@ fn lower_expr(expr: &S<Expr>, cx: &mut Cx) -> HirExpr {
         // synthesizing a `match` here, since those are real, independently
         // useful stdlib functions, not lowering-only plumbing.
         Expr::ExpectAssertion { actual, matcher, .. } => {
-            let actual_hir = lower_expr(actual, cx);
+            // BACKLOG item 393 - `expect(x)` is only a marker around `x`. Lowering it as a call
+            // sent `x` through the erased `certo_identity(void*)`, which cannot take a Float, a
+            // Decimal or a struct; the assertion reads the value itself instead.
+            let inner: &S<Expr> = match &actual.node {
+                Expr::App { func, args, .. }
+                    if args.len() == 1 && args[0].label.is_none()
+                        && matches!(&func.node, Expr::Path { path, .. }
+                            if path.segments.len() == 1 && path.segments[0].node == "expect") => &args[0].value,
+                _ => actual,
+            };
+            let actual_hir = lower_expr(inner, cx);
             let (cond, msg): (HirExpr, &str) = match matcher {
                 ExpectMatcher::ToBe(y) => {
                     let y_hir = lower_expr(y, cx);

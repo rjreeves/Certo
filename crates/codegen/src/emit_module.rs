@@ -1257,6 +1257,18 @@ static inline bool certo_slot_eq_float(void* a, void* b) { return __certo_i2f((i
 static inline bool certo_slot_eq_text(void* a, void* b) { return certo_text_eq((certo_text_t)a, (certo_text_t)b); }
 static inline bool certo_slot_eq_decimal(void* a, void* b) { return certo_decimal_eq(*(certo_decimal_t*)a, *(certo_decimal_t*)b); }
 static inline bool certo_slot_eq_uuid(void* a, void* b) { return certo_uuid_eq(*(certo_uuid_t*)a, *(certo_uuid_t*)b); }
+/* Option equality: None is NULL, Some is a pointer to the payload - the payload itself for a word
+   type, a struct/Decimal/UUID copy otherwise. */
+static inline bool certo_option_eq_word(void* a, void* b, certo_slot_eq_fn eq) {
+    if (a == b) return true;
+    if (!a || !b) return false;
+    return eq(*(void**)a, *(void**)b);
+}
+static inline bool certo_option_eq_boxed(void* a, void* b, certo_slot_eq_fn eq) {
+    if (a == b) return true;
+    if (!a || !b) return false;
+    return eq(a, b);
+}
 static inline bool certo_list_eq(void* a, void* b, certo_slot_eq_fn eq) {
     certo_eq_list_t* x = (certo_eq_list_t*)a; certo_eq_list_t* y = (certo_eq_list_t*)b;
     if (x == y) return true;

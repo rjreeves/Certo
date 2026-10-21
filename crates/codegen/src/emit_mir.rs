@@ -829,11 +829,21 @@ fn emit_eq(
         Ty::Uuid => return format!("certo_uuid_eq({lhs}, {rhs})"),
         _ => {}
     }
+    // A comparison with `None` / the null an Option is tested against stays a pointer test.
+    let against_null = |o: &Operand| matches!(o, Operand::Global(n) if n == "None" || n == "__NULL");
     // BACKLOG item 441 - lists and tuples compare element by element, not by address.
     match &ty {
+        _ if against_null(l) || against_null(r) => {}
         Ty::List(elem) => {
             if let Some(f) = slot_eq_fn(elem, eq_types) {
                 return format!("certo_list_eq({lhs}, {rhs}, {f})");
+            }
+        }
+        // An Option is null (None) or a pointer to its payload (BACKLOG item 393).
+        Ty::Option(inner) => {
+            if let Some(f) = slot_eq_fn(inner, eq_types) {
+                let helper = if inner.needs_heap_box() { "certo_option_eq_boxed" } else { "certo_option_eq_word" };
+                return format!("{helper}({lhs}, {rhs}, {f})");
             }
         }
         Ty::Tuple(elems) if !elems.is_empty() => {

@@ -1844,8 +1844,26 @@ fn hoist_decl(
 // Check bodies
 // ------------------------------------------------------------------ //
 
+/// A `test`/`property`/`dbTest` body is checked like a function body returning nothing in
+/// particular (BACKLOG item 394: they used to be skipped, so a type error reached clang).
+fn check_test_body(params: &[certo_ast::decl::FnParam], body: &S<Expr>, ctx: &mut Ctx<'_>) {
+    ctx.env.push();
+    for p in params {
+        let ty = type_expr_to_ty(&p.ty.node, ctx);
+        ctx.env.define(p.name.node.clone(), ty);
+    }
+    let ret = ctx.fresh();
+    ctx.env.set_current_body_return_ty(Some(ret));
+    infer_fn_body(body, ctx);
+    ctx.env.clear_current_body_return_ty();
+    ctx.env.pop();
+}
+
 fn check_decl(decl: &Decl, ctx: &mut Ctx<'_>) {
     match decl {
+        Decl::Test(t) => check_test_body(&[], &t.body, ctx),
+        Decl::Property(p) => check_test_body(&p.params, &p.body, ctx),
+        Decl::DbTest(t) => check_test_body(&[], &t.body, ctx),
         Decl::Fn(f) => {
             // BACKLOG item 363 - a signature with no body used to compile to `return 0;`.
             if f.body.is_none() && !f.is_extern {
