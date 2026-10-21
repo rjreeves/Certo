@@ -18,8 +18,10 @@ real.
 | `parallel { a(), b() }` | Spawns every task, so they run at the same time. |
 | `await parallel { a(), b() }` | Spawns all, waits for all, and returns a **tuple** of their results. |
 
-A task handle is just a value — you can store it in a `val`, pass it around, and
-`await` it later. The work between `spawn` and `await` is where you get your
+A task handle is just a value of type `Task<R>` (`R` is the function's result type) —
+you can store it in a `val`, keep it in a `List<Task<R>>`, pass it to or return it from
+a function (`fn start(n: Int): Task<Int> = spawn work(n)`), and `await` it later.
+A lambda parameter that is awaited needs its type written, `(h: Task<Int>) => await h`. The work between `spawn` and `await` is where you get your
 parallelism: the spawned task runs while your main thread keeps going.
 
 > **One rule to remember:** only a direct call to a *named function* is threaded

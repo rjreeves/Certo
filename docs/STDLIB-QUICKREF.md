@@ -569,6 +569,7 @@ Duration.days(n: Int): Duration
 ### Accessors (truncating)
 
 ```
+Duration.toMilliseconds(d: Duration): Int   // exact
 Duration.toSeconds(d: Duration): Int
 Duration.toMinutes(d: Duration): Int
 Duration.toHours(d: Duration): Int
