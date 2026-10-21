@@ -375,7 +375,7 @@ fn emit_stmt(stmt: &MirStmt, locals: &[MirLocalDecl], fn_cname: &str, spawn_idx:
         }
         Rvalue::Call { func, args } => {
             let args_str = emit_call_args(func, args, locals);
-            let callee = emit_callee(func, locals);
+            let callee = channel_receive_variant(emit_callee(func, locals), &operand_ty(&Operand::Local(*dest), locals));
             if is_void_noreturn_callee(func) {
                 // `panic(msg)` — genuinely `noreturn void` in C (unlike an
                 // ordinary `Unit`-returning Certo function, which fakes a
@@ -579,7 +579,8 @@ fn emit_terminator(term: &Terminator, ret_ty: &Ty, locals: &[MirLocalDecl], out:
             if is_void_noreturn_callee(func) {
                 writeln!(out, "    {}({});", emit_callee(func, locals), args_str).unwrap();
             } else {
-                writeln!(out, "    {} = {}({});", local_name(*dest), emit_callee(func, locals), args_str).unwrap();
+                let callee = channel_receive_variant(emit_callee(func, locals), &operand_ty(&Operand::Local(*dest), locals));
+                writeln!(out, "    {} = {}({});", local_name(*dest), callee, args_str).unwrap();
             }
             writeln!(out, "    goto bb{};", next).unwrap();
         }
@@ -617,6 +618,18 @@ fn emit_operand(op: &Operand) -> String {
 /// caller and callee always agree on arity regardless of which specific
 /// lambda ends up there). See `emit_call_args` for the paired `.env` first
 /// argument this cast's signature expects.
+/// BACKLOG item 385 - `Channel.receive`/`tryReceive` of a payload kept as a heap copy (a record,
+/// Decimal, UUID) must hand back that copy as the Option's payload pointer, not a box around the
+/// slot pointer.
+fn channel_receive_variant(callee: String, dest_ty: &Ty) -> String {
+    let payload_boxed = matches!(dest_ty, Ty::Option(inner) if inner.needs_heap_box());
+    if payload_boxed && (callee == "certo_channel_receive" || callee == "certo_channel_try_receive") {
+        format!("{callee}_boxed")
+    } else {
+        callee
+    }
+}
+
 fn emit_callee(func: &Operand, locals: &[MirLocalDecl]) -> String {
     let Operand::Local(id) = func else { return emit_operand(func) };
     let Some(Ty::Fn { params, ret }) = locals.iter().find(|l| l.id == *id).map(|l| &l.ty) else {
@@ -670,6 +683,7 @@ fn emit_call_arg(func_c: &str, idx: usize, arg: &Operand, locals: &[MirLocalDecl
         // argument position as `List.push` and needs the identical
         // treatment, for the identical reason.
         ("certo_list_push", 1) | ("certo_list_push_mut", 1) | ("certo_list_upsert", 1)
+        | ("certo_channel_send", 1)
         | ("certo_host_provide", 2) => box_value(&expr, &operand_ty(arg, locals)),
         // BACKLOG item 338 — `Map<K,V>` stores both key and value in a
         // void* slot, same as `List<T>`'s own item slot above, but none of

@@ -575,6 +575,12 @@ fn generic_container_ret(full: Option<&str>, args: &[HirExpr]) -> Option<Ty> {
             },
             _ => None,
         },
+        // BACKLOG item 385 - `Channel.receive`/`tryReceive` of a `Channel<T>` give `Option<T>`.
+        Some("Channel.receive") | Some("Channel.tryReceive") => match args.first().map(|a| &a.ty) {
+            Some(Ty::Named { name, args: targs }) if name == "Channel" && targs.len() == 1 =>
+                Some(Ty::Option(Box::new(targs[0].clone()))),
+            _ => None,
+        },
         Some("Map.get") => args.first().and_then(map_kv).map(|(_, v)| Ty::Option(Box::new(v))),
         // BACKLOG item 338 — `Map.insert`'s own return type used to just
         // blindly copy its first (input-map) argument's type, unchanged.
@@ -3196,6 +3202,13 @@ fn lower_block(stmts: &[Stmt], span: Span, cx: &mut Cx) -> HirExpr {
                     if literal_matches_fixed_width(&value.node, d) { init.ty = d.clone(); }
                 }
                 resolve_empty_list_ty(&mut init, declared.as_ref());
+                // BACKLOG item 385 - an initializer whose type could not be recovered (a call to a
+                // stdlib constructor such as `Channel.new`) takes the declared type.
+                if matches!(init.ty, Ty::Error) {
+                    if let Some(d) = &declared {
+                        if !matches!(d, Ty::Error | Ty::Var(_)) { init.ty = d.clone(); }
+                    }
+                }
                 match &pattern.node {
                     Pattern::Ident { name, .. } => {
                         let local = cx.define_local(&name.node);

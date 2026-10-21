@@ -387,3 +387,43 @@ test "option differs" { assert(Some(3) != Some(4), "differs") }
     let (ok, out) = certo("module T\ntest \"t\" { val n: Int = \"hello\" }\nproperty \"p\" { undefinedFn(1) }\n", &["check"]);
     assert!(!ok && out.contains("E0200") && out.contains("E0206"), "{out}");
 }
+
+// BACKLOG item 385 - a Channel of Float or of a record carries its payload.
+#[test]
+fn channels_carry_floats_and_records() {
+    let (ok, out, err) = run_program(r####"module C
+type Order = { id: Int, total: Float }
+fn producer(ch: Channel<Float>): Int [io] = {
+  Channel.send(ch, 1.5)
+  Channel.send(ch, 2.5)
+  Channel.close(ch)
+  0
+}
+fn main(): Unit [io, async] = {
+  val ch: Channel<Float> = Channel.new(capacity: 4)
+  val t = spawn producer(ch)
+  var sum = 0.0
+  var more = true
+  while more {
+    match Channel.receive(ch) {
+      Some(v) => { sum = sum + v }
+      None => { more = false }
+    }
+  }
+  await t
+  println(floatToText(sum))
+  val oc: Channel<Order> = Channel.new(capacity: 2)
+  Channel.send(oc, Order { id: 1, total: 9.5 })
+  match Channel.tryReceive(oc) {
+    Some(o) => println(floatToText(o.total) ++ " " ++ intToText(o.id))
+    None => println("empty")
+  }
+  match Channel.tryReceive(oc) {
+    Some(o) => println("unexpected")
+    None => println("empty")
+  }
+}
+"####);
+    assert!(ok, "{err}");
+    assert_eq!(out, "4\n9.5 1\nempty\n");
+}

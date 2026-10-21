@@ -156,6 +156,17 @@ void* certo_channel_try_receive(CertoChannel* c) {
     return __certo_opt_box((int64_t)item);
 }
 
+/* `Channel<T>` whose payload is a heap copy (a record, Decimal, UUID): the Option's payload pointer is
+   the copy itself (BACKLOG item 385), which is what the slot holds. */
+void* certo_channel_receive_boxed(CertoChannel* c) {
+    void* r = certo_channel_receive(c);
+    return r ? *(void**)r : NULL;
+}
+void* certo_channel_try_receive_boxed(CertoChannel* c) {
+    void* r = certo_channel_try_receive(c);
+    return r ? *(void**)r : NULL;
+}
+
 /* Idempotent. Wakes every blocked sender/receiver so they can re-check
    `closed` and unblock instead of waiting forever. */
 int64_t certo_channel_close(CertoChannel* c) {
