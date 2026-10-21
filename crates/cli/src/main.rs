@@ -4910,6 +4910,28 @@ fn parse_rollback_step(args: &[String]) -> Result<usize, String> {
     Ok(count.unwrap_or(1))
 }
 
+/// The arguments after `certo db migrate up` (BACKLOG item 410): `--dry-run`, and `--step <n>`
+/// with a number. Anything else - an unknown option, a typo such as `--stpe`, a `--step` with no
+/// value, a stray word - is an error instead of being skipped (which used to apply every migration).
+fn parse_migrate_up_args(args: &[String]) -> Result<Option<usize>, String> {
+    let mut step: Option<usize> = None;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--dry-run" => {}
+            "--step" => {
+                let v = args.get(i + 1).ok_or_else(|| "--step requires a number".to_string())?;
+                step = Some(v.parse().map_err(|_| "--step requires a number".to_string())?);
+                i += 1;
+            }
+            other if other.starts_with("--") => return Err(format!("unknown option: {}", other)),
+            other => return Err(format!("unexpected argument: {}", other)),
+        }
+        i += 1;
+    }
+    Ok(step)
+}
+
 fn cmd_migrate(args: &[String]) {
     let sub = args.first().map(String::as_str).unwrap_or("");
     let project_root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
@@ -4926,12 +4948,10 @@ fn cmd_migrate(args: &[String]) {
             // integer among the args" scan) matches the spec's own
             // flag-with-value syntax and avoids misreading an unrelated
             // numeric-looking argument as a step count.
-            let step: Option<usize> = args.iter().position(|a| a == "--step")
-                .and_then(|i| args.get(i + 1))
-                .map(|v| v.parse().unwrap_or_else(|_| {
-                    eprintln!("error: --step requires a number");
-                    process::exit(2);
-                }));
+            let step: Option<usize> = parse_migrate_up_args(&args[1..]).unwrap_or_else(|msg| {
+                eprintln!("error: {}", msg);
+                process::exit(2);
+            });
             let migrations = load_migrations(&project_root);
             if !check_migrations_against_app_schema(&project_root, &migrations) {
                 process::exit(1);
@@ -5463,6 +5483,18 @@ mod fullstack_template_tests {
         let src = fullstack_ui_source("myApp");
         assert!(src.contains("id:    Text"), "id must be Text, not Int:\n{src}");
         assert!(src.contains("columns: [id, title, done]"), "id must be listed in columns so the Create form asks for it:\n{src}");
+    }
+
+    #[test]
+    fn migrate_up_arguments_are_checked() {
+        let a = |xs: &[&str]| xs.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(parse_migrate_up_args(&a(&[])), Ok(None));
+        assert_eq!(parse_migrate_up_args(&a(&["--dry-run", "--step", "2"])), Ok(Some(2)));
+        assert!(parse_migrate_up_args(&a(&["--bogus", "--dry-run"])).unwrap_err().contains("unknown option: --bogus"));
+        assert!(parse_migrate_up_args(&a(&["--stpe", "1"])).unwrap_err().contains("--stpe"));
+        assert!(parse_migrate_up_args(&a(&["--dry-run", "--step"])).unwrap_err().contains("requires a number"));
+        assert!(parse_migrate_up_args(&a(&["--step", "x"])).unwrap_err().contains("requires a number"));
+        assert!(parse_migrate_up_args(&a(&["3"])).unwrap_err().contains("unexpected argument"));
     }
 
     #[test]
