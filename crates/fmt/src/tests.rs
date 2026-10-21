@@ -833,3 +833,20 @@ fn a_view_keeps_its_live_values_keys_and_layout() {
         assert!(out.contains(part), "missing `{}` in:\n{}", part, out);
     }
 }
+
+// BACKLOG item 445 - comments survive formatting.
+#[test]
+fn comments_are_kept_where_they_were() {
+    let src = "module C\n\n// header note\n// second line\nfn f(): Int = 1 // trailing\n\n/// doc for g\nfn g(x: Int): Int = {\n  // inside\n  val y = x + 1 // add one\n  y\n  // before close\n}\n\n// end of file\n";
+    let out = format_source(src).unwrap();
+    let want = "module C\n\n// header note\n// second line\nfn f(): Int = 1 // trailing\n\n/// doc for g\nfn g(x: Int): Int = {\n    // inside\n    val y = x + 1 // add one\n    y\n    // before close\n}\n\n// end of file\n";
+    assert_eq!(out, want);
+    // Formatting the result again changes nothing.
+    assert_eq!(format_source(&out).unwrap(), out);
+}
+
+#[test]
+fn a_file_without_comments_formats_as_before() {
+    let out = format_source("module C\nfn f(): Int = 1\n").unwrap();
+    assert!(!out.contains("//"), "{out}");
+}

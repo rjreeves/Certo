@@ -14,8 +14,11 @@ pub use fmt_type::fmt_type;
 /// corrupts a file it can't parse).
 pub fn format_source(src: &str) -> Result<String, Vec<certo_parser::ParseError>> {
     let module = certo_parser::parse_verbatim(src)?;
-    Ok(fmt_module(&module))
+    // BACKLOG item 445 - the AST has no comments; they are put back from the source.
+    Ok(comments::restore(src, fmt_module(&module)))
 }
+
+mod comments;
 
 #[cfg(test)]
 mod tests;

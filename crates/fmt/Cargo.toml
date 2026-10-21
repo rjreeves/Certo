@@ -11,3 +11,4 @@ path = "src/main.rs"
 [dependencies]
 certo-ast    = { path = "../ast" }
 certo-parser = { path = "../parser" }
+certo-lexer  = { path = "../lexer" }
