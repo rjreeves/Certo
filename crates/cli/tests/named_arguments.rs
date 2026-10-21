@@ -227,3 +227,12 @@ fn main(): Unit [io] = {
     let r = Command::new(&exe).output().unwrap();
     assert_eq!(String::from_utf8_lossy(&r.stdout).replace("\r\n", "\n"), "6\n5\n2\n0\n0\ninvalid\n");
 }
+
+// BACKLOG item 366 - `await` of a plain value is an error; an async call still runs synchronously.
+#[test]
+fn await_needs_a_task_or_a_call() {
+    let (ok, out) = certo("module A\nasync fn fetch(id: Int): Int = id + 1\nfn main(): Unit [io, async] = {\n  val x = await 5\n  println(intToText(x))\n}\n", &["check"]);
+    assert!(!ok && out.contains("E0234"), "{out}");
+    let (ok, out) = certo("module A\nasync fn fetch(id: Int): Int = id + 1\nfn main(): Unit [io, async] = {\n  val v = fetch(3)\n  println(intToText(v))\n  val w = await fetch(4)\n  println(intToText(w))\n  val t = spawn fetch(5)\n  println(intToText(await t))\n}\n", &["check"]);
+    assert!(ok, "{out}");
+}

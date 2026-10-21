@@ -1090,11 +1090,25 @@ pub fn infer(expr: &S<Expr>, ctx: &mut Ctx<'_>) -> Ty {
 
         // BACKLOG item 384 - `await` unwraps a task handle (`Task<R>` -> `R`); awaiting
         // anything else (`await <plain call>`) is the identity, as before.
-        Expr::Await { expr, .. } => {
+        Expr::Await { expr, span } => {
             let ty = infer(expr, ctx);
             match ctx.uf.find(ty) {
                 Ty::Named { name, mut args } if name == "__CertoTask" && args.len() == 1 => args.remove(0),
-                other => other,
+                other => {
+                    // BACKLOG item 366 - `await` takes a task, a call (`await fetch(1)`,
+                    // `await parallel { .. }`), or something still unresolved. A literal or a
+                    // variable that already holds a plain value has nothing to wait for.
+                    let plain_value = match &expr.node {
+                        Expr::Lit { .. } => true,
+                        Expr::Path { .. } => matches!(other, Ty::Int | Ty::Float | Ty::Bool | Ty::Text | Ty::Unit | Ty::Decimal(_)
+                            | Ty::List(_) | Ty::Option(_) | Ty::Result(..) | Ty::Tuple(_)),
+                        _ => false,
+                    };
+                    if plain_value {
+                        ctx.errors.push(TypeError { kind: TypeErrorKind::AwaitNotATask { ty: other.clone() }, span: *span });
+                    }
+                    other
+                }
             }
         }
 
