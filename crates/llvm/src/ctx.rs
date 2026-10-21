@@ -80,6 +80,16 @@ pub struct ModuleCtx {
     /// Layout of every non-generic sum type the module declares, by type name.
     pub enums: HashMap<String, EnumLayout>,
 
+    /// Field types of every record, in declared order (for structural `==`).
+    pub record_tys: HashMap<String, Vec<certo_typeck::Ty>>,
+
+    /// Every sum type's variants as `(tag, payload types)` (for structural `==`).
+    pub variant_tys: HashMap<String, Vec<(usize, Vec<certo_typeck::Ty>)>>,
+
+    /// Structural-equality functions: type key -> symbol, and the generated bodies.
+    pub eq_names: HashMap<String, String>,
+    pub eq_bodies: Vec<String>,
+
     /// Variant name -> the sum type it belongs to (only types in `enums`).
     pub variant_enum: HashMap<String, String>,
 

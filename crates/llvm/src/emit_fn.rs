@@ -36,7 +36,70 @@ use crate::ty::{ast_ty_to_llvm, ast_ret_ty_to_llvm, llvm_fn_name, llvm_ty};
 /// (for the control-flow graph).  Side-effects `ctx` with string literals and
 /// external declarations.
 pub fn emit_fn(ast_fn: &FnDecl, mir_fn: &MirFn, ctx: &mut ModuleCtx) -> String {
-    FnEmitter::new(ast_fn, mir_fn, ctx).emit()
+    FnEmitter::new(FnShape::from_ast(ast_fn, mir_fn), mir_fn, ctx).emit()
+}
+
+/// Emit a function MIR lifted out of another (a lambda, or the wrapper around a
+/// named function used as a value). It has no declaration, so its signature
+/// comes from its own locals.
+pub fn emit_lifted_fn(mir_fn: &MirFn, ctx: &mut ModuleCtx) -> String {
+    FnEmitter::new(FnShape::from_mir(mir_fn), mir_fn, ctx).emit()
+}
+
+/// The LLVM signature of a lifted function: `(ptr env, params...) -> ret`.
+pub fn lifted_sig(mir_fn: &MirFn) -> (String, Vec<String>) {
+    let shape = FnShape::from_mir(mir_fn);
+    (shape.ret_llty, shape.params.into_iter().map(|(_, t)| t).collect())
+}
+
+/// How a value of this Certo type crosses a closure call: an erased (`Var`/unknown) value
+/// travels as an `i64`, which holds a pointer, an Int or a Float's bits on every target.
+pub fn closure_slot_ty(ty: &Ty) -> String {
+    match ty {
+        Ty::Var(_) | Ty::Error => "i64".into(),
+        other => llvm_ty(other),
+    }
+}
+
+/// A closure's return type as written in its function: `Unit` is `void`.
+pub fn closure_ret_ty(ty: &Ty) -> String {
+    match ty {
+        Ty::Unit => "void".into(),
+        other => closure_slot_ty(other),
+    }
+}
+
+/// A function's name, return type and parameters, from its declaration or (for
+/// a lifted function) from its MIR locals.
+struct FnShape {
+    name:     String,
+    ret_llty: String,
+    params:   Vec<(MirLocal, String)>,
+    lifted:   bool,
+}
+
+impl FnShape {
+    fn from_ast(ast_fn: &FnDecl, mir_fn: &MirFn) -> Self {
+        let params = ast_fn.params.iter().map(|p| {
+            let id = mir_fn.locals.iter().find(|l| l.name == p.name.node).map(|l| l.id).unwrap_or(0);
+            (id, ast_ty_to_llvm(&p.ty.node))
+        }).collect();
+        FnShape {
+            name: ast_fn.name.node.clone(),
+            ret_llty: ast_ret_ty_to_llvm(ast_fn.ret_ty.as_ref().map(|s| &s.node)),
+            params,
+            lifted: false,
+        }
+    }
+
+    fn from_mir(mir_fn: &MirFn) -> Self {
+        let ret_llty = mir_fn.locals.first().map(|l| closure_ret_ty(&l.ty)).unwrap_or_else(|| "void".into());
+        let params = mir_fn.locals.iter().skip(1).take(mir_fn.param_count).enumerate().map(|(i, l)| {
+            // The first parameter is the closure environment, always a pointer.
+            (l.id, if i == 0 { "ptr".to_string() } else { closure_slot_ty(&l.ty) })
+        }).collect();
+        FnShape { name: mir_fn.name.clone(), ret_llty, params, lifted: true }
+    }
 }
 
 // ------------------------------------------------------------------ //
@@ -47,25 +110,19 @@ pub fn emit_fn(ast_fn: &FnDecl, mir_fn: &MirFn, ctx: &mut ModuleCtx) -> String {
 ///  1. Seeding from AST param/ret declarations.
 ///  2. Propagating through assignments until stable.
 fn compute_local_types(
-    ast_fn: &FnDecl,
+    shape: &FnShape,
     mir_fn: &MirFn,
     sigs: &HashMap<String, FnSig>,
 ) -> HashMap<MirLocal, String> {
     let mut map: HashMap<MirLocal, String> = HashMap::new();
 
     // Ret slot (local 0) ← declared return type
-    let ret_llty = ast_ret_ty_to_llvm(
-        ast_fn.ret_ty.as_ref().map(|s| &s.node)
-    );
     // For the alloca, Unit becomes i8; the actual `ret void` is handled elsewhere.
-    map.insert(0, if ret_llty == "void" { "i8".into() } else { ret_llty });
+    map.insert(0, if shape.ret_llty == "void" { "i8".into() } else { shape.ret_llty.clone() });
 
-    // Params: match by name
-    for ast_param in &ast_fn.params {
-        let llty = ast_ty_to_llvm(&ast_param.ty.node);
-        if let Some(ml) = mir_fn.locals.iter().find(|l| l.name == ast_param.name.node) {
-            map.insert(ml.id, llty);
-        }
+    // Params
+    for (id, llty) in &shape.params {
+        map.insert(*id, llty.clone());
     }
 
     // MIR already knows each local's type (records, Text, Int, ...); use it
@@ -91,6 +148,14 @@ fn compute_local_types(
         }
     }
 
+    // A lifted function's signature is fixed by its closure type, whatever its locals say.
+    if shape.lifted {
+        map.insert(0, if shape.ret_llty == "void" { "i8".into() } else { shape.ret_llty.clone() });
+        for (id, llty) in &shape.params {
+            map.insert(*id, llty.clone());
+        }
+    }
+
     // Propagation: repeat until no new types are learned
     let mut changed = true;
     while changed {
@@ -99,7 +164,7 @@ fn compute_local_types(
             for stmt in &bb.stmts {
                 let MirStmt::Assign { dest, rvalue, .. } = stmt;
                 if map.contains_key(dest) { continue; }
-                if let Some(t) = infer_rvalue(&map, sigs, rvalue) {
+                if let Some(t) = infer_rvalue(&map, sigs, &mir_fn.locals, rvalue) {
                     map.insert(*dest, t);
                     changed = true;
                 }
@@ -108,7 +173,7 @@ fn compute_local_types(
             // it's a function this module defines, otherwise ptr.
             if let Some(Terminator::Call { func, dest, .. }) = &bb.terminator {
                 if !map.contains_key(dest) {
-                    map.insert(*dest, call_result_llty(sigs, func));
+                    map.insert(*dest, call_result_llty(sigs, &mir_fn.locals, func));
                     changed = true;
                 }
             }
@@ -126,7 +191,7 @@ fn compute_local_types(
 /// The type of a call's result local: the callee's real return type if the
 /// module defines it (`Unit` is held in an `i8` slot, like the return slot),
 /// else `ptr` — the erased type every unresolved runtime call gets.
-fn call_result_llty(sigs: &HashMap<String, FnSig>, func: &Operand) -> String {
+fn call_result_llty(sigs: &HashMap<String, FnSig>, locals: &[certo_mir::MirLocalDecl], func: &Operand) -> String {
     if let Operand::Global(n) = func {
         if let Some(sig) = sigs.get(&llvm_fn_name(n)) {
             return if sig.ret == "void" { "i8".into() } else { sig.ret.clone() };
@@ -135,10 +200,17 @@ fn call_result_llty(sigs: &HashMap<String, FnSig>, func: &Operand) -> String {
             return if rt.ret == "void" { "i8".into() } else { rt.ret.into() };
         }
     }
+    // A call through a function value: the closure type says what comes back.
+    if let Operand::Local(id) = func {
+        if let Some(Ty::Fn { ret, .. }) = locals.iter().find(|l| l.id == *id).map(|l| &l.ty) {
+            let r = closure_ret_ty(ret);
+            return if r == "void" { "i8".into() } else { r };
+        }
+    }
     "ptr".into()
 }
 
-fn infer_rvalue(map: &HashMap<MirLocal, String>, sigs: &HashMap<String, FnSig>, rv: &Rvalue) -> Option<String> {
+fn infer_rvalue(map: &HashMap<MirLocal, String>, sigs: &HashMap<String, FnSig>, locals: &[certo_mir::MirLocalDecl], rv: &Rvalue) -> Option<String> {
     match rv {
         Rvalue::Use(op)          => operand_llty(map, op),
         Rvalue::UnOp { arg, .. } => operand_llty(map, arg),
@@ -146,7 +218,7 @@ fn infer_rvalue(map: &HashMap<MirLocal, String>, sigs: &HashMap<String, FnSig>, 
             let lty = operand_llty(map, lhs)?;
             Some(binop_result_llty(op, &lty))
         }
-        Rvalue::Call { func, .. } => Some(call_result_llty(sigs, func)),
+        Rvalue::Call { func, .. } => Some(call_result_llty(sigs, locals, func)),
         Rvalue::Field { .. }     => Some("ptr".into()),
         Rvalue::Aggregate(_, _)  => Some("ptr".into()),
         // Concurrency is not supported by the experimental LLVM backend.
@@ -198,7 +270,7 @@ fn binop_result_llty(op: &BinOp, lty: &str) -> String {
 // ------------------------------------------------------------------ //
 
 struct FnEmitter<'ctx> {
-    ast_fn:    FnDecl,           // owned clone
+    shape:     FnShape,
     mir_fn:    MirFn,
     ctx:       &'ctx mut ModuleCtx,
     local_ty:  HashMap<MirLocal, String>,  // LLVM type for each local
@@ -207,10 +279,10 @@ struct FnEmitter<'ctx> {
 }
 
 impl<'ctx> FnEmitter<'ctx> {
-    fn new(ast_fn: &FnDecl, mir_fn: &MirFn, ctx: &'ctx mut ModuleCtx) -> Self {
-        let local_ty = compute_local_types(ast_fn, mir_fn, &ctx.fn_sigs);
+    fn new(shape: FnShape, mir_fn: &MirFn, ctx: &'ctx mut ModuleCtx) -> Self {
+        let local_ty = compute_local_types(&shape, mir_fn, &ctx.fn_sigs);
         Self {
-            ast_fn: ast_fn.clone(),
+            shape,
             mir_fn: mir_fn.clone(),
             ctx,
             local_ty,
@@ -227,7 +299,7 @@ impl<'ctx> FnEmitter<'ctx> {
 
     /// Record a construct this backend can't compile (see `ModuleCtx::errors`).
     fn unsupported(&mut self, what: &str) {
-        let name = self.ast_fn.name.node.clone();
+        let name = self.shape.name.clone();
         self.ctx.unsupported(&name, what);
     }
 
@@ -309,7 +381,16 @@ impl<'ctx> FnEmitter<'ctx> {
         match rvalue {
             Rvalue::Use(op) => {
                 let (lty, val) = self.load(&op);
-                self.w(&format!("  store {lty} {val}, ptr {dest_ptr}"));
+                self.store_converted(&lty, &val, &dest_lty, &dest_ptr);
+            }
+
+            // `==`/`!=` on a record, sum type, list, tuple or option: compare structurally.
+            Rvalue::BinOp { op: op @ (BinOp::Eq | BinOp::NotEq), lhs, rhs }
+                if !Self::is_null_operand(&lhs) && !Self::is_null_operand(&rhs)
+                    && (self.structural_operand_ty(&lhs).is_some() || self.structural_operand_ty(&rhs).is_some()) =>
+            {
+                let ty = self.structural_operand_ty(&lhs).or_else(|| self.structural_operand_ty(&rhs)).unwrap();
+                self.emit_structural_eq(matches!(op, BinOp::NotEq), &ty, &lhs, &rhs, &dest_lty, &dest_ptr);
             }
 
             // `==`/`!=` where both sides are Text: compare contents, not addresses.
@@ -357,6 +438,13 @@ impl<'ctx> FnEmitter<'ctx> {
 
             Rvalue::Field { base, field } => {
                 self.emit_field(&base, &field, &dest_lty, &dest_ptr);
+            }
+
+            // A closure: `{ fn, env }` (see `make_closure` in MIR) is a block of two slots.
+            Rvalue::Aggregate(AggregateKind::Record(names), ops)
+                if names.len() == 2 && names[0] == "fn" && names[1] == "env" && self.is_fn_local(dest) =>
+            {
+                self.emit_closure_new(&ops, &dest_ptr);
             }
 
             Rvalue::Aggregate(AggregateKind::Record(names), ops) => {
@@ -533,6 +621,14 @@ impl<'ctx> FnEmitter<'ctx> {
             .map(|(t, v)| format!("{t} {v}"))
             .collect::<Vec<_>>().join(", ");
 
+        // A call through a function value held in a local.
+        if let Operand::Local(id) = func {
+            if let Some(Ty::Fn { params, ret }) = self.local_mir_ty(*id).cloned() {
+                self.emit_closure_call(*id, &params, &ret, &arg_pairs, dest_lty, dest_ptr);
+                return;
+            }
+        }
+
         // A function this module defines is a local call: no `declare` (LLVM
         // rejects declare + define of one symbol) and its own return type.
         let local_sig = match func {
@@ -617,6 +713,70 @@ impl<'ctx> FnEmitter<'ctx> {
         }
     }
 
+    fn local_mir_ty(&self, id: MirLocal) -> Option<&Ty> {
+        self.mir_fn.locals.iter().find(|l| l.id == id).map(|l| &l.ty)
+    }
+
+    fn is_fn_local(&self, id: MirLocal) -> bool {
+        matches!(self.local_mir_ty(id), Some(Ty::Fn { .. }))
+    }
+
+    /// Build a closure: a 16-byte block with the function address in slot 0 and
+    /// its environment (or null) in slot 1.
+    fn emit_closure_new(&mut self, ops: &[Operand], dest_ptr: &str) {
+        let [func, env] = ops else {
+            self.unsupported("a closure needs a function and an environment");
+            return;
+        };
+        let (fty, fval) = self.load(func);
+        let (ety, eval) = self.load(env);
+        let fp = self.as_ptr(&fty, &fval);
+        let ep = self.as_ptr(&ety, &eval);
+        self.ctx.declare_extern(crate::rt::ALLOC.into(), "ptr".into(), vec!["i64".into()]);
+        let b = self.fresh();
+        self.w(&format!("  %v{b} = call ptr @{}(i64 16)", crate::rt::ALLOC));
+        self.w(&format!("  store ptr {fp}, ptr %v{b}"));
+        let g = self.fresh();
+        self.w(&format!("  %v{g} = getelementptr i8, ptr %v{b}, i64 8"));
+        self.w(&format!("  store ptr {ep}, ptr %v{g}"));
+        self.w(&format!("  store ptr %v{b}, ptr {dest_ptr}"));
+    }
+
+    /// Call the function value in local `id`: load its function and environment
+    /// from the closure block and pass the environment first.
+    fn emit_closure_call(
+        &mut self, id: MirLocal, params: &[Ty], ret: &Ty,
+        args: &[(String, String)], dest_lty: &str, dest_ptr: &str,
+    ) {
+        if args.len() != params.len() {
+            self.unsupported(&format!("a closure taking {} argument(s) is called with {}", params.len(), args.len()));
+            return;
+        }
+        let (cty, cval) = self.load(&Operand::Local(id));
+        let clo = self.as_ptr(&cty, &cval);
+        let fnp = self.fresh();
+        self.w(&format!("  %v{fnp} = load ptr, ptr {clo}"));
+        let eg = self.fresh();
+        self.w(&format!("  %v{eg} = getelementptr i8, ptr {clo}, i64 8"));
+        let envp = self.fresh();
+        self.w(&format!("  %v{envp} = load ptr, ptr %v{eg}"));
+        let mut arg_strs = vec![format!("ptr %v{envp}")];
+        for ((aty, aval), pty) in args.iter().zip(params) {
+            let want = closure_slot_ty(pty);
+            let Some(v) = self.convert(aty, aval, &want) else { return };
+            arg_strs.push(format!("{want} {v}"));
+        }
+        let rty = closure_ret_ty(ret);
+        if rty == "void" {
+            self.w(&format!("  call void %v{fnp}({})", arg_strs.join(", ")));
+            self.w(&format!("  store i8 0, ptr {dest_ptr}"));
+        } else {
+            let r = self.fresh();
+            self.w(&format!("  %v{r} = call {rty} %v{fnp}({})", arg_strs.join(", ")));
+            self.store_converted(&rty, &format!("%v{r}"), dest_lty, dest_ptr);
+        }
+    }
+
     /// The record type a local holds, if its MIR type is a declared record.
     fn record_of_local(&self, id: MirLocal) -> Option<String> {
         let local = self.mir_fn.locals.iter().find(|l| l.id == id)?;
@@ -649,6 +809,8 @@ impl<'ctx> FnEmitter<'ctx> {
                 return Some(format!("%v{w}"));
             }
             ("i64", "ptr") => self.w(&format!("  %v{v} = inttoptr i64 {val} to ptr")),
+            ("i64", "double") => self.w(&format!("  %v{v} = bitcast i64 {val} to double")),
+            ("i64", t) if narrow(t) => self.w(&format!("  %v{v} = trunc i64 {val} to {t}")),
             ("double", "i64") => self.w(&format!("  %v{v} = bitcast double {val} to i64")),
             (f, "i64") if narrow(f) => self.w(&format!("  %v{v} = zext {f} {val} to i64")),
             ("double", "ptr") => {
@@ -753,6 +915,46 @@ impl<'ctx> FnEmitter<'ctx> {
                 .is_some_and(|l| matches!(l.ty, Ty::Text | Ty::BoundedText(_))),
             _ => false,
         }
+    }
+
+    /// `None` / the null an Option is tested against.
+    fn is_null_operand(op: &Operand) -> bool {
+        matches!(op, Operand::Global(n) if n == "None" || n == "__NULL")
+    }
+
+    /// The type of an operand when `==` on it is compiled structurally (see `crate::eq`).
+    fn structural_operand_ty(&self, op: &Operand) -> Option<Ty> {
+        let ty = match op {
+            Operand::Local(id) => self.local_mir_ty(*id)?.clone(),
+            Operand::Global(n) => {
+                let t = self.ctx.variant_enum.get(n)?;
+                Ty::Named { name: t.clone(), args: vec![] }
+            }
+            _ => return None,
+        };
+        crate::eq::is_structural(self.ctx, &ty).then_some(ty)
+    }
+
+    /// `a == b` / `a != b` through the generated equality function for `ty`.
+    fn emit_structural_eq(&mut self, negate: bool, ty: &Ty, lhs: &Operand, rhs: &Operand, dest_lty: &str, dest_ptr: &str) {
+        let (lty, lv) = self.load(lhs);
+        let (rty, rv) = self.load(rhs);
+        let a = self.as_ptr(&lty, &lv);
+        let b = self.as_ptr(&rty, &rv);
+        let sym = match crate::eq::eq_symbol(self.ctx, ty) {
+            Ok(s) => s,
+            Err(e) => { self.unsupported(&e); return; }
+        };
+        let r = self.fresh();
+        self.w(&format!("  %v{r} = call zeroext i1 @{sym}(ptr {a}, ptr {b})"));
+        let result = if negate {
+            let n = self.fresh();
+            self.w(&format!("  %v{n} = xor i1 %v{r}, 1"));
+            format!("%v{n}")
+        } else {
+            format!("%v{r}")
+        };
+        self.store_converted("i1", &result, dest_lty, dest_ptr);
     }
 
     /// `a == b` / `a != b` on Text, through the runtime's `Text.eq`.
@@ -935,7 +1137,13 @@ impl<'ctx> FnEmitter<'ctx> {
             Operand::Local(id) if layout.is_none() && enum_slot.is_none() => self.tuple_slot(*id, field),
             _ => None,
         };
-        let slot = layout.as_ref().and_then(|l| l.field(field)).map(|(i, _)| i).or(enum_slot).or(tuple_slot);
+        // A closure environment parameter has no type of its own: field `N` is capture `N`.
+        let env_slot = match base {
+            Operand::Local(id) if layout.is_none() && enum_slot.is_none() && tuple_slot.is_none()
+                && matches!(self.local_mir_ty(*id), Some(Ty::Error | Ty::Var(_))) => field.parse::<usize>().ok(),
+            _ => None,
+        };
+        let slot = layout.as_ref().and_then(|l| l.field(field)).map(|(i, _)| i).or(enum_slot).or(tuple_slot).or(env_slot);
         let (Some(slot), (_, bv)) = (slot, self.load(base)) else {
             self.unsupported(&format!("field access `.{field}` on a value that is not a declared record is not supported by the LLVM backend"));
             let v = self.fresh();
@@ -953,6 +1161,24 @@ impl<'ctx> FnEmitter<'ctx> {
     /// Emit a call to a runtime function the shim implements, checking that
     /// the arguments have the types the shim expects.
     fn emit_rt_call(&mut self, rt: &'static crate::rt::RtFn, args: &[(String, String)], dest_ptr: &str) {
+        // An erased value (a fold's accumulator, a cell's contents) may arrive as an Int, a
+        // Float's bits or a pointer; the runtime takes it as one pointer-sized slot.
+        let erased = matches!(rt.certo, "List.fold" | "List.reduce" | "__certo_cell_new" | "__certo_cell_set");
+        let converted: Vec<(String, String)>;
+        let args = if erased {
+            let mut out = Vec::new();
+            for ((t, v), want) in args.iter().zip(rt.params) {
+                if t == want || !matches!(t.as_str(), "i64" | "double" | "i1" | "i8" | "i16" | "i32") {
+                    out.push((t.clone(), v.clone()));
+                } else if let Some(c) = self.convert(t, v, want) {
+                    out.push(((*want).to_string(), c));
+                } else {
+                    out.push((t.clone(), v.clone()));
+                }
+            }
+            converted = out;
+            &converted[..]
+        } else { args };
         let ok = args.len() == rt.params.len()
             && args.iter().zip(rt.params).all(|((t, _), want)| t.as_str() == *want);
         if !ok {
@@ -1031,22 +1257,11 @@ impl<'ctx> FnEmitter<'ctx> {
     // ── Top-level ─────────────────────────────────────────────────────
 
     pub fn emit(mut self) -> String {
-        let fname    = llvm_fn_name(&self.ast_fn.name.node);
-        let ret_llty = ast_ret_ty_to_llvm(
-            self.ast_fn.ret_ty.as_ref().map(|s| &s.node)
-        );
+        let fname    = llvm_fn_name(&self.shape.name);
+        let ret_llty = self.shape.ret_llty.clone();
 
-        // LLVM parameter list (from AST, not HIR)
-        let params: String = self.ast_fn.params.iter()
-            .map(|p| {
-                let lty = ast_ty_to_llvm(&p.ty.node);
-                // Find the MIR local id for this param by name
-                let id  = self.mir_fn.locals.iter()
-                    .find(|l| l.name == p.name.node)
-                    .map(|l| l.id)
-                    .unwrap_or(0);
-                format!("{lty} %p{id}")
-            })
+        let params: String = self.shape.params.iter()
+            .map(|(id, lty)| format!("{lty} %p{id}"))
             .collect::<Vec<_>>()
             .join(", ");
 
@@ -1060,12 +1275,8 @@ impl<'ctx> FnEmitter<'ctx> {
         }
 
         // store params into their alloca slots
-        for param in self.ast_fn.params.clone() {
-            let lty = ast_ty_to_llvm(&param.ty.node);
-            if let Some(ml) = self.mir_fn.locals.iter().find(|l| l.name == param.name.node) {
-                let id = ml.id;
-                self.w(&format!("  store {lty} %p{id}, ptr {}", Self::local_ptr(id)));
-            }
+        for (id, lty) in self.shape.params.clone() {
+            self.w(&format!("  store {lty} %p{id}, ptr {}", Self::local_ptr(id)));
         }
 
         self.w("  br label %bb0");

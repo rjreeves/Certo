@@ -2554,12 +2554,23 @@ fn lower_expr(expr: &S<Expr>, cx: &mut Cx) -> HirExpr {
             cx.push_scope();
             let hir_params: Vec<HirParam> = params.iter().map(|p| {
                 let local = cx.define_local(&p.name.node);
-                HirParam { local, name: p.name.node.clone(), ty: Ty::Error, span: p.span }
+                // A written parameter type is the parameter's type.
+                let tp_names: Vec<&str> = cx.current_type_params.iter().map(|s| s.as_str()).collect();
+                let ty = p.ty.as_ref().map(|t| ast_ty_to_ty_with_params(&t.node, &tp_names, &cx.type_aliases))
+                    .unwrap_or(Ty::Error);
+                if !matches!(ty, Ty::Error) { cx.local_types.insert(local, ty.clone()); }
+                HirParam { local, name: p.name.node.clone(), ty, span: p.span }
             }).collect();
             let body = lower_expr(body, cx);
             cx.pop_scope();
             let captures = collect_lambda_captures(&body, capture_threshold);
-            HirExpr { kind: HirExprKind::Lambda { params: hir_params, body: Box::new(body), captures, ret_hint: Ty::Error }, ty: Ty::Error, span }
+            // With every parameter written and the result known, the lambda is a typed function
+            // value, so a call through it has a known result type.
+            let fn_ty = if !hir_params.is_empty() && hir_params.iter().all(|p| !matches!(p.ty, Ty::Error))
+                && !matches!(body.ty, Ty::Error | Ty::Var(_)) {
+                Ty::Fn { params: hir_params.iter().map(|p| p.ty.clone()).collect(), ret: Box::new(body.ty.clone()) }
+            } else { Ty::Error };
+            HirExpr { kind: HirExprKind::Lambda { params: hir_params, body: Box::new(body), captures, ret_hint: Ty::Error }, ty: fn_ty, span }
         }
 
         Expr::List { elements, .. } => {

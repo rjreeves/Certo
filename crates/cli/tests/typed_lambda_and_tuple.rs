@@ -73,3 +73,18 @@ fn main(): Unit [io] = {
 "####);
     assert_eq!(out, "2\nb false\n1 2.5 x\n2.5y\n");
 }
+
+// BACKLOG item 437 - an annotated parameter of a lambda bound with `val` keeps its type, and a
+// call through the lambda has the type of its body (it printed `2` for 2.5).
+#[test]
+fn an_annotated_lambda_bound_to_a_val_keeps_its_float_type() {
+    let out = run(r####"module T
+fn main(): Unit [io] = {
+  val half = (x: Float) => x / 2.0
+  println(floatToText(half(5.0)))
+  val scale = (x: Float, k: Int) => x * 2.0
+  println(floatToText(scale(1.25, 3)))
+}
+"####);
+    assert_eq!(out, "2.5\n2.5\n");
+}

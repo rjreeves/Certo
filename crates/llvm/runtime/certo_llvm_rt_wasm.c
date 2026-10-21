@@ -190,3 +190,88 @@ int64_t certo_rt_pow(int64_t base, int64_t exp) {
     }
     return result;
 }
+
+
+/* ---- Closures and higher-order list functions ----
+ * A closure is a block with its function in slot 0 and its environment in slot 1 (8-byte
+ * slots whatever the pointer width). A callback takes the environment first, then its
+ * arguments as erased 64-bit values (an Int, a pointer, a Float's bits), and returns the same;
+ * a predicate returns 0 or 1. */
+typedef int64_t (*certo_rt_fn1_t)(void *, int64_t);
+typedef int64_t (*certo_rt_fn2_t)(void *, int64_t, int64_t);
+
+static void *certo_rt_clo_fn(void *c)  { return *(void **)c; }
+static void *certo_rt_clo_env(void *c) { return *(void **)((char *)c + 8); }
+
+void *certo_rt_list_map(void *l, void *c) {
+    certo_rt_list_t *list = (certo_rt_list_t *)l;
+    int64_t n = list ? list->len : 0;
+    certo_rt_fn1_t fn = (certo_rt_fn1_t)certo_rt_clo_fn(c);
+    void *env = certo_rt_clo_env(c);
+    certo_rt_list_t *out = certo_rt_list_alloc(n);
+    for (int64_t i = 0; i < n; i++) out->data[i] = fn(env, list->data[i]);
+    return out;
+}
+
+void *certo_rt_list_filter(void *l, void *c) {
+    certo_rt_list_t *list = (certo_rt_list_t *)l;
+    int64_t n = list ? list->len : 0;
+    certo_rt_fn1_t fn = (certo_rt_fn1_t)certo_rt_clo_fn(c);
+    void *env = certo_rt_clo_env(c);
+    certo_rt_list_t *out = certo_rt_list_alloc(n);
+    int64_t k = 0;
+    for (int64_t i = 0; i < n; i++) if (fn(env, list->data[i]) & 0xff) out->data[k++] = list->data[i];
+    out->len = k;
+    return out;
+}
+
+/* List.fold(xs, init, f): the accumulator travels as a pointer-sized value, as in the C runtime. */
+void *certo_rt_list_fold(void *l, void *init, void *c) {
+    certo_rt_list_t *list = (certo_rt_list_t *)l;
+    certo_rt_fn2_t fn = (certo_rt_fn2_t)certo_rt_clo_fn(c);
+    void *env = certo_rt_clo_env(c);
+    int64_t acc = (int64_t)(__UINTPTR_TYPE__)init;
+    int64_t n = list ? list->len : 0;
+    for (int64_t i = 0; i < n; i++) acc = fn(env, acc, list->data[i]);
+    return (void *)(__UINTPTR_TYPE__)acc;
+}
+
+void certo_rt_list_for_each(void *l, void *c) {
+    certo_rt_list_t *list = (certo_rt_list_t *)l;
+    certo_rt_fn1_t fn = (certo_rt_fn1_t)certo_rt_clo_fn(c);
+    void *env = certo_rt_clo_env(c);
+    int64_t n = list ? list->len : 0;
+    for (int64_t i = 0; i < n; i++) fn(env, list->data[i]);
+}
+
+/* The slot of the first element the predicate accepts, which is a valid Some(element); else NULL. */
+void *certo_rt_list_find(void *l, void *c) {
+    certo_rt_list_t *list = (certo_rt_list_t *)l;
+    certo_rt_fn1_t fn = (certo_rt_fn1_t)certo_rt_clo_fn(c);
+    void *env = certo_rt_clo_env(c);
+    int64_t n = list ? list->len : 0;
+    for (int64_t i = 0; i < n; i++) if (fn(env, list->data[i]) & 0xff) return &list->data[i];
+    return 0;
+}
+
+_Bool certo_rt_list_any(void *l, void *c) {
+    return certo_rt_list_find(l, c) != 0;
+}
+
+_Bool certo_rt_list_all(void *l, void *c) {
+    certo_rt_list_t *list = (certo_rt_list_t *)l;
+    certo_rt_fn1_t fn = (certo_rt_fn1_t)certo_rt_clo_fn(c);
+    void *env = certo_rt_clo_env(c);
+    int64_t n = list ? list->len : 0;
+    for (int64_t i = 0; i < n; i++) if (!(fn(env, list->data[i]) & 0xff)) return 0;
+    return 1;
+}
+
+/* A shared mutable cell, for a `var` that a lambda assigns (BACKLOG item 354). */
+void *certo_rt_cell_new(void *v) {
+    void **cell = (void **)certo_rt_alloc(8);
+    *cell = v;
+    return cell;
+}
+void *certo_rt_cell_get(void *cell) { return *(void **)cell; }
+void certo_rt_cell_set(void *cell, void *v) { *(void **)cell = v; }

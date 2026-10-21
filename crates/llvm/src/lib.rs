@@ -26,6 +26,7 @@ pub mod ctx;
 pub mod emit_fn;
 pub mod emit_module;
 pub mod rt;
+pub mod eq;
 
 pub use emit_module::{emit_module, LlvmOptions};
 pub use rt::{link_executable, RUNTIME_SHIM_C};

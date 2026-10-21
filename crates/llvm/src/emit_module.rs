@@ -31,7 +31,7 @@ use certo_hir::{lower_module, HirItem};
 use certo_mir::lower_fn;
 
 use crate::ctx::ModuleCtx;
-use crate::emit_fn::emit_fn;
+use crate::emit_fn::{emit_fn, emit_lifted_fn, lifted_sig};
 use crate::ty::{ast_ret_ty_to_llvm, ast_ty_to_llvm, llvm_escape, llvm_fn_name};
 
 // ------------------------------------------------------------------ //
@@ -100,6 +100,7 @@ pub fn emit_module(module: &Module, opts: &LlvmOptions) -> Result<String, String
             if let certo_ast::decl::TypeBody::Record(rec) = &t.body {
                 if let Some(tys) = hir.record_field_types.get(&t.name.node) {
                     if tys.len() == rec.fields.len() {
+                        ctx.record_tys.insert(t.name.node.clone(), tys.clone());
                         ctx.records.insert(t.name.node.clone(), crate::ctx::RecordLayout {
                             fields: rec.fields.iter().zip(tys)
                                 .map(|(f, ty)| (f.name.node.clone(), crate::ty::llvm_ty(ty)))
@@ -111,13 +112,12 @@ pub fn emit_module(module: &Module, opts: &LlvmOptions) -> Result<String, String
         }
     }
 
-    // Layout of every non-generic sum type. A generic one (`Maybe<T>`) is left
-    // out, so using it is reported as unsupported; so is one whose payload
-    // types HIR could not give us.
+    // Layout of every sum type, generic ones (`Maybe<T>`) included: a payload typed
+    // by a type parameter is an erased pointer-sized slot. One whose payload types
+    // HIR could not give us is left out, so using it is reported as unsupported.
     for sdecl in &module.decls {
         if let Decl::Type(t) = &sdecl.node {
             let certo_ast::decl::TypeBody::Sum(variants) = &t.body else { continue };
-            if !t.type_params.is_empty() { continue; }
             let mut layout = Vec::new();
             let mut ok = true;
             for (tag, v) in variants.iter().enumerate() {
@@ -131,6 +131,10 @@ pub fn emit_module(module: &Module, opts: &LlvmOptions) -> Result<String, String
             }
             if !ok { continue; }
             for v in &layout { ctx.variant_enum.insert(v.name.clone(), t.name.node.clone()); }
+            ctx.variant_tys.insert(t.name.node.clone(), variants.iter().enumerate().map(|(tag, v)| (
+                tag,
+                if v.fields.is_empty() { Vec::new() } else { hir.variant_field_types.get(&v.name.node).cloned().unwrap_or_default() },
+            )).collect());
             ctx.enums.insert(t.name.node.clone(), crate::ctx::EnumLayout { variants: layout });
         }
     }
@@ -151,14 +155,28 @@ pub fn emit_module(module: &Module, opts: &LlvmOptions) -> Result<String, String
     }
 
     // ── MIR lowering + IR emission per function ───────────────────────
-    // Iterate AST decls (not HIR) to access declared param/ret types.
+    // Iterate AST decls (not HIR) to access declared param/ret types. Every
+    // function is lowered first, so the lambdas lifted out of them can be
+    // registered before any body is emitted.
+    let mut lowered = Vec::new();
     for sdecl in &module.decls {
         if let Decl::Fn(ast_fn) = &sdecl.node {
             if let Some(hir_fn) = hir_fn_map.get(ast_fn.name.node.as_str()) {
-                let (mf, _lifted) = lower_fn(hir_fn, &hir.record_field_types, &hir.variant_field_types, &hir.fn_param_tys, &hir.fn_ret_tys, &hir.variant_to_type);
-                let body = emit_fn(ast_fn, &mf, &mut ctx);
-                fn_bodies.push(body);
+                let (mf, lifted) = lower_fn(hir_fn, &hir.record_field_types, &hir.variant_field_types, &hir.fn_param_tys, &hir.fn_ret_tys, &hir.variant_to_type);
+                lowered.push((ast_fn, mf, lifted));
             }
+        }
+    }
+    for (_, _, lifted) in &lowered {
+        for lf in lifted {
+            let (ret, params) = lifted_sig(lf);
+            ctx.register_fn(llvm_fn_name(&lf.name), ret, params);
+        }
+    }
+    for (ast_fn, mf, lifted) in &lowered {
+        fn_bodies.push(emit_fn(ast_fn, mf, &mut ctx));
+        for lf in lifted {
+            fn_bodies.push(emit_lifted_fn(lf, &mut ctx));
         }
     }
 
@@ -260,6 +278,12 @@ pub fn emit_module(module: &Module, opts: &LlvmOptions) -> Result<String, String
         writeln!(out, "declare {ret_ty} @{name}({arg_str})").unwrap();
     }
     if !ctx.externs.is_empty() {
+        writeln!(out).unwrap();
+    }
+
+    // Structural-equality functions
+    for body in &ctx.eq_bodies {
+        out.push_str(body);
         writeln!(out).unwrap();
     }
 
@@ -579,12 +603,26 @@ fn run(): Unit [io] = println(Json.stringify(Json.object()))
     }
 
     #[test]
-    fn equality_on_records_is_still_reported() {
-        let err = emit_err("module T
-type P = { x: Int }
+    fn equality_on_records_calls_a_generated_structural_function() {
+        // BACKLOG item 437.
+        let ir = ir_of("module T
+type P = { x: Int, name: Text }
 fn same(a: P, b: P): Bool = a == b
 ");
-        assert!(err.contains("records, enums, lists"), "{err}");
+        assert!(ir.contains("define internal zeroext i1 @certo_eq_0(ptr %a, ptr %b)"), "{ir}");
+        assert!(ir.contains("call zeroext i1 @certo_eq_0(ptr "), "{ir}");
+        assert!(ir.contains("@certo_rt_text_eq"), "the Text field is compared by content
+{ir}");
+    }
+
+    #[test]
+    fn equality_on_a_generic_sum_type_is_still_reported() {
+        // The payload of `Just(T)` is erased, so there is no type to compare it as.
+        let err = emit_err("module T
+type Maybe<T> = Just(T) | Nothing
+fn same(a: Maybe<Int>, b: Maybe<Int>): Bool = a == b
+");
+        assert!(err.contains("generic or unknown type"), "{err}");
     }
 
     #[test]
@@ -722,15 +760,17 @@ type Shape = Circle(r: Int) | Rect(w: Int, h: Int) | Dot
     }
 
     #[test]
-    fn a_sum_type_with_type_parameters_is_reported() {
-        let err = emit_err("module T
+    fn a_sum_type_with_type_parameters_gets_a_layout() {
+        // BACKLOG item 437 - the payload of `Just(T)` is an erased slot.
+        let ir = ir_of("module T
 type Maybe<T> = Just(v: T) | Nothing
 fn f(m: Maybe<Int>): Int = match m {
  Just(v) => v
  Nothing => 0
 }
+fn g(): Maybe<Int> = Just(4)
 ");
-        assert!(err.contains("type parameters"), "{err}");
+        assert!(ir.contains("define i64 @certo_f(ptr "), "{ir}");
     }
 
     // ------------------------------------------------------------------ //
@@ -894,11 +934,22 @@ fn use_it(): Int = {
     }
 
     #[test]
-    fn list_functions_that_take_closures_are_still_reported() {
-        let err = emit_err("module T
-fn f(xs: List<Int>): List<Int> = List.map(xs, (x) => x + 1)
+    fn a_lambda_is_a_lifted_function_and_a_closure_block() {
+        // BACKLOG item 437 - the lambda becomes its own function (environment first), the
+        // closure is a block holding it, and List.map is a runtime call taking that block.
+        let ir = ir_of("module T
+fn f(xs: List<Int>, k: Int): List<Int> = List.map(xs, (x) => x + k)
 ");
-        assert!(err.contains("`List.map`"), "{err}");
+        assert!(ir.contains("define i64 @certo___lam_f_0_boxed(ptr %p1, i64 %p2)"), "{ir}");
+        assert!(ir.contains("call ptr @certo_rt_list_map(ptr "), "{ir}");
+    }
+
+    #[test]
+    fn a_function_the_backend_has_no_runtime_for_is_still_reported() {
+        let err = emit_err("module T
+fn f(xs: List<Int>): List<Int> = List.reverse(xs)
+");
+        assert!(err.contains("`List.reverse`"), "{err}");
     }
 
     // ------------------------------------------------------------------ //

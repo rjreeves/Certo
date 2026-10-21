@@ -99,3 +99,24 @@ fn parse_int_arg_getenv_and_text_equality_build_for_the_browser() {
     assert!(contains(&wasm, "certo_write"));
     assert!(contains(&wasm, "certo_rt_parse_int"));
 }
+
+#[test]
+fn closures_higher_order_lists_generic_enums_and_equality_build_for_the_browser() {
+    // BACKLOG item 437: the browser shim has the closure-taking list functions, and the
+    // freestanding runtime still needs no libc.
+    let src = "module P\nimport Stdlib.Core\n\
+               type Maybe<T> = Just(T) | Nothing\n\
+               type Pt = { x: Int, label: Text }\n\
+               fn pick(m: Maybe<Int>): Int = match m {\n    Just(v) => v\n    Nothing => 0\n}\n\
+               fn same(a: Pt, b: Pt): Bool = a == b\n\
+               pub fn main(): Unit [io] = {\n\
+                   val k = 3\n\
+                   val xs = List.map([1, 2, 3], (n) => n * k)\n\
+                   var total = 0\n\
+                   List.forEach(xs, (n) => { total = total + n })\n\
+                   println(intToText(List.fold(xs, 0, (a, b) => a + b) + pick(Just(total))))\n\
+                   println(boolToText(same(Pt { x: 1, label: \"a\" }, Pt { x: 1, label: \"a\" })))\n\
+               }\n";
+    let Some(wasm) = build_browser(src) else { return };
+    assert!(wasm.starts_with(b"\0asm"), "not a wasm binary");
+}
