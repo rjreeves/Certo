@@ -57,8 +57,8 @@ floatToText(f: Float): Text         // shortest text that reads back as exactly 
 boolToText(b: Bool): Text           // "true" | "false"
 floatToInt(f: Float): Int           // truncates toward zero
 intToFloat(n: Int): Float
-parseInt(s: Text): Int?             // None if not a valid integer
-parseFloat(s: Text): Float?         // None if not a valid float
+parseInt(s: Text): Int?             // None if not a valid integer or outside Int; surrounding spaces are ignored
+parseFloat(s: Text): Float?         // decimal notation only (3.14, .5, 1e3); None for 0x10, nan, inf, 1e400
 parseDecimal(s: Text): Decimal?     // None if not a valid decimal (strict — no trailing garbage)
 
 // Float32 — a distinct type from Float (32-bit vs 64-bit, does not unify)
@@ -68,6 +68,8 @@ intToFloat32(n: Int): Float32
 float32ToFloat(f: Float32): Float   // widen
 floatToFloat32(f: Float): Float32   // narrow, may lose precision
 ```
+
+**Dates.** `DateTime` works for years 0000-9999 (an instant outside that range stops the program with a message). `Timestamp.parse`, `DateTime.parseIso` accept only valid ISO 8601: impossible dates (`2023-02-29`), out-of-range fields and trailing text are rejected, and a UTC offset (`+02:00`) is applied. `Date.of(y, m, d)` and `Timestamp.of` stop on an impossible date. An unsupported `format` specifier stops the program rather than crashing.
 
 **F-strings.** `f"Hello, {name}"` interpolates any expression, including calls, record literals
 and string literals (`f"{show(Money { amount: 1, cur: "USD" })}"`). The usual escapes work (`\n`, `\t`,
@@ -487,9 +489,9 @@ DateTime.toUnix(dt: DateTime): Int
 
 ```
 DateTime.toIso(dt: DateTime): Text          // "2025-06-22T14:30:00Z"
-DateTime.format(dt: DateTime, fmt: Text): Text   // strftime format
+DateTime.format(dt: DateTime, fmt: Text): Text   // UTC; %Y %y %C %m %d %e %H %I %M %S %p %b %B %a %A %j %u %w %F %T %R %D %Z %z %%
 Date.format(d: Date, fmt: Text): Text
-DateTime.parseIso(s: Text): DateTime [fallible]  // returns error if unparseable
+DateTime.parseIso(s: Text): DateTime [fallible]  // strict ISO 8601: YYYY-MM-DD[THH:MM[:SS[.f]]][Z|+HH:MM]; stops the program on bad input
 ```
 
 ### Arithmetic
