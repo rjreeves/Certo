@@ -614,6 +614,20 @@ that leaves one out used to compile, and reading the field gave a null or empty 
 
 ---
 
+### E0229  Function has no body
+
+```
+error[E0229]: function `compute` has no body
+```
+
+**Cause:** `fn compute(x: Int): Int` ends after its signature. It used to compile to a function
+that returned zero (BACKLOG item 363). Only an `extern "C"` declaration, and a method signature
+inside a `trait`, may omit the body.
+
+**Fix:** Add `= <expression>`, or declare it in an `extern "C" { ... }` block if C implements it.
+
+---
+
 ### E0227  Unknown argument name
 
 ```
