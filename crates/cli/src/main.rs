@@ -451,6 +451,7 @@ fn module_uses_db_sugar(module: &Module) -> bool {
 /// `quiet`: suppress the "wrote <path>" line (used by `certo run`).
 fn cmd_build(args: &[String], quiet: bool) {
     let mut input:   Option<PathBuf> = None;
+    let mut extra_inputs: Vec<PathBuf> = Vec::new();
     let mut output:  Option<PathBuf> = None;
     let mut verbose  = false;
     let mut emit_c   = false;
@@ -506,8 +507,8 @@ fn cmd_build(args: &[String], quiet: bool) {
                 process::exit(2);
             }
             path => {
-                if input.is_some() { die("only one input file supported", 2); }
-                input = Some(PathBuf::from(path));
+                // BACKLOG item 408 - the first file is the entry; any others are merged into it.
+                if input.is_some() { extra_inputs.push(PathBuf::from(path)); } else { input = Some(PathBuf::from(path)); }
             }
         }
         i += 1;
@@ -623,6 +624,13 @@ fn cmd_build(args: &[String], quiet: bool) {
     let (mut module, src) = parse_file_or_exit(&input, colour);
 
     resolve_local_imports(&mut module, &input, colour, verbose);
+    // BACKLOG item 408 - further input files are merged into the entry's module.
+    for extra in &extra_inputs {
+        let (mut m, _) = parse_file_or_exit(extra, colour);
+        resolve_local_imports(&mut m, extra, colour, verbose);
+        module.imports.extend(m.imports);
+        module.decls.extend(m.decls);
+    }
     merge_discovered_plugin_sources(&mut module, &resolved_plugins, colour, verbose);
 
     // ── Expand state machines and validators into executable functions ─

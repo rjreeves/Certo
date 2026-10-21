@@ -65,3 +65,21 @@ fn commands_without_files_use_the_project() {
     let (ok, out) = certo(&proj, &["lint"]);
     assert!(ok, "{out}");
 }
+
+// BACKLOG item 408 - `certo build`/`run` take several files; the first is the entry and the others
+// are merged into its module.
+#[test]
+fn build_and_run_take_several_input_files() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("src")).unwrap();
+    std::fs::write(dir.path().join("src/main.cto"), "module Main\nfn main(): Unit [io] = println(intToText(orderTotal(2) + userCount()))\n").unwrap();
+    std::fs::write(dir.path().join("src/orders.cto"), "module Orders\nfn orderTotal(n: Int): Int = n * 10\n").unwrap();
+    std::fs::write(dir.path().join("src/users.cto"), "module Users\nfn userCount(): Int = 3\n").unwrap();
+    let (ok, out) = certo(dir.path(), &["run", "src/main.cto", "src/orders.cto", "src/users.cto"]);
+    assert!(ok && out.contains("23"), "{out}");
+    let exe = if cfg!(windows) { "app.exe" } else { "app" };
+    let (ok, out) = certo(dir.path(), &["build", "src/main.cto", "src/orders.cto", "src/users.cto", "-o", exe]);
+    assert!(ok, "{out}");
+    let run = Command::new(dir.path().join(exe)).output().unwrap();
+    assert_eq!(String::from_utf8_lossy(&run.stdout).trim(), "23");
+}
