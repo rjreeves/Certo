@@ -72,3 +72,33 @@ fn a_module_line_that_does_not_match_the_import_path_is_error_e0104() {
     assert!(!ok);
     assert!(err.contains("E0104") && err.contains("Totally.Different"), "{err}");
 }
+
+// BACKLOG item 440 - only `pub` functions, values and variables of an imported file are visible
+// to its importer; the private ones still work inside their own file.
+#[test]
+fn a_private_function_of_an_imported_file_is_not_callable_from_the_importer() {
+    let dir = project();
+    write(dir.path(), "main.cto", "module Main\nimport MyApp.Lib\nfn main(): Unit [io] = {\n  println(intToText(helper(mk(1))))\n}\n");
+    let (ok, _, err) = build_run(dir.path(), "main.cto");
+    assert!(!ok, "calling a private function of another file must not compile");
+    assert!(err.contains("helper"), "{err}");
+}
+
+#[test]
+fn a_private_helper_still_works_inside_its_own_file_and_names_can_be_reused() {
+    let dir = project();
+    // `helper` is private to Lib; the importer may define its own `helper`.
+    write(dir.path(), "main.cto", "module Main\nimport MyApp.Lib\nfn helper(): Int = 7\nfn main(): Unit [io] = {\n  println(intToText(other() + helper()))\n}\n");
+    let (ok, out, err) = build_run(dir.path(), "main.cto");
+    assert!(ok, "{err}");
+    assert_eq!(out, "108\n");
+}
+
+#[test]
+fn importing_a_private_name_by_name_is_an_error() {
+    let dir = project();
+    write(dir.path(), "main.cto", "module Main\nimport MyApp.Lib.{ helper }\nfn main(): Unit [io] = println(\"x\")\n");
+    let (ok, _, err) = build_run(dir.path(), "main.cto");
+    assert!(!ok);
+    assert!(err.contains("E0105") && err.contains("`helper` is private in module `MyApp.Lib`"), "{err}");
+}

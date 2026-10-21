@@ -1055,7 +1055,41 @@ fn resolve_imports_in(module: &mut Module, base_dir: &Path, importer: &Path, col
 
             // The imported file's own imports first, so its declarations (and anything it
             // re-exports) are all present before this import's filter is applied.
+            let own_count = imp_module.decls.len();
             resolve_imports_in(&mut imp_module, base_dir, &candidate, colour, verbose, visited);
+
+            // BACKLOG item 440 - only a `pub` function, value or variable of the imported file
+            // is visible to its importer. The private ones stay in the program (the file's own
+            // code still calls them) under a hidden `__imp_<module>_<name>` name.
+            let prefix = path_str.replace('.', "_");
+            let mut private: HashMap<String, RenameTo> = HashMap::new();
+            for d in &imp_module.decls[..own_count.min(imp_module.decls.len())] {
+                if let Some(own) = private_value_name(&d.node) {
+                    private.insert(own.to_string(), RenameTo::Bare(format!("__imp_{prefix}_{own}")));
+                }
+            }
+            if let ImportKind::Named(names) = &imp.kind {
+                if let Some(n) = names.iter().find(|n| private.contains_key(&n.name.node)) {
+                    let diag = Diagnostic::error("E0105",
+                        format!("`{}` is private in module `{path_str}`", n.name.node))
+                        .with_span(n.span)
+                        .with_note(format!("only `pub` functions, values and variables can be imported: declare it `pub` in {}", candidate.display()));
+                    let src = std::fs::read_to_string(importer).unwrap_or_default();
+                    eprint!("{}", render_all(&[diag], &src, &importer.display().to_string(), colour));
+                    process::exit(1);
+                }
+            }
+            if !private.is_empty() {
+                rewrite_decls_free_refs(&mut imp_module.decls, &private);
+                for d in imp_module.decls.iter_mut() {
+                    let Some(own_name) = decl_own_name(&d.node).map(|s| s.to_string()) else { continue };
+                    if let Some(RenameTo::Bare(new)) = private.get(&own_name) {
+                        if private_value_name(&d.node).is_some() {
+                            set_decl_own_name(&mut d.node, new.clone());
+                        }
+                    }
+                }
+            }
 
             match &imp.kind {
                 ImportKind::Whole => {
@@ -1082,6 +1116,7 @@ fn resolve_imports_in(module: &mut Module, base_dir: &Path, importer: &Path, col
                     for d in &imp_module.decls {
                         if !matches!(&d.node, Decl::Fn(_) | Decl::Val(_) | Decl::Var(_)) { continue; }
                         if let Some(own) = decl_own_name(&d.node) {
+                            if own.starts_with("__imp_") { continue; }
                             if !names.iter().any(|n| n.name.node == own) {
                                 renames.insert(own.to_string(), RenameTo::Bare(format!("__imp_{prefix}_{own}")));
                             }
@@ -1158,6 +1193,19 @@ enum RenameTo {
     /// Module-level import alias (`import X as M`) — rewrite bare `a`
     /// references to the dot-qualified `M.a`.
     Qualified(String),
+}
+
+/// The name of a function, value or variable declared without `pub` (BACKLOG item 440).
+fn private_value_name(decl: &Decl) -> Option<&str> {
+    match decl {
+        Decl::Fn(f) if !f.is_pub => Some(&f.name.node),
+        Decl::Val(v) if !v.is_pub => match &v.pattern.node {
+            Pattern::Ident { name, .. } => Some(&name.node),
+            _ => None,
+        },
+        Decl::Var(v) if !v.is_pub => Some(&v.name.node),
+        _ => None,
+    }
 }
 
 /// The name a top-level declaration introduces into module scope — mirrors
@@ -4241,7 +4289,7 @@ fn cmd_db_pull(args: &[String]) {
         let select_cols: Vec<&str> = cols.iter().map(|(c, _, _)| c.as_str()).collect();
         let select_list = select_cols.join(", ");
 
-        src.push_str(&format!("fn {}FromRow(row: List<Text?>): {} =\n", table, type_name));
+        src.push_str(&format!("pub fn {}FromRow(row: List<Text?>): {} =\n", table, type_name));
         src.push_str(&format!("    {} {{\n", type_name));
         for (i, (col_name, certo_ty, nullable)) in cols.iter().enumerate() {
             let field = snake_to_camel(col_name);
@@ -4260,7 +4308,7 @@ fn cmd_db_pull(args: &[String]) {
 
         // ── findAll ──────────────────────────────────────────────────────
         src.push_str(&format!(
-            "fn {}FindAll(conn: Int): List<{}> [io] =\n    dbQueryTyped(conn, \"SELECT {} FROM {} ORDER BY 1\", [], {}FromRow)\n\n",
+            "pub fn {}FindAll(conn: Int): List<{}> [io] =\n    dbQueryTyped(conn, \"SELECT {} FROM {} ORDER BY 1\", [], {}FromRow)\n\n",
             table, type_name, select_list, table, table
         ));
 
@@ -4284,14 +4332,14 @@ fn cmd_db_pull(args: &[String]) {
             let pk_to_text = certo_to_text_expr("id", pk_certo);
 
             src.push_str(&format!(
-                "fn {}FindById(conn: Int, id: {}): {}? [io] = {{\n    val rows = dbQueryTyped(conn, \"SELECT {} FROM {} WHERE {} = $1 LIMIT 1\", [{}], {}FromRow)\n    List.first(rows)\n}}\n\n",
+                "pub fn {}FindById(conn: Int, id: {}): {}? [io] = {{\n    val rows = dbQueryTyped(conn, \"SELECT {} FROM {} WHERE {} = $1 LIMIT 1\", [{}], {}FromRow)\n    List.first(rows)\n}}\n\n",
                 table, pk_certo, type_name,
                 select_list, table, pk_col, pk_to_text,
                 table
             ));
 
             src.push_str(&format!(
-                "fn {}DeleteById(conn: Int, id: {}): Int [io] =\n    dbExec(conn, \"DELETE FROM {} WHERE {} = $1\", [{}])\n\n",
+                "pub fn {}DeleteById(conn: Int, id: {}): Int [io] =\n    dbExec(conn, \"DELETE FROM {} WHERE {} = $1\", [{}])\n\n",
                 table, pk_certo, table, pk_col, pk_to_text
             ));
         }
@@ -4316,7 +4364,7 @@ fn cmd_db_pull(args: &[String]) {
             }).collect();
 
             src.push_str(&format!(
-                "fn {}Insert(conn: Int, record: {}): Int [io] =\n    dbExec(conn,\n        \"INSERT INTO {} ({}) VALUES ({})\",\n        [{}])\n\n",
+                "pub fn {}Insert(conn: Int, record: {}): Int [io] =\n    dbExec(conn,\n        \"INSERT INTO {} ({}) VALUES ({})\",\n        [{}])\n\n",
                 table, type_name,
                 table, col_names.join(", "), placeholders.join(", "),
                 params.join(", ")
@@ -5707,7 +5755,7 @@ mod resolve_local_imports_tests {
     #[test]
     fn merges_a_local_imports_declarations() {
         let dir = temp_project("basic");
-        std::fs::write(dir.join("MyModule.cto"), "module MyModule\nfn greet(): Text = \"hi\"\n").unwrap();
+        std::fs::write(dir.join("MyModule.cto"), "module MyModule\npub fn greet(): Text = \"hi\"\n").unwrap();
         let main_path = dir.join("main.cto");
         std::fs::write(&main_path, "module Main\nimport MyModule\nfn main(): Unit [io] = { println(greet()) }\n").unwrap();
 
@@ -5740,7 +5788,7 @@ mod resolve_local_imports_tests {
 
     fn write_mymodule(dir: &Path) {
         std::fs::write(dir.join("MyModule.cto"),
-            "module MyModule\nfn greet(): Text = helper()\nfn helper(): Text = \"hi\"\nfn secretHelper(): Text = \"secret\"\n").unwrap();
+            "module MyModule\npub fn greet(): Text = helper()\npub fn helper(): Text = \"hi\"\npub fn secretHelper(): Text = \"secret\"\n").unwrap();
     }
 
     // BACKLOG item 234 — `import X.{ a, b }` only brings the listed names
