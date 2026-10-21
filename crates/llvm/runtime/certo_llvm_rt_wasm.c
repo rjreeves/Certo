@@ -275,3 +275,157 @@ void *certo_rt_cell_new(void *v) {
 }
 void *certo_rt_cell_get(void *cell) { return *(void **)cell; }
 void certo_rt_cell_set(void *cell, void *v) { *(void **)cell = v; }
+
+
+/* ---- More list functions (BACKLOG item 442) ----
+ * A tuple is a bare block of 8-byte slots here (no header), so partition and zip build those. */
+static void *certo_rt_pair(void *a, void *b) {
+    int64_t *t = (int64_t *)certo_rt_alloc(16);
+    t[0] = (int64_t)(__UINTPTR_TYPE__)a;
+    t[1] = (int64_t)(__UINTPTR_TYPE__)b;
+    return t;
+}
+
+void *certo_rt_list_slice(void *l, int64_t start, int64_t end) {
+    certo_rt_list_t *list = (certo_rt_list_t *)l;
+    int64_t n = list ? list->len : 0;
+    if (start < 0) start = 0;
+    if (end > n) end = n;
+    if (start >= end) return certo_rt_list_alloc(0);
+    certo_rt_list_t *out = certo_rt_list_alloc(end - start);
+    for (int64_t i = start; i < end; i++) out->data[i - start] = list->data[i];
+    return out;
+}
+
+void *certo_rt_list_reverse(void *l) {
+    certo_rt_list_t *list = (certo_rt_list_t *)l;
+    int64_t n = list ? list->len : 0;
+    certo_rt_list_t *out = certo_rt_list_alloc(n);
+    for (int64_t i = 0; i < n; i++) out->data[i] = list->data[n - 1 - i];
+    return out;
+}
+
+void *certo_rt_list_concat(void *a, void *b) {
+    certo_rt_list_t *x = (certo_rt_list_t *)a, *y = (certo_rt_list_t *)b;
+    int64_t nx = x ? x->len : 0, ny = y ? y->len : 0;
+    certo_rt_list_t *out = certo_rt_list_alloc(nx + ny);
+    for (int64_t i = 0; i < nx; i++) out->data[i] = x->data[i];
+    for (int64_t i = 0; i < ny; i++) out->data[nx + i] = y->data[i];
+    return out;
+}
+
+void *certo_rt_list_chunked(void *l, int64_t size) {
+    certo_rt_list_t *list = (certo_rt_list_t *)l;
+    int64_t n = list ? list->len : 0;
+    if (n == 0 || size <= 0) return certo_rt_list_alloc(0);
+    certo_rt_list_t *out = certo_rt_list_alloc((n + size - 1) / size);
+    int64_t k = 0;
+    for (int64_t i = 0; i < n; i += size)
+        out->data[k++] = (int64_t)(__UINTPTR_TYPE__)certo_rt_list_slice(l, i, i + size);
+    return out;
+}
+
+_Bool certo_rt_list_contains(void *l, int64_t item) {
+    certo_rt_list_t *list = (certo_rt_list_t *)l;
+    int64_t n = list ? list->len : 0;
+    for (int64_t i = 0; i < n; i++) if (list->data[i] == item) return 1;
+    return 0;
+}
+
+_Bool certo_rt_list_contains_text(void *l, const char *item) {
+    certo_rt_list_t *list = (certo_rt_list_t *)l;
+    int64_t n = list ? list->len : 0;
+    for (int64_t i = 0; i < n; i++)
+        if (certo_rt_text_eq((const char *)(__UINTPTR_TYPE__)list->data[i], item)) return 1;
+    return 0;
+}
+
+void *certo_rt_list_distinct(void *l) {
+    certo_rt_list_t *list = (certo_rt_list_t *)l;
+    int64_t n = list ? list->len : 0;
+    certo_rt_list_t *out = certo_rt_list_alloc(n);
+    int64_t k = 0;
+    for (int64_t i = 0; i < n; i++) {
+        int seen = 0;
+        for (int64_t j = 0; j < k; j++) if (out->data[j] == list->data[i]) { seen = 1; break; }
+        if (!seen) out->data[k++] = list->data[i];
+    }
+    out->len = k;
+    return out;
+}
+
+void *certo_rt_list_distinct_text(void *l) {
+    certo_rt_list_t *list = (certo_rt_list_t *)l;
+    int64_t n = list ? list->len : 0;
+    certo_rt_list_t *out = certo_rt_list_alloc(n);
+    int64_t k = 0;
+    for (int64_t i = 0; i < n; i++) {
+        int seen = 0;
+        for (int64_t j = 0; j < k; j++)
+            if (certo_rt_text_eq((const char *)(__UINTPTR_TYPE__)out->data[j], (const char *)(__UINTPTR_TYPE__)list->data[i])) { seen = 1; break; }
+        if (!seen) out->data[k++] = list->data[i];
+    }
+    out->len = k;
+    return out;
+}
+
+void *certo_rt_list_partition(void *l, void *c) {
+    certo_rt_list_t *list = (certo_rt_list_t *)l;
+    int64_t n = list ? list->len : 0;
+    certo_rt_fn1_t fn = (certo_rt_fn1_t)certo_rt_clo_fn(c);
+    void *env = certo_rt_clo_env(c);
+    certo_rt_list_t *yes = certo_rt_list_alloc(n), *no = certo_rt_list_alloc(n);
+    int64_t ky = 0, kn = 0;
+    for (int64_t i = 0; i < n; i++) {
+        if (fn(env, list->data[i]) & 0xff) yes->data[ky++] = list->data[i];
+        else no->data[kn++] = list->data[i];
+    }
+    yes->len = ky;
+    no->len = kn;
+    return certo_rt_pair(yes, no);
+}
+
+void *certo_rt_list_flat_map(void *l, void *c) {
+    certo_rt_list_t *list = (certo_rt_list_t *)l;
+    int64_t n = list ? list->len : 0;
+    certo_rt_fn1_t fn = (certo_rt_fn1_t)certo_rt_clo_fn(c);
+    void *env = certo_rt_clo_env(c);
+    void *out = certo_rt_list_alloc(0);
+    for (int64_t i = 0; i < n; i++)
+        out = certo_rt_list_concat(out, (void *)(__UINTPTR_TYPE__)fn(env, list->data[i]));
+    return out;
+}
+
+void *certo_rt_list_zip(void *a, void *b) {
+    certo_rt_list_t *x = (certo_rt_list_t *)a, *y = (certo_rt_list_t *)b;
+    int64_t n = (x && y) ? (x->len < y->len ? x->len : y->len) : 0;
+    certo_rt_list_t *out = certo_rt_list_alloc(n);
+    for (int64_t i = 0; i < n; i++)
+        out->data[i] = (int64_t)(__UINTPTR_TYPE__)certo_rt_pair((void *)(__UINTPTR_TYPE__)x->data[i], (void *)(__UINTPTR_TYPE__)y->data[i]);
+    return out;
+}
+
+/* Stable merge sort; the comparator returns negative, zero or positive. */
+typedef int64_t (*certo_rt_cmp_t)(void *, int64_t, int64_t);
+
+static void certo_rt_sort_range(int64_t *d, int64_t *tmp, int64_t lo, int64_t hi, certo_rt_cmp_t cmp, void *env) {
+    if (hi - lo <= 1) return;
+    int64_t mid = lo + (hi - lo) / 2;
+    certo_rt_sort_range(d, tmp, lo, mid, cmp, env);
+    certo_rt_sort_range(d, tmp, mid, hi, cmp, env);
+    int64_t i = lo, j = mid, k = lo;
+    while (i < mid && j < hi) tmp[k++] = (cmp(env, d[i], d[j]) <= 0) ? d[i++] : d[j++];
+    while (i < mid) tmp[k++] = d[i++];
+    while (j < hi) tmp[k++] = d[j++];
+    for (k = lo; k < hi; k++) d[k] = tmp[k];
+}
+
+void *certo_rt_list_sort(void *l, void *c) {
+    certo_rt_list_t *list = (certo_rt_list_t *)l;
+    int64_t n = list ? list->len : 0;
+    certo_rt_list_t *out = certo_rt_list_alloc(n);
+    for (int64_t i = 0; i < n; i++) out->data[i] = list->data[i];
+    int64_t *tmp = (int64_t *)certo_rt_alloc((n > 0 ? n : 1) * 8);
+    certo_rt_sort_range(out->data, tmp, 0, n, (certo_rt_cmp_t)certo_rt_clo_fn(c), certo_rt_clo_env(c));
+    return out;
+}

@@ -245,3 +245,39 @@ fn main(): Unit [io] = {
 }
 "#, "3\n6\n10\n");
 }
+
+#[test]
+fn more_list_functions_run() {
+    check(r#"module M
+import Stdlib.Core
+
+fn show(xs: List<Int>): Text = List.fold(xs, "", (a, b) => a ++ intToText(b) ++ ",")
+fn showT(xs: List<Text>): Text = List.fold(xs, "", (a, b) => a ++ b ++ ",")
+
+fn head(xs: List<Int>): Int = match xs {
+    [] => -1
+    [x, ...rest] => x + List.len(rest) * 100
+    _ => -2
+}
+
+fn main(): Unit [io] = {
+    val xs = [3, 1, 2, 3, 1]
+    println(show(List.reverse(xs)))
+    println(show(List.concat(xs, [9])))
+    println(show(List.slice(xs, 1, 3)))
+    println(show(List.distinct(xs)))
+    println(showT(List.distinct(["a", "b", "a"])))
+    println(boolToText(List.contains(xs, 2)))
+    println(boolToText(List.contains(xs, 7)))
+    println(boolToText(List.contains(["a", "b"], "b")))
+    println(show(List.sort(xs, (a, b) => a - b)))
+    println(show(List.sort(xs, (a, b) => b - a)))
+    val (small, big) = List.partition(xs, (n) => n < 2)
+    println(show(small) ++ "|" ++ show(big))
+    println(show(List.flatMap([1, 2], (n) => [n, n * 10])))
+    println(intToText(List.len(List.chunked(xs, 2))))
+    println(intToText(head([5, 6, 7])))
+    println(intToText(head([])))
+}
+"#, "1,3,2,1,3,\n3,1,2,3,1,9,\n1,2,\n3,1,2,\na,b,\ntrue\nfalse\ntrue\n1,1,2,3,3,\n3,3,2,1,1,\n1,1,|3,2,3,\n1,10,2,20,\n3\n205\n-1\n");
+}

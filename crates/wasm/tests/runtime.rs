@@ -120,3 +120,20 @@ fn closures_higher_order_lists_generic_enums_and_equality_build_for_the_browser(
     let Some(wasm) = build_browser(src) else { return };
     assert!(wasm.starts_with(b"\0asm"), "not a wasm binary");
 }
+
+#[test]
+fn the_other_list_functions_build_for_the_browser() {
+    // BACKLOG item 442: sort, partition, distinct, zip and friends in the freestanding shim.
+    let src = "module P\nimport Stdlib.Core\n\
+               pub fn main(): Unit [io] = {\n\
+                   val xs = [3, 1, 2, 3]\n\
+                   val sorted = List.sort(xs, (a, b) => a - b)\n\
+                   val (small, big) = List.partition(sorted, (n) => n < 2)\n\
+                   val names = List.distinct([\"a\", \"b\", \"a\"])\n\
+                   println(intToText(List.len(List.distinct(List.concat(List.reverse(small), big)))))\n\
+                   println(boolToText(List.contains(names, \"b\")))\n\
+                   println(intToText(List.len(List.zip(xs, sorted))))\n\
+               }\n";
+    let Some(wasm) = build_browser(src) else { return };
+    assert!(wasm.starts_with(b"\0asm"), "not a wasm binary");
+}

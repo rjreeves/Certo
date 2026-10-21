@@ -947,9 +947,9 @@ fn f(xs: List<Int>, k: Int): List<Int> = List.map(xs, (x) => x + k)
     #[test]
     fn a_function_the_backend_has_no_runtime_for_is_still_reported() {
         let err = emit_err("module T
-fn f(xs: List<Int>): List<Int> = List.reverse(xs)
+fn f(xs: List<Int>): Int = Map.len(Map.empty())
 ");
-        assert!(err.contains("`List.reverse`"), "{err}");
+        assert!(err.contains("`Map.len`"), "{err}");
     }
 
     // ------------------------------------------------------------------ //

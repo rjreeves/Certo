@@ -1163,12 +1163,12 @@ impl<'ctx> FnEmitter<'ctx> {
     fn emit_rt_call(&mut self, rt: &'static crate::rt::RtFn, args: &[(String, String)], dest_ptr: &str) {
         // An erased value (a fold's accumulator, a cell's contents) may arrive as an Int, a
         // Float's bits or a pointer; the runtime takes it as one pointer-sized slot.
-        let erased = matches!(rt.certo, "List.fold" | "List.reduce" | "__certo_cell_new" | "__certo_cell_set");
+        let erased = matches!(rt.certo, "List.fold" | "List.reduce" | "__certo_cell_new" | "__certo_cell_set" | "List.contains");
         let converted: Vec<(String, String)>;
         let args = if erased {
             let mut out = Vec::new();
             for ((t, v), want) in args.iter().zip(rt.params) {
-                if t == want || !matches!(t.as_str(), "i64" | "double" | "i1" | "i8" | "i16" | "i32") {
+                if t == want || !(matches!(t.as_str(), "i64" | "double" | "i1" | "i8" | "i16" | "i32") || (t == "ptr" && *want == "i64")) {
                     out.push((t.clone(), v.clone()));
                 } else if let Some(c) = self.convert(t, v, want) {
                     out.push(((*want).to_string(), c));
