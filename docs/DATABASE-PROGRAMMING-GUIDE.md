@@ -384,7 +384,7 @@ Since every raw query cell comes back as `Text?`, you write one small
 mapper function per type to turn a row into a value:
 
 ```certo
-fn ordersFromRow(row: List<Text?>): Orders = Orders {
+pub fn ordersFromRow(row: List<Text?>): Orders = Orders {
     id:         parseInt(List.getOrPanic(row, 0) ?? "") ?? 0,
     customerId: parseInt(List.getOrPanic(row, 1) ?? "") ?? 0,
     status:     List.getOrPanic(row, 2) ?? "",
@@ -721,7 +721,7 @@ type Orders = {
 }
 impl DbRow for Orders {}
 
-fn ordersFromRow(row: List<Text?>): Orders = Orders {
+pub fn ordersFromRow(row: List<Text?>): Orders = Orders {
     id:         parseInt(List.getOrPanic(row, 0) ?? "") ?? 0,
     customerId: parseInt(List.getOrPanic(row, 1) ?? "") ?? 0,
     status:     List.getOrPanic(row, 2) ?? "",

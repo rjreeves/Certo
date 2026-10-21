@@ -389,9 +389,13 @@ functions can use them. A file reached more than once (or through an import cycl
 included once. `import Lib.{ other }` brings in only `other`; the helpers `other` calls
 still come along, but under hidden names the importing file cannot write.
 
-Currently every top-level name of an imported file, including names it imported
-itself, is visible to the importing file, and `pub` is not enforced across files
-(BACKLOG item 440).
+Only the `pub` functions, values and variables of an imported file are visible to the
+importing file. A function declared without `pub` is private to its file: the file's own
+code still calls it, the importer cannot (it gets "undefined identifier"), and the importer
+may define a function with the same name. `import Lib.{ helper }` naming a private
+function is error E0105. This applies to functions, values and variables; types, traits and
+variants of an imported file are still all visible, and so are the names a file imported
+itself (`pub import` does not yet limit them; BACKLOG item 443).
 
 ---
 
@@ -916,9 +920,9 @@ type User {
     name: Text?
 }
 
-fn userFromRow(row: List<Text?>): User = ...
-fn userFindAll(conn: Int): List<User> [io] = ...
-fn userFindById(conn: Int, id: UUID): User? [io] = ...
+pub fn userFromRow(row: List<Text?>): User = ...
+pub fn userFindAll(conn: Int): List<User> [io] = ...
+pub fn userFindById(conn: Int, id: UUID): User? [io] = ...
 
 impl DbRow for User {}
 ```

@@ -328,7 +328,7 @@ type Users = {
     email: Text?
 }
 
-fn usersFromRow(row: List<Text?>): Users = ...
+pub fn usersFromRow(row: List<Text?>): Users = ...
 
 impl DbRow for Users {}
 ```
