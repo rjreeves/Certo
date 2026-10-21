@@ -2405,6 +2405,18 @@ pub(crate) fn type_error_to_diagnostic(e: &TypeError) -> Diagnostic {
                 .with_note(format!("remove `{field}: ...` — it's computed automatically from `{type_name}`'s other fields"))
         }
 
+        TypeErrorKind::UnknownArgumentName { fn_name, name, expected } => {
+            Diagnostic::error("E0227", format!("`{fn_name}` has no parameter named `{name}`"))
+                .with_span(e.span)
+                .with_note(format!("its parameters are: {}", expected.join(", ")))
+        }
+
+        TypeErrorKind::DuplicateArgument { fn_name, name } => {
+            Diagnostic::error("E0228", format!("argument `{name}` of `{fn_name}` is given more than once"))
+                .with_span(e.span)
+                .with_note("each parameter can be passed once, either by position or by name")
+        }
+
         TypeErrorKind::MissingRecordField { field, type_name } => {
             Diagnostic::error("E0226",
                 format!("`{}` is missing the required field `{}`", type_name, field))

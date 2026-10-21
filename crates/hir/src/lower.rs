@@ -1123,6 +1123,27 @@ pub fn lower_module(module: &Module) -> Result<HirModule, Vec<LowerError>> {
                 cx.fn_trait_bounds.insert(f.name.node.clone(), trait_methods);
             }
         }
+        // BACKLOG item 352 - a record's positional constructor and a variant with named fields
+        // take their arguments by name, so a call is reordered like a function call.
+        if let Decl::Type(t) = &sdecl.node {
+            let as_params = |fields: Vec<(&certo_ast::types::Ident, &S<certo_ast::types::TypeExpr>, Span)>| -> Vec<FnParam> {
+                fields.into_iter().map(|(name, ty, span)| FnParam { name: name.clone(), ty: ty.clone(), default: None, span }).collect()
+            };
+            match &t.body {
+                certo_ast::decl::TypeBody::Record(rec) => {
+                    let ps = as_params(rec.fields.iter().map(|f| (&f.name, &f.ty, f.span)).collect());
+                    cx.fn_params.entry(t.name.node.clone()).or_insert(ps);
+                }
+                certo_ast::decl::TypeBody::Sum(variants) => {
+                    for v in variants {
+                        if v.fields.is_empty() || !v.fields.iter().all(|f| f.name.is_some()) { continue; }
+                        let ps = as_params(v.fields.iter().map(|f| (f.name.as_ref().unwrap(), &f.ty, f.span)).collect());
+                        cx.fn_params.entry(v.name.node.clone()).or_insert(ps);
+                    }
+                }
+                _ => {}
+            }
+        }
         // Impl methods register as qualified globals `Type.method`.
         if let Decl::Impl(i) = &sdecl.node {
             let type_name = i.type_path.segments.last().map(|s| s.node.clone()).unwrap_or_default();

@@ -518,13 +518,29 @@ pub fn infer(expr: &S<Expr>, ctx: &mut Ctx<'_>) -> Ty {
                     if let Some(params) = ctx.env.get_param_meta(fname).cloned() {
                         let mut slots: Vec<Option<(Ty, Span)>> = vec![None; params.len()];
                         let mut pos_cursor = 0usize;
+                        let shown_name = fn_full_path.clone().unwrap_or_else(|| fname.clone());
                         for arg in args {
                             let ty = infer(&arg.value, ctx);
                             let sp = arg.value.span;
                             if let Some(label) = &arg.label {
                                 if let Some(idx) = params.iter().position(|(n, _)| n == &label.node) {
+                                    // BACKLOG item 352 - a parameter given twice is an error.
+                                    if slots[idx].is_some() {
+                                        ctx.errors.push(TypeError {
+                                            kind: TypeErrorKind::DuplicateArgument { fn_name: shown_name.clone(), name: label.node.clone() },
+                                            span: sp,
+                                        });
+                                    }
                                     slots[idx] = Some((ty, sp));
                                 } else {
+                                    // BACKLOG item 352 - an unknown name is an error, not a positional arg.
+                                    ctx.errors.push(TypeError {
+                                        kind: TypeErrorKind::UnknownArgumentName {
+                                            fn_name: shown_name.clone(), name: label.node.clone(),
+                                            expected: params.iter().map(|(n, _)| n.clone()).collect(),
+                                        },
+                                        span: label.span,
+                                    });
                                     while pos_cursor < slots.len() && slots[pos_cursor].is_some() { pos_cursor += 1; }
                                     if pos_cursor < slots.len() { slots[pos_cursor] = Some((ty, sp)); pos_cursor += 1; }
                                 }

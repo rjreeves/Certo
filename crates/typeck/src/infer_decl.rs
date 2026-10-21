@@ -1586,6 +1586,9 @@ fn hoist_decl(
                     Ty::Forall { vars: type_param_vars.clone(), body: Box::new(fn_ty) }
                 };
                 variant_defs.push((t.name.node.clone(), fn_ty));
+                // BACKLOG item 352 - the field names, so `P(b: 1, a: 9)` binds by name.
+                ctx.env.define_param_meta(t.name.node.clone(),
+                    rec.fields.iter().map(|f| (f.name.node.clone(), false)).collect());
             }
 
             if let certo_ast::decl::TypeBody::Sum(variants) = &t.body {
@@ -1614,6 +1617,11 @@ fn hoist_decl(
                             Ty::Forall { vars: type_param_vars.clone(), body: Box::new(fn_ty) }
                         };
                         variant_defs.push((v.name.node.clone(), fn_ty));
+                        // BACKLOG item 352 - named variant fields bind by name at a call.
+                        if v.fields.iter().all(|f| f.name.is_some()) {
+                            ctx.env.define_param_meta(v.name.node.clone(),
+                                v.fields.iter().map(|f| (f.name.as_ref().unwrap().node.clone(), false)).collect());
+                        }
                     }
                 }
             }

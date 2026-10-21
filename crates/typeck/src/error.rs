@@ -41,6 +41,12 @@ pub enum TypeErrorKind {
     /// pre-existing gap in `.with(...)`'s own validation, not fixed here).
     ComputedFieldNotSettable { field: String, type_name: String },
 
+    /// E0227 - a call names an argument the function (or constructor) does not have.
+    UnknownArgumentName { fn_name: String, name: String, expected: Vec<String> },
+
+    /// E0228 - an argument is supplied twice (by name and by position, or by name twice).
+    DuplicateArgument { fn_name: String, name: String },
+
     /// E0226 - a record literal `T { .. }` leaves out a field that is neither optional (`T?`)
     /// nor computed (BACKLOG item 353).
     MissingRecordField { field: String, type_name: String },
@@ -248,6 +254,10 @@ impl TypeError {
                 format!("E0206: unbound name `{}`", name),
             TypeErrorKind::ComputedFieldNotSettable { field, type_name } =>
                 format!("E0217: `{}` is a computed property of `{}` — it's derived, not stored, and can't be set directly", field, type_name),
+            TypeErrorKind::UnknownArgumentName { fn_name, name, .. } =>
+                format!("E0227: `{fn_name}` has no parameter named `{name}`"),
+            TypeErrorKind::DuplicateArgument { fn_name, name } =>
+                format!("E0228: argument `{name}` of `{fn_name}` is given more than once"),
             TypeErrorKind::MissingRecordField { field, type_name } =>
                 format!("E0226: `{}` is missing the required field `{}`", type_name, field),
             TypeErrorKind::FfiCallOutsideUnsafe { name } =>
