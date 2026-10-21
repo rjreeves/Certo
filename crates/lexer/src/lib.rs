@@ -28,10 +28,7 @@ pub enum Token<'src> {
     Decimal(&'src str),
 
     /// Interpolated string: f"…"  (contents lexed as a raw slice; interpolation is a parser concern)
-    #[regex(r#"f"([^"\\]|\\.)*""#, |lex| {
-        let s = lex.slice();
-        &s[2..s.len()-1]
-    })]
+    #[token("f\"", fstring_body)]
     FString(&'src str),
 
     /// UUID literal: uuid"550e8400-…"
@@ -215,6 +212,40 @@ pub fn lex(source: &str) -> Result<Vec<Spanned<'_>>, Vec<(logos::Span, &str)>> {
     } else {
         Err(errors)
     }
+}
+
+/// The body of an f-string after `f"`, up to its closing quote (BACKLOG item 351). Inside a
+/// `{...}` interpolation a string literal may itself contain quotes and braces, so the end of the
+/// f-string is found by tracking brace depth and skipping nested string literals. `{{` and `}}`
+/// are literal braces and `\{` / `\}` escape one.
+fn fstring_body<'src>(lex: &mut logos::Lexer<'src, Token<'src>>) -> Option<&'src str> {
+    let rest = lex.remainder();
+    let b = rest.as_bytes();
+    let mut i = 0;
+    let mut depth = 0usize;
+    while i < b.len() {
+        match b[i] {
+            b'\\' if depth == 0 => i += 2,
+            b'"' if depth == 0 => {
+                lex.bump(i + 1);
+                return Some(&rest[..i]);
+            }
+            b'{' if depth == 0 && b.get(i + 1) == Some(&b'{') => i += 2,
+            b'}' if depth == 0 && b.get(i + 1) == Some(&b'}') => i += 2,
+            b'{' => { depth += 1; i += 1; }
+            b'}' if depth > 0 => { depth -= 1; i += 1; }
+            // A string literal inside an interpolation.
+            b'"' => {
+                i += 1;
+                while i < b.len() && b[i] != b'"' {
+                    i += if b[i] == b'\\' { 2 } else { 1 };
+                }
+                i += 1;
+            }
+            _ => i += 1,
+        }
+    }
+    None
 }
 
 #[cfg(test)]

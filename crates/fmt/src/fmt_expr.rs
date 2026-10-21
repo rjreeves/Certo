@@ -445,7 +445,7 @@ fn fmt_lit(lit: &Lit) -> String {
             // any string. Interpolation is plain `{expr}`; a `$` before the
             // brace would become literal text (BACKLOG item 404).
             let inner: String = parts.iter().map(|p| match p {
-                FStringPart::Literal(s) => escape_str(s),
+                FStringPart::Literal(s) => escape_str(s).replace('{', "{{").replace('}', "}}"),
                 FStringPart::Interpolated(e) => format!("{{{}}}", fmt_expr(&e.node, 0)),
             }).collect();
             format!("f\"{}\"", inner)

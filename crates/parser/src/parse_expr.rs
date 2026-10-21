@@ -1045,55 +1045,80 @@ fn parse_with_timeout(cur: &mut Cursor<'_>) -> Result<S<Expr>, ParseError> {
 fn parse_fstring_parts(content: &str, base_span: Span) -> Result<Vec<FStringPart>, ParseError> {
     use crate::cursor::Cursor as C;
     let mut parts = Vec::new();
-    let mut rest = content;
-    while !rest.is_empty() {
-        if let Some(open) = rest.find('{') {
-            if open > 0 {
-                parts.push(FStringPart::Literal(unescape_str(&rest[..open])));
-            }
-            rest = &rest[open + 1..];
-            // Find matching `}`, respecting nested braces
-            let mut depth = 1usize;
-            let mut end = 0;
-            for (i, c) in rest.char_indices() {
-                match c {
-                    '{' => depth += 1,
-                    '}' => {
-                        depth -= 1;
-                        if depth == 0 { end = i; break; }
+    let mut lit = String::new();
+    let b = content.as_bytes();
+    let mut i = 0;
+    while i < content.len() {
+        let ch = content[i..].chars().next().unwrap();
+        match ch {
+            '\\' => {
+                // An escape; `\{` and `\}` are literal braces.
+                let esc = content[i + 1..].chars().next();
+                match esc {
+                    Some('{') => { lit.push('{'); i += 2; }
+                    Some('}') => { lit.push('}'); i += 2; }
+                    Some(e) => {
+                        lit.push_str(&unescape_str(&content[i..i + 1 + e.len_utf8()]));
+                        i += 1 + e.len_utf8();
                     }
-                    _ => {}
+                    None => { lit.push('\\'); i += 1; }
                 }
             }
-            if depth != 0 {
-                return Err(ParseError {
-                    kind: ParseErrorKind::Custom("unclosed `{` in f-string".into()),
+            '{' if b.get(i + 1) == Some(&b'{') => { lit.push('{'); i += 2; }
+            '}' if b.get(i + 1) == Some(&b'}') => { lit.push('}'); i += 2; }
+            '{' => {
+                // Find the matching `}`, skipping string literals inside the expression.
+                let start = i + 1;
+                let mut depth = 1usize;
+                let mut k = start;
+                while k < content.len() {
+                    match b[k] {
+                        b'"' => {
+                            k += 1;
+                            while k < content.len() && b[k] != b'"' {
+                                k += if b[k] == b'\\' { 2 } else { 1 };
+                            }
+                        }
+                        b'{' => depth += 1,
+                        b'}' => {
+                            depth -= 1;
+                            if depth == 0 { break; }
+                        }
+                        _ => {}
+                    }
+                    k += 1;
+                }
+                if depth != 0 || k >= content.len() {
+                    return Err(ParseError {
+                        kind: ParseErrorKind::Custom("unclosed `{` in f-string (write `{{` for a literal brace)".into()),
+                        span: base_span,
+                    });
+                }
+                if !lit.is_empty() {
+                    parts.push(FStringPart::Literal(std::mem::take(&mut lit)));
+                }
+                let inner = &content[start..k];
+                // Absolute source offset of `inner`: the f-string content is a direct slice of
+                // the source after the `f"` prefix (2 bytes), so shifting the re-lexed token
+                // spans by this makes type errors inside interpolations point at the real source.
+                let abs = base_span.start as usize + 2 + start;
+                let mut tokens = certo_lexer::lex(inner).map_err(|_| ParseError {
+                    kind: ParseErrorKind::Custom(format!("invalid token in f-string expression `{{{inner}}}`")),
                     span: base_span,
-                });
+                })?;
+                for t in &mut tokens {
+                    t.span = (t.span.start + abs)..(t.span.end + abs);
+                }
+                let mut sub = C::new(tokens);
+                let expr = parse_expr(&mut sub)?;
+                parts.push(FStringPart::Interpolated(Box::new(expr)));
+                i = k + 1;
             }
-            let inner = &rest[..end];
-            // Absolute source offset of `inner`: the f-string content is a direct
-            // slice of the source after the `f"` prefix (2 bytes), and `rest` is a
-            // suffix of `content`, so the byte offset of `inner` within `content`
-            // is `content.len() - rest.len()`. Shifting the re-lexed token spans by
-            // this makes type errors inside interpolations point at the real source.
-            let abs = base_span.start as usize + 2 + (content.len() - rest.len());
-            rest = &rest[end + 1..];
-            // Re-lex and parse the embedded expression
-            let mut tokens = certo_lexer::lex(inner).map_err(|_| ParseError {
-                kind: ParseErrorKind::Custom(format!("invalid token in f-string expression `{{{inner}}}`")),
-                span: base_span,
-            })?;
-            for t in &mut tokens {
-                t.span = (t.span.start + abs)..(t.span.end + abs);
-            }
-            let mut sub = C::new(tokens);
-            let expr = parse_expr(&mut sub)?;
-            parts.push(FStringPart::Interpolated(Box::new(expr)));
-        } else {
-            parts.push(FStringPart::Literal(unescape_str(rest)));
-            break;
+            c => { lit.push(c); i += c.len_utf8(); }
         }
+    }
+    if !lit.is_empty() {
+        parts.push(FStringPart::Literal(lit));
     }
     if parts.is_empty() {
         parts.push(FStringPart::Literal(String::new()));
