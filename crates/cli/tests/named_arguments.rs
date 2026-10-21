@@ -175,3 +175,55 @@ fn main(): Unit [io] = {
     let text = fs::read_to_string(&file).unwrap();
     assert!(text.contains("impl Functor<Box> for Box {") && text.contains("impl Container<List<Int>> for Pair {"), "{text}");
 }
+
+// BACKLOG item 371 - a nullary variant of a sum type that also has payload variants can sit in a
+// list, a tuple, an Option/Result payload or a `List.push` argument.
+#[test]
+fn nullary_variants_of_payload_sum_types_in_lists_and_tuples() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("main.cto");
+    fs::write(&file, r####"module S
+type Shape = Circle(Int) | Dot | Sq(Int, Int)
+type OrderError = NoLines | Over(Int, Int)
+type Order = { lines: Int }
+validator Submit for Order errors OrderError {
+  rule has_lines {
+    require order.lines > 0
+    else OrderError.NoLines
+  }
+}
+fn area(s: Shape): Int = match s {
+  Circle(r) => r
+  Dot => 0
+  Sq(a, b) => a * b
+}
+fn pick(n: Int): Shape? = if n > 0 then Some(Dot) else None
+fn res(n: Int): Result<Shape, Text> = if n > 0 then Ok(Dot) else Err("neg")
+fn main(): Unit [io] = {
+  var xs: List<Shape> = []
+  xs = List.push(xs, Dot)
+  xs = List.push(xs, Sq(2, 3))
+  println(intToText(List.fold(xs, 0, (a, s) => a + area(s))))
+  val (s, n) = (Dot, 5)
+  println(intToText(area(s) + n))
+  println(intToText(List.len(List.filter([Dot, Circle(2), Dot], x => area(x) == 0))))
+  match pick(1) {
+    Some(v) => println(intToText(area(v)))
+    None => println("none")
+  }
+  match res(1) {
+    Ok(v) => println(intToText(area(v)))
+    Err(e) => println(e)
+  }
+  match Submit.validate(Order { lines: 0 }) {
+    Ok(o) => println("ok")
+    Err(e) => println("invalid")
+  }
+}
+"####).unwrap();
+    let exe = dir.path().join(if cfg!(windows) { "app.exe" } else { "app" });
+    let b = Command::new(env!("CARGO_BIN_EXE_certo")).arg("build").arg(&file).arg("-o").arg(&exe).output().unwrap();
+    assert!(b.status.success(), "{}", String::from_utf8_lossy(&b.stderr));
+    let r = Command::new(&exe).output().unwrap();
+    assert_eq!(String::from_utf8_lossy(&r.stdout).replace("\r\n", "\n"), "6\n5\n2\n0\n0\ninvalid\n");
+}

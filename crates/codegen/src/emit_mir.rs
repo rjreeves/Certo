@@ -173,8 +173,27 @@ fn is_void_noreturn_callee(func: &Operand) -> bool {
     matches!(func, Operand::Global(name) if matches!(name.as_str(), "panic" | "unreachable" | "todo"))
 }
 
+// BACKLOG item 371 - the nullary variants of sum types that also have payload variants (`Dot` in
+// `Circle(Int) | Dot`) are struct constants, not ints, so a list/tuple/argument slot holding one
+// must box it like any other struct. They are `Operand::Global`s with no local to take a type from.
+thread_local! {
+    static PAYLOAD_NULLARY: std::cell::RefCell<HashMap<String, String>> = std::cell::RefCell::new(HashMap::new());
+}
+
+pub fn reset_payload_nullary_variants() {
+    PAYLOAD_NULLARY.with(|m| m.borrow_mut().clear());
+}
+
+pub fn register_payload_nullary_variant(variant: &str, parent: &str) {
+    PAYLOAD_NULLARY.with(|m| { m.borrow_mut().insert(variant.to_string(), parent.to_string()); });
+}
+
 fn operand_ty(op: &Operand, locals: &[MirLocalDecl]) -> Ty {
     match op {
+        Operand::Global(n) => match PAYLOAD_NULLARY.with(|m| m.borrow().get(n).cloned()) {
+            Some(parent) => Ty::Named { name: parent, args: vec![] },
+            None => Ty::Error,
+        },
         Operand::Local(id) => locals.iter().find(|l| l.id == *id).map(|l| l.ty.clone()).unwrap_or(Ty::Error),
         Operand::Const(MirConst::Int(_))     => Ty::Int,
         Operand::Const(MirConst::Float(_))   => Ty::Float,

@@ -161,6 +161,7 @@ pub fn emit_module(module: &Module, opts: &CodegenOptions) -> String {
     // from; `emit_binop` consults this to find the parent type (and from
     // there, whether it's in `eq_types`) when that happens.
     let mut variant_parent: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    crate::emit_mir::reset_payload_nullary_variants();
 
     // Build set of pub function names for export annotation.
     let pub_fns: std::collections::HashSet<&str> = module.decls.iter()
@@ -279,6 +280,9 @@ pub fn emit_module(module: &Module, opts: &CodegenOptions) -> String {
                     for v in variants {
                         if v.fields.is_empty() {
                             variant_parent.insert(v.name.node.clone(), t.name.node.clone());
+                            if has_payload {
+                                crate::emit_mir::register_payload_nullary_variant(&v.name.node, &t.name.node);
+                            }
                         }
                     }
                     if has_payload {
