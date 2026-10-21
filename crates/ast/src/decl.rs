@@ -223,7 +223,12 @@ pub struct TraitDecl {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ImplDecl {
     pub trait_path:  Option<ModulePath>,  // None for inherent impls
+    /// The `<..>` after the trait name (`impl Container<Int> for Box`), kept so `certo fmt`
+    /// prints it back; name resolution does not use it (BACKLOG item 364).
+    pub trait_args:  Vec<S<TypeExpr>>,
     pub type_path:   ModulePath,
+    /// The `<..>` after the implementing type's name.
+    pub type_args:   Vec<S<TypeExpr>>,
     pub type_params: Vec<TypeParam>,
     pub methods:     Vec<FnDecl>,
     /// `true` for the trailing `impl` block the parser itself synthesizes

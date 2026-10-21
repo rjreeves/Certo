@@ -67,6 +67,8 @@ pub fn parse_decl(cur: &mut Cursor<'_>) -> Result<Vec<S<Decl>>, ParseError> {
             if !methods.is_empty() {
                 let impl_decl = ImplDecl {
                     trait_path: None,
+                    trait_args: vec![],
+                    type_args: vec![],
                     type_path: certo_ast::types::ModulePath {
                         segments: vec![d.name.clone()],
                         span: d.name.span,
@@ -909,18 +911,35 @@ fn parse_trait_decl(cur: &mut Cursor<'_>, is_pub: bool) -> Result<TraitDecl, Par
     Ok(TraitDecl { is_pub, name: S::new(name, name_span), type_params, methods, span })
 }
 
+/// Parse a `<T, U<V>>` argument list after a path in an `impl` header (empty if absent).
+fn parse_impl_type_args(cur: &mut Cursor<'_>) -> Result<Vec<S<TypeExpr>>, ParseError> {
+    let mut out = Vec::new();
+    if cur.peek() != Some(&Token::Lt) { return Ok(out); }
+    cur.bump();
+    loop {
+        out.push(parse_type(cur)?);
+        if cur.eat(|t| matches!(t, Token::Comma)).is_none() { break; }
+    }
+    cur.expect(&Token::Gt)?;
+    Ok(out)
+}
+
 fn parse_impl_decl(cur: &mut Cursor<'_>) -> Result<ImplDecl, ParseError> {
     let start = cur.expect(&Token::Impl)?;
     let type_params = parse_type_params(cur)?;
 
     let first = parse_module_path(cur)?;
+    // BACKLOG item 364 - `impl Functor<Box> for Box`, `impl Container<Int> for Box<T>`: the
+    // type arguments are parsed so the block can be written; resolution uses the names.
+    let first_args = parse_impl_type_args(cur)?;
 
     // `impl Trait for Type` vs `impl Type`
-    let (trait_path, type_path) = if cur.eat(|t| matches!(t, Token::For)).is_some() {
+    let (trait_path, trait_args, type_path, type_args) = if cur.eat(|t| matches!(t, Token::For)).is_some() {
         let tp = parse_module_path(cur)?;
-        (Some(first), tp)
+        let tp_args = parse_impl_type_args(cur)?;
+        (Some(first), first_args, tp, tp_args)
     } else {
-        (None, first)
+        (None, vec![], first, first_args)
     };
 
     cur.expect(&Token::LBrace)?;
@@ -938,7 +957,7 @@ fn parse_impl_decl(cur: &mut Cursor<'_>) -> Result<ImplDecl, ParseError> {
             resolve_self_param(m, concrete_name);
         }
     }
-    Ok(ImplDecl { trait_path, type_path, type_params, methods, is_synthesized: false, span })
+    Ok(ImplDecl { trait_path, trait_args, type_path, type_args, type_params, methods, is_synthesized: false, span })
 }
 
 // ------------------------------------------------------------------ //

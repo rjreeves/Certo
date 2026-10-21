@@ -139,3 +139,39 @@ fn main(): Unit [io] = {
     let (ok, out) = certo("module I\nfn main(): Unit [io] = { val x: UInt = 18446744073709551616\n println(\"x\") }\n", &["check"]);
     assert!(!ok && out.contains("too large"), "{out}");
 }
+
+// BACKLOG item 364 - `impl Trait<Args> for Type<Args>` parses, runs and survives `certo fmt`.
+#[test]
+fn generic_trait_impls_parse_run_and_format() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("main.cto");
+    fs::write(&file, r####"module T
+trait Functor<F> {
+  fn fmap(x: F): F
+}
+trait Container<A> {
+  fn first(c: Self): A
+}
+type Box = { v: Int }
+type Pair = { a: Int, b: Int }
+impl Functor<Box> for Box {
+  fn fmap(x: Box): Box = Box { v: x.v + 1 }
+}
+impl Container<List<Int>> for Pair {
+  fn first(c: Pair): List<Int> = [c.a]
+}
+fn main(): Unit [io] = {
+  println(intToText(Box.fmap(Box { v: 1 }).v))
+  println(intToText(List.len(Pair.first(Pair { a: 7, b: 8 }))))
+}
+"####).unwrap();
+    let exe = dir.path().join(if cfg!(windows) { "app.exe" } else { "app" });
+    let b = Command::new(env!("CARGO_BIN_EXE_certo")).arg("build").arg(&file).arg("-o").arg(&exe).output().unwrap();
+    assert!(b.status.success(), "{}", String::from_utf8_lossy(&b.stderr));
+    let r = Command::new(&exe).output().unwrap();
+    assert_eq!(String::from_utf8_lossy(&r.stdout).replace("\r\n", "\n"), "2\n1\n");
+    let f = Command::new(env!("CARGO_BIN_EXE_certo")).arg("fmt").arg(&file).output().unwrap();
+    assert!(f.status.success());
+    let text = fs::read_to_string(&file).unwrap();
+    assert!(text.contains("impl Functor<Box> for Box {") && text.contains("impl Container<List<Int>> for Pair {"), "{text}");
+}

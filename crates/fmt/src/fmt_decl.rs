@@ -164,10 +164,13 @@ fn fmt_trait(t: &TraitDecl, indent: usize) -> String {
 }
 
 fn fmt_impl(i: &ImplDecl, indent: usize) -> String {
+    let args = |xs: &[certo_ast::span::S<certo_ast::types::TypeExpr>]| if xs.is_empty() { String::new() } else {
+        format!("<{}>", xs.iter().map(|t| fmt_type(&t.node, 0)).collect::<Vec<_>>().join(", "))
+    };
     let trait_str = i.trait_path.as_ref()
-        .map(|p| format!("{} for ", p.segments.iter().map(|s| s.node.as_str()).collect::<Vec<_>>().join(".")))
+        .map(|p| format!("{}{} for ", p.segments.iter().map(|s| s.node.as_str()).collect::<Vec<_>>().join("."), args(&i.trait_args)))
         .unwrap_or_default();
-    let type_str  = i.type_path.segments.iter().map(|s| s.node.as_str()).collect::<Vec<_>>().join(".");
+    let type_str  = format!("{}{}", i.type_path.segments.iter().map(|s| s.node.as_str()).collect::<Vec<_>>().join("."), args(&i.type_args));
     let params    = fmt_type_params(&i.type_params);
     let methods: Vec<String> = i.methods.iter()
         .map(|m| format!("{}{}", ind(indent + 1), fmt_fn(m, indent + 1)))
