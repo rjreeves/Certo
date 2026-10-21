@@ -450,6 +450,9 @@ fn cmd_build(args: &[String], quiet: bool) {
         // No file argument — try reading `[build] entry` from certo.toml in cwd.
         match cwd_toml.as_ref().and_then(|c| c.build.as_ref()).and_then(|b| b.entry.as_deref()) {
             Some(entry) if !entry.is_empty() => cwd.join(entry),
+            // BACKLOG item 409 - a library has no `entry` (CLI-TOOLCHAIN §15); its source is `src/main.cto`.
+            Some(_) | None if cwd_toml.as_ref().and_then(|c| c.build.as_ref()).and_then(|b| b.ty.as_deref()) == Some("lib")
+                && cwd.join("src").join("main.cto").exists() => cwd.join("src").join("main.cto"),
             Some(_) | None => {
                 if cwd_toml.is_some() {
                     eprintln!("error: certo.toml found but has no `entry` field under [build]");
@@ -3041,6 +3044,11 @@ fn cmd_new(args: &[String]) {
         process::exit(1);
     });
 
+    if !["default", "api", "lib", "cli", "fullstack"].contains(&template) {
+        eprintln!("error: unknown template '{}' (choose default, api, lib, cli or fullstack)", template);
+        process::exit(2);
+    }
+
     let root = PathBuf::from(name);
     if root.exists() {
         eprintln!("error: directory '{}' already exists", name);
@@ -3136,37 +3144,36 @@ fn cmd_new(args: &[String]) {
              \n\
              import Stdlib.Http\n\
              \n\
-             fn handleHealth(req: HttpRequest): HttpResponse {{\n\
+             fn handleHealth(req: HttpRequest): HttpResponse =\n\
                  Http.ok(\"application/json\", \"{{\\\"status\\\": \\\"ok\\\"}}\")\n\
-             }}\n\
              \n\
-             fn main(): Unit {{\n\
+             fn route(req: HttpRequest): HttpResponse =\n\
+                 if req.path == \"/health\" then handleHealth(req)\n\
+                 else Http.notFound(\"not found\")\n\
+             \n\
+             fn main(): Unit [io] = {{\n\
                  println(\"Listening on :8080\")\n\
-                 Http.serve(8080, fn(req) {{\n\
-                     if req.path == \"/health\" then handleHealth(req)\n\
-                     else Http.notFound(\"not found\")\n\
-                 }})\n\
+                 Http.serve(8080, route)\n\
              }}\n"
         ),
         "lib" => format!(
             "module {module_name}\n\
              \n\
              /// The public API of this library.\n\
-             pub fn greet(name: Text): Text {{\n\
-                 \"Hello, \" ++ name ++ \"!\"\n\
-             }}\n"
+             pub fn greet(name: Text): Text =\n\
+                 \"Hello, \" ++ name ++ \"!\"\n"
         ),
         "cli" => format!(
             "module {module_name}\n\
              \n\
-             fn printUsage(): Unit {{\n\
+             fn printUsage(): Unit [io] = {{\n\
                  println(\"Usage: {name} <command>\")\n\
                  println(\"\")\n\
                  println(\"Commands:\")\n\
                  println(\"  help    Show this message\")\n\
              }}\n\
              \n\
-             fn main(): Unit {{\n\
+             fn main(): Unit [io] = {{\n\
                  val cmd = arg(1)\n\
                  match cmd {{\n\
                      None    => printUsage()\n\
@@ -3181,7 +3188,7 @@ fn cmd_new(args: &[String]) {
         _ => format!(
             "module {module_name}\n\
              \n\
-             fn main(): Unit {{\n\
+             fn main(): Unit [io] = {{\n\
                  println(\"Hello from {name}!\")\n\
              }}\n",
             name = name,
@@ -3216,9 +3223,9 @@ fn cmd_new(args: &[String]) {
 
     // .gitignore
     write_file(&root.join(".gitignore"),
-        "dist\\\n\
+        "dist/\n\
          .env\n\
-         .cto\\\n\
+         .cto/\n\
          *.log\n"
     );
 
