@@ -88,3 +88,31 @@ fn main(): Unit [io] = {
 "####);
     assert_eq!(out, "2.5\n2.5\n");
 }
+
+// BACKLOG item 368 - annotated lambda values keep their parameter types (Float, Text, Decimal, a
+// record), and a curried local lambda works.
+#[test]
+fn annotated_lambda_values_keep_their_parameter_types() {
+    let out = run(r####"module A
+type P = { w: Float, n: Int }
+fn main(): Unit [io] = {
+  val h = (a: Float, b: Float) => a / b
+  println(floatToText(h(1.0, 4.0)))
+  val t = (a: Text, b: Text) => a == b
+  println(boolToText(t("x" ++ "y", "xy")))
+  val lt = (a: Text, b: Text) => a < b
+  println(boolToText(lt("apple", "fig")))
+  val d = (a: Decimal) => Decimal.add(a, d"1.5")
+  println(Decimal.toText(d(d"2")))
+  val f = (x: P) => x.w > 2.0
+  println(boolToText(f(P { w: 3.0, n: 1 })))
+  val sub = (a: Int) => (b: Int) => a - b
+  println(intToText(sub(1)(10)))
+  val inc = sub(100)
+  println(intToText(inc(1)))
+  val mk = (x: P) => P { w: x.w * 2.0, n: x.n + 1 }
+  println(floatToText(mk(P { w: 1.5, n: 1 }).w))
+}
+"####);
+    assert_eq!(out, "0.25\ntrue\ntrue\n3.5\ntrue\n-9\n99\n3\n");
+}
