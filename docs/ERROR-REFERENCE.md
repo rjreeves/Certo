@@ -666,6 +666,21 @@ runs synchronously and returns its result directly (BACKLOG item 366).
 
 ---
 
+### E0235  Type, trait or variant not visible from this file
+
+```
+error[E0235]: `Secret` is private to module `App.Models`
+error[E0235]: `Order` is declared in module `App.Models`, which this file does not import
+```
+
+**Cause:** A file names a type, trait or variant that another file declares without `pub`, or that
+belongs to a module this file does not itself import (a file's own imports reach its importer only
+through `pub import`).
+
+**Fix:** Declare it `pub`, add `import <module>`, or have the importing module say `pub import <module>`.
+
+---
+
 ### E0233  Anonymous record literal matches no record type, or several
 
 ```

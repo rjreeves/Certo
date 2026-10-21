@@ -398,13 +398,19 @@ functions can use them. A file reached more than once (or through an import cycl
 included once. `import Lib.{ other }` brings in only `other`; the helpers `other` calls
 still come along, but under hidden names the importing file cannot write.
 
-Only the `pub` functions, values and variables of an imported file are visible to the
-importing file. A function declared without `pub` is private to its file: the file's own
-code still calls it, the importer cannot (it gets "undefined identifier"), and the importer
-may define a function with the same name. `import Lib.{ helper }` naming a private
-function is error E0105. This applies to functions, values and variables; types, traits and
-variants of an imported file are still all visible, and so are the names a file imported
-itself (`pub import` does not yet limit them; BACKLOG item 443).
+Only the `pub` declarations of an imported file are visible to the importing file. A function,
+value or variable declared without `pub` is private to its file: the file's own code still calls
+it, the importer cannot (it gets "undefined identifier"), and the importer may define one with the
+same name. `import Lib.{ helper }` naming a private function is error E0105.
+
+The same holds for types, traits and variants: a type declared without `pub` cannot be named from
+another file, and a file's own imports reach its importer only through `pub import`
+(`pub import App.Models` makes `App.Models`' public types visible to whoever imports this file;
+a plain `import` does not). Naming one that is not visible is error E0235, either "private to
+module M" or "declared in module M, which this file does not import". `certo db pull` and
+`certo-ffi --rest-client` generate their types and functions as `pub`. Two gaps remain: the functions
+and values a file imported are still visible to its importer even without `pub import`, and
+`import Lib.{ Name }` does not yet narrow which types of `Lib` can be named.
 
 ---
 

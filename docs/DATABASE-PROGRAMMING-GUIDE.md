@@ -361,7 +361,7 @@ There's no special schema-declaration syntax in Certo — a "database-backed
 type" is just an ordinary `type`, marked with an empty `DbRow` impl:
 
 ```certo
-type Orders = {
+pub type Orders = {
     id: Int
     customerId: Int
     status: Text
@@ -713,7 +713,7 @@ import Stdlib.Db
 import Stdlib.DbQuery
 import Stdlib.DbMutation
 
-type Orders = {
+pub type Orders = {
     id: Int
     customerId: Int
     status: Text
