@@ -470,6 +470,7 @@ typedef struct {
 
 static CertoMap* map_alloc(int64_t cap) {
     if (cap < 16) cap = 16;
+    cap |= 1;   /* odd, so 8/16-byte-aligned pointer keys do not all land in a few buckets */
     CertoMap* m = (CertoMap*)malloc(sizeof(CertoMap));
     if (!m) certo_panic("out of memory");
     m->len     = 0;
@@ -500,7 +501,10 @@ static int64_t map_hash(CertoMap* m, void* key) {
         for (const unsigned char* p = (const unsigned char*)map_text(key); *p; p++) { h ^= *p; h *= 1099511628211ULL; }
         return (int64_t)(h % (uint64_t)m->cap);
     }
-    return (int64_t)((uintptr_t)key >> 3) % m->cap;
+    /* BACKLOG item 398 - an Int key is its own value and a pointer key is aligned; with an odd
+       capacity `key % cap` spreads both. (`key >> 3` put eight neighbouring Ints in one bucket,
+       and linear probing then made every insert walk a long cluster.) */
+    return (int64_t)((uint64_t)(uintptr_t)key % (uint64_t)m->cap);
 }
 
 static bool map_key_eq(CertoMap* m, void* a, void* b) {
@@ -515,15 +519,29 @@ static int64_t map_probe(CertoMap* m, void* key) {
 }
 
 static CertoMap* map_insert_mode(CertoMap* m, void* key, void* value, int text) {
-    /* Copy-on-write: return a new map */
-    CertoMap* n = map_alloc(m ? (m->len + 1) * 2 : 16);
-    n->text = text || (m && m->text);
-    if (m) {
-        for (int64_t i = 0; i < m->cap; i++) {
-            if (!m->entries[i].occupied) continue;
-            int64_t h = map_probe(n, m->entries[i].key);
-            n->entries[h] = m->entries[i];
-            n->len++;
+    /* Copy-on-write: return a new map. While the table is under half full the copy is one
+       memcpy of the same-sized table (no re-hashing, no growth); it grows by doubling. */
+    int want_text = text || (m && m->text);
+    CertoMap* n;
+    if (m && m->text == want_text && (m->len + 1) * 2 <= m->cap) {
+        n = (CertoMap*)malloc(sizeof(CertoMap));
+        if (!n) certo_panic("out of memory");
+        n->len = m->len;
+        n->text = m->text;
+        n->cap = m->cap;
+        n->entries = (MapEntry*)malloc((size_t)m->cap * sizeof(MapEntry));
+        if (!n->entries) certo_panic("out of memory");
+        memcpy(n->entries, m->entries, (size_t)m->cap * sizeof(MapEntry));
+    } else {
+        n = map_alloc(m ? m->cap * 2 : 16);
+        n->text = want_text;
+        if (m) {
+            for (int64_t i = 0; i < m->cap; i++) {
+                if (!m->entries[i].occupied) continue;
+                int64_t h = map_probe(n, m->entries[i].key);
+                n->entries[h] = m->entries[i];
+                n->len++;
+            }
         }
     }
     int64_t h = map_probe(n, key);
