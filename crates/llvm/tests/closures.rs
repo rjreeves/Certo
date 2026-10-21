@@ -41,14 +41,6 @@ fn c_output(dir: &Path, src: &str) -> Option<String> {
     Some(String::from_utf8_lossy(&Command::new(&exe).output().unwrap().stdout).replace("\r\n", "\n"))
 }
 
-/// Like `check`, without the C comparison: the C backend compares lists and tuples with `==`
-/// by address, so it answers `false` for equal ones.
-fn check_llvm_only(src: &str, expected: &str) {
-    if !clang_available() { return; }
-    let dir = tempfile::tempdir().unwrap();
-    assert_eq!(llvm_output(dir.path(), src), expected);
-}
-
 fn check(src: &str, expected: &str) {
     if !clang_available() { return; }
     let dir = tempfile::tempdir().unwrap();
@@ -196,7 +188,7 @@ false
 
 #[test]
 fn structural_equality_on_lists_and_tuples() {
-    check_llvm_only(r#"module E
+    check(r#"module E
 import Stdlib.Core
 
 type P = { x: Int }

@@ -241,6 +241,7 @@ pub fn emit_module(module: &Module, opts: &CodegenOptions) -> String {
                         let body = if parts.is_empty() { "true".to_string() } else { parts.join(" && ") };
                         writeln!(out, "    return {body};").unwrap();
                         writeln!(out, "}}").unwrap();
+                        writeln!(out, "static inline bool certo_eqp_{tname}(void* a, void* b) {{ return certo_eq_{tname}(*({tname}*)a, *({tname}*)b); }}").unwrap();
                         writeln!(out).unwrap();
                         eq_types.insert(t.name.node.clone());
                     }
@@ -341,6 +342,7 @@ pub fn emit_module(module: &Module, opts: &CodegenOptions) -> String {
                             writeln!(out, "        default: return true;").unwrap();
                             writeln!(out, "    }}").unwrap();
                             writeln!(out, "}}").unwrap();
+                            writeln!(out, "static inline bool certo_eqp_{tname}(void* a, void* b) {{ return certo_eq_{tname}(*({tname}*)a, *({tname}*)b); }}").unwrap();
                             writeln!(out).unwrap();
                             eq_types.insert(t.name.node.clone());
                         }
@@ -1229,6 +1231,32 @@ typedef struct { void* value; } certo_tuple_t;
  * `Ty::Fn` value flows — see `ty_to_c`. */
 typedef struct { void* fn; void* env; } certo_fn_t;
 typedef void* certo_error_t;
+
+/* `==` on lists and tuples (BACKLOG item 441): both are `{len, cap, data}` blocks of pointer-
+ * sized slots, compared slot by slot with a comparator chosen from the element type. */
+typedef struct { int64_t len; int64_t cap; void** data; } certo_eq_list_t;
+typedef bool (*certo_slot_eq_fn)(void*, void*);
+bool certo_decimal_eq(certo_decimal_t a, certo_decimal_t b);
+bool certo_uuid_eq(certo_uuid_t a, certo_uuid_t b);
+static inline bool certo_slot_eq_word(void* a, void* b) { return a == b; }
+static inline bool certo_slot_eq_float(void* a, void* b) { return __certo_i2f((int64_t)(intptr_t)a) == __certo_i2f((int64_t)(intptr_t)b); }
+static inline bool certo_slot_eq_text(void* a, void* b) { return certo_text_eq((certo_text_t)a, (certo_text_t)b); }
+static inline bool certo_slot_eq_decimal(void* a, void* b) { return certo_decimal_eq(*(certo_decimal_t*)a, *(certo_decimal_t*)b); }
+static inline bool certo_slot_eq_uuid(void* a, void* b) { return certo_uuid_eq(*(certo_uuid_t*)a, *(certo_uuid_t*)b); }
+static inline bool certo_list_eq(void* a, void* b, certo_slot_eq_fn eq) {
+    certo_eq_list_t* x = (certo_eq_list_t*)a; certo_eq_list_t* y = (certo_eq_list_t*)b;
+    if (x == y) return true;
+    if (!x || !y || x->len != y->len) return false;
+    for (int64_t i = 0; i < x->len; i++) if (!eq(x->data[i], y->data[i])) return false;
+    return true;
+}
+static inline bool certo_tuple_eq(void* a, void* b, certo_slot_eq_fn* eqs) {
+    certo_eq_list_t* x = (certo_eq_list_t*)a; certo_eq_list_t* y = (certo_eq_list_t*)b;
+    if (x == y) return true;
+    if (!x || !y || x->len != y->len) return false;
+    for (int64_t i = 0; i < x->len; i++) if (!eqs[i](x->data[i], y->data[i])) return false;
+    return true;
+}
 
 /* List (dynamic array) — full signatures are in the stdlib C block. */
 typedef struct { int64_t len; int64_t cap; void** data; } certo_list_base_t;

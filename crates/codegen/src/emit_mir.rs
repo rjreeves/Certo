@@ -810,6 +810,21 @@ fn emit_eq(
         Ty::Uuid => return format!("certo_uuid_eq({lhs}, {rhs})"),
         _ => {}
     }
+    // BACKLOG item 441 - lists and tuples compare element by element, not by address.
+    match &ty {
+        Ty::List(elem) => {
+            if let Some(f) = slot_eq_fn(elem, eq_types) {
+                return format!("certo_list_eq({lhs}, {rhs}, {f})");
+            }
+        }
+        Ty::Tuple(elems) if !elems.is_empty() => {
+            let fns: Option<Vec<String>> = elems.iter().map(|t| slot_eq_fn(t, eq_types)).collect();
+            if let Some(fns) = fns {
+                return format!("certo_tuple_eq({lhs}, {rhs}, (certo_slot_eq_fn[]){{{}}})", fns.join(", "));
+            }
+        }
+        _ => {}
+    }
     let name = operand_type_name(l, locals, variant_parent)
         .or_else(|| operand_type_name(r, locals, variant_parent));
     if let Some(name) = name {
@@ -818,6 +833,23 @@ fn emit_eq(
         }
     }
     format!("({lhs} == {rhs})")
+}
+
+/// The comparator for one list/tuple slot holding a value of this type, if it has one.
+fn slot_eq_fn(ty: &Ty, eq_types: &HashSet<String>) -> Option<String> {
+    Some(match ty {
+        Ty::Int | Ty::Int8 | Ty::Int16 | Ty::Int32 | Ty::UInt | Ty::Bool | Ty::Char | Ty::Unit => "certo_slot_eq_word".into(),
+        Ty::Float | Ty::Float32 => "certo_slot_eq_float".into(),
+        Ty::Text | Ty::BoundedText(_) => "certo_slot_eq_text".into(),
+        Ty::Decimal(_) => "certo_slot_eq_decimal".into(),
+        Ty::Uuid => "certo_slot_eq_uuid".into(),
+        // A record or payload sum type has a generated comparator; any other plain name is a
+        // nullary enum or an opaque handle, which is a single word.
+        Ty::Named { name, args } if args.is_empty() => {
+            if eq_types.contains(name) { format!("certo_eqp_{}", c_ident(name)) } else { "certo_slot_eq_word".into() }
+        }
+        _ => return None,
+    })
 }
 
 fn emit_binop(
