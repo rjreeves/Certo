@@ -860,6 +860,7 @@ pub fn seed_stdlib(env: &mut TypeEnv, counter: &mut u32) {
     // BACKLOG item 271 — `Duration.months` (§16.9's own worked example,
     // `Duration.months(12)`), mirroring `Duration.days`'s exact shape.
     def!("Duration.months",    fn1(Ty::Int, dur()));
+    def!("Duration.toMilliseconds", fn1(dur(), Ty::Int));
     def!("Duration.toSeconds", fn1(dur(), Ty::Int));
     def!("Duration.toMinutes", fn1(dur(), Ty::Int));
     def!("Duration.toHours",   fn1(dur(), Ty::Int));

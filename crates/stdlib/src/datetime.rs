@@ -120,6 +120,7 @@ CertoDuration certo_duration_months (int64_t n) { return (CertoDuration)(n * 259
 
 /* ---- Duration: accessors (truncating to the coarser unit) ---- */
 
+int64_t certo_duration_to_milliseconds(CertoDuration d) { return d; }
 int64_t certo_duration_to_seconds(CertoDuration d) { return d / 1000; }
 int64_t certo_duration_to_minutes(CertoDuration d) { return d / 60000; }
 int64_t certo_duration_to_hours  (CertoDuration d) { return d / 3600000; }

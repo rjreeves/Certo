@@ -2687,7 +2687,11 @@ fn lower_expr(expr: &S<Expr>, cx: &mut Cx) -> HirExpr {
             // here is already `Ty::Error` for that case regardless; this
             // fix can only ever improve on that, never regress it.
             let inner = lower_expr(expr, cx);
-            let ty = inner.ty.clone();
+            // BACKLOG item 384 - awaiting a task handle yields the task's result type.
+            let ty = match &inner.ty {
+                Ty::Named { name, args } if name == "__CertoTask" && args.len() == 1 => args[0].clone(),
+                other => other.clone(),
+            };
             HirExpr { kind: HirExprKind::Await(Box::new(inner)), ty, span }
         }
 
@@ -2698,7 +2702,9 @@ fn lower_expr(expr: &S<Expr>, cx: &mut Cx) -> HirExpr {
             let capture_threshold = cx.next_local;
             let inner = lower_expr(expr, cx);
             let captures = collect_lambda_captures(&inner, capture_threshold);
-            HirExpr { kind: HirExprKind::Spawn { fn_name: String::new(), args: vec![inner], captures }, ty: Ty::Error, span }
+            let ty = if matches!(inner.ty, Ty::Error) { Ty::Error }
+                     else { Ty::Named { name: "__CertoTask".into(), args: vec![inner.ty.clone()] } };
+            HirExpr { kind: HirExprKind::Spawn { fn_name: String::new(), args: vec![inner], captures }, ty, span }
         }
 
         // `guard cond else e` → `if !cond { return e }; unit` — BACKLOG item
@@ -3826,6 +3832,9 @@ fn ast_ty_to_ty_with_params_depth(
                 "BoundedText" => Ty::BoundedText(None),
                 "Unit"    => Ty::Unit,
                 "UUID"    => Ty::Uuid,
+                // `Task<R>` is the handle `spawn` returns (BACKLOG item 384).
+                "Task" if targs.len() == 1 && !aliases.contains_key("Task") =>
+                    Ty::Named { name: "__CertoTask".into(), args: targs },
                 "List"    => Ty::List(Box::new(targs.into_iter().next().unwrap_or(Ty::Error))),
                 "Option"  => Ty::Option(Box::new(targs.into_iter().next().unwrap_or(Ty::Error))),
                 "Result"  => {
@@ -4071,25 +4080,18 @@ fn add_trait_bound_accessor_params(fn_name: &str, params: &mut Vec<HirParam>, sp
 /// `id < threshold` (the counter's value right before the lambda's own
 /// scope was pushed) must have been bound in an enclosing scope.
 /// Compute an absolute monotonic-clock millisecond deadline from a
-/// `Duration` expression (`now() + duration.toSeconds() * 1000`) and push
+/// `Duration` expression (`now() + duration.toMilliseconds()`) and push
 /// its `let` binding into `stmts`, returning the bound local — shared by
 /// `parallel(timeout: ...) { ... }` (BACKLOG item 81) and
 /// `withTimeout(...) { ... }` (BACKLOG item 122), which both need the
 /// identical deadline math.
 fn lower_deadline(duration: &S<Expr>, name: &str, stmts: &mut Vec<HirStmt>, cx: &mut Cx, span: Span) -> LocalId {
     let timeout_hir = lower_expr(duration, cx);
-    let to_seconds = HirExpr {
-        kind: HirExprKind::Call {
-            func: Box::new(HirExpr { kind: HirExprKind::Global("Duration.toSeconds".into()), ty: Ty::Error, span }),
-            args: vec![timeout_hir],
-        },
-        ty: Ty::Int, span,
-    };
+    // BACKLOG item 383 - `toSeconds` truncated a sub-second Duration to zero.
     let to_ms = HirExpr {
-        kind: HirExprKind::BinOp {
-            op: BinOp::Mul,
-            lhs: Box::new(to_seconds),
-            rhs: Box::new(HirExpr { kind: HirExprKind::Int(1000), ty: Ty::Int, span }),
+        kind: HirExprKind::Call {
+            func: Box::new(HirExpr { kind: HirExprKind::Global("Duration.toMilliseconds".into()), ty: Ty::Error, span }),
+            args: vec![timeout_hir],
         },
         ty: Ty::Int, span,
     };

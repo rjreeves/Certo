@@ -1833,7 +1833,7 @@ fn every_desugars_to_spawn_of_while_true() {
     let Expr::While { cond, body: loop_body, .. } = &expr.node else { panic!("expected Expr::While, got {:?}", expr.node) };
     assert!(matches!(&cond.node, Expr::Lit { value: Lit::Bool(true), .. }), "expected `while true`, got {:?}", cond.node);
     let Expr::Block { stmts, .. } = &loop_body.node else { panic!("expected a block body") };
-    // First statement is the synthesized `sleep(Duration.toSeconds(interval) * 1000)`;
+    // First statement is the synthesized `sleep(Duration.toMilliseconds(interval))`;
     // the user's own `println("tick")` follows it.
     assert_eq!(stmts.len(), 2, "expected [sleep(...), println(...)], got {:?}", stmts);
 }

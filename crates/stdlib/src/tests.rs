@@ -1546,7 +1546,7 @@ fn duration_functions_registered() {
     for name in &["Duration.milliseconds",
                   "Duration.seconds", "Duration.minutes", "Duration.hours", "Duration.days",
                   "Duration.months",
-                  "Duration.toSeconds", "Duration.toMinutes", "Duration.toHours", "Duration.toDays",
+                  "Duration.toMilliseconds", "Duration.toSeconds", "Duration.toMinutes", "Duration.toHours", "Duration.toDays",
                   "Duration.add", "Duration.sub", "Duration.negate",
                   "Duration.eq", "Duration.lt", "Duration.gt",
                   "DateTime.addDuration", "DateTime.diff", "Date.addDuration"] {

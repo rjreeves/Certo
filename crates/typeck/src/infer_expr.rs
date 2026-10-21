@@ -69,6 +69,13 @@ pub fn type_expr_to_ty(te: &TypeExpr, ctx: &mut Ctx<'_>) -> Ty {
                 "BoundedText" => Ty::BoundedText(None),
                 "Unit"    => Ty::Unit,
                 "UUID"    => Ty::Uuid,
+                // `Task<R>`: the handle `spawn` returns (BACKLOG item 384). A user type named
+                // `Task` wins.
+                "Task" if targs.len() == 1
+                    && !ctx.env.record_fields.contains_key("Task")
+                    && !ctx.env.sum_variants.contains_key("Task")
+                    && !ctx.env.type_aliases.contains_key("Task") =>
+                    Ty::Named { name: "__CertoTask".into(), args: targs },
                 "Option"  => Ty::Option(Box::new(targs.into_iter().next().unwrap_or(Ty::Error))),
                 "Result"  => {
                     let mut it = targs.into_iter();
@@ -1043,13 +1050,22 @@ pub fn infer(expr: &S<Expr>, ctx: &mut Ctx<'_>) -> Ty {
             }
         }
 
-        Expr::Await { expr, .. } => infer(expr, ctx),
+        // BACKLOG item 384 - `await` unwraps a task handle (`Task<R>` -> `R`); awaiting
+        // anything else (`await <plain call>`) is the identity, as before.
+        Expr::Await { expr, .. } => {
+            let ty = infer(expr, ctx);
+            match ctx.uf.find(ty) {
+                Ty::Named { name, mut args } if name == "__CertoTask" && args.len() == 1 => args.remove(0),
+                other => other,
+            }
+        }
 
+        // `spawn e` is a task handle, `Task<typeof e>`, so it can be stored, passed and returned.
         Expr::Spawn { expr, .. } => {
             ctx.env.enter_nested_body();
             let ty = infer(expr, ctx);
             ctx.env.leave_nested_body();
-            ty
+            Ty::Named { name: "__CertoTask".into(), args: vec![ty] }
         }
 
         // `guard cond else e` — BACKLOG item 342. Returns `e` from the

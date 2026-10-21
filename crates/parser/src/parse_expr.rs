@@ -518,7 +518,7 @@ fn parse_atom(cur: &mut Cursor<'_>) -> Result<S<Expr>, ParseError> {
     // `filter`/`layout`), recognised only when directly followed by `(`, so
     // `every` still works as an ordinary identifier everywhere else.
     // Pure parser sugar (BACKLOG item 122/141) — desugars immediately into
-    // `spawn { while true { sleep(Duration.toSeconds(interval) * 1000);
+    // `spawn { while true { sleep(Duration.toMilliseconds(interval));
     // body... } }`, a shape `resolve`/`typeck`/`hir` already fully
     // understand, needing no new AST node or downstream support at all.
     if matches!(cur.peek(), Some(Token::Ident(s)) if *s == "every")
@@ -1109,7 +1109,7 @@ fn parse_while(cur: &mut Cursor<'_>) -> Result<S<Expr>, ParseError> {
     Ok(S::new(Expr::While { cond: Box::new(cond), body: Box::new(body), span }, span))
 }
 
-/// `every(interval) { body }` → `spawn { while true { sleep(Duration.toSeconds(interval) * 1000); body... } }`
+/// `every(interval) { body }` → `spawn { while true { sleep(Duration.toMilliseconds(interval)); body... } }`
 /// — see the call site's doc comment (BACKLOG item 122/141). Every synthetic
 /// node reuses the whole construct's own span (there's no more precise
 /// source location for text the user didn't write) — same convention
@@ -1148,16 +1148,8 @@ fn parse_every(cur: &mut Cursor<'_>) -> Result<S<Expr>, ParseError> {
         span,
     );
 
-    // `Duration.toSeconds(interval) * 1000`
-    let to_seconds = app(qualified("Duration", "toSeconds"), vec![interval]);
-    let ms = S::new(
-        Expr::BinOp {
-            op: BinOp::Mul, left: Box::new(to_seconds),
-            right: Box::new(S::new(Expr::Lit { value: Lit::Int(1000), span }, span)),
-            span,
-        },
-        span,
-    );
+    // `Duration.toMilliseconds(interval)` (exact; `toSeconds` truncated a sub-second interval to 0)
+    let ms = app(qualified("Duration", "toMilliseconds"), vec![interval]);
     // `sleep(ms)`
     let sleep_call = app(path("sleep"), vec![ms]);
     let sleep_stmt = Stmt::Expr { expr: sleep_call, span };

@@ -115,6 +115,9 @@ impl UnionFind {
             (Ty::BoundedText(a), Ty::BoundedText(b)) if a.is_none() || b.is_none() || a == b => Ok(()),
             (Ty::Text, Ty::BoundedText(_)) | (Ty::BoundedText(_), Ty::Text) => Ok(()),
             (Ty::Unit,    Ty::Unit)    => Ok(()),
+            // A fire-and-forget `spawn` (`fn f(): Unit [async] = spawn work()`) may stand where
+            // `Unit` is expected: the handle is simply dropped.
+            (Ty::Named { name, .. }, Ty::Unit) | (Ty::Unit, Ty::Named { name, .. }) if name == "__CertoTask" => Ok(()),
             (Ty::Uuid,    Ty::Uuid)    => Ok(()),
 
             // Compound — recurse.
