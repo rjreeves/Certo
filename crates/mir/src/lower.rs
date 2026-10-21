@@ -720,12 +720,13 @@ fn first_known_ty(candidates: &[&Ty]) -> Ty {
 /// any other call so the caller falls through.
 fn lower_result_combinator_call(name: &str, args: &[HirExpr], expr_ty: &Ty, b: &mut Builder) -> Option<Operand> {
     #[derive(PartialEq)]
-    enum K { GetOrElse, Recover, FlatMap, MapErr }
+    enum K { GetOrElse, Recover, FlatMap, MapErr, Map }
     let kind = match name {
         "getOrElse" | "Result.getOrElse" => K::GetOrElse,
         "recover"   | "Result.recover"   => K::Recover,
         "flatMap"   | "Result.flatMap"   => K::FlatMap,
         "mapErr"    | "Result.mapErr"    => K::MapErr,
+        "Result.map"                     => K::Map,
         _ => return None,
     };
     if args.len() != 2 { return None; }
@@ -763,7 +764,7 @@ fn lower_result_combinator_call(name: &str, args: &[HirExpr], expr_ty: &Ty, b: &
     let result_ty = match kind {
         K::GetOrElse | K::Recover => ok_ty.clone(),
         K::FlatMap => if matches!(expr_ty, Ty::Result(..)) { expr_ty.clone() } else if matches!(f_ret, Ty::Result(..)) { f_ret.clone() } else { void_result },
-        K::MapErr => if matches!(expr_ty, Ty::Result(..)) { expr_ty.clone() } else { void_result },
+        K::MapErr | K::Map => if matches!(expr_ty, Ty::Result(..)) { expr_ty.clone() } else { void_result },
     };
     let dest = b.declare_local("_rc_res", result_ty);
 
@@ -779,6 +780,21 @@ fn lower_result_combinator_call(name: &str, args: &[HirExpr], expr_ty: &Ty, b: &
             b.switch_to(next);
         }
         K::MapErr => b.assign(dest, Rvalue::Use(r_op.clone())),
+        K::Map => {
+            // Ok(f(v)): decode the payload, call the callback, re-encode its result.
+            let v = b.declare_local("_rc_ok", ok_ty.clone());
+            unwrap_result_into(b, &r_op, &ok_ty, v);
+            let new_ok = match expr_ty { Ty::Result(t, _) => (**t).clone(), _ => Ty::Error };
+            let new_ok_ty = first_known_ty(&[&f_ret, &new_ok]);
+            let mapped = b.declare_local("_rc_mapped", new_ok_ty.clone());
+            let next = b.new_block();
+            b.terminate(Terminator::Call { func: f_op.clone().unwrap(), args: vec![Operand::Local(v)], dest: mapped, next });
+            b.switch_to(next);
+            let slot = encode_result_payload(b, Operand::Local(mapped), &new_ok_ty);
+            let next2 = b.new_block();
+            b.terminate(Terminator::Call { func: Operand::Global("Ok".into()), args: vec![slot], dest, next: next2 });
+            b.switch_to(next2);
+        }
     }
     b.terminate(Terminator::Goto(join));
 
@@ -786,7 +802,7 @@ fn lower_result_combinator_call(name: &str, args: &[HirExpr], expr_ty: &Ty, b: &
     b.switch_to(err_bb);
     match kind {
         K::GetOrElse => b.assign(dest, Rvalue::Use(default_op.clone().unwrap())),
-        K::FlatMap => b.assign(dest, Rvalue::Use(r_op.clone())),
+        K::FlatMap | K::Map => b.assign(dest, Rvalue::Use(r_op.clone())),
         K::Recover => {
             let e = b.declare_local("_rc_err", err_ty.clone());
             unwrap_result_into(b, &r_op, &err_ty, e);

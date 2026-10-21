@@ -552,6 +552,12 @@ fn generic_container_ret(full: Option<&str>, args: &[HirExpr]) -> Option<Ty> {
         // `Err(...)` tail could never legitimately appear here in the
         // first place; no backfill needed, unlike `flatMap` above.
         Some("recover") | Some("Result.recover") => args.get(1).and_then(callback_ret_ty),
+        // `Result.map` (BACKLOG item 360): the success value becomes the callback's result.
+        Some("Result.map") => {
+            let new_ok = args.get(1).and_then(callback_ret_ty)?;
+            let err_ty = args.first().and_then(result_ok_err).map(|(_, e)| e).unwrap_or(Ty::Error);
+            Some(Ty::Result(Box::new(new_ok), Box::new(err_ty)))
+        }
         Some("mapErr") | Some("Result.mapErr") => {
             let ok_ty = args.first().and_then(result_ok_err).map(|(ok, _)| ok)?;
             let err_ty = args.get(1).and_then(callback_ret_ty)?;
@@ -962,6 +968,7 @@ fn stdlib_param_names() -> HashMap<&'static str, &'static [&'static str]> {
     // was added, until this entry existed too.
     m.insert("flatMap",         &["r", "f"]);
     m.insert("Result.flatMap",  &["r", "f"]);
+    m.insert("Result.map",      &["r", "f"]);
     m.insert("mapErr",          &["r", "f"]);
     m.insert("Result.mapErr",   &["r", "f"]);
     m.insert("recover",         &["r", "f"]);
@@ -1852,7 +1859,7 @@ fn lower_expr(expr: &S<Expr>, cx: &mut Cx) -> HirExpr {
                 // with the `Ok`/`Err`-recovery and `merge_partial` fixes
                 // above both already in place.
                 let result_hint_side: Option<bool> = match fn_full_path.as_deref() {
-                    Some("flatMap") | Some("Result.flatMap") => Some(true),
+                    Some("flatMap") | Some("Result.flatMap") | Some("Result.map") => Some(true),
                     Some("recover") | Some("Result.recover")
                     | Some("mapErr") | Some("Result.mapErr") => Some(false),
                     _ => None,

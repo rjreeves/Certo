@@ -480,6 +480,16 @@ fn parse_fn_lambda(cur: &mut Cursor<'_>) -> Result<S<Expr>, ParseError> {
 fn parse_atom(cur: &mut Cursor<'_>) -> Result<S<Expr>, ParseError> {
     let span = cur.peek_span();
 
+    // `x => body` - a lambda with one bare parameter (spec §5, BACKLOG item 360).
+    if matches!(cur.peek(), Some(Token::Ident(_))) && cur.peek2() == Some(&Token::FatArrow) && cur.bare_lambda_allowed() {
+        let (name, name_span) = cur.expect_ident()?;
+        cur.expect(&Token::FatArrow)?;
+        let body = parse_expr(cur)?;
+        let full = span.to(body.span);
+        let param = LambdaParam { name: S::new(name, name_span), ty: None, span: name_span };
+        return Ok(S::new(Expr::Lambda { params: vec![param], body: Box::new(body), span: full }, full));
+    }
+
     // `unsafe { ... }` — unsafe block. `unsafe` is a contextual identifier (it is
     // also an effect name), so recognise it only when directly followed by `{`.
     if matches!(cur.peek(), Some(Token::Ident(s)) if *s == "unsafe")
@@ -943,7 +953,10 @@ fn parse_match(cur: &mut Cursor<'_>) -> Result<S<Expr>, ParseError> {
     while cur.peek() != Some(&Token::RBrace) && !cur.at_end() {
         let pattern = parse_pattern(cur)?;
         let guard = if cur.eat(|t| matches!(t, Token::If)).is_some() {
-            Some(parse_expr(cur)?)
+            let prev = cur.enter_guard();
+            let g = parse_expr(cur);
+            cur.leave_guard(prev);
+            Some(g?)
         } else {
             None
         };

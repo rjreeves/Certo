@@ -216,6 +216,13 @@ pub fn seed_stdlib(env: &mut TypeEnv, counter: &mut u32) {
         env.define("flatMap", poly3(t, u, e, fn2(result_te.clone(), f_ty.clone(), result_ue.clone())));
         env.define("Result.flatMap", poly3(t, u, e, fn2(result_te, f_ty, result_ue)));
     }
+    // map :: ∀T U E. Result<T,E> → (T → U) → Result<U,E>   (BACKLOG item 360)
+    {
+        let t = fresh(); let u = fresh(); let e = fresh();
+        let result_te = Ty::Result(Box::new(Ty::Var(t)), Box::new(Ty::Var(e)));
+        let result_ue = Ty::Result(Box::new(Ty::Var(u)), Box::new(Ty::Var(e)));
+        env.define("Result.map", poly3(t, u, e, fn2(result_te, fn1(Ty::Var(t), Ty::Var(u)), result_ue)));
+    }
     // mapErr :: ∀T E F. Result<T,E> → (E → F) → Result<T,F>
     {
         let t = fresh(); let e = fresh(); let f = fresh();
@@ -2075,6 +2082,7 @@ pub fn seed_stdlib(env: &mut TypeEnv, counter: &mut u32) {
     // `Ty::Error` — only ever "accidentally" recovered when something else
     // in the body (arithmetic) reconstructed a type structurally.
     pm!("Result.flatMap",      "r", "f");
+    pm!("Result.map",          "r", "f");
     pm!("Result.mapErr",       "r", "f");
     pm!("Result.recover",      "r", "f");
     pm!("Result.all",          "results");

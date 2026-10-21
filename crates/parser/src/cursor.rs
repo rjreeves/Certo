@@ -10,17 +10,35 @@ pub struct Cursor<'src> {
     /// Set while parsing a `match` scrutinee so `match c { Red => … }` reads the
     /// braces as the match body, not as `c { Red => … }` (a lambda call).
     suppress_trailing_lambda: bool,
+    /// Bracket nesting depth of the next token, and the depth a `match` guard started at: a bare
+    /// `x => ...` lambda is not read at the guard's own level, where `=>` ends the guard.
+    depth: i32,
+    guard_floor: Option<i32>,
 }
 
 impl<'src> Cursor<'src> {
     pub fn new(tokens: Vec<Spanned<'src>>) -> Self {
-        Cursor { tokens, pos: 0, suppress_trailing_lambda: false }
+        Cursor { tokens, pos: 0, suppress_trailing_lambda: false, depth: 0, guard_floor: None }
     }
 
     /// Set the trailing-lambda suppression flag, returning the previous value
     /// (so callers can restore it).
     pub fn set_suppress_trailing_lambda(&mut self, v: bool) -> bool {
         std::mem::replace(&mut self.suppress_trailing_lambda, v)
+    }
+
+    /// Mark the start of a `match` guard; returns the previous marker to restore.
+    pub fn enter_guard(&mut self) -> Option<i32> {
+        std::mem::replace(&mut self.guard_floor, Some(self.depth))
+    }
+
+    pub fn leave_guard(&mut self, prev: Option<i32>) {
+        self.guard_floor = prev;
+    }
+
+    /// May `ident => body` be read as a lambda here?
+    pub fn bare_lambda_allowed(&self) -> bool {
+        self.guard_floor.map_or(true, |floor| self.depth > floor)
     }
 
     // ---------------------------------------------------------------- //
@@ -95,6 +113,11 @@ impl<'src> Cursor<'src> {
             let tok = s.token.clone();
             let span = s.span.clone().into();
             self.pos += 1;
+            match tok {
+                Token::LParen | Token::LBracket | Token::LBrace => self.depth += 1,
+                Token::RParen | Token::RBracket | Token::RBrace => self.depth -= 1,
+                _ => {}
+            }
             Some((tok, span))
         } else {
             None
