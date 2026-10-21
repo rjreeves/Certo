@@ -652,6 +652,20 @@ and a type may share a spelling.
 
 ---
 
+### E0234  `await` of a value that is not a task
+
+```
+error[E0234]: cannot `await` a value of type `Int`
+```
+
+**Cause:** `await 5`, or `await x` where `x` already holds an `Int`, `Text`, list, ... Only a task from
+`spawn`, a call (`await fetch(1)`) or `parallel { .. }` has something to wait for. An `async fn` call
+runs synchronously and returns its result directly (BACKLOG item 366).
+
+**Fix:** Drop the `await`, or `spawn` the call to get a task.
+
+---
+
 ### E0233  Anonymous record literal matches no record type, or several
 
 ```

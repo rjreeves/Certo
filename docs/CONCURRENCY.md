@@ -241,6 +241,13 @@ the result back out. You never see any of this — it's all in the generated C.
 
 ## Tips and gotchas
 
+- **`async fn` is not what runs in parallel.** A call to an `async fn` runs to completion
+  on the caller's thread and gives back its plain result, so `val v = fetch(3)` is already the
+  value and `await fetch(3)` is the same value with the `[async]` effect recorded. Two awaited
+  calls in a row take the sum of their times. Concurrency comes only from `spawn` (a `Task<R>`
+  you `await` later) and `parallel { .. }`. `await` of something that is already a plain value
+  (`await 5`, or a variable holding an `Int`) is error E0234.
+
 - **Spawn before you await.** The parallelism lives between the `spawn` and the
   `await`. Awaiting a task immediately after spawning it is just a slow way to
   call a function.
