@@ -565,7 +565,10 @@ migrate` above, in reverse.
 certo db create add_products_table
 ```
 
-Writes `<migrations dir>/add_products_table.cto` with an empty template —
+Writes `<migrations dir>/<NNN>_add_products_table.cto` with an empty template, where
+`NNN` is the next free number in that directory (`001` the first time, then `002`, ...) —
+migrations apply in file-name order, so the number keeps them in creation order. A name that
+already starts with digits and an underscore is used as given —
 the migrations directory is `certo.toml`'s `[database] migrations` if set
 (see [§15](#15-certotoml--project-manifest)), else `migrations/`:
 

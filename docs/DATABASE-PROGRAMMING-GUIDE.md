@@ -439,7 +439,7 @@ The full builder surface:
 ```certo
 Query.from(table)                                   Query.fromAs(table, alias)
 Query.filter(q, column, op, value)                   // op: "=" "!=" "<" "<=" ">" ">=" "like"
-Query.orderBy(q, column, dir)                        // dir: "asc" "desc"
+Query.orderBy(q, column, dir)                        // dir: "asc" "desc"; call again to add a tie-breaker key
 Query.limit(q, n)                                    Query.offset(q, n)
 Query.join(q, table, leftCol, rightCol)               Query.leftJoin(q, table, leftCol, rightCol)
 Query.joinAs(q, table, alias, leftCol, rightCol)      Query.leftJoinAs(q, table, alias, leftCol, rightCol)
@@ -568,8 +568,16 @@ migration "create_users" {
 }
 ```
 
-Columns are `NOT NULL` by default — add `nullable` to allow `NULL`. A
-later migration can alter that table:
+Columns are `NOT NULL` by default — add `nullable` (or write the type as `T?`) to allow
+`NULL`. A `default` may be a literal (`-5`, `-0.5`, `d"1.50"`, `"x"`, `true`, a UUID) or a call
+passed through to SQL (`now()`, `gen_random_uuid()`); anything else is an error rather than
+`DEFAULT NULL`. Column types map to `BIGINT` (`Int`), `INTEGER` (`Int32`), `SMALLINT`
+(`Int16`, `Int8`), `NUMERIC(20, 0)` (`UInt`), `DOUBLE PRECISION` (`Float`), `REAL` (`Float32`),
+`NUMERIC` (`Decimal`), `BOOLEAN`, `TEXT`, `UUID`, `DATE`, `TIMESTAMPTZ` (`DateTime`,
+`Timestamp`), `JSONB` (`Json`) and `BYTEA` (`Bytes`). Table and column names written in
+camelCase become snake_case, both here and in the `Query`/`Mutation` builders, so
+`Query.filter("customerId", ...)` reads the column `customer_id`. A later migration can alter
+that table:
 
 ```certo
 migration "add_author_and_drop_legacy" {
@@ -590,7 +598,7 @@ Operations available inside `up`/`down`: `createTable`, `alterTable`
 (`addColumn` / `dropColumn` / `foreignKey ... references ... onDelete
 cascade|setNull|restrict|noAction`), `dropTable`, `createIndex ... on
 table [col, ...]`, `dropIndex`, and `rawSql "..."` as an escape hatch for
-anything the structured grammar doesn't cover.
+anything the structured grammar doesn't cover (a `;` is added if the statement has none).
 
 The CLI:
 
