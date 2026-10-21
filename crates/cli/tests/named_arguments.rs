@@ -236,3 +236,12 @@ fn await_needs_a_task_or_a_call() {
     let (ok, out) = certo("module A\nasync fn fetch(id: Int): Int = id + 1\nfn main(): Unit [io, async] = {\n  val v = fetch(3)\n  println(intToText(v))\n  val w = await fetch(4)\n  println(intToText(w))\n  val t = spawn fetch(5)\n  println(intToText(await t))\n}\n", &["check"]);
     assert!(ok, "{out}");
 }
+
+// BACKLOG item 370 - `.with(field: value)` checks the value against the field's type.
+#[test]
+fn with_checks_the_types_of_the_overriding_values() {
+    let (ok, out) = certo("module W\ntype P = { name: Text, age: Int }\nfn main(): Unit [io] = {\n  val p = P { name: \"a\", age: 1 }\n  val q = p.with(age: \"old\", name: 7)\n  println(q.name)\n}\n", &["check"]);
+    assert!(!ok && out.contains("E0200"), "{out}");
+    let (ok, out) = certo("module W\ntype P = { name: Text, age: Int }\ntype Box<T> = { v: T, n: Int }\nfn main(): Unit [io] = {\n  val p = P { name: \"a\", age: 1 }\n  val q = p.with(age: 2)\n  val b = Box { v: 1.5, n: 1 }\n  val c = b.with(v: 2.5)\n  println(q.name)\n}\n", &["check"]);
+    assert!(ok, "{out}");
+}

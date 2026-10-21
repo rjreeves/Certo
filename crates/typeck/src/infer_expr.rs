@@ -1044,6 +1044,20 @@ pub fn infer(expr: &S<Expr>, ctx: &mut Ctx<'_>) -> Ty {
                 let args: Vec<Ty> = type_params.iter().map(|v| subst[v].clone()).collect();
                 Ty::Named { name: name.clone(), args }
             } else if let Some(named) = base_named {
+                // BACKLOG item 370 - each overriding value must have its field's declared type.
+                if let Ty::Named { name, args } = &named {
+                    if let Some(declared) = ctx.env.record_fields.get(name.as_str()).cloned() {
+                        let params = ctx.env.type_param_vars.get(name.as_str()).cloned().unwrap_or_default();
+                        let subst: HashMap<TyVar, Ty> = params.iter().cloned().zip(args.iter().cloned()).collect();
+                        for f in fields.iter() {
+                            let found = field_tys.iter().find(|(n, _)| n == &f.name.node).map(|(_, t)| t.clone());
+                            let expected = declared.iter().find(|(n, _)| n == &f.name.node).map(|(_, t)| t.apply_subst(&subst));
+                            if let (Some(found), Some(expected)) = (found, expected) {
+                                ctx.unify(found, expected, f.span);
+                            }
+                        }
+                    }
+                }
                 // `.with(...)`'s desugar (BACKLOG item 151): no syntactic
                 // `ty_name`, but `base` was nominal — stay that same nominal
                 // type rather than degrading to a structural `Ty::Record`,
