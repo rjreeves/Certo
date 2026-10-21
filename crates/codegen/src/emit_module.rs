@@ -658,6 +658,18 @@ pub fn emit_module(module: &Module, opts: &CodegenOptions) -> String {
         }
     }
 
+    // BACKLOG item 406 - the initializers of module-level `val`s run from one function, so the
+    // program's `main` and the `certo test` harness (which has its own `main`) share it.
+    {
+        let mut global_inits = String::new();
+        for (name, mir) in &const_init_fns {
+            writeln!(global_inits, "    {} = {}();", c_fn_name(name), c_fn_name(&mir.name)).unwrap();
+        }
+        writeln!(out, "void certo_run_global_inits(void) {{").unwrap();
+        write!(out, "{}", global_inits).unwrap();
+        writeln!(out, "}}").unwrap();
+    }
+
     // If the module has a `main` function, emit a C main() that bootstraps
     // argv and calls it.
     let has_main = module.decls.iter().any(|d| {
@@ -668,10 +680,8 @@ pub fn emit_module(module: &Module, opts: &CodegenOptions) -> String {
         // initializer (BACKLOG item 168) — run once, before the user's own
         // `main()` body, so every later reference sees the real computed
         // value rather than the zero/NULL the global starts as.
-        let mut global_inits = String::new();
-        for (name, mir) in &const_init_fns {
-            writeln!(global_inits, "    {} = {}();", c_fn_name(name), c_fn_name(&mir.name)).unwrap();
-        }
+        let global_inits = "    certo_run_global_inits();
+";
         // On Windows emit a wmain entry point so the CRT passes wchar_t** argv,
         // which is derived directly from CommandLineToArgvW — immune to shells
         // (Git Bash, PowerShell, cmd) stripping or mangling quoted arguments.

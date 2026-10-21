@@ -290,6 +290,8 @@ pub fn build_harness(module: &Module, coverage_source: Option<(String, String)>)
     c_src.push_str("    }\n\n");
 
     c_src.push_str("    const char* target = argv[1];\n");
+    // Module-level `val`s with a computed initializer (BACKLOG item 406).
+    c_src.push_str("    void certo_run_global_inits(void);\n    certo_run_global_inits();\n");
     for e in &entries {
         let escaped = e.display_name.replace('"', "\\\"");
         let mangled = c_fn_name(&e.c_fn_name);
