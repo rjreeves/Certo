@@ -1110,8 +1110,10 @@ compile functions over numbers, Bool, Text, records, sum types (generic ones suc
 `Maybe<T>` and recursive ones such as a tree included), lists, tuples, `Option` and `Result`,
 `match`, and closures: lambdas that capture variables, `var`s that a lambda assigns, and
 functions passed as values. `==` and `!=` compare records, sum types, lists, tuples and options
-by value. The list functions available are `len`, `get`, `first`, `last`, `push`, `map`,
-`filter`, `fold`/`reduce`, `forEach`, `find`, `any` and `all`.
+by value. The list functions available are `len`, `get`, `first`, `last`, `push`, `slice`,
+`reverse`, `concat`, `chunked`, `zip`, `contains`, `distinct`, `sort`, `map`, `filter`,
+`fold`/`reduce`, `forEach`, `find`, `any`, `all`, `partition` and `flatMap`, and list patterns
+(`[x, ...rest]`) in `match`; `Map` and `Set` are not available.
 
 Programs that need the database, HTTP server, JSON, process execution, concurrency or the rest
 of the standard library are rejected with an error naming the unsupported call; build those with
