@@ -125,15 +125,13 @@ panic(msg: Text): Nothing            // unconditional abort
 
 ### Assertions — `expect(x).toBeXxx(...)`
 
-`expect<T>(x: T): T` is a real, honest identity function — it exists for
-readability at the call site, not as a syntactic gate; `x.toBe(y)` and
-`expect(x).toBe(y)` are equivalent. Every matcher desugars to the same
-`assert` above.
+`expect(x)` is only a marker around `x`; `x.toBe(y)` and `expect(x).toBe(y)` are
+equivalent. Every matcher desugars to the same `assert` above.
 
 ```
-expect(x).toBe(y)       // x == y — same equality assert(a == b, ...) uses; a
-                         // Decimal/record x hits assert's own struct-compare
-                         // limitation, not a new one
+expect(x).toBe(y)       // x == y — the language's `==`: values of any type, including
+                         // Float, Decimal, records, sum types, lists, tuples and Options,
+                         // compare by value
 expect(x).toBeTrue()    // x
 expect(x).toBeFalse()   // !x
 expect(x).toBeSome()    // x: Option<T> — Option.isSome(x)
