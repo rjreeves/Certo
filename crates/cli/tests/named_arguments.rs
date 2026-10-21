@@ -49,3 +49,10 @@ fn unknown_and_repeated_argument_names_are_errors() {
         assert!(!ok && out.contains(code), "{body}: {out}");
     }
 }
+
+// BACKLOG item 363 - a function declaration with no body is an error, not `return 0;`.
+#[test]
+fn a_function_without_a_body_is_an_error() {
+    let (ok, out) = certo("module B\nfn compute(x: Int): Int\nfn main(): Unit [io] = println(intToText(compute(3)))\n", &["check"]);
+    assert!(!ok && out.contains("E0229") && out.contains("`compute` has no body"), "{out}");
+}

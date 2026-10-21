@@ -1799,6 +1799,13 @@ fn hoist_decl(
 fn check_decl(decl: &Decl, ctx: &mut Ctx<'_>) {
     match decl {
         Decl::Fn(f) => {
+            // BACKLOG item 363 - a signature with no body used to compile to `return 0;`.
+            if f.body.is_none() && !f.is_extern {
+                ctx.errors.push(TypeError {
+                    kind: TypeErrorKind::MissingFnBody { name: f.name.node.clone() },
+                    span: f.name.span,
+                });
+            }
             if let Some(body) = &f.body {
                 ctx.env.push();
                 // Pre-define type params as fresh vars so every occurrence of T

@@ -2405,6 +2405,12 @@ pub(crate) fn type_error_to_diagnostic(e: &TypeError) -> Diagnostic {
                 .with_note(format!("remove `{field}: ...` — it's computed automatically from `{type_name}`'s other fields"))
         }
 
+        TypeErrorKind::MissingFnBody { name } => {
+            Diagnostic::error("E0229", format!("function `{name}` has no body"))
+                .with_span(e.span)
+                .with_note(format!("write `= <expression>` after the signature, or declare it `extern \"C\" {{ ... }}` if it is implemented in C"))
+        }
+
         TypeErrorKind::UnknownArgumentName { fn_name, name, expected } => {
             Diagnostic::error("E0227", format!("`{fn_name}` has no parameter named `{name}`"))
                 .with_span(e.span)

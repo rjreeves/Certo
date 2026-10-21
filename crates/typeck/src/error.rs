@@ -41,6 +41,9 @@ pub enum TypeErrorKind {
     /// pre-existing gap in `.with(...)`'s own validation, not fixed here).
     ComputedFieldNotSettable { field: String, type_name: String },
 
+    /// E0229 - a `fn` declaration has no body (and is not an `extern` declaration).
+    MissingFnBody { name: String },
+
     /// E0227 - a call names an argument the function (or constructor) does not have.
     UnknownArgumentName { fn_name: String, name: String, expected: Vec<String> },
 
@@ -254,6 +257,8 @@ impl TypeError {
                 format!("E0206: unbound name `{}`", name),
             TypeErrorKind::ComputedFieldNotSettable { field, type_name } =>
                 format!("E0217: `{}` is a computed property of `{}` — it's derived, not stored, and can't be set directly", field, type_name),
+            TypeErrorKind::MissingFnBody { name } =>
+                format!("E0229: function `{name}` has no body"),
             TypeErrorKind::UnknownArgumentName { fn_name, name, .. } =>
                 format!("E0227: `{fn_name}` has no parameter named `{name}`"),
             TypeErrorKind::DuplicateArgument { fn_name, name } =>
