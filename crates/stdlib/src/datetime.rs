@@ -33,6 +33,197 @@ typedef int64_t CertoDuration;   /* signed span, in MILLISECONDS (BACKLOG
                                      grain and are now genuinely
                                      millisecond-precise. */
 
+
+/* ---- calendar arithmetic (BACKLOG items 396/397) ----
+   The C library's gmtime/timegm are not used: gmtime returns NULL (and the program crashed) for
+   instants outside the platform's range, and timegm silently normalises an impossible date such as
+   2023-02-29 into March. These work for every instant in years 0000-9999 and reject the rest. */
+#define CERTO_DT_MIN (-62167219200LL)   /* 0000-01-01T00:00:00Z */
+#define CERTO_DT_MAX (253402300799LL)   /* 9999-12-31T23:59:59Z */
+
+static int64_t certo_days_from_civil(int64_t y, int64_t m, int64_t d) {
+    y -= m <= 2;
+    int64_t era = (y >= 0 ? y : y - 399) / 400;
+    int64_t yoe = y - era * 400;
+    int64_t doy = (153 * (m + (m > 2 ? -3 : 9)) + 2) / 5 + d - 1;
+    int64_t doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    return era * 146097 + doe - 719468;
+}
+
+static void certo_civil_from_days(int64_t z, int64_t* y, int64_t* m, int64_t* d) {
+    z += 719468;
+    int64_t era = (z >= 0 ? z : z - 146096) / 146097;
+    int64_t doe = z - era * 146097;
+    int64_t yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    int64_t yy = yoe + era * 400;
+    int64_t doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    int64_t mp = (5 * doy + 2) / 153;
+    *d = doy - (153 * mp + 2) / 5 + 1;
+    *m = mp < 10 ? mp + 3 : mp - 9;
+    *y = yy + (*m <= 2);
+}
+
+static int certo_is_leap(int64_t y) { return (y % 4 == 0 && y % 100 != 0) || y % 400 == 0; }
+
+static int certo_days_in_month(int64_t y, int64_t m) {
+    static const int dm[12] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+    return m == 2 && certo_is_leap(y) ? 29 : dm[m - 1];
+}
+
+/* Break `secs` (UTC) into `out`; 0 if outside years 0000-9999. */
+static int certo_gm(int64_t secs, struct tm* out) {
+    if (secs < CERTO_DT_MIN || secs > CERTO_DT_MAX) return 0;
+    int64_t days = secs >= 0 ? secs / 86400 : -((-secs + 86399) / 86400);
+    int64_t rem = secs - days * 86400;
+    int64_t y, m, d;
+    certo_civil_from_days(days, &y, &m, &d);
+    memset(out, 0, sizeof *out);
+    out->tm_year = (int)(y - 1900);
+    out->tm_mon = (int)(m - 1);
+    out->tm_mday = (int)d;
+    out->tm_hour = (int)(rem / 3600);
+    out->tm_min = (int)((rem % 3600) / 60);
+    out->tm_sec = (int)(rem % 60);
+    int64_t wd = (days + 4) % 7;            /* 1970-01-01 was a Thursday */
+    out->tm_wday = (int)(wd < 0 ? wd + 7 : wd);
+    out->tm_yday = (int)(days - certo_days_from_civil(y, 1, 1));
+    return 1;
+}
+
+static struct tm certo_gm_or_panic(int64_t secs, const char* what) {
+    struct tm t;
+    if (!certo_gm(secs, &t)) {
+        char msg[128];
+        snprintf(msg, sizeof msg, "%s: instant out of range (years 0000-9999 only)", what);
+        certo_panic(msg);
+    }
+    return t;
+}
+
+/* Seconds since the epoch for a validated wall-clock time; 0 if any field is out of range. */
+static int certo_mk_utc(int64_t y, int64_t mo, int64_t d, int64_t h, int64_t mi, int64_t s, int64_t* out) {
+    if (y < 0 || y > 9999 || mo < 1 || mo > 12 || d < 1 || d > certo_days_in_month(y, mo)) return 0;
+    if (h < 0 || h > 23 || mi < 0 || mi > 59 || s < 0 || s > 59) return 0;
+    *out = certo_days_from_civil(y, mo, d) * 86400 + h * 3600 + mi * 60 + s;
+    return 1;
+}
+
+/* strftime for UTC (or a fixed offset `off` seconds, shown by %z). Supports Y y C m d e H I M S p
+   b B a A h j u w F T D R Z z n t %% ; any other specifier is a panic, not a crash. */
+static void certo_format_time(char* buf, size_t cap, const char* fmt, const struct tm* t, int64_t off) {
+    static const char* const mon[12] = {"January","February","March","April","May","June","July","August","September","October","November","December"};
+    static const char* const day[7] = {"Sunday","Monday","Tuesday","Wednesday","Thursday","Friday","Saturday"};
+    size_t n = 0;
+    char piece[64];
+    for (const char* p = fmt; *p; p++) {
+        piece[0] = 0;
+        if (*p != '%') { piece[0] = *p; piece[1] = 0; }
+        else {
+            p++;
+            int64_t y = t->tm_year + 1900;
+            switch (*p) {
+                case 'Y': snprintf(piece, sizeof piece, "%04lld", (long long)y); break;
+                case 'y': snprintf(piece, sizeof piece, "%02lld", (long long)(y % 100)); break;
+                case 'C': snprintf(piece, sizeof piece, "%02lld", (long long)(y / 100)); break;
+                case 'm': snprintf(piece, sizeof piece, "%02d", t->tm_mon + 1); break;
+                case 'd': snprintf(piece, sizeof piece, "%02d", t->tm_mday); break;
+                case 'e': snprintf(piece, sizeof piece, "%2d", t->tm_mday); break;
+                case 'H': snprintf(piece, sizeof piece, "%02d", t->tm_hour); break;
+                case 'I': snprintf(piece, sizeof piece, "%02d", t->tm_hour % 12 == 0 ? 12 : t->tm_hour % 12); break;
+                case 'M': snprintf(piece, sizeof piece, "%02d", t->tm_min); break;
+                case 'S': snprintf(piece, sizeof piece, "%02d", t->tm_sec); break;
+                case 'p': snprintf(piece, sizeof piece, "%s", t->tm_hour < 12 ? "AM" : "PM"); break;
+                case 'b': case 'h': snprintf(piece, sizeof piece, "%.3s", mon[t->tm_mon]); break;
+                case 'B': snprintf(piece, sizeof piece, "%s", mon[t->tm_mon]); break;
+                case 'a': snprintf(piece, sizeof piece, "%.3s", day[t->tm_wday]); break;
+                case 'A': snprintf(piece, sizeof piece, "%s", day[t->tm_wday]); break;
+                case 'j': snprintf(piece, sizeof piece, "%03d", t->tm_yday + 1); break;
+                case 'u': snprintf(piece, sizeof piece, "%d", t->tm_wday == 0 ? 7 : t->tm_wday); break;
+                case 'w': snprintf(piece, sizeof piece, "%d", t->tm_wday); break;
+                case 'F': snprintf(piece, sizeof piece, "%04lld-%02d-%02d", (long long)y, t->tm_mon + 1, t->tm_mday); break;
+                case 'T': snprintf(piece, sizeof piece, "%02d:%02d:%02d", t->tm_hour, t->tm_min, t->tm_sec); break;
+                case 'R': snprintf(piece, sizeof piece, "%02d:%02d", t->tm_hour, t->tm_min); break;
+                case 'D': snprintf(piece, sizeof piece, "%02d/%02d/%02lld", t->tm_mon + 1, t->tm_mday, (long long)(y % 100)); break;
+                case 'Z': {
+                    /* No zone abbreviations here: UTC, or the numeric offset. */
+                    int64_t a = off < 0 ? -off : off;
+                    if (off == 0) snprintf(piece, sizeof piece, "UTC");
+                    else snprintf(piece, sizeof piece, "%c%02d:%02d", off < 0 ? '-' : '+', (int)(a / 3600), (int)((a % 3600) / 60));
+                    break;
+                }
+                case 'z': {
+                    int64_t a = off < 0 ? -off : off;
+                    snprintf(piece, sizeof piece, "%c%02d%02d", off < 0 ? '-' : '+', (int)(a / 3600), (int)((a % 3600) / 60));
+                    break;
+                }
+                case 'n': piece[0] = '\n'; piece[1] = 0; break;
+                case 't': piece[0] = '\t'; piece[1] = 0; break;
+                case '%': piece[0] = '%'; piece[1] = 0; break;
+                default: {
+                    char msg[96];
+                    snprintf(msg, sizeof msg, "DateTime.format: unsupported format specifier %%%c", *p ? *p : '?');
+                    certo_panic(msg);
+                }
+            }
+        }
+        size_t len = strlen(piece);
+        if (n + len >= cap) { len = cap - 1 - n; }
+        memcpy(buf + n, piece, len);
+        n += len;
+        if (n >= cap - 1) break;
+    }
+    buf[n] = 0;
+}
+
+/* Strict ISO 8601: YYYY-MM-DD, optionally followed by T or a space and HH:MM[:SS[.fraction]],
+   optionally followed by Z or a UTC offset (+HH:MM, +HHMM, +HH). No time means midnight, no offset
+   means UTC. Returns 1 and the UTC instant, or 0 for anything else (bad field values, trailing
+   text, the wrong separators). */
+static int certo_parse_iso8601(const char* s, int64_t* out) {
+    int64_t v[6] = {0, 0, 0, 0, 0, 0};
+    int i = 0;
+    #define CERTO_DIGITS(n, dst) do { int64_t acc = 0; for (int k = 0; k < (n); k++) { \
+        if (s[i] < '0' || s[i] > '9') return 0; acc = acc * 10 + (s[i] - '0'); i++; } (dst) = acc; } while (0)
+    CERTO_DIGITS(4, v[0]);
+    if (s[i++] != '-') return 0;
+    CERTO_DIGITS(2, v[1]);
+    if (s[i++] != '-') return 0;
+    CERTO_DIGITS(2, v[2]);
+    int64_t off = 0;
+    if (s[i] == 'T' || s[i] == ' ') {
+        i++;
+        CERTO_DIGITS(2, v[3]);
+        if (s[i++] != ':') return 0;
+        CERTO_DIGITS(2, v[4]);
+        if (s[i] == ':') {
+            i++;
+            CERTO_DIGITS(2, v[5]);
+            if (s[i] == '.') {
+                i++;
+                if (s[i] < '0' || s[i] > '9') return 0;
+                while (s[i] >= '0' && s[i] <= '9') i++;
+            }
+        }
+        if (s[i] == 'Z') { i++; }
+        else if (s[i] == '+' || s[i] == '-') {
+            int sign = s[i] == '-' ? -1 : 1;
+            i++;
+            int64_t oh = 0, om = 0;
+            CERTO_DIGITS(2, oh);
+            if (s[i] == ':') i++;
+            if (s[i] >= '0' && s[i] <= '9') CERTO_DIGITS(2, om);
+            if (oh > 23 || om > 59) return 0;
+            off = sign * (oh * 3600 + om * 60);
+        }
+    }
+    #undef CERTO_DIGITS
+    if (s[i] != 0) return 0;
+    int64_t local;
+    if (!certo_mk_utc(v[0], v[1], v[2], v[3], v[4], v[5], &local)) return 0;
+    *out = local - off;
+    return 1;
+}
+
 /* ---- constructors ---- */
 
 CertoDateTime certo_datetime_now(void) {
@@ -40,10 +231,8 @@ CertoDateTime certo_datetime_now(void) {
 }
 
 CertoDate certo_date_today(void) {
-    time_t now = time(NULL);
-    struct tm* t = gmtime(&now);
-    t->tm_hour = 0; t->tm_min = 0; t->tm_sec = 0;
-    return (CertoDate)timegm(t);
+    int64_t now = (int64_t)time(NULL);
+    return (CertoDate)(now - ((now % 86400) + 86400) % 86400);
 }
 
 CertoDateTime certo_datetime_from_unix(int64_t secs) {
@@ -57,11 +246,10 @@ int64_t certo_datetime_to_unix(CertoDateTime dt) {
 /* ---- formatting ---- */
 
 certo_text_t certo_datetime_format(CertoDateTime dt, certo_text_t fmt) {
-    time_t t = (time_t)dt;
-    struct tm* tm_info = gmtime(&t);
+    struct tm tm_info = certo_gm_or_panic((int64_t)dt, "DateTime.format");
     char* buf = (char*)malloc(256);
     if (!buf) certo_panic("out of memory");
-    strftime(buf, 256, fmt ? fmt : "%Y-%m-%dT%H:%M:%SZ", tm_info);
+    certo_format_time(buf, 256, fmt ? fmt : "%Y-%m-%dT%H:%M:%SZ", &tm_info, 0);
     return buf;
 }
 
@@ -91,12 +279,12 @@ bool certo_datetime_eq    (CertoDateTime a, CertoDateTime b) { return a == b; }
 
 /* ---- components ---- */
 
-int64_t certo_datetime_year  (CertoDateTime dt) { time_t t = (time_t)dt; struct tm* m = gmtime(&t); return m->tm_year + 1900; }
-int64_t certo_datetime_month (CertoDateTime dt) { time_t t = (time_t)dt; struct tm* m = gmtime(&t); return m->tm_mon + 1; }
-int64_t certo_datetime_day   (CertoDateTime dt) { time_t t = (time_t)dt; struct tm* m = gmtime(&t); return m->tm_mday; }
-int64_t certo_datetime_hour  (CertoDateTime dt) { time_t t = (time_t)dt; struct tm* m = gmtime(&t); return m->tm_hour; }
-int64_t certo_datetime_minute(CertoDateTime dt) { time_t t = (time_t)dt; struct tm* m = gmtime(&t); return m->tm_min; }
-int64_t certo_datetime_second(CertoDateTime dt) { time_t t = (time_t)dt; struct tm* m = gmtime(&t); return m->tm_sec; }
+int64_t certo_datetime_year(CertoDateTime dt) { struct tm m = certo_gm_or_panic((int64_t)dt, "DateTime.year"); return m.tm_year + 1900; }
+int64_t certo_datetime_month(CertoDateTime dt) { struct tm m = certo_gm_or_panic((int64_t)dt, "DateTime.month"); return m.tm_mon + 1; }
+int64_t certo_datetime_day(CertoDateTime dt) { struct tm m = certo_gm_or_panic((int64_t)dt, "DateTime.day"); return m.tm_mday; }
+int64_t certo_datetime_hour(CertoDateTime dt) { struct tm m = certo_gm_or_panic((int64_t)dt, "DateTime.hour"); return m.tm_hour; }
+int64_t certo_datetime_minute(CertoDateTime dt) { struct tm m = certo_gm_or_panic((int64_t)dt, "DateTime.minute"); return m.tm_min; }
+int64_t certo_datetime_second(CertoDateTime dt) { struct tm m = certo_gm_or_panic((int64_t)dt, "DateTime.second"); return m.tm_sec; }
 
 /* ---- Duration: constructors ---- */
 
@@ -155,15 +343,9 @@ CertoDate     certo_date_add_duration    (CertoDate d, CertoDuration dur)    { r
 /* ---- parse ISO 8601 ---- */
 CertoDateTime certo_datetime_parse_iso(certo_text_t s) {
     if (!s) certo_panic("datetime_parse_iso: null input");
-    struct tm t = {0};
-    /* Minimal parser: YYYY-MM-DDTHH:MM:SSZ */
-    if (sscanf(s, "%d-%d-%dT%d:%d:%d",
-               &t.tm_year, &t.tm_mon, &t.tm_mday,
-               &t.tm_hour, &t.tm_min, &t.tm_sec) < 3)
-        certo_panic("datetime_parse_iso: invalid format");
-    t.tm_year -= 1900;
-    t.tm_mon  -= 1;
-    return (CertoDateTime)timegm(&t);
+    int64_t out;
+    if (!certo_parse_iso8601(s, &out)) certo_panic("datetime_parse_iso: not a valid ISO 8601 date-time");
+    return (CertoDateTime)out;
 }
 
 /* `Timestamp.parse` (spec §9.4, BACKLOG item 289) — the spec documents this
@@ -182,14 +364,9 @@ CertoDateTime certo_datetime_parse_iso(certo_text_t s) {
    catchable-panic mechanism in this C runtime to catch. */
 int64_t* certo_timestamp_parse_opt(certo_text_t s) {
     if (!s) return NULL;
-    struct tm t = {0};
-    if (sscanf(s, "%d-%d-%dT%d:%d:%d",
-               &t.tm_year, &t.tm_mon, &t.tm_mday,
-               &t.tm_hour, &t.tm_min, &t.tm_sec) < 3)
-        return NULL;
-    t.tm_year -= 1900;
-    t.tm_mon  -= 1;
-    return __certo_opt_box((int64_t)(CertoDateTime)timegm(&t));
+    int64_t out;
+    if (!certo_parse_iso8601(s, &out)) return NULL;
+    return __certo_opt_box(out);
 }
 
 /* ================================================================
@@ -388,14 +565,9 @@ static int64_t __certo_tz_offset_seconds(const char* name, int64_t epoch_secs, i
 CertoDateTime certo_timestamp_of(int64_t year, int64_t month, int64_t day,
                                   int64_t hour, int64_t minute, int64_t second,
                                   CertoTimezone tz) {
-    struct tm t = {0};
-    t.tm_year = (int)(year - 1900);
-    t.tm_mon  = (int)(month - 1);
-    t.tm_mday = (int)day;
-    t.tm_hour = (int)hour;
-    t.tm_min  = (int)minute;
-    t.tm_sec  = (int)second;
-    int64_t naive_utc = (int64_t)timegm(&t);
+    int64_t naive_utc;
+    if (!certo_mk_utc(year, month, day, hour, minute, second, &naive_utc))
+        certo_panic("Timestamp.of: not a valid date and time");
     int ok = 0;
     int64_t off = __certo_tz_offset_seconds(tz, naive_utc, &ok);
     if (!ok) certo_panic("Timestamp.of: timezone became unresolvable");
@@ -405,11 +577,9 @@ CertoDateTime certo_timestamp_of(int64_t year, int64_t month, int64_t day,
 /* Date.of(year, month, day): Date — calendar date at UTC midnight, the
    same convention `Date.today()` already uses. */
 CertoDate certo_date_of(int64_t year, int64_t month, int64_t day) {
-    struct tm t = {0};
-    t.tm_year = (int)(year - 1900);
-    t.tm_mon  = (int)(month - 1);
-    t.tm_mday = (int)day;
-    return (CertoDate)timegm(&t);
+    int64_t out;
+    if (!certo_mk_utc(year, month, day, 0, 0, 0, &out)) certo_panic("Date.of: not a valid calendar date");
+    return (CertoDate)out;
 }
 
 /* Timezone(name: Text): Timezone? — None if `name` isn't a real IANA zone. */
@@ -435,8 +605,8 @@ certo_text_t certo_date_time_in_timezone(CertoDateTime dt, CertoTimezone tz) {
     int ok = 0;
     int64_t off = __certo_tz_offset_seconds(tz, dt, &ok);
     if (!ok) certo_panic("inTimezone: timezone became unresolvable");
-    time_t adjusted = (time_t)(dt + off);
-    struct tm* m = gmtime(&adjusted);
+    struct tm mv = certo_gm_or_panic((int64_t)dt + off, "inTimezone");
+    struct tm* m = &mv;
     char* buf = (char*)malloc(64);
     if (!buf) certo_panic("out of memory");
     int64_t abs_off = off < 0 ? -off : off;
@@ -447,30 +617,19 @@ certo_text_t certo_date_time_in_timezone(CertoDateTime dt, CertoTimezone tz) {
     return buf;
 }
 
-/* DateTime.formatTz(dt, fmt, tz): Text — same `strftime` pattern language
-   as the existing UTC-only `DateTime.format`, applied to `tz`'s wall clock
-   (year/month/day/hour/etc. are all correctly zone- and DST-adjusted).
-   KNOWN LIMITATION, confirmed by direct testing, not just suspected: `%Z`/
-   `%z` are NOT reliable here and must not be relied on — `strftime` reads
-   those two conversions from `struct tm`'s own zone-name/gmtoff fields
-   (or, on some platforms, falls back to the C library's *process-wide*
-   locale timezone), neither of which this function ever sets to `tz` —
-   there is no portable, standard way to hand `strftime` an arbitrary
-   zone's display name/abbreviation directly. Confirmed on a real Windows
-   machine: formatting a `Europe/London` instant with `%Z` printed the
-   *host machine's own* configured Windows timezone name (unrelated to
-   London) instead of anything London-specific. Use `DateTime.inTimezone`
-   for a numeric UTC-offset suffix (`+01:00`) computed correctly from `tz`
-   itself, or `Timezone.name(tz)` for the IANA name, instead of `%Z`/`%z`. */
+/* DateTime.formatTz(dt, fmt, tz): Text - the same pattern language as `DateTime.format`, applied
+   to `tz`'s wall clock (year/month/day/hour/etc. are zone- and DST-adjusted). `%z` is `tz`'s
+   numeric UTC offset at that instant (`+0100`) and `%Z` is `UTC` or that offset with a colon
+   (`+01:00`); there are no zone abbreviations (`BST`). See `certo_format_time` for the supported
+   specifiers; an unsupported one is a panic. */
 certo_text_t certo_date_time_format_tz(CertoDateTime dt, certo_text_t fmt, CertoTimezone tz) {
     int ok = 0;
     int64_t off = __certo_tz_offset_seconds(tz, dt, &ok);
     if (!ok) certo_panic("formatTz: timezone became unresolvable");
-    time_t adjusted = (time_t)(dt + off);
-    struct tm* m = gmtime(&adjusted);
+    struct tm m = certo_gm_or_panic((int64_t)dt + off, "formatTz");
     char* buf = (char*)malloc(256);
     if (!buf) certo_panic("out of memory");
-    strftime(buf, 256, fmt ? fmt : "%Y-%m-%dT%H:%M:%S", m);
+    certo_format_time(buf, 256, fmt ? fmt : "%Y-%m-%dT%H:%M:%S", &m, off);
     return buf;
 }
 
@@ -482,10 +641,8 @@ CertoDate certo_date_today_in(CertoTimezone tz) {
     int ok = 0;
     int64_t off = __certo_tz_offset_seconds(tz, now, &ok);
     if (!ok) certo_panic("todayIn: timezone became unresolvable");
-    time_t adjusted = (time_t)(now + off);
-    struct tm* m = gmtime(&adjusted);
-    m->tm_hour = 0; m->tm_min = 0; m->tm_sec = 0;
-    return (CertoDate)timegm(m);
+    int64_t adjusted = now + off;
+    return (CertoDate)(adjusted - ((adjusted % 86400) + 86400) % 86400);
 }
 
 /* Bridge codegen's DateTime.* names (certo_date_time_*) to the certo_datetime_*

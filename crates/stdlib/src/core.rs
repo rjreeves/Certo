@@ -7,6 +7,7 @@ pub const CORE_C: &str = r#"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <errno.h>
 #include <math.h>
 
 /* ---- FFI: free a heap buffer handed to a foreign caller ----
@@ -440,22 +441,45 @@ void* certo_arg(int64_t i) {   /* Option<Text> */
 }
 
 /* ---- parseInt / parseFloat ---- */
-/* Returns NULL (None) on failure, heap-allocated int64_t* on success. */
+/* Returns NULL (None) on failure, heap-allocated int64_t* on success.
+   BACKLOG item 399: surrounding ASCII whitespace is allowed on both sides (" 5 " is 5); a value
+   outside int64 is None rather than saturating; nothing else is accepted. */
+static const char* __certo_skip_ws(const char* s) { while (*s == ' ' || *s == '\t' || *s == '\n' || *s == '\r') s++; return s; }
+
 int64_t* certo_parse_int(certo_text_t s) {
     if (!s) return NULL;
+    s = __certo_skip_ws(s);
     char *end;
+    errno = 0;
     long long v = strtoll(s, &end, 10);
-    if (end == s || *end != '\0') return NULL;
+    if (end == s || errno == ERANGE) return NULL;
+    if (*__certo_skip_ws(end) != '\0') return NULL;
     int64_t *box = (int64_t*)malloc(sizeof(int64_t));
     *box = (int64_t)v;
     return box;
 }
 
+/* Decimal notation only: [+-] digits [. digits] [e|E [+-] digits], with at least one digit in
+   the mantissa. Hex (0x10), nan, inf and a result that overflows to infinity are None. */
 double* certo_parse_float(certo_text_t s) {
     if (!s) return NULL;
-    char *end;
+    s = __certo_skip_ws(s);
+    const char* p = s;
+    if (*p == '+' || *p == '-') p++;
+    int digits = 0;
+    while (*p >= '0' && *p <= '9') { p++; digits++; }
+    if (*p == '.') { p++; while (*p >= '0' && *p <= '9') { p++; digits++; } }
+    if (digits == 0) return NULL;
+    if (*p == 'e' || *p == 'E') {
+        p++;
+        if (*p == '+' || *p == '-') p++;
+        if (*p < '0' || *p > '9') return NULL;
+        while (*p >= '0' && *p <= '9') p++;
+    }
+    if (*__certo_skip_ws(p) != '\0') return NULL;
+    char* end;
     double v = strtod(s, &end);
-    if (end == s || *end != '\0') return NULL;
+    if (v - v != 0) return NULL;   /* overflowed to infinity */
     double *box = (double*)malloc(sizeof(double));
     *box = v;
     return box;

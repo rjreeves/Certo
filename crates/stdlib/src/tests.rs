@@ -931,7 +931,7 @@ fn datetime_c_does_not_change_the_still_panicking_date_time_parse_iso() {
     // new one.
     assert!(DATETIME_C.contains("#define certo_date_time_parse_iso    certo_datetime_parse_iso"),
         "DateTime.parseIso's own bridge must be unaffected by this item");
-    assert!(DATETIME_C.contains("certo_panic(\"datetime_parse_iso: invalid format\")"),
+    assert!(DATETIME_C.contains("certo_panic(\"datetime_parse_iso: not a valid ISO 8601 date-time\")"),
         "certo_datetime_parse_iso (DateTime.parseIso's real implementation) must still panic, unchanged");
 }
 

@@ -215,6 +215,7 @@ fn keyword_as_name(tok: &Token<'_>) -> Option<&'static str> {
     match tok {
         Token::Match => Some("match"),
         Token::On    => Some("on"),
+        Token::After => Some("after"),
         _ => None,
     }
 }

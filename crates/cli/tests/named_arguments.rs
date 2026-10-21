@@ -282,3 +282,77 @@ fn main(): Unit [io] = {
     let (ok, out) = certo(src, &["check"]);
     assert!(!ok && out.matches("E0214").count() == 2, "{out}");
 }
+
+// BACKLOG items 395-399 - DateTime keyword, strict ISO parsing, out-of-range instants and format
+// specifiers, and number parsing.
+fn run_program(src: &str) -> (bool, String, String) {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("main.cto");
+    fs::write(&file, src).unwrap();
+    let exe = dir.path().join(if cfg!(windows) { "app.exe" } else { "app" });
+    let b = Command::new(env!("CARGO_BIN_EXE_certo")).arg("build").arg(&file).arg("-o").arg(&exe).output().unwrap();
+    assert!(b.status.success(), "{}", String::from_utf8_lossy(&b.stderr));
+    let r = Command::new(&exe).output().unwrap();
+    (r.status.success(), String::from_utf8_lossy(&r.stdout).replace("\r\n", "\n"), String::from_utf8_lossy(&r.stderr).to_string())
+}
+
+#[test]
+fn datetime_after_parses_and_dates_are_strict_and_total() {
+    let (ok, out, err) = run_program(r####"module D
+fn show(t: Timestamp?): Text = match t {
+  Some(v) => "some"
+  None => "none"
+}
+fn main(): Unit [io] = {
+  val a = DateTime.fromUnix(100)
+  val b = DateTime.fromUnix(200)
+  println(boolToText(DateTime.after(b, a)))
+  println(DateTime.toIso(DateTime.fromUnix(1750602600)))
+  println(DateTime.format(DateTime.fromUnix(1750602600), "%A %d %B %Y %I:%M %p %j %z %Z"))
+  println(DateTime.toIso(DateTime.fromUnix(-62167219200)))
+  println(intToText(DateTime.year(DateTime.fromUnix(253402300799))))
+  println(DateTime.toIso(DateTime.parseIso("2025-06-22T14:30:00+02:00")))
+  println(DateTime.toIso(DateTime.parseIso("2025-06-22")))
+  println(DateTime.toIso(DateTime.parseIso("2025-06-22T14:30:00.250-0530")))
+  println(show(Timestamp.parse("2025-13-45T25:61:61Z")) ++ show(Timestamp.parse("2023-02-29T00:00:00Z")) ++ show(Timestamp.parse("2025-06-22T14:30:00Zjunk")) ++ show(Timestamp.parse("2025-6-2T1:2:3Z")))
+  println(show(Timestamp.parse("2024-02-29T00:00:00Z")))
+  println(Date.format(Date.of(2024, 2, 29), "%F"))
+}
+"####);
+    assert!(ok, "{err}");
+    assert_eq!(out, "true\n2025-06-22T14:30:00Z\nSunday 22 June 2025 02:30 PM 173 +0000 UTC\n0000-01-01T00:00:00Z\n9999\n2025-06-22T12:30:00Z\n2025-06-22T00:00:00Z\n2025-06-22T20:00:00Z\nnonenonenonenone\nsome\n2024-02-29\n");
+    // An instant out of range, an impossible Date.of and an unknown specifier stop with a message
+    // (and the output so far is kept) instead of crashing.
+    for (body, msg) in [
+        ("DateTime.toIso(DateTime.fromUnix(253402300800))", "out of range"),
+        ("DateTime.format(DateTime.fromUnix(5), \"%Q\")", "unsupported format specifier %Q"),
+        ("Date.format(Date.of(2023, 2, 29), \"%F\")", "not a valid calendar date"),
+    ] {
+        let (ok, out, err) = run_program(&format!("module D\nfn main(): Unit [io] = {{\n  println(\"before\")\n  println({body})\n}}\n"));
+        assert!(!ok && out == "before\n" && err.contains(msg), "{body}: {out} {err}");
+    }
+}
+
+#[test]
+fn parse_int_and_parse_float_are_strict() {
+    let (ok, out, err) = run_program(r####"module P
+fn i(s: Text): Text = match parseInt(s) {
+  Some(v) => intToText(v)
+  None => "none"
+}
+fn f(s: Text): Text = match parseFloat(s) {
+  Some(v) => floatToText(v)
+  None => "none"
+}
+fn main(): Unit [io] = {
+  println(i("42") ++ " " ++ i(" 5") ++ " " ++ i("5 ") ++ " " ++ i("-7") ++ " " ++ i("+3"))
+  println(i("9223372036854775807") ++ " " ++ i("9223372036854775808") ++ " " ++ i("-9223372036854775808") ++ " " ++ i("-9223372036854775809"))
+  println(i("") ++ " " ++ i("abc") ++ " " ++ i("1.5") ++ " " ++ i("0x10") ++ " " ++ i("- 1"))
+  println(f("3.14") ++ " " ++ f(".5") ++ " " ++ f("5.") ++ " " ++ f("1e3") ++ " " ++ f("-2.5E-2") ++ " " ++ f(" 7 "))
+  println(f("0x10") ++ " " ++ f("nan") ++ " " ++ f("inf") ++ " " ++ f("1e400") ++ " " ++ f("") ++ " " ++ f(".") ++ " " ++ f("1e") ++ " " ++ f("1.5x"))
+  println(floatToText(sqrt(-1.0)))
+}
+"####);
+    assert!(ok, "{err}");
+    assert_eq!(out, "42 5 5 -7 3\n9223372036854775807 none -9223372036854775808 none\nnone none none none none\n3.14 0.5 5 1000 -0.025 7\nnone none none none none none none none\nnan\n");
+}
