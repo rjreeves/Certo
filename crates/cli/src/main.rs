@@ -1011,9 +1011,39 @@ fn parse_file_or_exit(path: &Path, colour: bool) -> (Module, String) {
 /// resolution logic rather than risking the two silently drifting apart.
 fn resolve_local_imports(module: &mut Module, input: &Path, colour: bool, verbose: bool) {
     let base_dir = input.parent().unwrap_or(Path::new(".")).to_path_buf();
-    let mut visited: HashSet<PathBuf> = HashSet::new();
-    visited.insert(input.canonicalize().unwrap_or_else(|_| input.to_path_buf()));
-    resolve_imports_in(module, &base_dir, input, colour, verbose, &mut visited);
+    let mut state = ImportState::default();
+    let key = input.canonicalize().unwrap_or_else(|_| input.to_path_buf());
+    state.visited.insert(key.clone());
+    let src = std::fs::read_to_string(input).unwrap_or_default();
+    resolve_imports_in(module, &base_dir, input, &src, key, colour, verbose, &mut state);
+}
+
+/// What the import walk remembers across files (BACKLOG item 443).
+#[derive(Default)]
+struct ImportState {
+    visited: HashSet<PathBuf>,
+    /// The type-level names (types, traits, variants) a whole import of a file brings.
+    exports: HashMap<PathBuf, HashSet<String>>,
+    /// Every type-level name an imported file declares: `(module, is_pub)`.
+    defs: HashMap<String, (String, bool)>,
+}
+
+/// The types, traits and variants a declaration list introduces, with whether each is `pub`.
+fn type_level_names(decls: &[certo_ast::span::S<Decl>]) -> Vec<(String, bool)> {
+    let mut out = Vec::new();
+    for d in decls {
+        match &d.node {
+            Decl::Type(t) => {
+                out.push((t.name.node.clone(), t.is_pub));
+                if let certo_ast::decl::TypeBody::Sum(vs) = &t.body {
+                    for v in vs { out.push((v.name.node.clone(), t.is_pub)); }
+                }
+            }
+            Decl::Trait(tr) => out.push((tr.name.node.clone(), tr.is_pub)),
+            _ => {}
+        }
+    }
+    out
 }
 
 /// One level of import resolution. `importer` is the file `module` was parsed from (used to
@@ -1021,9 +1051,20 @@ fn resolve_local_imports(module: &mut Module, input: &Path, colour: bool, verbos
 /// file's directory. BACKLOG item 359: an imported file's own imports are resolved first, so its
 /// declarations can use what it imported; each file is merged only once (a cycle or a diamond
 /// does not duplicate it); and the imported file's `module` line must mirror its path.
-fn resolve_imports_in(module: &mut Module, base_dir: &Path, importer: &Path, colour: bool, verbose: bool, visited: &mut HashSet<PathBuf>) {
+fn resolve_imports_in(
+    module: &mut Module, base_dir: &Path, importer: &Path, src: &str, file_key: PathBuf,
+    colour: bool, verbose: bool, state: &mut ImportState,
+) -> HashSet<String> {
     use certo_ast::module::ImportKind;
     let stdlib_prefixes = ["Stdlib", "Core", "Collections", "Text", "DateTime", "Money"];
+    // BACKLOG item 443 - which types, traits and variants this file declares, which of its
+    // imports it passes on (`pub import`), and which it can see at all.
+    let this_module = module.path.segments.iter().map(|s| s.node.as_str()).collect::<Vec<_>>().join(".");
+    let own: Vec<(String, bool)> = type_level_names(&module.decls);
+    for (n, p) in &own { state.defs.insert(n.clone(), (this_module.clone(), *p)); }
+    let own_names: HashSet<String> = own.iter().map(|(n, _)| n.clone()).collect();
+    let mut visible: HashSet<String> = HashSet::new();
+    let mut reexports: HashSet<String> = HashSet::new();
     for imp in &module.imports.clone() {
         let first_seg = imp.path.segments.first().map(|s| s.node.as_str()).unwrap_or("");
         if stdlib_prefixes.contains(&first_seg) { continue; }
@@ -1036,9 +1077,18 @@ fn resolve_imports_in(module: &mut Module, base_dir: &Path, importer: &Path, col
         let path_str = imp.path.segments.iter().map(|s| s.node.as_str()).collect::<Vec<_>>().join(".");
         if candidate.exists() {
             // Already merged through another import (or an import cycle): nothing more to add.
-            if !visited.insert(candidate.canonicalize().unwrap_or_else(|_| candidate.clone())) { continue; }
+            let canon = candidate.canonicalize().unwrap_or_else(|_| candidate.clone());
+            if !state.visited.insert(canon.clone()) {
+                let again = state.exports.get(&canon).cloned().unwrap_or_default();
+                let brought: HashSet<String> = match &imp.kind {
+                    ImportKind::Named(names) => names.iter().map(|n| n.name.node.clone()).filter(|n| again.contains(n)).collect(),
+                    _ => again,
+                };
+                if imp.is_pub { reexports.extend(brought.iter().cloned()); }
+                visible.extend(brought);
+                continue;
+            }
             let (mut imp_module, imp_src) = parse_file_or_exit(&candidate, colour);
-            let _ = imp_src; // already reported inside helper
             if verbose { eprintln!("importing {}", candidate.display()); }
 
             // Spec 2.1: the module path mirrors the file path.
@@ -1056,7 +1106,13 @@ fn resolve_imports_in(module: &mut Module, base_dir: &Path, importer: &Path, col
             // The imported file's own imports first, so its declarations (and anything it
             // re-exports) are all present before this import's filter is applied.
             let own_count = imp_module.decls.len();
-            resolve_imports_in(&mut imp_module, base_dir, &candidate, colour, verbose, visited);
+            let child_exports = resolve_imports_in(&mut imp_module, base_dir, &candidate, &imp_src, canon, colour, verbose, state);
+            let brought: HashSet<String> = match &imp.kind {
+                ImportKind::Named(names) => names.iter().map(|n| n.name.node.clone()).filter(|n| child_exports.contains(n)).collect(),
+                _ => child_exports,
+            };
+            if imp.is_pub { reexports.extend(brought.iter().cloned()); }
+            visible.extend(brought);
 
             // BACKLOG item 440 - only a `pub` function, value or variable of the imported file
             // is visible to its importer. The private ones stay in the program (the file's own
@@ -1164,6 +1220,47 @@ fn resolve_imports_in(module: &mut Module, base_dir: &Path, importer: &Path, col
             process::exit(1);
         }
     }
+
+    // What an importer of this file may use: its own `pub` types, traits and variants, plus what it
+    // passes on with `pub import`.
+    let mut exports: HashSet<String> = own.iter().filter(|(_, p)| *p).map(|(n, _)| n.clone()).collect();
+    exports.extend(reexports);
+    state.exports.insert(file_key, exports.clone());
+
+    // BACKLOG item 443 - this file may name a type, trait or variant that another file declares
+    // only if that file is imported and the name is public (or passed on by `pub import`).
+    let mut skip_line = false;
+    let mut diags: Vec<Diagnostic> = Vec::new();
+    if let Ok(tokens) = certo_lexer::lex(src) {
+        for t in &tokens {
+            if t.newline_before { skip_line = false; }
+            match &t.token {
+                certo_lexer::Token::Import | certo_lexer::Token::Module => { skip_line = true; continue; }
+                certo_lexer::Token::Ident(name) if !skip_line && name.chars().next().is_some_and(|c| c.is_uppercase()) => {
+                    if own_names.contains(*name) || visible.contains(*name) { continue; }
+                    let Some((def_module, is_pub)) = state.defs.get(*name) else { continue };
+                    let msg = if !*is_pub {
+                        format!("`{name}` is private to module `{def_module}`")
+                    } else {
+                        format!("`{name}` is declared in module `{def_module}`, which this file does not import")
+                    };
+                    let note = if !*is_pub {
+                        format!("declare it `pub` in {def_module} to use it from another file")
+                    } else {
+                        format!("add `import {def_module}`, or have the module that imports it say `pub import {def_module}`")
+                    };
+                    let d = Diagnostic::error("E0235", msg).with_span(t.span.clone().into()).with_note(note);
+                    if !diags.iter().any(|x| x.message == d.message) { diags.push(d); }
+                }
+                _ => {}
+            }
+        }
+    }
+    if !diags.is_empty() {
+        eprint!("{}", render_all(&diags, src, &importer.display().to_string(), colour));
+        process::exit(1);
+    }
+    exports
 }
 
 /// Builds the diagnostic for an import path with no matching local file —
@@ -4327,7 +4424,7 @@ fn cmd_db_pull(args: &[String]) {
         let cols = columns.get(table).map(|v| v.as_slice()).unwrap_or(&[]);
 
         // ── Type declaration ─────────────────────────────────────────────
-        src.push_str(&format!("type {} = {{\n", type_name));
+        src.push_str(&format!("pub type {} = {{\n", type_name));
         for (col_name, certo_ty, nullable) in cols {
             let field_name = snake_to_camel(col_name);
             let is_pk = primary_keys.contains(&(table.clone(), col_name.clone()));

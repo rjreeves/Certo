@@ -102,3 +102,42 @@ fn importing_a_private_name_by_name_is_an_error() {
     assert!(!ok);
     assert!(err.contains("E0105") && err.contains("`helper` is private in module `MyApp.Lib`"), "{err}");
 }
+
+// BACKLOG item 443 - types, traits and variants follow `pub` too, and a file's own imports reach
+// its importer only through `pub import`.
+fn visibility_project() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    write(dir.path(), "App/Models.cto", "module App.Models\npub type Order = { total: Int }\ntype Secret = { code: Int }\npub type Kind = Big | Small\npub fn mk(n: Int): Order = Order { total: n }\nfn hidden(): Secret = Secret { code: 1 }\npub fn reveal(): Int = hidden().code\n");
+    write(dir.path(), "App/Lib.cto", "module App.Lib\nimport App.Models\npub fn twice(o: Order): Int = o.total * 2\n");
+    write(dir.path(), "App/Pub.cto", "module App.Pub\npub import App.Models\npub fn id(n: Int): Int = n\n");
+    dir
+}
+
+#[test]
+fn private_and_unimported_types_are_errors() {
+    let dir = visibility_project();
+    // A type reached only through a file's own (non-`pub`) import.
+    write(dir.path(), "m1.cto", "module Main\nimport App.Lib\nfn main(): Unit [io] = println(intToText(twice(Order { total: 2 })))\n");
+    let (ok, _, err) = build_run(dir.path(), "m1.cto");
+    assert!(!ok && err.contains("E0235") && err.contains("`Order` is declared in module `App.Models`, which this file does not import"), "{err}");
+    // A private type.
+    write(dir.path(), "m3.cto", "module Main\nimport App.Models\nfn f(s: Secret): Int = s.code\nfn main(): Unit [io] = println(\"x\")\n");
+    let (ok, _, err) = build_run(dir.path(), "m3.cto");
+    assert!(!ok && err.contains("E0235") && err.contains("`Secret` is private to module `App.Models`"), "{err}");
+}
+
+#[test]
+fn public_types_direct_pub_import_and_both_imports_work() {
+    let dir = visibility_project();
+    write(dir.path(), "m2.cto", "module Main\nimport App.Models\nfn main(): Unit [io] = println(intToText(reveal() + mk(3).total))\n");
+    let (ok, out, err) = build_run(dir.path(), "m2.cto");
+    assert!(ok, "{err}");
+    assert_eq!(out, "4\n");
+    write(dir.path(), "m4.cto", "module Main\nimport App.Pub\nfn main(): Unit [io] = println(intToText(mk(Order { total: 3 }.total).total))\n");
+    let (ok, _, err) = build_run(dir.path(), "m4.cto");
+    assert!(ok, "pub import passes the types on: {err}");
+    write(dir.path(), "m5.cto", "module Main\nimport App.Models\nimport App.Lib\nfn main(): Unit [io] = println(intToText(twice(mk(3))))\n");
+    let (ok, out, err) = build_run(dir.path(), "m5.cto");
+    assert!(ok, "{err}");
+    assert_eq!(out, "6\n");
+}

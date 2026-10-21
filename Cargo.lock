@@ -255,6 +255,7 @@ dependencies = [
  "certo-effects",
  "certo-fmt",
  "certo-hir",
+ "certo-lexer",
  "certo-mdl",
  "certo-migrate",
  "certo-parser",

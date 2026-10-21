@@ -97,7 +97,7 @@ fn main(): Unit [io] = {
 #[test]
 fn db_table_insert_sugar_calls_the_generated_insert_function() {
     let dir = tempfile::tempdir().unwrap();
-    fs::write(dir.path().join("Schema.cto"), "module Schema\nimport Stdlib.Db\n\ntype AuditLog = { id: Int, message: Text }\n\npub fn auditLogInsert(conn: Int, record: AuditLog): Int [io] =\n    dbExec(conn, \"INSERT INTO audit_log (id, message) VALUES ($1, $2)\", [intToText(record.id), record.message])\n").unwrap();
+    fs::write(dir.path().join("Schema.cto"), "module Schema\nimport Stdlib.Db\n\npub type AuditLog = { id: Int, message: Text }\n\npub fn auditLogInsert(conn: Int, record: AuditLog): Int [io] =\n    dbExec(conn, \"INSERT INTO audit_log (id, message) VALUES ($1, $2)\", [intToText(record.id), record.message])\n").unwrap();
     fs::write(dir.path().join("main.cto"), "module Main\nimport Stdlib.Db\nimport Schema\n\nfn logIt(): Int [io] = db.auditLog.insert(AuditLog { id: 1, message: \"hi\" })\n\nfn main(): Unit [io] = { println(\"ok\") }\n").unwrap();
     let (ok, _o, err) = certo(dir.path(), &["check", "main.cto"]);
     assert!(ok, "{err}");

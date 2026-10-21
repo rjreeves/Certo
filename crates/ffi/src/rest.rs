@@ -371,7 +371,7 @@ fn emit_model(out: &mut String, m: &Model, models: &[Model]) {
     let fields_str = field_tys.iter()
         .map(|(name, ty, optional)| format!("{}: {}{}", name, ty.certo_ty(), if *optional { "?" } else { "" }))
         .collect::<Vec<_>>().join(", ");
-    writeln!(out, "type {} = {{ {} }}", m.name, fields_str).unwrap();
+    writeln!(out, "pub type {} = {{ {} }}", m.name, fields_str).unwrap();
     writeln!(out).unwrap();
 
     // Decoder: fn __decodeX(jv: JsonValue): X
