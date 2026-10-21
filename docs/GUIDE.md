@@ -408,9 +408,13 @@ another file, and a file's own imports reach its importer only through `pub impo
 (`pub import App.Models` makes `App.Models`' public types visible to whoever imports this file;
 a plain `import` does not). Naming one that is not visible is error E0235, either "private to
 module M" or "declared in module M, which this file does not import". `certo db pull` and
-`certo-ffi --rest-client` generate their types and functions as `pub`. Two gaps remain: the functions
-and values a file imported are still visible to its importer even without `pub import`, and
-`import Lib.{ Name }` does not yet narrow which types of `Lib` can be named.
+`certo-ffi --rest-client` generate their types and functions as `pub`.
+
+Functions and values follow the same rule: `Lib` importing `Util` does not give whoever imports
+`Lib` the use of `Util`'s functions unless `Lib` says `pub import Util`; calling one without that is
+error E0236 (a local variable of the same name is not a use). One flat-namespace consequence remains:
+a public function of a file that is merged somewhere in the import graph still collides with a
+function of the same name you declare yourself (E0232).
 
 ---
 

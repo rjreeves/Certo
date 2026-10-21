@@ -681,6 +681,20 @@ through `pub import`).
 
 ---
 
+### E0236  Function or value not imported
+
+```
+error[E0236]: `shout` is declared in module `App.Util`, which this file does not import
+```
+
+**Cause:** The file calls or reads a public function or value of a module it does not import. It is
+only in scope because another imported file imports that module; a plain `import` does not pass
+its names on.
+
+**Fix:** Add `import <module>`, or have the module that imports it say `pub import <module>`.
+
+---
+
 ### E0233  Anonymous record literal matches no record type, or several
 
 ```
