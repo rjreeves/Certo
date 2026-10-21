@@ -1576,6 +1576,24 @@ fn infer_binop(op: &BinOp, left: &S<Expr>, right: &S<Expr>, span: Span, ctx: &mu
                 return lt;
             }
             ctx.unify(lt.clone(), rt, span);
+            // BACKLOG item 362 - arithmetic needs a number (there is no operator overloading).
+            // A `Duration` adds and subtracts; the opaque time types are reported just below.
+            let operand = ctx.uf.apply(&lt);
+            let ok = match &operand {
+                Ty::Var(_) | Ty::Error | Ty::Int | Ty::Int8 | Ty::Int16 | Ty::Int32 | Ty::UInt
+                | Ty::Float | Ty::Float32 | Ty::Decimal(_) => true,
+                Ty::Named { name, args } if args.is_empty() => matches!(name.as_str(), "Duration" | "Timestamp" | "DateTime" | "Date"),
+                // An unresolved or generic operand is not judged here.
+                Ty::Forall { .. } | Ty::Ctor(_) | Ty::App(_, _) => true,
+                _ => false,
+            };
+            if !ok {
+                ctx.errors.push(TypeError {
+                    kind: TypeErrorKind::NonNumericOperand { op: binop_symbol(op).to_string(), ty: operand },
+                    span,
+                });
+                return lt;
+            }
             // BACKLOG item 214 — `Timestamp`/`DateTime`/`Date` are opaque,
             // non-unifying nominal types with no operator overloading (see
             // item 85); same-type arithmetic between them previously
@@ -2112,6 +2130,15 @@ fn check_pattern(pat: &certo_ast::pattern::Pattern, expected: Ty, ctx: &mut Ctx<
                 let inst = ctx.instantiate(expected);
                 ctx.unify(Ty::Named { name: name.clone(), args }, inst, *span);
                 for f in fields {
+                    // BACKLOG item 362 - a field the record does not have.
+                    if !declared.iter().any(|(n, _)| n == &f.name.node)
+                        && !ctx.env.computed_fields.get(name).is_some_and(|cs| cs.iter().any(|(n, _)| n == &f.name.node))
+                    {
+                        ctx.errors.push(TypeError {
+                            kind: TypeErrorKind::UnknownPatternField { type_name: name.clone(), field: f.name.node.clone() },
+                            span: f.span,
+                        });
+                    }
                     let field_ty = declared.iter().find(|(n, _)| n == &f.name.node)
                         .map(|(_, t)| t.apply_subst(&subst))
                         .unwrap_or_else(|| ctx.fresh());

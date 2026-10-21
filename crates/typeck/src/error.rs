@@ -41,6 +41,15 @@ pub enum TypeErrorKind {
     /// pre-existing gap in `.with(...)`'s own validation, not fixed here).
     ComputedFieldNotSettable { field: String, type_name: String },
 
+    /// E0230 - arithmetic (`+ - * / % **`) on a value that is not a number.
+    NonNumericOperand { op: String, ty: Ty },
+
+    /// E0231 - a record pattern names a field the record does not have.
+    UnknownPatternField { type_name: String, field: String },
+
+    /// E0232 - two top-level declarations of the same kind share a name.
+    DuplicateDeclaration { name: String, kind: String },
+
     /// E0229 - a `fn` declaration has no body (and is not an `extern` declaration).
     MissingFnBody { name: String },
 
@@ -257,6 +266,12 @@ impl TypeError {
                 format!("E0206: unbound name `{}`", name),
             TypeErrorKind::ComputedFieldNotSettable { field, type_name } =>
                 format!("E0217: `{}` is a computed property of `{}` — it's derived, not stored, and can't be set directly", field, type_name),
+            TypeErrorKind::NonNumericOperand { op, ty } =>
+                format!("E0230: `{op}` needs numbers, but this is `{}`", ty.display()),
+            TypeErrorKind::UnknownPatternField { type_name, field } =>
+                format!("E0231: `{type_name}` has no field `{field}`"),
+            TypeErrorKind::DuplicateDeclaration { name, kind } =>
+                format!("E0232: {kind} `{name}` is declared more than once"),
             TypeErrorKind::MissingFnBody { name } =>
                 format!("E0229: function `{name}` has no body"),
             TypeErrorKind::UnknownArgumentName { fn_name, name, .. } =>

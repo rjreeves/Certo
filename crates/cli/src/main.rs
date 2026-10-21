@@ -2405,6 +2405,27 @@ pub(crate) fn type_error_to_diagnostic(e: &TypeError) -> Diagnostic {
                 .with_note(format!("remove `{field}: ...` — it's computed automatically from `{type_name}`'s other fields"))
         }
 
+        TypeErrorKind::NonNumericOperand { op, ty } => {
+            Diagnostic::error("E0230", format!("`{op}` needs numbers, but this is `{}`", ty.display()))
+                .with_span(e.span)
+                .with_note(if matches!(ty, certo_typeck::Ty::Text) {
+                    "join Text with `++`".to_string()
+                } else {
+                    "arithmetic works on Int, Float, Decimal and the other number types; there is no operator overloading".to_string()
+                })
+        }
+
+        TypeErrorKind::UnknownPatternField { type_name, field } => {
+            Diagnostic::error("E0231", format!("`{type_name}` has no field `{field}`"))
+                .with_span(e.span)
+        }
+
+        TypeErrorKind::DuplicateDeclaration { name, kind } => {
+            Diagnostic::error("E0232", format!("{kind} `{name}` is declared more than once"))
+                .with_span(e.span)
+                .with_note("rename one of them, or remove the duplicate")
+        }
+
         TypeErrorKind::MissingFnBody { name } => {
             Diagnostic::error("E0229", format!("function `{name}` has no body"))
                 .with_span(e.span)

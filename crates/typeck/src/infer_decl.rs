@@ -118,6 +118,9 @@ pub fn check_module_seeded(
     let mut errors  = Vec::new();
     let mut counter = counter;
 
+    // Pass 0 (BACKLOG item 362) - two functions/values, or two types, with one name.
+    check_duplicate_decls(module, &mut errors);
+
     // Pass 1 — hoist function signatures so mutually-recursive calls work.
     for sdecl in &module.decls {
         hoist_decl(&sdecl.node, &mut env, &mut uf, &mut errors, &mut counter);
@@ -154,6 +157,32 @@ pub fn check_module_seeded(
     check_mutable_assignments(module, &mut errors);
 
     if errors.is_empty() { Ok(()) } else { Err(errors) }
+}
+
+/// Two top-level functions, values or variables with one name, or two types with one name.
+/// (A function and a type may share a spelling; they live in different namespaces.)
+fn check_duplicate_decls(module: &Module, errors: &mut Vec<TypeError>) {
+    use std::collections::HashSet;
+    let mut values: HashSet<String> = HashSet::new();
+    let mut types: HashSet<String> = HashSet::new();
+    for sdecl in &module.decls {
+        let (set, name, span, kind): (&mut HashSet<String>, String, _, &str) = match &sdecl.node {
+            Decl::Fn(f) => (&mut values, f.name.node.clone(), f.name.span, "function"),
+            Decl::Var(v) => (&mut values, v.name.node.clone(), v.name.span, "variable"),
+            Decl::Val(v) => match &v.pattern.node {
+                certo_ast::pattern::Pattern::Ident { name, .. } => (&mut values, name.node.clone(), name.span, "value"),
+                _ => continue,
+            },
+            Decl::Type(t) => (&mut types, t.name.node.clone(), t.name.span, "type"),
+            _ => continue,
+        };
+        if !set.insert(name.clone()) {
+            errors.push(TypeError {
+                kind: TypeErrorKind::DuplicateDeclaration { name, kind: kind.to_string() },
+                span,
+            });
+        }
+    }
 }
 
 // ------------------------------------------------------------------ //

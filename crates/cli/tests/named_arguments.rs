@@ -56,3 +56,23 @@ fn a_function_without_a_body_is_an_error() {
     let (ok, out) = certo("module B\nfn compute(x: Int): Int\nfn main(): Unit [io] = println(intToText(compute(3)))\n", &["check"]);
     assert!(!ok && out.contains("E0229") && out.contains("`compute` has no body"), "{out}");
 }
+
+// BACKLOG item 362 - arithmetic needs numbers, record patterns need real fields, and a name can be
+// declared once per namespace.
+#[test]
+fn bad_operands_unknown_pattern_fields_and_duplicate_declarations_are_errors() {
+    for (src, code) in [
+        ("module A\nfn f(): Bool = true + false\n", "E0230"),
+        ("module A\nfn f(): Text = \"a\" - \"b\"\n", "E0230"),
+        ("module A\nfn f(): Int = [1] + [2]\n", "E0230"),
+        ("module A\ntype P = { a: Int }\nfn f(p: P): Int = { val { zz } = p\n  1 }\n", "E0231"),
+        ("module A\nfn dup(): Int = 1\nfn dup(): Int = 2\n", "E0232"),
+        ("module A\ntype T = { a: Int }\ntype T = { b: Int }\n", "E0232"),
+    ] {
+        let (ok, out) = certo(src, &["check"]);
+        assert!(!ok && out.contains(code), "{src}: {out}");
+    }
+    // A function and a type may share a spelling, and a Duration adds.
+    let (ok, out) = certo("module A\ntype Pt = { a: Int }\nfn pt(): Int = 1\nfn d(a: Duration, b: Duration): Duration = a + b\nfn main(): Unit [io] = println(\"ok\")\n", &["check"]);
+    assert!(ok, "{out}");
+}
