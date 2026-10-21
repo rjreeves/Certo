@@ -632,11 +632,11 @@ certo db diff db/schema.cto        # compare that file against the live DB,
 starting point — it's exactly the pattern shown in §6, generated
 automatically, one `type`/mapper/helper set per table.
 
-Building your whole project (`certo build`/`certo check`) also cross-checks
-every migration against your `type` declarations — a `createTable orders
-{ ... }` with no matching `type Orders = { ... }` anywhere in your project
-is a compile error, not something you find out at migration time. Keep the
-two in sync (running `certo db pull` after a migration is the easiest way).
+`certo db migrate` (and `rollback`) cross-checks the migrations against your `type`
+declarations before it runs anything — a `createTable orders { ... }` with no matching
+`type Orders = { ... }` in your project stops the migration with an error. `certo build` and
+`certo check` do not run this check. Keep the two in sync (running `certo db pull` after a
+migration is the easiest way).
 
 ---
 

@@ -58,14 +58,13 @@ finished by the deadline (BACKLOG item 81). `Channel<T>` (BACKLOG item 80) is a
 real thread-safe bounded queue for streaming values between tasks — see
 [CONCURRENCY.md](CONCURRENCY.md#example-3--channelt-producer-and-consumer).
 
-**Not implemented:** the runtime has no task-cancellation mechanism at all —
-once `spawn` starts a thread, it always runs to completion. `withTimeout`,
-supervised `spawn`/`every()` (periodic background jobs), and cancellation
-scopes from [CERTO-SPEC.md §7](Certo_Language_Specification.md) are a design
-target only; a real implementation needs actual cancellation infrastructure
-first (a cooperative cancel-check point or OS-level thread termination),
-which `parallel(timeout:)`'s "leak the thread, panic anyway" approach
-deliberately sidesteps rather than provides.
+**Implemented:** `withTimeout(duration) { body }` (result `T?`), `every(interval) { body }`
+(a periodic background job) and `parallel(timeout: ...)`. **Not implemented:** general
+cancellation scopes from [CERTO-SPEC.md §7](Certo_Language_Specification.md). The runtime
+cannot stop a running thread; a task that misses its deadline is abandoned (the thread is
+leaked and the caller moves on, or `parallel(timeout:)` panics), not cancelled. A real
+implementation needs cancellation infrastructure first (a cooperative cancel-check point
+or OS-level thread termination).
 
 ---
 

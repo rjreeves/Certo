@@ -351,12 +351,13 @@ test "list fold" {
 ### Output
 
 ```
-running 3 tests in src/math_tests.cto
-  test "addition works"    ok      1ms
-  test "list fold"         ok      0ms
-  test "divide by zero"    FAILED  (assertion failed: expected Err)
+✓ [PASS] addition works [test] (1ms)
+✓ [PASS] list fold [test] (0ms)
+✗ [FAIL] divide by zero [test] (2ms)
+  stderr:
+    certo panic: expected Err
 
-1 test failed.
+1 failed, 2 passed, 0 errored — 3 total (0.05s)
 ```
 
 Exit code is `0` when all tests pass, `1` if any fail. If a file has no
@@ -483,7 +484,7 @@ Reads YAML rule definitions and emits:
 This command is for projects that maintain validator rules in YAML (useful
 when non-programmers need to edit business rules). Hand-written validators
 using the `validator` keyword are the more common approach; see
-[HOW-TO-PROGRAM.md](HOW-TO-PROGRAM.md#18-validators).
+[section-16-validators.md](section-16-validators.md).
 
 ---
 
@@ -690,8 +691,9 @@ Requires `psql` on `PATH`.
 
 ## 14. certo migrate — migrations
 
-`certo migrate` is an alias for `certo db` with slightly different subcommand
-names. Both accept `--dry-run`.
+`certo migrate` is a shorter spelling of part of `certo db`: it takes `up`, `down`, `status`
+and `create`. `rollback`, `pull` and `diff` exist only under `certo db`. `--dry-run` goes
+after the subcommand (`certo migrate up --dry-run`).
 
 ```sh
 certo migrate up              # same as: certo db migrate

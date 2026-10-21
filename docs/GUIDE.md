@@ -911,7 +911,7 @@ certo db pull -o schema.cto  # write to a specific path
 certo db diff schema.cto      # compare type declarations to live DB
 ```
 
-`certo migrate` is an alias for `certo db` and accepts the same subcommands.
+`certo migrate` takes `up`, `down`, `status` and `create`; `rollback`, `pull` and `diff` are `certo db` only.
 
 ### `certo db pull` — schema introspection
 

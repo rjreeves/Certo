@@ -261,9 +261,9 @@ the result back out. You never see any of this — it's all in the generated C.
   `f` and `g` return.
 
 For the precise list of what is and isn't supported in concurrency today, see
-[LIMITATIONS.md §1](LIMITATIONS.md). The higher-level structured-concurrency
-features sketched in [CERTO-SPEC.md §7](CERTO-SPEC.md) — cancellation scopes,
-`withTimeout`, supervised background jobs (`every()`) — are a design target
-and not implemented yet: the runtime has no task-cancellation mechanism at
-all today, spawned threads always run to completion once started. `spawn` /
-`await` / `parallel {}` / `Channel<T>` are what runs today.
+[LIMITATIONS.md §1](LIMITATIONS.md). `withTimeout(duration) { body }` (the body's
+result is `T?`, `None` if the deadline passes), `every(interval) { body }` (a
+supervised periodic background job) and `parallel(timeout: ...)` work today. A
+general cancellation scope does not exist: the runtime has no way to stop a
+running thread, so a timed-out task is abandoned, not killed. `spawn` / `await` /
+`parallel {}` / `Channel<T>` are the primitives.

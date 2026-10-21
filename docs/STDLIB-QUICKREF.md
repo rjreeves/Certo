@@ -544,7 +544,7 @@ Text): Timezone?`, constructed elsewhere via `DateTime`'s own `Timezone(...)`
 ```
 Timestamp.now(): Timestamp [io]
 Timestamp.of(year: Int, month: Int, day: Int, hour: Int, minute: Int, second: Int, tz: Timezone): Timestamp
-Timestamp.parse(s: Text): Timestamp [fallible]     // ISO 8601, panics if unparseable
+Timestamp.parse(s: Text): Timestamp?               // ISO 8601; None if it is not valid
 Timestamp.inTimezone(ts: Timestamp, tz: Timezone): Text   // e.g. "2026-07-15T13:30:00+01:00"
 Timestamp.formatTz(ts: Timestamp, fmt: Text, tz: Timezone): Text   // strftime format, tz's wall clock
 
@@ -562,16 +562,18 @@ as `13:30:00 - 01:00` UTC.
 
 `import Stdlib.DateTime`
 
-`Duration` is an `Int` (signed seconds) representing a span of time —
+`Duration` is a span of time, stored as signed milliseconds (`Duration.milliseconds(n)` is exact; `Duration.months(n)` is 30 days each) —
 not a point in time. No `Timezone` type exists yet; see BACKLOG.
 
 ### Constructors
 
 ```
+Duration.milliseconds(n: Int): Duration
 Duration.seconds(n: Int): Duration
 Duration.minutes(n: Int): Duration
 Duration.hours(n: Int): Duration
 Duration.days(n: Int): Duration
+Duration.months(n: Int): Duration         // 30 days each
 ```
 
 ### Accessors (truncating)
@@ -709,8 +711,7 @@ JsonValue.push(arr: JsonValue, item: JsonValue): Unit [io]   // mutates arr
 ### Object access
 
 ```
-JsonValue.get(v: JsonValue, key: Text): JsonValue    // alias: field
-JsonValue.field(v: JsonValue, key: Text): JsonValue
+JsonValue.get(v: JsonValue, key: Text): JsonValue
 JsonValue.keys(v: JsonValue): List<Text>
 JsonValue.set(obj: JsonValue, key: Text, value: JsonValue): Unit [io]  // mutates obj
 ```
