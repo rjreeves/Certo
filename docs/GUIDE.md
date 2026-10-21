@@ -291,6 +291,13 @@ fn sumList(xs: List<Int>): Int =
     List.fold(xs, 0, (acc, x) => acc + x)
 ```
 
+### Anonymous record literals
+
+`{ x: 1, y: 2 }` builds a record without naming its type. The compiler picks the declared record type
+that contains all the named fields (or, if several do, the one whose fields are exactly those);
+otherwise it is error E0233 and you write `Pt { x: 1, y: 2 }`. A `{` that does not start with
+`name:` is still a block.
+
 ### Lambdas
 
 Lambdas can be passed inline as `(params) => body`, as `x => body` when there is exactly one

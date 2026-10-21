@@ -652,6 +652,21 @@ and a type may share a spelling.
 
 ---
 
+### E0233  Anonymous record literal matches no record type, or several
+
+```
+error[E0233]: cannot tell which record type `{ x }` is
+  = note: it could be A, B; write `TypeName { ... }` to choose
+```
+
+**Cause:** `{ name: value, ... }` without a type name stands for the one declared record type that
+contains all of its fields; if the fields fit no record, or several, the compiler cannot pick.
+(Several types are resolved when exactly one has precisely those fields.)
+
+**Fix:** Write `TypeName { ... }`, or declare the record type.
+
+---
+
 ### E0229  Function has no body
 
 ```
