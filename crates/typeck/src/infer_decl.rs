@@ -118,6 +118,9 @@ pub fn check_module_seeded(
     let mut errors  = Vec::new();
     let mut counter = counter;
 
+    // Mutually recursive functions without a return annotation (BACKLOG item 374).
+    check_mutual_recursion(module, &mut errors);
+
     // Pass 0 (BACKLOG item 362) - two functions/values, or two types, with one name.
     check_duplicate_decls(module, &mut errors);
 
@@ -157,6 +160,42 @@ pub fn check_module_seeded(
     check_mutable_assignments(module, &mut errors);
 
     if errors.is_empty() { Ok(()) } else { Err(errors) }
+}
+
+/// E0203 for functions that call each other in a cycle and have no return annotation: a direct
+/// self-call is flagged where the body is checked; a cycle through two or more functions was
+/// accepted, although neither return type can be inferred first.
+fn check_mutual_recursion(module: &Module, errors: &mut Vec<TypeError>) {
+    use std::collections::{HashMap, HashSet};
+    let unannotated: Vec<&certo_ast::decl::FnDecl> = module.decls.iter().filter_map(|d| match &d.node {
+        Decl::Fn(f) if f.ret_ty.is_none() && f.body.is_some() => Some(f),
+        _ => None,
+    }).collect();
+    if unannotated.len() < 2 { return; }
+    let mut edges: HashMap<&str, Vec<&str>> = HashMap::new();
+    for f in &unannotated {
+        let body = f.body.as_ref().unwrap();
+        let outs: Vec<&str> = unannotated.iter()
+            .filter(|g| g.name.node != f.name.node && is_recursive_call(body, &g.name.node))
+            .map(|g| g.name.node.as_str()).collect();
+        edges.insert(f.name.node.as_str(), outs);
+    }
+    for f in &unannotated {
+        // Can we get back to `f` from `f` through at least one other function?
+        let mut seen: HashSet<&str> = HashSet::new();
+        let mut stack: Vec<&str> = edges.get(f.name.node.as_str()).cloned().unwrap_or_default();
+        let mut cyclic = false;
+        while let Some(n) = stack.pop() {
+            if n == f.name.node { cyclic = true; break; }
+            if seen.insert(n) { stack.extend(edges.get(n).cloned().unwrap_or_default()); }
+        }
+        if cyclic {
+            errors.push(TypeError {
+                kind: TypeErrorKind::MissingAnnotation { name: f.name.node.clone() },
+                span: f.span,
+            });
+        }
+    }
 }
 
 /// Two top-level functions, values or variables with one name, or two types with one name.

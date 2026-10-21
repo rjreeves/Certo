@@ -652,8 +652,17 @@ fn parse_literal(cur: &mut Cursor<'_>) -> Result<S<Expr>, ParseError> {
             Lit::Float(f)
         }
         Token::Decimal(s)       => Lit::Decimal(s.to_string()),
-        Token::StringLit(s)     => Lit::String(unescape_str(s)),
-        Token::MultilineString(s) => Lit::String(unescape_str(s)),
+        Token::StringLit(s) | Token::MultilineString(s) => {
+            let text = unescape_str(s);
+            // A Text is a C string: a NUL would silently cut it short (BACKLOG item 374).
+            if text.contains('\0') {
+                return Err(ParseError {
+                    kind: ParseErrorKind::InvalidLiteral("a Text cannot contain a NUL character (`\\0`)".into()),
+                    span,
+                });
+            }
+            Lit::String(text)
+        }
         Token::FString(s)       => Lit::FString(parse_fstring_parts(s, span)?),
         Token::UuidLit(s)       => Lit::Uuid(s.to_string()),
         Token::True             => Lit::Bool(true),
@@ -1274,6 +1283,19 @@ fn unescape_str(s: &str) -> String {
                 Some('\\') => out.push('\\'),
                 Some('"')  => out.push('"'),
                 Some('0')  => out.push('\0'),
+                // BACKLOG item 374 - `\u{1F600}` (any code point) and `A` (four digits).
+                Some('u') => {
+                    let rest = chars.as_str();
+                    let decoded = if let Some(body) = rest.strip_prefix('{') {
+                        body.find('}').and_then(|end| u32::from_str_radix(&body[..end], 16).ok().map(|n| (n, end + 2)))
+                    } else if rest.len() >= 4 && rest.is_char_boundary(4) {
+                        u32::from_str_radix(&rest[..4], 16).ok().map(|n| (n, 4))
+                    } else { None };
+                    match decoded.and_then(|(n, used)| char::from_u32(n).map(|ch| (ch, used))) {
+                        Some((ch, used)) => { out.push(ch); chars = rest[used..].chars(); }
+                        None => { out.push('\\'); out.push('u'); }
+                    }
+                }
                 Some(c)    => { out.push('\\'); out.push(c); }
                 None       => out.push('\\'),
             }

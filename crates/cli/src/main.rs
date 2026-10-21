@@ -236,7 +236,13 @@ fn cmd_check(args: &[String]) {
 
     let (mut module, src) = module;
     resolve_local_imports(&mut module, &input, colour, verbose);
-    run_typeck_opts(&module, &src, &filename, colour, explain);
+    // BACKLOG item 376 - `certo build` type-checks the functions generated from state machines and
+    // validators; so does `check`, or an error in an `on_enter`/`invariant` body only showed up
+    // at build time.
+    let mut combined_src = src.clone();
+    expand_state_machines(&mut module, colour, &mut combined_src);
+    expand_validators(&mut module, colour, &mut combined_src);
+    run_typeck_opts(&module, &combined_src, &filename, colour, explain);
 
     if strict {
         let warnings = cmd_lint::lint_hir(&module, &input, &src, colour);

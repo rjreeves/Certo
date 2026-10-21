@@ -496,7 +496,9 @@ pub fn emit_module(module: &Module, opts: &CodegenOptions) -> String {
         let param_str = if params.is_empty() { "void".into() } else { params.join(", ") };
         let pfx = if pub_fns.contains(mir.name.as_str()) { export(&mir.name) } else { "" };
         writeln!(out, "{}{} {}({});", pfx, ret_c, c_fn_name(&mir.name), param_str).unwrap();
-        if let Some(export_name) = export_names.get(mir.name.as_str()) {
+        // BACKLOG item 412 - an export name equal to the function's own C symbol
+        // (`@export("certo_process_order") pub fn processOrder`) needs no wrapper.
+        if let Some(export_name) = export_names.get(mir.name.as_str()).filter(|n| c_ident(n) != c_fn_name(&mir.name)) {
             let args: Vec<String> = arg_tys.iter().map(|(_, id)| format!("_l{}", id)).collect();
             export_wrappers.push(format!("{}{} {}({}) {{ return {}({}); }}",
                 export(export_name), ret_c, c_ident(export_name), param_str, c_fn_name(&mir.name), args.join(", ")));

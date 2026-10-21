@@ -131,7 +131,8 @@ pub enum Token<'src> {
     // ------------------------------------------------------------------ //
     #[token("|>")]  Pipe,           // pipeline
     #[token("=>")]  FatArrow,       // match arm / lambda
-    #[token("->")]  Arrow,          // function type
+    #[token("->")]
+    #[token("→")]  Arrow,          // function type; the spec writes the transition arrow as →
     #[token("?.")]  SafeDot,        // safe field access
     #[token("...")]  DotDotDot,     // exclusive range  (before DotDot)
     #[token("..")]   DotDot,        // inclusive range
