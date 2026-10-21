@@ -157,15 +157,21 @@ fn check_fn_body(
             }
 
             Effect::DbWrite => {
+                // `[io]` covers database writes too (item 415), as it always did.
                 if !declared.effects.contains(&Effect::DbWrite)
+                    && !declared.effects.contains(&Effect::Io)
                     && (declared.is_pure || !declared.effects.is_empty())
                 {
-                    errors.push(EffectError {
-                        kind: EffectErrorKind::TransactionOutsideDbWrite {
+                    let kind = match callee {
+                        Some(_) => EffectErrorKind::UndeclaredEffect {
+                            fn_name: fn_name.to_string(),
+                            effect:  Effect::DbWrite,
+                        },
+                        None => EffectErrorKind::TransactionOutsideDbWrite {
                             fn_name: fn_name.to_string(),
                         },
-                        span: *span,
-                    });
+                    };
+                    errors.push(EffectError { kind, span: *span });
                 }
             }
 
@@ -194,7 +200,11 @@ fn check_fn_body(
                         },
                         span: *span,
                     });
-                } else if !declared.effects.is_empty() && !declared.effects.contains(other) {
+                } else if !declared.effects.is_empty() && !declared.effects.contains(other)
+                    // A read is also covered by `[db.write]` and by `[io]` (item 415).
+                    && !(matches!(other, Effect::DbRead)
+                        && (declared.effects.contains(&Effect::DbWrite) || declared.effects.contains(&Effect::Io)))
+                {
                     errors.push(EffectError {
                         kind: EffectErrorKind::UndeclaredEffect {
                             fn_name: fn_name.to_string(),

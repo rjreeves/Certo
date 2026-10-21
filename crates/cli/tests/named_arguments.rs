@@ -427,3 +427,25 @@ fn main(): Unit [io, async] = {
     assert!(ok, "{err}");
     assert_eq!(out, "4\n9.5 1\nempty\n");
 }
+
+// BACKLOG items 413/414/415 - effects through function references, more seeded I/O functions, and
+// the database effects.
+#[test]
+fn effects_follow_function_references_and_cover_the_database() {
+    // A function named as a value carries its effect (item 413).
+    let (ok, out) = certo("module E\nfn noisy(x: Int): Int [io] = { println(\"s\")\n  x }\nfn viaPipe(x: Int): Int [pure] = x |> noisy\nfn viaVal(x: Int): Int [pure] = { val f = noisy\n  f(x) }\nfn viaMap(xs: List<Int>): List<Int> [pure] = List.map(xs, noisy)\nfn fine(x: Int): Int [pure] = x + 1\nfn ok(x: Int): Int [io] = x |> noisy\n", &["check"]);
+    assert!(!ok && out.matches("E0401").count() == 3, "{out}");
+    // Naming an extern function outside `unsafe` is E0210 (item 413).
+    let (ok, out) = certo("module F\nextern \"C\" {\n  fn llabs(n: Int): Int\n}\nfn a(n: Int): Int = n |> llabs\nfn b(xs: List<Int>): List<Int> = List.map(xs, llabs)\nfn ok(n: Int): Int = unsafe { n |> llabs }\n", &["check"]);
+    assert!(!ok && out.matches("E0210").count() == 2, "{out}");
+    // More functions are I/O (item 414).
+    for call in ["Timestamp.now()", "Math.random()", "getEnv(\"HOME\")", "getCurrentDir()", "argCount()"] {
+        let (ok, out) = certo(&format!("module P\nfn f(): Unit [pure] = {{\n  val x = {call}\n  ()\n}}\n"), &["check"]);
+        assert!(!ok && out.contains("E0401"), "{call}: {out}");
+    }
+    // `db.read`, `db.write` and `db` (item 415).
+    let (ok, out) = certo("module D\nimport Stdlib.Db\nfn r(conn: Int): List<List<Text?>> [db.read] = dbQuery(conn, \"SELECT 1\", [])\nfn w(conn: Int): Int [db.write] = dbExec(conn, \"DELETE FROM t\", [])\nfn rw(conn: Int): Int [db] = {\n  val x = dbQuery(conn, \"SELECT 1\", [])\n  dbExec(conn, \"DELETE FROM t\", [])\n}\nfn io(conn: Int): Int [io] = dbExec(conn, \"DELETE FROM t\", [])\nfn main(): Unit [io] = println(\"x\")\n", &["check"]);
+    assert!(ok, "{out}");
+    let (ok, out) = certo("module D\nimport Stdlib.Db\nfn bad(conn: Int): Int [db.read] = dbExec(conn, \"DELETE FROM t\", [])\nfn pure1(conn: Int): Int [pure] = dbExec(conn, \"DELETE FROM t\", [])\n", &["check"]);
+    assert!(!ok && out.contains("E0400") && out.contains("db.write") && out.contains("E0401"), "{out}");
+}

@@ -234,12 +234,29 @@ fn walk_ffi(
                     }
                 }
             }
-            walk_ffi(func, in_unsafe, extern_fns, errors);
+            if !matches!(func.node, Expr::Path { .. }) {
+                walk_ffi(func, in_unsafe, extern_fns, errors);
+            }
             for a in args { walk_ffi(&a.value, in_unsafe, extern_fns, errors); }
         }
 
+        // BACKLOG item 413 - naming an extern function as a value (`n |> llabs`,
+        // `List.map(xs, llabs)`, `val f = llabs`) is as unsafe as calling it.
+        Expr::Path { path, span } => {
+            if !in_unsafe {
+                if let [seg] = path.segments.as_slice() {
+                    if extern_fns.contains(seg.node.as_str()) {
+                        errors.push(TypeError {
+                            kind: TypeErrorKind::FfiCallOutsideUnsafe { name: seg.node.clone() },
+                            span: *span,
+                        });
+                    }
+                }
+            }
+        }
+
         // Recurse into every expression-bearing child, preserving `in_unsafe`.
-        Expr::Lit { .. } | Expr::Path { .. } => {}
+        Expr::Lit { .. } => {}
         Expr::Pipe { left, right, .. } | Expr::BinOp { left, right, .. } => {
             walk_ffi(left, in_unsafe, extern_fns, errors);
             walk_ffi(right, in_unsafe, extern_fns, errors);

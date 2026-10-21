@@ -49,10 +49,28 @@ impl InferredEffects {
 /// Walk an expression, collecting every effect it uses.
 pub fn infer_expr(expr: &S<Expr>, env: &EffectEnv, locals: &LocalTypes, out: &mut InferredEffects) {
     match &expr.node {
-        Expr::Lit { .. } | Expr::Path { .. } => {}
+        Expr::Lit { .. } => {}
+
+        // BACKLOG item 413 - a function named as a value (`x |> noisy`, `val f = noisy`,
+        // `List.map(xs, noisy)`) brings its declared effects with it: it can be called from here
+        // on, so a `[pure]` function may not hold one. (A direct call is judged in the `App` arm.)
+        Expr::Path { path, span } => {
+            if path.segments.len() == 1 {
+                let name = path.segments[0].node.as_str();
+                if !locals.contains_key(name) {
+                    if let Some(decl) = env.get(name) {
+                        for e in &decl.effects {
+                            out.add(e.clone(), *span, Some(name.to_string()));
+                        }
+                    }
+                }
+            }
+        }
 
         Expr::App { func, args, span } => {
-            infer_expr(func, env, locals, out);
+            if !matches!(func.node, Expr::Path { .. }) {
+                infer_expr(func, env, locals, out);
+            }
             for a in args { infer_expr(&a.value, env, locals, out); }
 
             // If calling a named function — bare `f(x)`, qualified

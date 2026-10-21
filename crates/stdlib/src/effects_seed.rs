@@ -22,6 +22,14 @@ pub fn seed_stdlib_effects(env: &mut EffectEnv) {
     for name in IO_FUNCTIONS {
         define(env, name, Effect::Io);
     }
+    // BACKLOG item 415 - queries need `db.read`, statements that change data need `db.write`
+    // (a function declaring `[io]` or, for reads, `[db.write]` covers them).
+    for name in DB_READ_FUNCTIONS {
+        define(env, name, Effect::DbRead);
+    }
+    for name in DB_WRITE_FUNCTIONS {
+        define(env, name, Effect::DbWrite);
+    }
     for name in FALLIBLE_FUNCTIONS {
         define(env, name, Effect::Fallible);
     }
@@ -43,16 +51,8 @@ const IO_FUNCTIONS: &[&str] = &[
     // File
     "readFile", "readFileBytes", "readFileBytesRange", "writeFile", "writeFileBytes",
     "appendFile", "deleteFile", "renameFile", "fileExists", "listDir", "makeDir", "removeDir",
-    // Db (connection / raw query / transaction)
-    "dbConnect", "dbClose", "dbServerVersion", "dbVersionString",
-    "dbExec", "dbRunScript", "dbRunScriptResult",
-    "dbQuery", "dbQueryTyped", "dbQueryRow", "dbQueryOne", "dbColumns", "dbStream",
-    "dbBegin", "dbCommit", "dbRollback",
-    "withTransaction", "withConnection",
-    // DbQuery / DbMutation builders' terminal (executing) methods
-    "Query.list", "Query.first", "Query.groupedList",
-    "Query.count", "Query.sum", "Query.avg", "Query.min", "Query.max",
-    "Mutation.run",
+    // Db connections (the data-touching functions are in DB_READ/WRITE_FUNCTIONS below)
+    "dbConnect", "dbClose", "withConnection",
     // Http
     "Http.get", "Http.post", "Http.put", "Http.delete",
     "Http.request", "Http.requestBytes", "Http.serve", "Http.liveNotify",
@@ -78,12 +78,31 @@ const IO_FUNCTIONS: &[&str] = &[
     "Cli.parse",
     // DateTime
     "DateTime.now", "Date.today",
+    // BACKLOG item 414 - the remaining I/O and nondeterministic functions.
+    "Timestamp.now", "Date.todayIn", "Math.random",
+    "File.open", "File.readAll", "File.write", "File.close", "readBytes",
+    "isDirectory", "removeEmptyDir", "getCurrentDir", "getEnv", "arg", "argCount",
+    "Process.run", "Http.requestWithLimit", "Http.respond", "HostHttp.serve",
     // Json (in-place mutation)
     "JsonValue.push", "JsonValue.set",
     // Channel — cross-thread communication (allocation alone, Channel.new,
     // is not marked: same convention as List.empty/Map.empty).
     "Channel.send", "Channel.receive", "Channel.tryReceive",
     "Channel.close", "Channel.isClosed",
+];
+
+const DB_READ_FUNCTIONS: &[&str] = &[
+    "dbServerVersion", "dbVersionString",
+    "dbQuery", "dbQueryTyped", "dbQueryRow", "dbQueryOne", "dbColumns", "dbStream",
+    // DbQuery builder's terminal (executing) methods
+    "Query.list", "Query.first", "Query.groupedList",
+    "Query.count", "Query.sum", "Query.avg", "Query.min", "Query.max",
+];
+
+const DB_WRITE_FUNCTIONS: &[&str] = &[
+    "dbExec", "dbRunScript", "dbRunScriptResult",
+    "dbBegin", "dbCommit", "dbRollback", "withTransaction",
+    "Mutation.run",
 ];
 
 const FALLIBLE_FUNCTIONS: &[&str] = &[

@@ -389,6 +389,15 @@ pub fn parse_effect_set(cur: &mut Cursor<'_>) -> Result<Option<EffectSet>, Parse
             name
         };
 
+        // `db` alone is shorthand for `db.read, db.write` (docs/GUIDE.md).
+        if full == "db" {
+            effects.push(S::new(Effect::DbRead, name_span));
+            effects.push(S::new(Effect::DbWrite, name_span));
+            if cur.eat(|t| matches!(t, Token::Comma)).is_none() { break; }
+            if cur.peek() == Some(&Token::RBracket) { break; }
+            continue;
+        }
+
         let effect = match full.as_str() {
             "pure"     => Effect::Pure,
             "db.read"  => Effect::DbRead,

@@ -3014,11 +3014,19 @@ fn seed_stdlib_effects_registers_known_io_functions() {
     let mut env = certo_effects::EffectEnv::new();
     crate::seed_stdlib_effects(&mut env);
 
-    for name in ["println", "eprintln", "readLine", "readAll", "dbConnect", "dbQuery", "setEnv",
-                 "Http.get", "Query.list", "Mutation.run"] {
+    for name in ["println", "eprintln", "readLine", "readAll", "dbConnect", "setEnv",
+                 "Http.get", "Timestamp.now", "Math.random", "File.open", "getEnv", "arg",
+                 "Process.run", "isDirectory", "Http.respond"] {
         let declared = env.get(name).unwrap_or_else(|| panic!("{} not registered", name));
         assert!(declared.effects.contains(&Effect::Io),
             "{} registered without Io: {:?}", name, declared);
+    }
+    // BACKLOG item 415 - database access has its own effects.
+    for name in ["dbQuery", "dbQueryTyped", "Query.list"] {
+        assert!(env.get(name).unwrap().effects.contains(&Effect::DbRead), "{name}");
+    }
+    for name in ["dbExec", "Mutation.run", "withTransaction"] {
+        assert!(env.get(name).unwrap().effects.contains(&Effect::DbWrite), "{name}");
     }
 }
 
