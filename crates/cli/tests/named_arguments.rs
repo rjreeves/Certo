@@ -108,3 +108,34 @@ fn main(): Unit [io] = {
     let (ok, out) = certo("module R\ntype A = { x: Int, y: Int }\ntype B = { x: Int, z: Int }\nfn main(): Unit [io] = { val a = { x: 1 }\n  println(\"x\") }\n", &["check"]);
     assert!(!ok && out.contains("E0233") && out.contains("A, B"), "{out}");
 }
+
+// BACKLOG item 365 - the range extremes of spec §4.1's table can be written.
+#[test]
+fn int_and_uint_range_extreme_literals() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("main.cto");
+    fs::write(&file, r####"module I
+fn main(): Unit [io] = {
+  val c: UInt = 18446744073709551615
+  val h: UInt = 0xFFFFFFFFFFFFFFFF
+  val m: UInt = 9223372036854775808
+  val mx: Int = 9223372036854775807
+  val mn = -9223372036854775808
+  println(f"{c} {h} {m}")
+  println(intToText(mx))
+  println(intToText(mn))
+  println(boolToText(c == h))
+}
+"####).unwrap();
+    let exe = dir.path().join(if cfg!(windows) { "app.exe" } else { "app" });
+    let b = Command::new(env!("CARGO_BIN_EXE_certo")).arg("build").arg(&file).arg("-o").arg(&exe).output().unwrap();
+    assert!(b.status.success(), "{}", String::from_utf8_lossy(&b.stderr));
+    let r = Command::new(&exe).output().unwrap();
+    assert_eq!(String::from_utf8_lossy(&r.stdout).replace("\r\n", "\n"),
+        "18446744073709551615 18446744073709551615 9223372036854775808\n9223372036854775807\n-9223372036854775808\ntrue\n");
+    // An Int cannot hold a UInt-sized literal, and nothing holds 2^64.
+    let (ok, out) = certo("module I\nfn main(): Unit [io] = { val x: Int = 18446744073709551615\n println(\"x\") }\n", &["check"]);
+    assert!(!ok && out.contains("UInt"), "{out}");
+    let (ok, out) = certo("module I\nfn main(): Unit [io] = { val x: UInt = 18446744073709551616\n println(\"x\") }\n", &["check"]);
+    assert!(!ok && out.contains("too large"), "{out}");
+}

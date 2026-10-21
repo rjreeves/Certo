@@ -194,6 +194,10 @@ fn parse_unary(cur: &mut Cursor<'_>) -> Result<S<Expr>, ParseError> {
     if let Some((_, span)) = cur.eat(|t| matches!(t, Token::Minus)) {
         let expr = parse_unary(cur)?;
         let full = span.to(expr.span);
+        // `-9223372036854775808` is `Int`'s minimum: the digits alone do not fit an `Int`.
+        if matches!(&expr.node, Expr::Lit { value: Lit::UInt(n), .. } if *n == 1u64 << 63) {
+            return Ok(S::new(Expr::Lit { value: Lit::Int(i64::MIN), span: full }, full));
+        }
         return Ok(S::new(Expr::UnOp { op: UnOp::Neg, expr: Box::new(expr), span: full }, full));
     }
     parse_postfix(cur)
@@ -627,16 +631,19 @@ fn parse_literal(cur: &mut Cursor<'_>) -> Result<S<Expr>, ParseError> {
     let lit = match tok {
         Token::Integer(s)       => {
             // Hex / binary / octal need special parsing
-            let n = if s.starts_with("0x") || s.starts_with("0X") {
-                i64::from_str_radix(&s[2..].replace('_', ""), 16)
-            } else if s.starts_with("0b") || s.starts_with("0B") {
-                i64::from_str_radix(&s[2..].replace('_', ""), 2)
-            } else if s.starts_with("0o") || s.starts_with("0O") {
-                i64::from_str_radix(&s[2..].replace('_', ""), 8)
-            } else {
-                s.replace('_', "").parse::<i64>()
-            };
-            Lit::Int(n.map_err(|e| ParseError { kind: ParseErrorKind::InvalidLiteral(e.to_string()), span })?)
+            let digits = s.replace('_', "");
+            let (radix, body) = if digits.starts_with("0x") || digits.starts_with("0X") { (16, &digits[2..]) }
+                else if digits.starts_with("0b") || digits.starts_with("0B") { (2, &digits[2..]) }
+                else if digits.starts_with("0o") || digits.starts_with("0O") { (8, &digits[2..]) }
+                else { (10, &digits[..]) };
+            // Above `i64::MAX` the literal is a `UInt` (BACKLOG item 365: spec §4.1's range table).
+            match i64::from_str_radix(body, radix) {
+                Ok(n) => Lit::Int(n),
+                Err(e) => match u64::from_str_radix(body, radix) {
+                    Ok(u) => Lit::UInt(u),
+                    Err(_) => return Err(ParseError { kind: ParseErrorKind::InvalidLiteral(e.to_string()), span }),
+                },
+            }
         }
         Token::Float(s)         => {
             let f = s.replace('_', "").parse::<f64>().map_err(|e| ParseError {

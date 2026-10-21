@@ -432,6 +432,7 @@ fn fmt_dot_shorthand(body: &Expr, indent: usize) -> Option<String> {
 fn fmt_lit(lit: &Lit) -> String {
     match lit {
         Lit::Int(n)        => n.to_string(),
+        Lit::UInt(n)       => n.to_string(),
         Lit::Float(f)      => {
             let s = format!("{}", f);
             if s.contains('.') { s } else { format!("{}.0", s) }

@@ -9,6 +9,8 @@ use crate::pattern::Pattern;
 #[derive(Debug, Clone, PartialEq)]
 pub enum Lit {
     Int(i64),
+    /// An integer literal above `i64::MAX` (up to `u64::MAX`): a `UInt` value (BACKLOG item 365).
+    UInt(u64),
     Float(f64),
     /// Exact decimal string, e.g. `"19.99"` from `d"19.99"`
     Decimal(String),

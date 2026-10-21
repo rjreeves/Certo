@@ -1563,6 +1563,7 @@ fn push_row_shape_mismatch(resolved_ty: &Ty, required_fields: &[(String, Ty)], c
 fn infer_lit(lit: &Lit) -> Ty {
     match lit {
         Lit::Int(_)     => Ty::Int,
+        Lit::UInt(_)    => Ty::UInt,
         Lit::Float(_)   => Ty::Float,
         Lit::Decimal(_) => Ty::Decimal(None),
         Lit::Bool(_)    => Ty::Bool,

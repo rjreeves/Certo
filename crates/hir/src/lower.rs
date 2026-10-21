@@ -3100,6 +3100,8 @@ fn lower_lit(lit: &Lit, span: Span) -> HirExpr {
     use certo_ast::expr::FStringPart;
     let (kind, ty) = match lit {
         Lit::Int(n)     => (HirExprKind::Int(*n),           Ty::Int),
+        // A literal above `i64::MAX` is a `UInt`; its bits are stored in the signed slot.
+        Lit::UInt(n)    => (HirExprKind::Int(*n as i64),    Ty::UInt),
         Lit::Float(f)   => (HirExprKind::Float(*f),         Ty::Float),
         Lit::Decimal(s) => (HirExprKind::Decimal(s.clone()), Ty::Decimal(None)),
         Lit::Bool(b)    => (HirExprKind::Bool(*b),          Ty::Bool),

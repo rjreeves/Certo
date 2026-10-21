@@ -155,6 +155,7 @@ fn expr_to_sql_default(expr: &certo_ast::expr::Expr, column: &str) -> Result<Str
     match expr {
         Expr::Lit { value, .. } => Ok(match value {
             Lit::Int(n)     => n.to_string(),
+            Lit::UInt(n)    => n.to_string(),
             Lit::Float(f)   => format!("{}", f),
             Lit::Decimal(d) => d.clone(),
             Lit::Bool(b)    => if *b { "TRUE".into() } else { "FALSE".into() },

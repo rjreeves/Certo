@@ -263,6 +263,7 @@ fn lit_expr_to_string(expr: &Expr) -> Option<String> {
         Expr::Lit { value, .. } => match value {
             Lit::String(s)  => Some(s.clone()),
             Lit::Int(n)      => Some(n.to_string()),
+            Lit::UInt(n)     => Some(n.to_string()),
             Lit::Float(f)    => Some(f.to_string()),
             Lit::Decimal(s)  => Some(s.clone()),
             Lit::Bool(b)     => Some(b.to_string()),
