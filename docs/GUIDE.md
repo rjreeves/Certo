@@ -293,7 +293,9 @@ fn sumList(xs: List<Int>): Int =
 
 ### Lambdas
 
-Lambdas can be passed inline as `(params) => body` or written with the `fn` expression form:
+Lambdas can be passed inline as `(params) => body`, as `x => body` when there is exactly one
+parameter and no type annotation, or written with the `fn` expression form (in a `match` guard,
+`x if ok => ...`, the `=>` ends the guard, so a bare lambda there needs parentheses):
 
 ```
 fn double(xs: List<Int>): List<Int> =

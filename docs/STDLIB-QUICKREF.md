@@ -156,6 +156,9 @@ these aren't called as `r.flatMap(f)`. `Result.all`/`Result.allSettled`
 are qualified, like `List.map`.
 
 ```
+Result.map<T, U, E>(r: Result<T, E>, f: fn(T): U): Result<U, E>
+    // Ok(v) -> Ok(f(v)); Err(e) unchanged. Also `r.map(f)`, and `r |> Result.map(f)`
+
 flatMap<T, U, E>(r: Result<T, E>, f: fn(T): Result<U, E>): Result<U, E>
     // Ok(v) -> f(v); Err(e) -> Err(e) unchanged (short-circuits)
 
