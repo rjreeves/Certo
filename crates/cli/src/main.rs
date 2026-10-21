@@ -1026,6 +1026,10 @@ struct ImportState {
     exports: HashMap<PathBuf, HashSet<String>>,
     /// Every type-level name an imported file declares: `(module, is_pub)`.
     defs: HashMap<String, (String, bool)>,
+    /// The `pub` functions, values and variables a whole import of a file brings.
+    value_exports: HashMap<PathBuf, HashSet<String>>,
+    /// Every `pub` function, value or variable an imported file declares: name -> module.
+    value_defs: HashMap<String, String>,
 }
 
 /// The types, traits and variants a declaration list introduces, with whether each is `pub`.
@@ -1065,6 +1069,18 @@ fn resolve_imports_in(
     let own_names: HashSet<String> = own.iter().map(|(n, _)| n.clone()).collect();
     let mut visible: HashSet<String> = HashSet::new();
     let mut reexports: HashSet<String> = HashSet::new();
+    // The same for functions, values and variables (BACKLOG item 444).
+    let own_value_count = module.decls.len();
+    let own_values: Vec<(String, bool)> = module.decls.iter().filter_map(|d| match &d.node {
+        Decl::Fn(f) => Some((f.name.node.clone(), f.is_pub)),
+        Decl::Val(v) => match &v.pattern.node { Pattern::Ident { name, .. } => Some((name.node.clone(), v.is_pub)), _ => None },
+        Decl::Var(v) => Some((v.name.node.clone(), v.is_pub)),
+        _ => None,
+    }).collect();
+    for (n, p) in &own_values { if *p { state.value_defs.insert(n.clone(), this_module.clone()); } }
+    let own_value_names: HashSet<String> = own_values.iter().map(|(n, _)| n.clone()).collect();
+    let mut visible_values: HashSet<String> = HashSet::new();
+    let mut reexport_values: HashSet<String> = HashSet::new();
     for imp in &module.imports.clone() {
         let first_seg = imp.path.segments.first().map(|s| s.node.as_str()).unwrap_or("");
         if stdlib_prefixes.contains(&first_seg) { continue; }
@@ -1086,6 +1102,10 @@ fn resolve_imports_in(
                 };
                 if imp.is_pub { reexports.extend(brought.iter().cloned()); }
                 visible.extend(brought);
+                let again_v = state.value_exports.get(&canon).cloned().unwrap_or_default();
+                let brought_v = values_brought(&imp.kind, again_v);
+                if imp.is_pub { reexport_values.extend(brought_v.iter().cloned()); }
+                visible_values.extend(brought_v);
                 continue;
             }
             let (mut imp_module, imp_src) = parse_file_or_exit(&candidate, colour);
@@ -1106,6 +1126,7 @@ fn resolve_imports_in(
             // The imported file's own imports first, so its declarations (and anything it
             // re-exports) are all present before this import's filter is applied.
             let own_count = imp_module.decls.len();
+            let child_key = canon.clone();
             let child_exports = resolve_imports_in(&mut imp_module, base_dir, &candidate, &imp_src, canon, colour, verbose, state);
             let brought: HashSet<String> = match &imp.kind {
                 ImportKind::Named(names) => names.iter().map(|n| n.name.node.clone()).filter(|n| child_exports.contains(n)).collect(),
@@ -1113,6 +1134,10 @@ fn resolve_imports_in(
             };
             if imp.is_pub { reexports.extend(brought.iter().cloned()); }
             visible.extend(brought);
+            let child_values = state.value_exports.get(&child_key).cloned().unwrap_or_default();
+            let brought_v = values_brought(&imp.kind, child_values);
+            if imp.is_pub { reexport_values.extend(brought_v.iter().cloned()); }
+            visible_values.extend(brought_v);
 
             // BACKLOG item 440 - only a `pub` function, value or variable of the imported file
             // is visible to its importer. The private ones stay in the program (the file's own
@@ -1225,7 +1250,10 @@ fn resolve_imports_in(
     // passes on with `pub import`.
     let mut exports: HashSet<String> = own.iter().filter(|(_, p)| *p).map(|(n, _)| n.clone()).collect();
     exports.extend(reexports);
-    state.exports.insert(file_key, exports.clone());
+    state.exports.insert(file_key.clone(), exports.clone());
+    let mut value_exports: HashSet<String> = own_values.iter().filter(|(_, p)| *p).map(|(n, _)| n.clone()).collect();
+    value_exports.extend(reexport_values);
+    state.value_exports.insert(file_key, value_exports);
 
     // BACKLOG item 443 - this file may name a type, trait or variant that another file declares
     // only if that file is imported and the name is public (or passed on by `pub import`).
@@ -1256,11 +1284,56 @@ fn resolve_imports_in(
             }
         }
     }
+    // BACKLOG item 444 - a function or value another file declares is usable here only if that file
+    // is imported (directly or through a `pub import`). Free uses are found with the scope-aware
+    // rename walk: a local variable or parameter of the same name is not one.
+    let hidden: HashMap<String, RenameTo> = state.value_defs.keys()
+        .filter(|n| !own_value_names.contains(*n) && !visible_values.contains(*n) && !n.starts_with("__"))
+        .map(|n| (n.clone(), RenameTo::Bare(format!("__not_imported_{n}"))))
+        .collect();
+    if !hidden.is_empty() {
+        let mut probe: Vec<_> = module.decls[..own_value_count.min(module.decls.len())].to_vec();
+        rewrite_decls_free_refs(&mut probe, &hidden);
+        let dump = format!("{:?}", probe);
+        if dump.contains("__not_imported_") {
+            let mut names: Vec<&String> = hidden.keys().filter(|n| dump.contains(&format!("\"__not_imported_{n}\""))).collect();
+            names.sort();
+            for name in names {
+                let def_module = state.value_defs.get(name.as_str()).cloned().unwrap_or_default();
+                let span = certo_lexer::lex(src).ok().and_then(|ts| {
+                    ts.iter().enumerate().find(|(i, t)| {
+                        matches!(&t.token, certo_lexer::Token::Ident(n) if n == name)
+                            && !(*i > 0 && matches!(ts[*i - 1].token, certo_lexer::Token::Dot | certo_lexer::Token::Fn))
+                    }).map(|(_, t)| t.span.clone())
+                });
+                let mut d = Diagnostic::error("E0236", format!("`{name}` is declared in module `{def_module}`, which this file does not import"))
+                    .with_note(format!("add `import {def_module}`, or have the module that imports it say `pub import {def_module}`"));
+                if let Some(sp) = span { d = d.with_span(sp.into()); }
+                diags.push(d);
+            }
+        }
+    }
     if !diags.is_empty() {
         eprint!("{}", render_all(&diags, src, &importer.display().to_string(), colour));
         process::exit(1);
     }
     exports
+}
+
+/// The function/value names an import brings into scope, given the imported file's public ones.
+fn values_brought(kind: &certo_ast::module::ImportKind, exported: HashSet<String>) -> HashSet<String> {
+    use certo_ast::module::ImportKind;
+    match kind {
+        ImportKind::Whole => exported,
+        // `import X.{ a, b as c }` brings `a` and `c` (a listed name that is not a function or
+        // value, such as a type, is simply absent from `exported`).
+        ImportKind::Named(names) => names.iter()
+            .filter(|n| exported.contains(&n.name.node))
+            .map(|n| n.alias.as_ref().map(|a| a.node.clone()).unwrap_or_else(|| n.name.node.clone()))
+            .collect(),
+        // Qualified (`M.f`): nothing is free.
+        ImportKind::Aliased(_) => HashSet::new(),
+    }
 }
 
 /// Builds the diagnostic for an import path with no matching local file —

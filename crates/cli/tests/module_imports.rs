@@ -46,7 +46,7 @@ fn a_file_imported_twice_is_merged_once() {
 #[test]
 fn an_import_cycle_does_not_loop() {
     let dir = tempfile::tempdir().unwrap();
-    write(dir.path(), "cyc_a.cto", "module cyc_a\nimport cyc_b\npub fn a(): Int = 1\n");
+    write(dir.path(), "cyc_a.cto", "module cyc_a\npub import cyc_b\npub fn a(): Int = 1\n");
     write(dir.path(), "cyc_b.cto", "module cyc_b\nimport cyc_a\npub fn b(): Int = 2\n");
     write(dir.path(), "main.cto", "module Main\nimport cyc_a\nfn main(): Unit [io] = { println(intToText(a() + b())) }\n");
     let (ok, out, err) = build_run(dir.path(), "main.cto");
@@ -140,4 +140,30 @@ fn public_types_direct_pub_import_and_both_imports_work() {
     let (ok, out, err) = build_run(dir.path(), "m5.cto");
     assert!(ok, "{err}");
     assert_eq!(out, "6\n");
+}
+
+// BACKLOG item 444 - functions and values another file declares are usable only from a file that
+// imports it, directly or through a `pub import`.
+#[test]
+fn transitive_functions_need_an_import_or_a_pub_import() {
+    let dir = tempfile::tempdir().unwrap();
+    write(dir.path(), "App/Util.cto", "module App.Util\npub fn shout(s: Text): Text = s ++ \"!\"\npub val greeting = \"hi\"\n");
+    write(dir.path(), "App/Wrap.cto", "module App.Wrap\nimport App.Util\npub fn hello(): Text = shout(greeting)\n");
+    write(dir.path(), "App/WrapPub.cto", "module App.WrapPub\npub import App.Util\npub fn hello2(): Text = shout(\"x\")\n");
+    // Reached only through Wrap's plain import: not visible.
+    write(dir.path(), "u1.cto", "module Main\nimport App.Wrap\nfn main(): Unit [io] = println(shout(\"a\"))\n");
+    let (ok, _, err) = build_run(dir.path(), "u1.cto");
+    assert!(!ok && err.contains("E0236") && err.contains("`shout` is declared in module `App.Util`"), "{err}");
+    // Passed on with `pub import`, imported directly, named, aliased, shadowed by a local: all fine.
+    for (name, src, expect) in [
+        ("u3.cto", "module Main\nimport App.WrapPub\nfn main(): Unit [io] = println(shout(\"a\") ++ hello2())\n", "a!x!\n"),
+        ("u4.cto", "module Main\nimport App.Wrap\nimport App.Util\nfn main(): Unit [io] = println(shout(\"a\") ++ hello())\n", "a!hi!\n"),
+        ("u5.cto", "module Main\nimport App.Wrap\nfn main(): Unit [io] = { val shout = 1\n  println(intToText(shout)) }\n", "1\n"),
+        ("u7.cto", "module Main\nimport App.Util.{ shout as yell }\nfn main(): Unit [io] = println(yell(\"a\"))\n", "a!\n"),
+    ] {
+        write(dir.path(), name, src);
+        let (ok, out, err) = build_run(dir.path(), name);
+        assert!(ok, "{name}: {err}");
+        assert_eq!(out, expect, "{name}");
+    }
 }
