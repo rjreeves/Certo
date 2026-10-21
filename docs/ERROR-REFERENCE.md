@@ -614,6 +614,44 @@ that leaves one out used to compile, and reading the field gave a null or empty 
 
 ---
 
+### E0230  Arithmetic on a value that is not a number
+
+```
+error[E0230]: `+` needs numbers, but this is `Bool`
+```
+
+**Cause:** `+ - * / % **` on Text, Bool, lists, records or `Unit`. There is no operator overloading.
+A `Duration` can be added and subtracted.
+
+**Fix:** Join Text with `++`; call the type's own function (`Decimal.add`, ...) for anything else.
+
+---
+
+### E0231  Unknown field in a record pattern
+
+```
+error[E0231]: `P` has no field `zz`
+```
+
+**Cause:** `val { zz } = p` or a `{ zz: x }` pattern names a field the record type does not declare.
+
+**Fix:** Use a field of the type.
+
+---
+
+### E0232  Name declared more than once
+
+```
+error[E0232]: function `dup` is declared more than once
+```
+
+**Cause:** Two top-level functions, values or variables, or two types, have the same name. A function
+and a type may share a spelling.
+
+**Fix:** Rename one.
+
+---
+
 ### E0229  Function has no body
 
 ```
