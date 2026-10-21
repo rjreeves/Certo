@@ -101,6 +101,10 @@ pub fn compile_c_opts(c_src: &str, out_path: &Path, coverage: bool, uses_db: boo
     }
     if cfg!(windows) {
         cmd.arg("-Xlinker").arg("/subsystem:console");
+        // BACKLOG item 405 - a source with a `main` codegens a WinMain that calls
+        // CommandLineToArgvW; the test build links the same libraries as `certo build`.
+        cmd.arg("-lshell32");
+        cmd.arg("-luser32");
     } else {
         cmd.arg("-lm");
     }
