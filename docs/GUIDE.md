@@ -1103,6 +1103,22 @@ You can then compile the IR with:
 clang math.ll -o math.exe
 ```
 
+### What the LLVM and WebAssembly backends compile
+
+These backends are a compute target, not a second implementation of the whole language. They
+compile functions over numbers, Bool, Text, records, sum types (generic ones such as
+`Maybe<T>` and recursive ones such as a tree included), lists, tuples, `Option` and `Result`,
+`match`, and closures: lambdas that capture variables, `var`s that a lambda assigns, and
+functions passed as values. `==` and `!=` compare records, sum types, lists, tuples and options
+by value. The list functions available are `len`, `get`, `first`, `last`, `push`, `map`,
+`filter`, `fold`/`reduce`, `forEach`, `find`, `any` and `all`.
+
+Programs that need the database, HTTP server, JSON, process execution, concurrency or the rest
+of the standard library are rejected with an error naming the unsupported call; build those with
+the C backend. A generic sum type's payload is an erased slot, so `==` on one is an error; on
+WebAssembly a `Float` or an `Int` above 32 bits that passes through `List.fold`'s accumulator is
+truncated.
+
 ### WebAssembly
 
 ```powershell
