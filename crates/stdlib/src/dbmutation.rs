@@ -42,7 +42,7 @@ static CertoMutation* certo_mutation_new(certo_text_t table, CertoMutationKind k
     CertoMutation* m = (CertoMutation*)malloc(sizeof(CertoMutation));
     if (!m) certo_panic("out of memory");
     m->kind         = kind;
-    m->table        = certo_db_strdup(table);
+    m->table        = certo_db_ident(table);
     m->set_cols     = certo_list_new_empty();
     m->set_vals     = certo_list_new_empty();
     m->where_cols   = certo_list_new_empty();
@@ -65,7 +65,11 @@ CertoMutation* certo_mutation_delete_from(certo_text_t table) {
 }
 CertoMutation* certo_mutation_insert_many(certo_text_t table, CertoList* columns) {
     CertoMutation* m = certo_mutation_new(table, CERTO_MUT_INSERT_MANY);
-    m->many_cols = columns;
+    /* column names are converted like every other identifier */
+    CertoList* snake = certo_list_new_empty();
+    for (int64_t i = 0; columns && i < columns->len; i++)
+        snake = certo_list_push(snake, (void*)certo_db_ident((const char*)columns->data[i]));
+    m->many_cols = snake;
     return m;
 }
 
@@ -80,14 +84,14 @@ static CertoMutation* certo_mutation_clone(CertoMutation* m) {
 
 CertoMutation* certo_mutation_set(CertoMutation* m, certo_text_t column, certo_text_t value) {
     CertoMutation* n = certo_mutation_clone(m);
-    n->set_cols = certo_list_push(m->set_cols, (void*)certo_db_strdup(column));
+    n->set_cols = certo_list_push(m->set_cols, (void*)certo_db_ident(column));
     n->set_vals = certo_list_push(m->set_vals, (void*)certo_db_strdup(value));
     return n;
 }
 
 CertoMutation* certo_mutation_filter(CertoMutation* m, certo_text_t column, certo_text_t op, certo_text_t value) {
     CertoMutation* n = certo_mutation_clone(m);
-    n->where_cols = certo_list_push(m->where_cols, (void*)certo_db_strdup(column));
+    n->where_cols = certo_list_push(m->where_cols, (void*)certo_db_ident(column));
     n->where_ops  = certo_list_push(m->where_ops,  (void*)certo_db_strdup(op));
     n->where_vals = certo_list_push(m->where_vals, (void*)certo_db_strdup(value));
     return n;
@@ -95,7 +99,7 @@ CertoMutation* certo_mutation_filter(CertoMutation* m, certo_text_t column, cert
 
 CertoMutation* certo_mutation_on_conflict(CertoMutation* m, certo_text_t column) {
     CertoMutation* n = certo_mutation_clone(m);
-    n->conflict_col = certo_db_strdup(column);
+    n->conflict_col = certo_db_ident(column);
     return n;
 }
 

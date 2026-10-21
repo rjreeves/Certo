@@ -23,6 +23,33 @@ static char* certo_db_strdup(const char* s) {
     return out;
 }
 
+/* BACKLOG item 377 - table and column names are written in camelCase/PascalCase in Certo code
+   but live in the database as snake_case (migrations and `certo db pull` both convert, see
+   `certo_dbschema::camel_to_snake`); an unquoted `customerId` would fold to `customerid`. This
+   converts one identifier, or a dotted `alias.column`, with the same rule: an uppercase letter
+   that is not first in its segment becomes `_` plus its lowercase. `*` and anything that is not
+   a plain identifier is left alone. The result is malloc'd. */
+static char* certo_db_ident(const char* s) {
+    if (!s) return certo_db_strdup("");
+    size_t n = strlen(s);
+    char* out = (char*)malloc(n * 2 + 1);
+    if (!out) certo_panic("out of memory");
+    size_t o = 0;
+    int seg_start = 1;
+    for (size_t i = 0; i < n; i++) {
+        unsigned char c = (unsigned char)s[i];
+        if (c >= 'A' && c <= 'Z') {
+            if (!seg_start) out[o++] = '_';
+            out[o++] = (char)(c - 'A' + 'a');
+        } else {
+            out[o++] = (char)c;
+        }
+        seg_start = (c == '.');
+    }
+    out[o] = '\0';
+    return out;
+}
+
 /* Sentinel for SQL NULL parameters.  dbNull() returns a pointer to this
  * buffer.  certo_db_params detects it by pointer identity and passes NULL
  * to PQexecParams, which libpq treats as SQL NULL. */

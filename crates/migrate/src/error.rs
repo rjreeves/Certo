@@ -8,6 +8,8 @@ pub enum MigrateError {
     AlreadyApplied(String),
     NotApplied(String),
     OutOfOrder { name: String, expected: usize, got: usize },
+    /// A column default or type the SQL generator cannot express (BACKLOG items 379/380).
+    Unsupported(String),
 }
 
 impl fmt::Display for MigrateError {
@@ -18,6 +20,7 @@ impl fmt::Display for MigrateError {
             MigrateError::UnknownMigration(n)    => write!(f, "unknown migration: {}", n),
             MigrateError::AlreadyApplied(n)      => write!(f, "migration already applied: {}", n),
             MigrateError::NotApplied(n)          => write!(f, "migration not yet applied: {}", n),
+            MigrateError::Unsupported(what)      => write!(f, "{}", what),
             MigrateError::OutOfOrder { name, expected, got } =>
                 write!(f, "migration {} is out of order (expected index {}, got {})", name, expected, got),
         }

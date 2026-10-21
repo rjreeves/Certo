@@ -42,8 +42,7 @@ typedef struct {
     CertoList*   group_by;    /* List<Text> — GROUP BY column names, in order */
     CertoList*   aggregates;  /* List<Text> — "AGG(col) AS alias" fragments, in order */
     CertoList*   having;      /* List<Text> — "AGG(col) op $N" fragments, in order */
-    certo_text_t order_col;   /* NULL = no ORDER BY */
-    int64_t      order_desc;  /* 0 = ASC, 1 = DESC */
+    CertoList*   order_by;    /* List<Text> - "col ASC|DESC" fragments, in the order given (BACKLOG item 382) */
     int64_t      limit_n;     /* -1 = no LIMIT */
     int64_t      offset_n;    /* -1 = no OFFSET */
 } CertoQuery;
@@ -51,16 +50,15 @@ typedef struct {
 CertoQuery* certo_query_from_as(certo_text_t table, certo_text_t alias) {
     CertoQuery* q = (CertoQuery*)malloc(sizeof(CertoQuery));
     if (!q) certo_panic("out of memory");
-    q->table      = certo_db_strdup(table);
-    q->alias      = certo_db_strdup(alias);
+    q->table      = certo_db_ident(table);
+    q->alias      = certo_db_ident(alias);
     q->joins      = certo_list_new_empty();
     q->wheres     = certo_list_new_empty();
     q->params     = certo_list_new_empty();
     q->group_by   = certo_list_new_empty();
     q->aggregates = certo_list_new_empty();
     q->having     = certo_list_new_empty();
-    q->order_col  = NULL;
-    q->order_desc = 0;
+    q->order_by   = certo_list_new_empty();
     q->limit_n    = -1;
     q->offset_n   = -1;
     return q;
@@ -83,16 +81,22 @@ CertoQuery* certo_query_filter(CertoQuery* q, certo_text_t column, certo_text_t 
     CertoQuery* n = certo_query_clone(q);
     int64_t param_n = (q->params ? q->params->len : 0) + 1;
     char frag[160];
-    snprintf(frag, sizeof(frag), "%s %s $%" PRId64, column, op, param_n);
+    char* col = certo_db_ident(column);
+    snprintf(frag, sizeof(frag), "%s %s $%" PRId64, col, op, param_n);
+    free(col);
     n->wheres = certo_list_push(q->wheres, (void*)certo_db_strdup(frag));
     n->params = certo_list_push(q->params, (void*)certo_db_strdup(value));
     return n;
 }
 
 CertoQuery* certo_query_order_by(CertoQuery* q, certo_text_t column, certo_text_t dir) {
+    /* Each call adds a sort key after the earlier ones, so a second orderBy is a tie-breaker. */
     CertoQuery* n = certo_query_clone(q);
-    n->order_col  = certo_db_strdup(column);
-    n->order_desc = (strcmp(dir, "desc") == 0) ? 1 : 0;
+    char* col = certo_db_ident(column);
+    char frag[200];
+    snprintf(frag, sizeof(frag), "%s %s", col, (strcmp(dir, "desc") == 0) ? "DESC" : "ASC");
+    free(col);
+    n->order_by = certo_list_push(q->order_by, (void*)certo_db_strdup(frag));
     return n;
 }
 
@@ -111,7 +115,9 @@ CertoQuery* certo_query_offset(CertoQuery* q, int64_t offset_n) {
 CertoQuery* certo_query_join_as(CertoQuery* q, certo_text_t table, certo_text_t alias, certo_text_t left_col, certo_text_t right_col) {
     CertoQuery* n = certo_query_clone(q);
     char frag[220];
-    snprintf(frag, sizeof(frag), "JOIN %s AS %s ON %s = %s", table, alias, left_col, right_col);
+    char *t = certo_db_ident(table), *a = certo_db_ident(alias), *l = certo_db_ident(left_col), *r = certo_db_ident(right_col);
+    snprintf(frag, sizeof(frag), "JOIN %s AS %s ON %s = %s", t, a, l, r);
+    free(t); free(a); free(l); free(r);
     n->joins = certo_list_push(q->joins, (void*)certo_db_strdup(frag));
     return n;
 }
@@ -123,7 +129,9 @@ CertoQuery* certo_query_join(CertoQuery* q, certo_text_t table, certo_text_t lef
 CertoQuery* certo_query_left_join_as(CertoQuery* q, certo_text_t table, certo_text_t alias, certo_text_t left_col, certo_text_t right_col) {
     CertoQuery* n = certo_query_clone(q);
     char frag[220];
-    snprintf(frag, sizeof(frag), "LEFT JOIN %s AS %s ON %s = %s", table, alias, left_col, right_col);
+    char *t = certo_db_ident(table), *a = certo_db_ident(alias), *l = certo_db_ident(left_col), *r = certo_db_ident(right_col);
+    snprintf(frag, sizeof(frag), "LEFT JOIN %s AS %s ON %s = %s", t, a, l, r);
+    free(t); free(a); free(l); free(r);
     n->joins = certo_list_push(q->joins, (void*)certo_db_strdup(frag));
     return n;
 }
@@ -134,7 +142,7 @@ CertoQuery* certo_query_left_join(CertoQuery* q, certo_text_t table, certo_text_
 
 CertoQuery* certo_query_group_by(CertoQuery* q, certo_text_t column) {
     CertoQuery* n = certo_query_clone(q);
-    n->group_by = certo_list_push(q->group_by, (void*)certo_db_strdup(column));
+    n->group_by = certo_list_push(q->group_by, (void*)certo_db_ident(column));
     return n;
 }
 
@@ -150,7 +158,9 @@ static char* certo_query_agg_expr(certo_text_t agg_fn, certo_text_t column) {
         size_t i = 0;
         for (; agg_fn[i] && i + 1 < sizeof(up); i++) up[i] = (char)toupper((unsigned char)agg_fn[i]);
         up[i] = '\0';
-        snprintf(buf, 128, "%s(%s)", up, column);
+        char* col = certo_db_ident(column);
+        snprintf(buf, 128, "%s(%s)", up, col);
+        free(col);
     }
     return buf;
 }
@@ -196,6 +206,7 @@ static size_t certo_query_sql_capacity(CertoQuery* q) {
     n = q->group_by   ? q->group_by->len   : 0; for (int64_t i = 0; i < n; i++) cap += strlen((const char*)q->group_by->data[i])   + 8;
     n = q->aggregates ? q->aggregates->len : 0; for (int64_t i = 0; i < n; i++) cap += strlen((const char*)q->aggregates->data[i]) + 8;
     n = q->having     ? q->having->len     : 0; for (int64_t i = 0; i < n; i++) cap += strlen((const char*)q->having->data[i])     + 8;
+    n = q->order_by   ? q->order_by->len   : 0; for (int64_t i = 0; i < n; i++) cap += strlen((const char*)q->order_by->data[i])   + 8;
     return cap;
 }
 
@@ -248,9 +259,9 @@ static char* certo_query_build_sql(CertoQuery* q) {
         pos += (size_t)snprintf(sql + pos, cap - pos, "%s %s", i == 0 ? " HAVING" : " AND", (const char*)q->having->data[i]);
     }
 
-    if (q->order_col) {
-        pos += (size_t)snprintf(sql + pos, cap - pos, " ORDER BY %s %s",
-                                 q->order_col, q->order_desc ? "DESC" : "ASC");
+    int64_t norder = q->order_by ? q->order_by->len : 0;
+    for (int64_t i = 0; i < norder; i++) {
+        pos += (size_t)snprintf(sql + pos, cap - pos, "%s%s", i == 0 ? " ORDER BY " : ", ", (const char*)q->order_by->data[i]);
     }
     if (q->limit_n >= 0)  pos += (size_t)snprintf(sql + pos, cap - pos, " LIMIT %"  PRId64, q->limit_n);
     if (q->offset_n >= 0) pos += (size_t)snprintf(sql + pos, cap - pos, " OFFSET %" PRId64, q->offset_n);

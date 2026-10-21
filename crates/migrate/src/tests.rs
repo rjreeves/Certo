@@ -319,7 +319,7 @@ fn plan_sql_generates_real_ddl_for_up_steps() {
     let migrations = vec![make_migration_with_ops("m001")];
     let state = MigrationState::default();
     let steps = plan_up(&migrations, &state, None);
-    let sql = plan_sql(&steps);
+    let sql = plan_sql(&steps).unwrap();
     assert_eq!(sql.len(), 1);
     assert!(sql[0].contains("CREATE TABLE widgets"), "got: {}", sql[0]);
 }
@@ -330,7 +330,7 @@ fn plan_sql_generates_real_ddl_for_down_steps() {
     let mut state = MigrationState::default();
     state.mark_applied("m001");
     let steps = plan_down(&migrations, &state, 1);
-    let sql = plan_sql(&steps);
+    let sql = plan_sql(&steps).unwrap();
     assert_eq!(sql.len(), 1);
     assert_eq!(sql[0], "DROP TABLE widgets;");
 }
@@ -523,4 +523,91 @@ fn create_index_snake_cases_table_and_columns_but_not_the_index_name_itself() {
     let sql = op_to_sql(&op);
     assert_eq!(sql, "CREATE INDEX productsCategoryIdx ON products (category_id);",
         "the index name itself must stay as written; only the table/columns snake_case");
+}
+
+// ------------------------------------------------------------------ //
+// BACKLOG items 378-380 - raw SQL terminator, column defaults, column types
+// ------------------------------------------------------------------ //
+
+fn named_ty(name: &str) -> S<TypeExpr> {
+    s(TypeExpr::Named {
+        path: ModulePath { segments: vec![s(name.to_string())], span: dummy_span() },
+        args: vec![],
+        span: dummy_span(),
+    })
+}
+
+fn col_with_default(name: &str, ty: S<TypeExpr>, default: certo_ast::expr::Expr) -> ColumnDef {
+    let mut c = make_col(name, ty, false, false);
+    c.default = Some(s(default));
+    c
+}
+
+fn lit(l: certo_ast::expr::Lit) -> certo_ast::expr::Expr {
+    certo_ast::expr::Expr::Lit { value: l, span: dummy_span() }
+}
+
+fn table_sql(cols: Vec<ColumnDef>) -> Result<String, crate::MigrateError> {
+    crate::try_op_to_sql(&MigrationOp::CreateTable { name: "things".to_string(), columns: cols, span: dummy_span() })
+}
+
+#[test]
+fn raw_sql_without_a_terminator_gets_one() {
+    let op = MigrationOp::RawSql { sql: "SELECT 1".to_string(), span: dummy_span() };
+    assert_eq!(op_to_sql(&op), "SELECT 1;");
+}
+
+#[test]
+fn column_defaults_cover_negative_numbers_decimals_uuids_and_calls() {
+    use certo_ast::expr::{Expr, Lit, UnOp};
+    let neg = |e: Expr| Expr::UnOp { op: UnOp::Neg, expr: Box::new(s(e)), span: dummy_span() };
+    let call = |name: &str| Expr::App {
+        func: Box::new(s(Expr::Path { path: ModulePath { segments: vec![s(name.to_string())], span: dummy_span() }, span: dummy_span() })),
+        args: vec![],
+        span: dummy_span(),
+    };
+    let sql = table_sql(vec![
+        col_with_default("a", int_ty(), neg(lit(Lit::Int(5)))),
+        col_with_default("b", named_ty("Decimal"), lit(Lit::Decimal("1.50".to_string()))),
+        col_with_default("c", named_ty("DateTime"), call("now")),
+        col_with_default("d", named_ty("UUID"), call("gen_random_uuid")),
+        col_with_default("e", named_ty("Float"), neg(lit(Lit::Float(0.5)))),
+    ]).unwrap();
+    assert!(sql.contains("a BIGINT NOT NULL DEFAULT -5"), "{sql}");
+    assert!(sql.contains("b NUMERIC NOT NULL DEFAULT 1.50"), "{sql}");
+    assert!(sql.contains("c TIMESTAMPTZ NOT NULL DEFAULT now()"), "{sql}");
+    assert!(sql.contains("d UUID NOT NULL DEFAULT gen_random_uuid()"), "{sql}");
+    assert!(sql.contains("e DOUBLE PRECISION NOT NULL DEFAULT -0.5"), "{sql}");
+}
+
+#[test]
+fn an_inexpressible_default_is_an_error_not_null() {
+    use certo_ast::expr::{Expr, Lit};
+    let sum = Expr::BinOp {
+        op: certo_ast::expr::BinOp::Add,
+        left: Box::new(s(lit(Lit::Int(1)))),
+        right: Box::new(s(lit(Lit::Int(2)))),
+        span: dummy_span(),
+    };
+    let err = table_sql(vec![col_with_default("c", int_ty(), sum)]).unwrap_err();
+    assert!(err.to_string().contains("`c`"), "{err}");
+}
+
+#[test]
+fn every_builtin_column_type_has_a_real_sql_type() {
+    let cols: Vec<ColumnDef> = ["Int32", "Int16", "Int8", "UInt", "Float32", "Timestamp", "Bytes", "DateTime"]
+        .iter().map(|t| make_col(&t.to_lowercase(), named_ty(t), false, false)).collect();
+    let sql = table_sql(cols).unwrap();
+    assert!(sql.contains("int32 INTEGER") && sql.contains("int16 SMALLINT") && sql.contains("int8 SMALLINT"), "{sql}");
+    assert!(sql.contains("uint NUMERIC(20, 0)") && sql.contains("float32 REAL"), "{sql}");
+    assert!(sql.contains("timestamp TIMESTAMPTZ") && sql.contains("bytes BYTEA"), "{sql}");
+    assert!(!sql.contains("TEXT"), "no built-in type may fall back to TEXT: {sql}");
+}
+
+#[test]
+fn an_optional_column_is_nullable_and_keeps_its_inner_type() {
+    let opt = s(TypeExpr::Option { inner: Box::new(int_ty()), span: dummy_span() });
+    let sql = table_sql(vec![make_col("parent", opt, false, false)]).unwrap();
+    assert!(sql.contains("parent BIGINT"), "{sql}");
+    assert!(!sql.contains("parent BIGINT NOT NULL"), "{sql}");
 }

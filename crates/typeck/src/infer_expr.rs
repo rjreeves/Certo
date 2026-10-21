@@ -1392,10 +1392,12 @@ fn try_db_accessor_call(func: &S<Expr>, args: &[Arg], call_span: Span, ctx: &mut
         "find"   => "FindById",
         "all"    => "FindAll",
         "delete" => "DeleteById",
+        // BACKLOG item 381 - `db.<table>.insert(record)` -> `<table>Insert(conn, record)`.
+        "insert" => "Insert",
         _ => {
             ctx.errors.push(TypeError { kind: TypeErrorKind::DbAccessorNotFound {
                 table: table.node.clone(), method: method.node.clone(),
-                expected_fn: format!("{}FindById|{}FindAll|{}DeleteById", table.node, table.node, table.node),
+                expected_fn: format!("{}FindById|{}FindAll|{}DeleteById|{}Insert", table.node, table.node, table.node, table.node),
             }, span: call_span });
             return Some(None);
         }

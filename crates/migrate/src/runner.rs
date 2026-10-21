@@ -2,23 +2,23 @@ use std::path::Path;
 use certo_ast::decl::MigrationDecl;
 use crate::error::MigrateError;
 use crate::plan::{Direction, MigrationStep};
-use crate::sql_gen::op_to_sql;
+use crate::sql_gen::try_op_to_sql;
 use crate::state::MigrationState;
 
 /// Generate the SQL statements for a set of migration steps. Pure — no state
 /// mutation, no execution against any database. Used both for `--dry-run`
 /// (print and stop) and as the first half of a real run (generate, then the
 /// caller actually executes it before calling `commit_steps`).
-pub fn plan_sql(steps: &[MigrationStep<'_>]) -> Vec<String> {
-    steps.iter()
-        .flat_map(|step| {
-            let ops: &[_] = match step.direction {
-                Direction::Up   => &step.migration.up,
-                Direction::Down => &step.migration.down,
-            };
-            ops.iter().map(op_to_sql).collect::<Vec<_>>()
-        })
-        .collect()
+pub fn plan_sql(steps: &[MigrationStep<'_>]) -> Result<Vec<String>, MigrateError> {
+    let mut out = Vec::new();
+    for step in steps {
+        let ops: &[_] = match step.direction {
+            Direction::Up   => &step.migration.up,
+            Direction::Down => &step.migration.down,
+        };
+        for op in ops { out.push(try_op_to_sql(op)?); }
+    }
+    Ok(out)
 }
 
 /// Records that `steps` were actually applied/rolled back, persisting to

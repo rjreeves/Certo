@@ -3562,3 +3562,24 @@ fn execwith_input_keeps_text_mode_line_endings_on_windows() {
     let body = &p[w..w + p[w..].find("\n}\n").unwrap()];
     assert!(body.contains("'\\r'"), "LF must be written as CRLF");
 }
+
+// BACKLOG item 377 - every table/column name a Query or Mutation builder takes goes through
+// `certo_db_ident` (camelCase/PascalCase -> snake_case), so it matches the migrated schema.
+#[test]
+fn db_dsl_converts_identifiers_to_snake_case() {
+    for needle in [
+        "q->table      = certo_db_ident(table);",
+        "char* col = certo_db_ident(column);",
+        "(void*)certo_db_ident(column));",
+    ] {
+        assert!(crate::dbquery::DBQUERY_C.contains(needle), "DBQUERY_C must contain `{needle}`");
+    }
+    for needle in [
+        "m->table        = certo_db_ident(table);",
+        "n->set_cols = certo_list_push(m->set_cols, (void*)certo_db_ident(column));",
+        "n->where_cols = certo_list_push(m->where_cols, (void*)certo_db_ident(column));",
+        "n->conflict_col = certo_db_ident(column);",
+    ] {
+        assert!(crate::dbmutation::DBMUTATION_C.contains(needle), "DBMUTATION_C must contain `{needle}`");
+    }
+}

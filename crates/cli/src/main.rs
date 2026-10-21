@@ -4659,7 +4659,7 @@ fn cmd_migrate(args: &[String]) {
             let state = certo_migrate::MigrationState::load(&manifest)
                 .unwrap_or_else(|e| { eprintln!("error: {}", e); process::exit(1); });
             let steps = plan_up(&migrations, &state, step);
-            let sql = plan_sql(&steps);
+            let sql = plan_sql(&steps).unwrap_or_else(|e| { eprintln!("error: {}", e); process::exit(1); });
             // BACKLOG item 221 — a trigger-bearing `validator` "installs
             // itself as a database trigger when you run `certo db migrate`"
             // (`docs/section-16-validators.md` §16.7), but nothing ever
@@ -4716,7 +4716,7 @@ fn cmd_migrate(args: &[String]) {
                 .unwrap_or_else(|e| { eprintln!("error: {}", e); process::exit(1); });
             let steps = plan_down(&migrations, &state, count);
             if steps.is_empty() { println!("Nothing to roll back."); return; }
-            let sql = plan_sql(&steps);
+            let sql = plan_sql(&steps).unwrap_or_else(|e| { eprintln!("error: {}", e); process::exit(1); });
             for stmt in &sql { println!("{}", stmt); }
 
             if dry_run {
@@ -4755,7 +4755,9 @@ fn cmd_migrate(args: &[String]) {
             std::fs::create_dir_all(&dir).unwrap_or_else(|e| {
                 eprintln!("error creating {}: {}", dir.display(), e); process::exit(1);
             });
-            let filename = dir.join(format!("{}.cto", name));
+            // BACKLOG item 382 - migrations apply in sorted-filename order, so the file gets the next
+            // free numeric prefix (`003_add_x.cto`) unless the name already has one.
+            let filename = dir.join(migration_file_name(&dir, name));
             let template = format!(
                 "module Migration\n\nmigration \"{}\" {{\n    up {{\n        // TODO: add operations\n    }}\n    down {{\n        // TODO: add rollback operations\n    }}\n}}\n",
                 name
@@ -4772,6 +4774,23 @@ fn cmd_migrate(args: &[String]) {
             process::exit(1);
         }
     }
+}
+
+/// The file name `certo db create <name>` writes: `<NNN>_<name>.cto`, where `NNN` is one more
+/// than the highest numeric prefix already in `dir` (001 for an empty directory). A name that
+/// already starts with `<digits>_` is used as given.
+fn migration_file_name(dir: &Path, name: &str) -> String {
+    let has_prefix = name.split_once('_').is_some_and(|(p, _)| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()));
+    if has_prefix { return format!("{name}.cto"); }
+    let mut highest = 0u32;
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for e in entries.flatten() {
+            let file = e.file_name().to_string_lossy().to_string();
+            let digits: String = file.chars().take_while(|c| c.is_ascii_digit()).collect();
+            if let Ok(n) = digits.parse::<u32>() { highest = highest.max(n); }
+        }
+    }
+    format!("{:03}_{name}.cto", highest + 1)
 }
 
 /// Actually executes `sql` against `DATABASE_URL` via `psql`, exiting the
@@ -5164,6 +5183,21 @@ mod fullstack_template_tests {
         let src = fullstack_ui_source("myApp");
         assert!(src.contains("id:    Text"), "id must be Text, not Int:\n{src}");
         assert!(src.contains("columns: [id, title, done]"), "id must be listed in columns so the Create form asks for it:\n{src}");
+    }
+
+    #[test]
+    fn migrate_create_numbers_files_so_they_apply_in_creation_order() {
+        // BACKLOG item 382 - `certo db create` scaffolded unprefixed names, so a later
+        // `add_x` sorted before an earlier `create_y`.
+        let dir = std::env::temp_dir().join(format!("certo_mig_prefix_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        assert_eq!(migration_file_name(&dir, "create_products"), "001_create_products.cto");
+        std::fs::write(dir.join("001_create_products.cto"), "").unwrap();
+        assert_eq!(migration_file_name(&dir, "add_category_to_products"), "002_add_category_to_products.cto");
+        std::fs::write(dir.join("007_x.cto"), "").unwrap();
+        assert_eq!(migration_file_name(&dir, "later"), "008_later.cto");
+        assert_eq!(migration_file_name(&dir, "010_explicit"), "010_explicit.cto");
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

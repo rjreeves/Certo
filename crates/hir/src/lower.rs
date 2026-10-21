@@ -1454,6 +1454,7 @@ fn try_db_accessor_rewrite(func: &S<Expr>, args: &[certo_ast::expr::Arg], cx: &C
         "find"   => "FindById",
         "all"    => "FindAll",
         "delete" => "DeleteById",
+        "insert" => "Insert", // BACKLOG item 381
         _ => return None, // typeck already rejected this with E0711
     };
     let fn_name = format!("{}{}", table.node, suffix);
