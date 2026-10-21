@@ -355,10 +355,14 @@ error[E0213]: match on `Shape` is not exhaustive
 ```
 
 **Cause:** A `match` does not cover every possible value of the
-scrutinee's type. Fully checked for `Bool`, `Option`, `Result`, and
-user-declared sum types — for everything else (`Int`, `Text`, records,
-etc.) a trailing `_` catch-all arm is required, since there's no finite
-set of cases to enumerate.
+scrutinee's type. Nested patterns are checked too: `Ok(Some(x))` with
+`Err(_)` leaves `Ok(None)` uncovered, and the error names it. Complete sets
+are recognised for `Bool`, `Option`, `Result`, user-declared sum types, lists
+(`[]` and `[x, ...rest]`), tuples and record patterns, however they are
+combined. A number or text literal pattern (`Some(0)`) never covers its whole
+type, so it needs a catch-all (`Some(_)`) arm. A guarded arm (`pat if cond`)
+does not count. A pattern that names a variant's fields (`Circle { radius: r }`)
+is assumed to cover that variant.
 
 **Fix:** Add the missing arm(s), or a trailing `_ => ...` arm to cover the
 rest.
