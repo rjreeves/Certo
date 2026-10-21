@@ -194,7 +194,9 @@ pub fn build_harness(module: &Module, coverage_source: Option<(String, String)>)
                     });
                 }
                 let call = build_validator_call(validator_name, rule_name, &rt.entity, &rt.context, !v.context.is_empty(), rt.span);
-                (rt.label.clone(), &rt.expect, call, rt.span)
+                // BACKLOG item 407 - the validator and rule are part of the name, so
+                // `--filter Submit` finds them.
+                (format!("{}.{}: {}", validator_name, rule_name, rt.label), &rt.expect, call, rt.span)
             }
             Decl::ValidatorTest(vt) => {
                 let v = find_validator(module, &vt.validator.node).ok_or_else(|| crate::error::TestRunnerError::UnknownValidatorRef {
@@ -202,7 +204,7 @@ pub fn build_harness(module: &Module, coverage_source: Option<(String, String)>)
                     path: vt.validator.node.clone(),
                 })?;
                 let call = build_validator_call(&vt.validator.node, "validate", &vt.entity, &vt.context, !v.context.is_empty(), vt.span);
-                (vt.label.clone(), &vt.expect, call, vt.span)
+                (format!("{}: {}", vt.validator.node, vt.label), &vt.expect, call, vt.span)
             }
             _ => continue,
         };
@@ -868,7 +870,7 @@ mod tests {
         )).unwrap();
         let (src, entries) = build_harness(&m, None).unwrap();
         assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].display_name, "passes");
+        assert_eq!(entries[0].display_name, "V.active: passes");
         assert_eq!(entries[0].kind, TestKind::Unit);
         assert!(src.contains("certo_v_active"), "expected a call to the real generated per-rule function\n{src}");
     }

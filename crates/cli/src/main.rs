@@ -129,6 +129,64 @@ fn real_main() {
 // check
 // ------------------------------------------------------------------ //
 
+/// The project's entry file from `certo.toml` in the current directory (BACKLOG item 407): its
+/// `[build] entry`, or `src/main.cto` for a `type = "lib"` project.
+fn project_entry() -> Option<PathBuf> {
+    let cwd = std::env::current_dir().ok()?;
+    let toml = load_certo_toml_or_die(&cwd)?;
+    let build = toml.build.as_ref()?;
+    match build.entry.as_deref() {
+        Some(e) if !e.is_empty() => Some(cwd.join(e)),
+        _ if build.ty.as_deref() == Some("lib") && cwd.join("src").join("main.cto").exists() => Some(cwd.join("src").join("main.cto")),
+        _ => None,
+    }
+}
+
+/// Every `.cto` file under `dir`, recursively, in name order.
+fn cto_files_in(dir: &Path, out: &mut Vec<PathBuf>) {
+    let Ok(rd) = std::fs::read_dir(dir) else { return };
+    let mut entries: Vec<PathBuf> = rd.flatten().map(|e| e.path()).collect();
+    entries.sort();
+    for p in entries {
+        if p.is_dir() {
+            let skip = p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n == "dist" || n.starts_with('.'));
+            if !skip { cto_files_in(&p, out); }
+        } else if p.extension().and_then(|e| e.to_str()) == Some("cto") {
+            out.push(p);
+        }
+    }
+}
+
+/// A directory argument stands for the `.cto` files under it.
+fn expand_dir_args(paths: Vec<PathBuf>) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    for p in paths {
+        if p.is_dir() { cto_files_in(&p, &mut out); } else { out.push(p); }
+    }
+    out
+}
+
+/// The project's sources (`src/` and `tests/`) when a command is given no files.
+fn project_sources() -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    if let Ok(cwd) = std::env::current_dir() {
+        if cwd.join("certo.toml").exists() {
+            cto_files_in(&cwd.join("src"), &mut out);
+            cto_files_in(&cwd.join("tests"), &mut out);
+        }
+    }
+    out
+}
+
+/// Does this source declare any kind of test?
+fn declares_tests(path: &Path) -> bool {
+    let Ok(text) = std::fs::read_to_string(path) else { return false };
+    text.lines().any(|l| {
+        let l = l.trim_start();
+        ["test ", "property ", "ruleTest", "validatorTest", "dbTest", "asyncTest"].iter().any(|k| l.starts_with(k))
+    })
+}
+
 fn cmd_check(args: &[String]) {
     let mut input: Option<PathBuf> = None;
     let mut verbose = false;
@@ -164,9 +222,9 @@ fn cmd_check(args: &[String]) {
         i += 1;
     }
 
-    let input = input.unwrap_or_else(|| {
+    let input = input.or_else(project_entry).unwrap_or_else(|| {
         eprintln!("error: no input file");
-        eprintln!("usage: certo check <file.cto>");
+        eprintln!("usage: certo check <file.cto>   (or run it in a project with `[build] entry` in certo.toml)");
         process::exit(2);
     });
 
@@ -202,6 +260,18 @@ fn cmd_run(args: &[String]) {
     } else {
         (args, [].as_slice())
     };
+
+    // BACKLOG item 407 - no file given: run the project's entry.
+    let with_entry: Vec<String>;
+    let build_args: &[String] = if !build_args.iter().any(|a| a.ends_with(".cto")) {
+        match project_entry() {
+            Some(e) => {
+                with_entry = std::iter::once(e.display().to_string()).chain(build_args.iter().cloned()).collect();
+                &with_entry
+            }
+            None => build_args,
+        }
+    } else { build_args };
 
     // `--watch`/`-w`: rebuild AND re-run the program on every change, not
     // just rebuild silently. `cmd_build`'s own `--watch` handling only
@@ -3560,8 +3630,10 @@ fn cmd_fmt(args: &[String]) {
         i += 1;
     }
 
+    let mut files = expand_dir_args(files);
+    if files.is_empty() { files = project_sources(); }
     if files.is_empty() {
-        eprintln!("error: no input files");
+        eprintln!("error: no input files (give files or directories, or run in a project with certo.toml)");
         process::exit(2);
     }
 
@@ -3656,8 +3728,12 @@ fn cmd_test(args: &[String]) {
         i += 1;
     }
 
+    let mut files = expand_dir_args(files);
     if files.is_empty() {
-        eprintln!("error: no input files");
+        files = project_sources().into_iter().filter(|p| declares_tests(p)).collect();
+    }
+    if files.is_empty() {
+        eprintln!("error: no test files (give files or directories, or run in a project with tests under src/ or tests/)");
         process::exit(2);
     }
 
@@ -3734,8 +3810,10 @@ fn cmd_lint(args: &[String]) {
         i += 1;
     }
 
+    let mut files = expand_dir_args(files);
+    if files.is_empty() { files = project_sources(); }
     if files.is_empty() {
-        eprintln!("error: no input files");
+        eprintln!("error: no input files (give files or directories, or run in a project with certo.toml)");
         process::exit(2);
     }
 

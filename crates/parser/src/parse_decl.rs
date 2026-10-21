@@ -1893,10 +1893,12 @@ fn parse_test_body(cur: &mut Cursor<'_>) -> Result<(S<Expr>, S<Expr>, TestExpect
         kind: ParseErrorKind::Custom("test block missing `entity`".into()),
         span: cur.peek_span(),
     })?;
-    let context = context_expr.ok_or_else(|| ParseError {
-        kind: ParseErrorKind::Custom("test block missing `context`".into()),
-        span: cur.peek_span(),
-    })?;
+    // BACKLOG item 407 - a validator with no `context { .. }` block needs no `context:` here;
+    // the harness passes it only to a validator that declares one.
+    let context = context_expr.unwrap_or_else(|| {
+        let sp = entity.span;
+        S::new(Expr::Lit { value: Lit::Unit, span: sp }, sp)
+    });
     let expect = expect_val.ok_or_else(|| ParseError {
         kind: ParseErrorKind::Custom("test block missing `expect`".into()),
         span: cur.peek_span(),
