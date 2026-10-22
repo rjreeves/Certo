@@ -370,7 +370,7 @@ rest.
 
 ---
 
-### E0214  Private constructor called outside its `impl`
+### E0214  Private constructor used outside its `impl`
 
 ```
 error[E0214]: constructor `Email` is private
@@ -378,7 +378,9 @@ error[E0214]: constructor `Email` is private
 ```
 
 **Cause:** A `type X = priv X(...)` smart-constructor's raw constructor was
-called from outside an `impl X { ... }` block for the same type.
+called, passed as a value, or named in a `match` / `val` pattern
+(`match s { Secret(v) => v }`, which would read the wrapped value out) from
+outside an `impl X { ... }` block for the same type.
 
 **Fix:** Call it only from within `impl X { ... }` — typically via a
 validating factory function such as `X.new(...)`.

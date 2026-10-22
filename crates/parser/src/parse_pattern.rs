@@ -158,7 +158,7 @@ fn parse_record_pattern(
             rest = true;
             break;
         }
-        let (fname, fspan) = cur.expect_ident()?;
+        let (fname, fspan) = cur.expect_field_name()?;
         let pattern = if cur.eat(|t| matches!(t, Token::Colon)).is_some() {
             Some(parse_pattern(cur)?)
         } else {

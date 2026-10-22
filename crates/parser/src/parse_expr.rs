@@ -272,7 +272,7 @@ fn parse_postfix_continuation(cur: &mut Cursor<'_>, mut expr: S<Expr>) -> Result
                 cur.expect(&Token::LParen)?;
                 let mut fields = Vec::new();
                 while cur.peek() != Some(&Token::RParen) && !cur.at_end() {
-                    let (fname, fspan) = cur.expect_ident()?;
+                    let (fname, fspan) = cur.expect_field_name()?;
                     cur.expect(&Token::Colon)?;
                     let value = parse_expr(cur)?;
                     let fspan_full = fspan.to(value.span);
@@ -886,7 +886,7 @@ fn parse_record_body(
     };
 
     while cur.peek() != Some(&Token::RBrace) && !cur.at_end() {
-        let (name, name_span) = cur.expect_ident()?;
+        let (name, name_span) = cur.expect_field_name()?;
         cur.expect(&Token::Colon)?;
         let value = parse_expr(cur)?;
         let span = name_span.to(value.span);

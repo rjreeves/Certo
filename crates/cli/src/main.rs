@@ -2848,7 +2848,7 @@ pub(crate) fn type_error_to_diagnostic(e: &TypeError) -> Diagnostic {
             Diagnostic::error("E0214",
                 format!("constructor `{type_name}` is private"))
                 .with_span(e.span)
-                .with_label("not callable outside its own impl block")
+                .with_label("not usable (called or matched on) outside its own impl block")
                 .with_note(format!("call it only from within `impl {type_name} {{ ... }}`, e.g. a validating `{type_name}.new` factory"))
         }
 

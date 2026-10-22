@@ -780,7 +780,7 @@ fn parse_record_type_def(cur: &mut Cursor<'_>) -> Result<(RecordTypeDef, Vec<FnD
             }
         }
 
-        let (fname, fspan) = cur.expect_ident()?;
+        let (fname, fspan) = cur.expect_field_name()?;
         let optional = cur.eat(|t| matches!(t, Token::Question)).is_some();
         cur.expect(&Token::Colon)?;
         let ty = parse_type(cur)?;

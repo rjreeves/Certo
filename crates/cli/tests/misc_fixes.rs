@@ -62,3 +62,36 @@ fn an_export_name_equal_to_the_functions_own_symbol_builds() {
     assert!(b.status.success(), "{}", String::from_utf8_lossy(&b.stderr));
     assert!(dll.exists());
 }
+
+// BACKLOG item 446 - a private constructor cannot be destructured outside its impl, and
+// structural words are usable as field names.
+#[test]
+fn private_constructor_patterns_are_private() {
+    let (ok, out) = certo(r####"module X
+type Secret<T> = priv Secret(T)
+impl<T> Secret {
+  fn wrap(v: T): Secret<T> = Secret(v)
+  fn expose(s: Secret<T>): T = match s { Secret(v) => v }
+}
+fn leak(s: Secret<Text>): Text = match s { Secret(v) => v }
+fn leak2(s: Secret<Text>): Text = {
+  val Secret(v) = s
+  v
+}
+"####, &["check"]);
+    assert!(!ok && out.matches("E0214").count() == 2, "{out}");
+}
+
+#[test]
+fn structural_words_work_as_field_names() {
+    let (ok, out) = certo(r####"module K
+type R = { test: Int, view: Int, module: Int, type: Int, in: Int, unit: Int, when: Int }
+fn main(): Unit [io] = {
+  val r = R { test: 1, view: 2, module: 3, type: 4, in: 5, unit: 6, when: 7 }
+  val s = r.with(test: 10)
+  println(intToText(s.test + r.view + r.module + r.type + r.in + r.unit + r.when))
+  match r { R { when: w, in: i, .. } => println(intToText(w + i)) }
+}
+"####, &["run"]);
+    assert!(ok && out.replace("\r\n", "\n").trim() == "37\n12", "{out}");
+}

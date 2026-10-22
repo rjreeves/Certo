@@ -216,6 +216,15 @@ fn keyword_as_name(tok: &Token<'_>) -> Option<&'static str> {
         Token::Match => Some("match"),
         Token::On    => Some("on"),
         Token::After => Some("after"),
+        // Item 446 - words that are structural only at the start of a
+        // declaration, so they are free as field names (`r.test`, `{ view: 1 }`).
+        Token::Test   => Some("test"),
+        Token::View   => Some("view"),
+        Token::Module => Some("module"),
+        Token::Type   => Some("type"),
+        Token::In     => Some("in"),
+        Token::Unit   => Some("unit"),
+        Token::When   => Some("when"),
         _ => None,
     }
 }

@@ -1411,6 +1411,54 @@ fn check_priv_ctors(module: &Module, errors: &mut Vec<TypeError>) {
     }
 }
 
+/// Item 446 - destructuring a private constructor (`match s { Secret(v) => v }`)
+/// reads the wrapped value out as surely as calling it builds one, so a pattern
+/// naming it is private to its own `impl` too.
+fn walk_priv_pattern(
+    pat:        &S<certo_ast::pattern::Pattern>,
+    self_type:  Option<&str>,
+    priv_ctors: &std::collections::HashSet<&str>,
+    errors:     &mut Vec<TypeError>,
+) {
+    use certo_ast::pattern::Pattern;
+    let mut check = |path: &certo_ast::types::ModulePath, span| {
+        if let [seg] = path.segments.as_slice() {
+            let name = seg.node.as_str();
+            if priv_ctors.contains(name) && self_type != Some(name) {
+                errors.push(TypeError {
+                    kind: TypeErrorKind::PrivConstructorCall { type_name: name.to_string() },
+                    span,
+                });
+            }
+        }
+    };
+    match &pat.node {
+        Pattern::Constructor { path, fields, span } => {
+            check(path, *span);
+            for f in fields { walk_priv_pattern(f, self_type, priv_ctors, errors); }
+        }
+        Pattern::Record { path, fields, span, .. } => {
+            if let Some(p) = path { check(p, *span); }
+            for f in fields {
+                if let Some(fp) = &f.pattern { walk_priv_pattern(fp, self_type, priv_ctors, errors); }
+            }
+        }
+        Pattern::Tuple { elements, .. } => {
+            for e in elements { walk_priv_pattern(e, self_type, priv_ctors, errors); }
+        }
+        Pattern::List { head, tail, .. } => {
+            for e in head { walk_priv_pattern(e, self_type, priv_ctors, errors); }
+            if let Some(t) = tail { walk_priv_pattern(t, self_type, priv_ctors, errors); }
+        }
+        Pattern::Guard { pattern, .. } | Pattern::As { pattern, .. } => walk_priv_pattern(pattern, self_type, priv_ctors, errors),
+        Pattern::Or { left, right, .. } => {
+            walk_priv_pattern(left, self_type, priv_ctors, errors);
+            walk_priv_pattern(right, self_type, priv_ctors, errors);
+        }
+        Pattern::Wildcard { .. } | Pattern::Ident { .. } | Pattern::Literal { .. } => {}
+    }
+}
+
 fn walk_priv_ctors(
     expr:       &S<Expr>,
     self_type:  Option<&str>,
@@ -1480,6 +1528,7 @@ fn walk_priv_ctors(
         Expr::Match { scrutinee, arms, .. } => {
             walk_priv_ctors(scrutinee, self_type, priv_ctors, errors);
             for arm in arms {
+                walk_priv_pattern(&arm.pattern, self_type, priv_ctors, errors);
                 if let Some(g) = &arm.guard { walk_priv_ctors(g, self_type, priv_ctors, errors); }
                 walk_priv_ctors(&arm.body, self_type, priv_ctors, errors);
             }
@@ -1487,7 +1536,11 @@ fn walk_priv_ctors(
         Expr::Block { stmts, .. } => {
             for st in stmts {
                 match st {
-                    Stmt::Val { value, .. } | Stmt::Var { value, .. } | Stmt::Assign { value, .. } => {
+                    Stmt::Val { pattern, value, .. } => {
+                        walk_priv_pattern(pattern, self_type, priv_ctors, errors);
+                        walk_priv_ctors(value, self_type, priv_ctors, errors);
+                    }
+                    Stmt::Var { value, .. } | Stmt::Assign { value, .. } => {
                         walk_priv_ctors(value, self_type, priv_ctors, errors);
                     }
                     Stmt::Defer { body, .. } | Stmt::Expr { expr: body, .. } => {
