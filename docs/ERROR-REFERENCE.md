@@ -20,6 +20,7 @@ the fix, and a minimal reproduction.
 | [E0700–E0702](#e0700-e0702-validator-rule-errors) | Validator rules |
 | [E0708–E0709](#e0708-e0709-temporal--age-errors) | Temporal / `.age` |
 | [E0710](#e0710-unsupported-keynumeric-projection-type) | `sortBy`/`minBy`/`maxBy`/`sumBy` projections |
+| [E0712–E0714](#e0712-e0714-validator-rule-name-errors) | Validator rule names |
 | [L001–L005](#l001-l005-lint-warnings) | Lint warnings |
 
 ---
@@ -1824,6 +1825,22 @@ db.customers.insert(customer)
 `DATABASE_URL`) connection, independent of any specific table.
 
 ---
+
+## E0712–E0714  Validator rule name errors
+
+```
+error[E0712]: validator `V` has two rules named `r`
+error[E0713]: rule name `validate` clashes with a generated function
+error[E0714]: rule `s` overrides itself
+```
+
+**Cause:** Rule names must be unique within a validator (§16.3). A rule
+cannot be called `validate`, `validateAll` or `validateWithDb`, because each
+rule becomes a function `V_<rule>` and those names belong to the generated
+entry points. A rule that names itself in `overrides` would suspend itself and
+never run.
+
+**Fix:** Rename the rule, or point `overrides` at a different rule.
 
 ## L001–L005  Lint warnings
 
