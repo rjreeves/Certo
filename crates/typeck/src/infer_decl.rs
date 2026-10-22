@@ -572,6 +572,31 @@ fn check_rule_dependencies(module: &Module, errors: &mut Vec<TypeError>) {
 
         let rule_map: HashMap<&str, ()> = v.rules.iter().map(|r| (r.name.node.as_str(), ())).collect();
 
+        // BACKLOG item 420 - rule names are unique, are not the generated functions' names, and a
+        // rule does not override itself.
+        let mut seen_names: HashSet<&str> = HashSet::new();
+        for rule in &v.rules {
+            let name = rule.name.node.as_str();
+            if !seen_names.insert(name) {
+                errors.push(TypeError {
+                    kind: TypeErrorKind::DuplicateRuleName { validator: v.name.node.clone(), rule: name.to_string() },
+                    span: rule.name.span,
+                });
+            }
+            if matches!(name, "validate" | "validateAll" | "validateWithDb") {
+                errors.push(TypeError {
+                    kind: TypeErrorKind::ReservedRuleName { validator: v.name.node.clone(), rule: name.to_string() },
+                    span: rule.name.span,
+                });
+            }
+            if rule.overrides.as_ref().is_some_and(|o| o.node == name) {
+                errors.push(TypeError {
+                    kind: TypeErrorKind::RuleOverridesItself { rule: name.to_string() },
+                    span: rule.overrides.as_ref().unwrap().span,
+                });
+            }
+        }
+
         let mut has_ref_errors = false;
         for rule in &v.rules {
             for after_ref in &rule.after {
@@ -1822,8 +1847,16 @@ fn hoist_decl(
             // validate(entity[, ctx]) -> Result<Unit, ErrorsType>
             env.define(
                 format!("{}.validate", v.name.node),
-                Ty::Fn { params: params.clone(), ret: Box::new(result_ty) },
+                Ty::Fn { params: params.clone(), ret: Box::new(result_ty.clone()) },
             );
+            // validateWithDb(entity) -> Result<Unit, ErrorsType>; generated
+            // only when every context field has `loaded by` (item 416).
+            if !v.context.is_empty() && v.context.iter().all(|f| f.loaded_by.is_some()) {
+                env.define(
+                    format!("{}.validateWithDb", v.name.node),
+                    Ty::Fn { params: vec![entity_ty.clone()], ret: Box::new(result_ty) },
+                );
+            }
             // validateAll(entity[, ctx]) -> List<ErrorsType>
             env.define(
                 format!("{}.validateAll", v.name.node),

@@ -41,6 +41,15 @@ pub enum TypeErrorKind {
     /// pre-existing gap in `.with(...)`'s own validation, not fixed here).
     ComputedFieldNotSettable { field: String, type_name: String },
 
+    /// E0712 - two rules of one validator share a name.
+    DuplicateRuleName { validator: String, rule: String },
+
+    /// E0713 - a rule is named like a function the validator itself generates.
+    ReservedRuleName { validator: String, rule: String },
+
+    /// E0714 - a rule overrides itself.
+    RuleOverridesItself { rule: String },
+
     /// E0234 - `await` applied to a value that is not a task or a call.
     AwaitNotATask { ty: Ty },
 
@@ -272,6 +281,12 @@ impl TypeError {
                 format!("E0206: unbound name `{}`", name),
             TypeErrorKind::ComputedFieldNotSettable { field, type_name } =>
                 format!("E0217: `{}` is a computed property of `{}` — it's derived, not stored, and can't be set directly", field, type_name),
+            TypeErrorKind::DuplicateRuleName { validator, rule } =>
+                format!("E0712: validator `{validator}` has two rules named `{rule}`"),
+            TypeErrorKind::ReservedRuleName { validator, rule } =>
+                format!("E0713: `{rule}` cannot be a rule name in validator `{validator}` - the validator generates a function with that name"),
+            TypeErrorKind::RuleOverridesItself { rule } =>
+                format!("E0714: rule `{rule}` overrides itself"),
             TypeErrorKind::AwaitNotATask { ty } =>
                 format!("E0234: cannot `await` a value of type `{}`", ty.display()),
             TypeErrorKind::AnonymousRecordUnresolved { fields, .. } =>

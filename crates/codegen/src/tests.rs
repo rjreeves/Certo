@@ -1394,7 +1394,7 @@ fn trigger_when_condition_against_old_field_is_not_quoted() {
                validator V for Widget errors WidgetError trigger on Update when status != OLD.status {\n\
                    rule r { require true else WidgetError.NotReady }\n}";
     let sql = gen_trigger_sql(src);
-    assert_contains(&sql, "IF NEW.status = OLD.status THEN RETURN NEW; END IF;");
+    assert_contains(&sql, "IF NEW.\"status\" IS NOT DISTINCT FROM OLD.status THEN RETURN NEW; END IF;");
     assert!(!sql.contains("'OLD.status'"), "OLD.status must not be quoted as a string literal, got: {sql}");
 }
 
@@ -1405,7 +1405,7 @@ fn trigger_when_condition_against_enum_variant_is_still_quoted() {
                validator V for Widget errors WidgetError trigger on Update when status == Submitted {\n\
                    rule r { require true else WidgetError.NotReady }\n}";
     let sql = gen_trigger_sql(src);
-    assert_contains(&sql, "IF NEW.status != 'Submitted' THEN RETURN NEW; END IF;");
+    assert_contains(&sql, "IF NEW.\"status\" IS DISTINCT FROM 'Submitted' THEN RETURN NEW; END IF;");
 }
 
 // ------------------------------------------------------------------ //
@@ -1437,7 +1437,7 @@ fn trigger_rule_on_entity_field_emits_real_raise_exception() {
                validator V for Order errors OrderError trigger on Update {\n\
                    rule r { require order.status == Draft else OrderError.NotDraft }\n}";
     let sql = gen_trigger_sql(src);
-    assert_contains(&sql, "IF NOT ((NEW.status = 'Draft')) THEN RAISE EXCEPTION 'OrderError.NotDraft'; END IF;");
+    assert_contains(&sql, "IF ((NEW.\"status\" = 'Draft')) IS NOT TRUE THEN RAISE EXCEPTION 'OrderError.NotDraft'; END IF;");
 }
 
 #[test]
@@ -1460,7 +1460,7 @@ fn trigger_rule_on_context_field_uses_correlated_subquery() {
                    context { customer: Customer loaded by db.customers.find(order.customerId) }\n\
                    rule r { require customer.status == \"Active\" else OrderError.CustomerNotActive }\n}";
     let sql = gen_trigger_sql(src);
-    assert_contains(&sql, "(SELECT status FROM customers WHERE id = NEW.customer_id)");
+    assert_contains(&sql, "(SELECT \"status\" FROM \"customers\" WHERE id = NEW.\"customer_id\")");
     assert_contains(&sql, "RAISE EXCEPTION 'OrderError.CustomerNotActive'");
 }
 
@@ -1471,7 +1471,7 @@ fn trigger_rule_inlines_named_constraint() {
                validator V for Order errors OrderError trigger on Update {\n\
                    rule r { require OrderIsDraft else OrderError.NotDraft }\n}";
     let sql = gen_trigger_sql(src);
-    assert_contains(&sql, "NEW.status = 'Draft'");
+    assert_contains(&sql, "NEW.\"status\" = 'Draft'");
     assert_contains(&sql, "RAISE EXCEPTION 'OrderError.NotDraft'");
 }
 
@@ -1481,7 +1481,7 @@ fn trigger_rule_with_is_some_translates_to_is_not_null() {
                validator V for Order errors OrderError trigger on Update {\n\
                    rule r { require order.note.isSome() else OrderError.Bad }\n}";
     let sql = gen_trigger_sql(src);
-    assert_contains(&sql, "NEW.note IS NOT NULL");
+    assert_contains(&sql, "NEW.\"note\" IS NOT NULL");
 }
 
 #[test]
@@ -1514,8 +1514,8 @@ fn trigger_rules_respect_overrides_gating() {
     // `bypass` is a pure skip-switch — never contributes its own RAISE.
     assert_eq!(sql.matches("RAISE EXCEPTION").count(), 1, "expected exactly one RAISE, got:\n{sql}");
     // `base` only fires when NOT overridden (bypass's own condition doesn't hold) and its own require is false.
-    assert_contains(&sql, "NOT ((NEW.status = 'Approved'))");
-    assert_contains(&sql, "NOT ((NEW.total <= 1000))");
+    assert_contains(&sql, "((NEW.\"status\" = 'Approved')) IS NOT TRUE");
+    assert_contains(&sql, "((NEW.\"total\" <= 1000)) IS NOT TRUE");
 }
 
 #[test]
@@ -1738,7 +1738,7 @@ fn overridden_rule_gates_on_the_overriders_negated_condition() {
     let out = gen_validator(src);
     // Both validate and validateAll must guard creditLimit's own check with
     // `!(isAdmin)` — it only fires when the override isn't active.
-    assert_contains(&out, "!(isAdmin)");
+    assert_contains(&out, "!((isAdmin))");
 }
 
 // ------------------------------------------------------------------ //
@@ -1815,7 +1815,7 @@ fn override_active_skips_the_overridden_rule_end_to_end() {
         rule adminOverride { overrides creditLimit priority 110 require isAdmin else OE.NA }\n\
     }";
     let out = gen_validator(src);
-    assert_contains(&out, "!(isAdmin) and !(order.total <= 100)");
+    assert_contains(&out, "!((isAdmin)) and !(order.total <= 100)");
 }
 
 #[test]
@@ -1887,7 +1887,8 @@ fn validator_with_loaded_by_emits_validate_with_db() {
     let src = "module A\nvalidator V for Order errors OE {\n    context { customer: Customer loaded by db.customers.find(order.customerId) }\n    rule r { require true else true }\n}";
     let out = gen_validator(src);
     assert_contains(&out, "validateWithDb");
-    assert_contains(&out, "db.transaction");
+    assert_contains(&out, "fn V_validateWithDb(order: Order)");
+    assert_contains(&out, "customer: customer");
 }
 
 #[test]

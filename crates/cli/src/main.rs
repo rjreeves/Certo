@@ -2662,6 +2662,24 @@ pub(crate) fn type_error_to_diagnostic(e: &TypeError) -> Diagnostic {
                 .with_note(format!("remove `{field}: ...` — it's computed automatically from `{type_name}`'s other fields"))
         }
 
+        TypeErrorKind::DuplicateRuleName { validator, rule } => {
+            Diagnostic::error("E0712", format!("validator `{validator}` has two rules named `{rule}`"))
+                .with_span(e.span)
+                .with_note("rule names must be unique within a validator (spec section 16.3)")
+        }
+
+        TypeErrorKind::ReservedRuleName { validator, rule } => {
+            Diagnostic::error("E0713", format!("`{rule}` cannot be a rule name in validator `{validator}`"))
+                .with_span(e.span)
+                .with_note("`validate` and `validateAll` are generated for every validator; rename the rule")
+        }
+
+        TypeErrorKind::RuleOverridesItself { rule } => {
+            Diagnostic::error("E0714", format!("rule `{rule}` overrides itself"))
+                .with_span(e.span)
+                .with_note("`overrides` names a different, lower-priority rule")
+        }
+
         TypeErrorKind::AwaitNotATask { ty } => {
             Diagnostic::error("E0234", format!("cannot `await` a value of type `{}`", ty.display()))
                 .with_span(e.span)
@@ -4617,7 +4635,11 @@ fn cmd_db_pull(args: &[String]) {
 
         // ── fromRow ──────────────────────────────────────────────────────
         let select_cols: Vec<&str> = cols.iter().map(|(c, _, _)| c.as_str()).collect();
-        let select_list = select_cols.join(", ");
+        // Identifiers are double-quoted (escaped for the Certo string literal)
+        // so reserved words such as `order` or `user` are valid SQL.
+        let qid = |n: &str| format!("\\\"{}\\\"", n);
+        let select_list = select_cols.iter().map(|c| qid(c)).collect::<Vec<_>>().join(", ");
+        let qtable = qid(table);
 
         src.push_str(&format!("pub fn {}FromRow(row: List<Text?>): {} =\n", table, type_name));
         src.push_str(&format!("    {} {{\n", type_name));
@@ -4639,7 +4661,7 @@ fn cmd_db_pull(args: &[String]) {
         // ── findAll ──────────────────────────────────────────────────────
         src.push_str(&format!(
             "pub fn {}FindAll(conn: Int): List<{}> [io] =\n    dbQueryTyped(conn, \"SELECT {} FROM {} ORDER BY 1\", [], {}FromRow)\n\n",
-            table, type_name, select_list, table, table
+            table, type_name, select_list, qtable, table
         ));
 
         // ── findById / deleteById (only when a PK exists) ────────────────
@@ -4664,13 +4686,13 @@ fn cmd_db_pull(args: &[String]) {
             src.push_str(&format!(
                 "pub fn {}FindById(conn: Int, id: {}): {}? [io] = {{\n    val rows = dbQueryTyped(conn, \"SELECT {} FROM {} WHERE {} = $1 LIMIT 1\", [{}], {}FromRow)\n    List.first(rows)\n}}\n\n",
                 table, pk_certo, type_name,
-                select_list, table, pk_col, pk_to_text,
+                select_list, qtable, qid(pk_col), pk_to_text,
                 table
             ));
 
             src.push_str(&format!(
                 "pub fn {}DeleteById(conn: Int, id: {}): Int [io] =\n    dbExec(conn, \"DELETE FROM {} WHERE {} = $1\", [{}])\n\n",
-                table, pk_certo, table, pk_col, pk_to_text
+                table, pk_certo, qtable, qid(pk_col), pk_to_text
             ));
         }
 
@@ -4696,7 +4718,7 @@ fn cmd_db_pull(args: &[String]) {
             src.push_str(&format!(
                 "pub fn {}Insert(conn: Int, record: {}): Int [io] =\n    dbExec(conn,\n        \"INSERT INTO {} ({}) VALUES ({})\",\n        [{}])\n\n",
                 table, type_name,
-                table, col_names.join(", "), placeholders.join(", "),
+                qtable, col_names.iter().map(|c| qid(c)).collect::<Vec<_>>().join(", "), placeholders.join(", "),
                 params.join(", ")
             ));
         }

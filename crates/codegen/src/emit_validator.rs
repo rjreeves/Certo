@@ -141,19 +141,9 @@ pub fn emit_validator(
     // transitive override-chain resolver (`priority`'s own role in
     // resolving conflicts among *multiple* overriders of the same rule
     // remains unconsumed — that's W0100, BACKLOG item 220, not this one).
-    let mut overridden_by: HashMap<&str, Vec<String>> = HashMap::new();
-    for rule in &v.rules {
-        if let Some(target) = &rule.overrides {
-            overridden_by.entry(target.node.as_str())
-                .or_default()
-                .push(expand(fmt_expr(&rule.require.node, 0)));
-        }
-    }
-    let override_guard = |name: &str| -> Option<String> {
-        let reqs = overridden_by.get(name)?;
-        if reqs.is_empty() { return None; }
-        Some(reqs.iter().map(|r| format!("!({})", r)).collect::<Vec<_>>().join(" and "))
-    };
+    let gates = RuleGates::new(&v.rules, v.rules.iter()
+        .map(|r| (r.name.node.as_str(), expand(fmt_expr(&r.require.node, 0))))
+        .collect());
 
     // ---------------------------------------------------------------- //
     // validate — fail fast
@@ -163,20 +153,14 @@ pub fn emit_validator(
             &ctx_type, !v.context.is_empty(),
             &format!("Result<Unit, {}>", errors_ty));
 
-        // Fail-fast: a right-folded if/then/else chain in topological order.
-        // Topo order guarantees an `after`-prerequisite is checked first, so if
-        // it fails we return its error before reaching the dependent rule —
-        // `after` gating is satisfied by ordering alone here.
+        // Fail-fast: a right-folded if/then/else chain in topological order,
+        // each rule guarded by `RuleGates` so a skipped prerequisite or an
+        // active override suppresses it exactly as `validateAll` does.
         let mut expr = String::from("Ok(unit)");
         for rule in ordered.iter().rev() {
             if rule.overrides.is_some() { continue; } // pure skip-switch, never fails on its own
-            let req = expand(fmt_expr(&rule.require.node, 0));
             let err = expand(fmt_expr(&rule.else_.node, 0));
-            let cond = match override_guard(&rule.name.node) {
-                Some(guard) => format!("{} and !({})", guard, req),
-                None => format!("!({})", req),
-            };
-            expr = format!("if {} then Err({}) else {}", cond, err, expr);
+            expr = format!("if {} then Err({}) else {}", gates.fails(rule.name.node.as_str()), err, expr);
         }
         out.validate_fn = format!("{} =\n{}\n", sig, wrap_body(&expr, &v.context));
     }
@@ -208,38 +192,11 @@ pub fn emit_validator(
             &ctx_type, !v.context.is_empty(),
             &format!("List<{}>", errors_ty));
 
-        // Each rule contributes `[err]` when it fails (and its `after`
-        // prerequisites' conditions hold, and no rule overriding it is
-        // active), or `[]` otherwise; concatenate all.
-        let req_by_name: HashMap<&str, String> = ordered.iter()
-            .map(|r| (r.name.node.as_str(), expand(fmt_expr(&r.require.node, 0))))
-            .collect();
-
         let mut parts: Vec<String> = Vec::new();
         for rule in &ordered {
             if rule.overrides.is_some() { continue; } // pure skip-switch, never fails on its own
-            let req = expand(fmt_expr(&rule.require.node, 0));
             let err = expand(fmt_expr(&rule.else_.node, 0));
-            let mut conds: Vec<String> = rule.after.iter()
-                .filter_map(|a| req_by_name.get(a.node.as_str()))
-                .map(|r| format!("({})", r))
-                .collect();
-            if let Some(guard) = override_guard(&rule.name.node) {
-                conds.push(guard);
-            }
-            conds.push(format!("!({})", req));
-            // BACKLOG item 218 — real Certo uses the `and` keyword, not
-            // Rust's `&&` (which lexes as two separate `Amp` tokens and
-            // fails to parse) — a pre-existing mistake in this exact spot
-            // for `after`-gate combination too (this file's own original
-            // `gates.join(" && ")`), just never triggered by any existing
-            // test or a real compile: every prior test used at most one
-            // `after` dependency, and `Vec::join` never inserts a
-            // separator for a single-element list, so the broken
-            // separator was silently never emitted until multiple
-            // conditions actually needed combining here.
-            let cond = conds.join(" and ");
-            parts.push(format!("(if {} then [{}] else [])", cond, err));
+            parts.push(format!("(if {} then [{}] else [])", gates.fails(rule.name.node.as_str()), err));
         }
 
         // Fold parts with `List.concat` (not `++`, which is overloaded with text
@@ -261,20 +218,22 @@ pub fn emit_validator(
         && v.context.iter().all(|f| f.loaded_by.is_some());
 
     if all_have_loaded_by {
-        let sig = format!("async fn {}.validateWithDb({}: {}): Result<Unit, {}>",
+        // Item 416 — a plain underscore-named fn (like `V_validate`) and
+        // `field: field` record entries: a dotted `async fn` name and a
+        // `{ customer }` shorthand record neither parse.
+        let sig = format!("fn {}_validateWithDb({}: {}): Result<Unit, {}>",
             vname, entity_var, entity_ty, errors_ty);
 
         let mut body = String::new();
-        writeln!(body, "    db.transaction {{").unwrap();
+        writeln!(body, "    {{").unwrap();
         for field in &v.context {
             if let Some(lb) = &field.loaded_by {
-                writeln!(body, "        val {} = {}?", field.name.node, fmt_expr(&lb.node, 2)).unwrap();
+                writeln!(body, "        val {} = {}", field.name.node, fmt_expr(&lb.node, 2)).unwrap();
             }
         }
-        let field_names: Vec<String> = v.context.iter().map(|f| f.name.node.clone()).collect();
-        writeln!(body, "        val ctx = {} {{ {} }}", ctx_type, field_names.join(", ")).unwrap();
-        writeln!(body, "        {}.validate({}, ctx)?", vname, entity_var).unwrap();
-        writeln!(body, "        Ok(())").unwrap();
+        let inits: Vec<String> = v.context.iter().map(|f| format!("{}: {}", f.name.node, f.name.node)).collect();
+        writeln!(body, "        val ctx = {} {{ {} }}", ctx_type, inits.join(", ")).unwrap();
+        writeln!(body, "        {}_validate({}, ctx)", vname, entity_var).unwrap();
         writeln!(body, "    }}").unwrap();
 
         out.validate_with_db_fn = Some(format!("{} =\n{}\n", sig, body));
@@ -295,8 +254,10 @@ pub fn emit_validator(
             let field = &cond.field.node;
             let value = fmt_expr(&cond.value.node, 0);
             let op = match cond.op {
-                certo_ast::decl::TriggerCondOp::Eq    => "!=",
-                certo_ast::decl::TriggerCondOp::NotEq => "=",
+                // IS [NOT] DISTINCT FROM, so a NULL column compares as a value (BACKLOG item 419):
+                // with `!=` a NULL status made the early return not fire and the rules ran.
+                certo_ast::decl::TriggerCondOp::Eq    => "IS DISTINCT FROM",
+                certo_ast::decl::TriggerCondOp::NotEq => "IS NOT DISTINCT FROM",
             };
             // BACKLOG item 244 — a bare enum-variant literal (`Submitted`,
             // a single-segment `Expr::Path`) is a real SQL value and must
@@ -311,7 +272,7 @@ pub fn emit_validator(
             let is_bare_literal = matches!(&cond.value.node,
                 certo_ast::expr::Expr::Path { path, .. } if path.segments.len() == 1);
             let rendered = if is_bare_literal { format!("'{value}'") } else { value };
-            format!("    IF NEW.{field} {op} {rendered} THEN RETURN NEW; END IF;\n")
+            format!("    IF NEW.\"{field}\" {op} {rendered} THEN RETURN NEW; END IF;\n")
         } else {
             String::new()
         };
@@ -375,7 +336,7 @@ pub fn emit_validator(
             for r in rules {
                 parts.push(expr_to_sql(&r.require.node, &sql_ctx)?);
             }
-            Some(Some(format!("NOT ({})", parts.join(" OR "))))
+            Some(Some(format!("({}) IS NOT TRUE", parts.join(" OR "))))
         };
 
         let mut rules_sql = String::new();
@@ -389,14 +350,17 @@ pub fn emit_validator(
 
                 let mut conds: Vec<String> = Vec::new();
                 for after in &rule.after {
-                    conds.push(req_sql_by_name.get(after.node.as_str())?.clone());
+                    // The prerequisite must have run and passed: NULL counts as not passed.
+                    conds.push(format!("({}) IS TRUE", req_sql_by_name.get(after.node.as_str())?));
                 }
                 match override_guard_sql(rule.name.node.as_str()) {
                     Some(Some(guard)) => conds.push(guard),
                     Some(None) => return None, // overriding rule's own condition didn't translate
                     None => {}
                 }
-                conds.push(format!("NOT ({})", req_sql));
+                // A rule fails unless its condition is TRUE, so a missing context row (a NULL
+                // subquery) fails closed instead of passing (BACKLOG item 419).
+                conds.push(format!("({}) IS NOT TRUE", req_sql));
                 Some((conds.join(" AND "), message))
             })();
 
@@ -435,9 +399,9 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
-DROP TRIGGER IF EXISTS {fn_name} ON {table_name};
+DROP TRIGGER IF EXISTS {fn_name} ON \"{table_name}\";
 CREATE TRIGGER {fn_name}
-    {op_sql} ON {table_name}
+    {op_sql} ON \"{table_name}\"
     FOR EACH ROW
     EXECUTE FUNCTION {fn_name}();
 ");
@@ -813,9 +777,9 @@ fn expr_to_sql(expr: &Expr, ctx: &SqlCtx) -> Option<String> {
             if path.segments.len() != 1 { return None; }
             let name = path.segments[0].node.as_str();
             if name == ctx.entity_var {
-                Some(format!("NEW.{}", snake_case(&field.node)))
+                Some(format!("NEW.\"{}\"", snake_case(&field.node)))
             } else if let Some(sub) = ctx.context_subqueries.get(name) {
-                Some(format!("(SELECT {} FROM {} WHERE id = {})", snake_case(&field.node), sub.table, sub.key_sql))
+                Some(format!("(SELECT \"{}\" FROM \"{}\" WHERE id = {})", snake_case(&field.node), sub.table, sub.key_sql))
             } else {
                 None
             }
@@ -903,3 +867,62 @@ fn expr_to_sql(expr: &Expr, ctx: &SqlCtx) -> Option<String> {
 /// `Expr::Age { expr, .. }` wraps the base expression `Box<S<Expr>>` — this
 /// just unwraps one layer so callers can hand `expr_to_sql` a plain `&Expr`.
 fn inner_age_base(expr: &S<Expr>) -> &Expr { &expr.node }
+
+/// Item 417 - one definition of "this rule is evaluated" shared by `validate`
+/// and `validateAll`. Spec 16.4: a rule whose `after` prerequisite failed *or
+/// was skipped* is not evaluated, and a rule is skipped while any rule that
+/// `overrides` it is active (its own `after` gates hold and its `require` is
+/// true). Rendered as Certo source, recursively inlined.
+struct RuleGates<'a> {
+    after: HashMap<&'a str, Vec<&'a str>>,
+    overriders: HashMap<&'a str, Vec<&'a str>>,
+    req: HashMap<&'a str, String>,
+}
+
+impl<'a> RuleGates<'a> {
+    fn new(rules: &'a [certo_ast::decl::RuleDecl], req: HashMap<&'a str, String>) -> Self {
+        let mut after = HashMap::new();
+        let mut overriders: HashMap<&str, Vec<&str>> = HashMap::new();
+        for r in rules {
+            after.insert(r.name.node.as_str(), r.after.iter().map(|a| a.node.as_str()).collect());
+            if let Some(t) = &r.overrides {
+                overriders.entry(t.node.as_str()).or_default().push(r.name.node.as_str());
+            }
+        }
+        RuleGates { after, overriders, req }
+    }
+
+    /// "Prerequisite ran and passed" for each of `name`'s `after` rules.
+    fn after_ok(&self, name: &str, stack: &mut Vec<String>) -> Vec<String> {
+        self.after.get(name).into_iter().flatten()
+            .map(|a| self.ok(a, stack)).collect()
+    }
+
+    /// Conditions under which `name` is evaluated at all.
+    fn ran(&self, name: &str, stack: &mut Vec<String>) -> Vec<String> {
+        if stack.iter().any(|n| n == name) { return Vec::new(); } // cycle: reported by typeck
+        stack.push(name.to_string());
+        let mut conds = self.after_ok(name, stack);
+        for o in self.overriders.get(name).into_iter().flatten() {
+            let mut act = self.after_ok(o, stack);
+            act.push(format!("({})", self.req[o]));
+            conds.push(format!("!({})", act.join(" and ")));
+        }
+        stack.pop();
+        conds
+    }
+
+    /// `name` was evaluated and its `require` held.
+    fn ok(&self, name: &str, stack: &mut Vec<String>) -> String {
+        let mut conds = self.ran(name, stack);
+        conds.push(format!("({})", self.req[name]));
+        format!("({})", conds.join(" and "))
+    }
+
+    /// `name` was evaluated and its `require` failed.
+    fn fails(&self, name: &str) -> String {
+        let mut conds = self.ran(name, &mut Vec::new());
+        conds.push(format!("!({})", self.req[name]));
+        conds.join(" and ")
+    }
+}
