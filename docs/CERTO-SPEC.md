@@ -621,7 +621,7 @@ form ProductForm {     target: Product     field name {         label:       "Pr
 | --- | --- | --- |
 | certo new <name> | --template default│api│lib│cli│fullstack | Scaffold new project |
 | certo build | --release  --target native│wasm│jvm | Compile project |
-| certo run | --watch  --port 8080 | Build and run, hot reload |
+| certo run | --watch | Build and run, hot reload (no `--port`: a program reads its own flags) |
 | certo check | --strict  --explain E0412 | Type check only |
 | certo test | --filter <pattern>  --coverage  --watch | Run tests |
 | certo fmt | --check  --diff | Format source files |
@@ -629,11 +629,11 @@ form ProductForm {     target: Product     field name {         label:       "Pr
 | certo db rollback | --step 1 | Reverse migrations |
 | certo db status |  | Show migration state |
 | certo db pull | --url <dsn> | Import schema from DB |
-| certo add <pkg> | --version 1.2.0  --dev | Add dependency |
+| certo add <module> |  | Add a stdlib module to `[dependencies]` (no package registry, `--version` or `--dev` yet) |
 | certo audit | --fix  --level high | Security audit |
 | certo repl | --connect <dsn> | Interactive session |
 | certo doc | --serve  --port 4000 | Generate documentation |
-| certo generate | model│api│migration <name> | Code scaffolding |
+| certo generate | validators│api … | Code generation from YAML/OpenAPI input (no `model`/`migration` scaffolds) |
 
 ## 11.3 Project Structure
 
@@ -644,7 +644,7 @@ my-app/ ├── certo.toml              # Project manifest and config ├─�
 ## 11.4 certo.toml — Full Schema
 
 ```
-[project] name    = "billing-system" version = "1.2.0" edition = "2026" authors = ["Alice Smith <alice@example.com>"] license = "MIT" [build] target     = "native"      # native │ wasm │ jvm output     = "dist/" entry      = "src/main.cto" [database] schema     = "postgresql://localhost/billing_dev" migrations = "db/migrations/" seeds      = "db/seeds/" [server] port    = 8080 host    = "0.0.0.0" [dependencies] stripe      = "4.2.0" sendgrid    = "2.1.0" pdf-render  = "1.0.3" [dev-dependencies] test-fixtures = "1.0.0" [features] strict-nulls     = true    # Warn on any unsafe null operations query-logging    = true    # Log all DB queries in dev mode schema-sync      = true    # Fail compile on schema mismatch effect-checking  = true    # Enforce effect type annotations [targets.production] optimize    = true strip-debug = true schema      = "${DATABASE_URL}"
+[project] name    = "billing-system" version = "1.2.0" edition = "2026" authors = ["Alice Smith <alice@example.com>"] license = "MIT" [build] target     = "native"      # native │ wasm │ jvm output     = "dist/" entry      = "src/main.cto" [database] schema     = "postgresql://localhost/billing_dev"  # parsed but inert today (schema-sync reads DATABASE_URL) migrations = "db/migrations/" seeds      = "db/seeds/" [server] port    = 8080 host    = "0.0.0.0" [dependencies] stripe      = "4.2.0" sendgrid    = "2.1.0" pdf-render  = "1.0.3" [dev-dependencies] test-fixtures = "1.0.0" [features] strict-nulls     = true    # Warn on any unsafe null operations query-logging    = true    # Log all DB queries in dev mode schema-sync      = true    # Fail compile on schema mismatch effect-checking  = true    # Enforce effect type annotations [targets.production] optimize    = true strip-debug = true schema      = "${DATABASE_URL}"
 ```
 
 # 12. Interoperability

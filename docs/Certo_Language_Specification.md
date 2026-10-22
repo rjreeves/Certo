@@ -774,7 +774,7 @@ Regex is a separate namespace, not a method on `Text` — pattern first, subject
 | - | - | - |
 | certo new \<name\> | --template default|api|lib|cli|fullstack | Scaffold new project |
 | certo build | --release | Compile project |
-| certo run | --watch  --port 8080 | Build and run, hot reload |
+| certo run | --watch | Build and run, hot reload (no `--port`: a program reads its own flags, see CLI-TOOLCHAIN §5) |
 | certo check | --strict  --explain | Type check only (`--explain` prints each reported diagnostic's full write-up) |
 | certo test | --filter \<pattern\>  --coverage  --watch | Run tests |
 | certo fmt | --check  --diff | Format source files |
@@ -782,11 +782,11 @@ Regex is a separate namespace, not a method on `Text` — pattern first, subject
 | certo db rollback | --step 1 | Reverse migrations |
 | certo db status |  | Show migration state |
 | certo db pull | --url \<dsn\> | Import schema from DB |
-| certo add \<pkg\> | --version 1.2.0  --dev | Add dependency |
+| certo add \<module\> |  | Add a stdlib module to `[dependencies]` (no package registry, `--version` or `--dev` yet) |
 | certo audit | --strict | Check certo.toml dependencies against actual imports |
 | certo repl | --connect \<dsn\> | Interactive session |
 | certo doc | --serve  --port 4000 | Generate documentation |
-| certo generate | model|api|migration \<name\> | Code scaffolding |
+| certo generate | validators|api … | Code generation from YAML/OpenAPI input (no `model`/`migration` scaffolds; see CLI-TOOLCHAIN §12) |
 
 
 ## **11.3 Project Structure**
@@ -797,7 +797,7 @@ Regex is a separate namespace, not a method on `Text` — pattern first, subject
 
 ## **11.4 certo.toml — Full Schema**
 
-| \[project\] name    = "billing-system" version = "1.2.0" edition = "2026" authors = \["Alice Smith \<alice@example.com\>"\] license = "MIT"  \[build\] output     = "dist/" entry      = "src/main.cto"  \[database\] schema     = "postgresql://localhost/billing\_dev" migrations = "db/migrations/" seeds      = "db/seeds/"  \[server\] port    = 8080 host    = "0.0.0.0"  \[dependencies\] stripe      = "4.2.0" sendgrid    = "2.1.0" pdf-render  = "1.0.3"  \[dev-dependencies\] test-fixtures = "1.0.0"  \[features\] strict-nulls     = true    \# Warn on any unsafe null operations query-logging    = true    \# Log all DB queries in dev mode schema-sync      = true    \# Fail compile on schema mismatch effect-checking  = true    \# Enforce effect type annotations  \[targets.production\] optimize    = true strip-debug = true schema      = "$\{DATABASE\_URL\}" |
+| \[project\] name    = "billing-system" version = "1.2.0" edition = "2026" authors = \["Alice Smith \<alice@example.com\>"\] license = "MIT"  \[build\] output     = "dist/" entry      = "src/main.cto"  \[database\] schema     = "postgresql://localhost/billing\_dev" \# parsed but inert today: schema-sync reads DATABASE_URL (or \[targets.production\] schema) migrations = "db/migrations/" seeds      = "db/seeds/"  \[server\] port    = 8080 host    = "0.0.0.0"  \[dependencies\] stripe      = "4.2.0" sendgrid    = "2.1.0" pdf-render  = "1.0.3"  \[dev-dependencies\] test-fixtures = "1.0.0"  \[features\] strict-nulls     = true    \# Warn on any unsafe null operations query-logging    = true    \# Log all DB queries in dev mode schema-sync      = true    \# Fail compile on schema mismatch effect-checking  = true    \# Enforce effect type annotations  \[targets.production\] optimize    = true strip-debug = true schema      = "$\{DATABASE\_URL\}" |
 | - |
 
 

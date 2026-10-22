@@ -783,6 +783,10 @@ schema-sync = true
 |---|---|
 | `schema-sync` | If `true`, every `certo build`/`certo check` connects to `DATABASE_URL` (env var, then `.env`) and cross-checks every `impl DbRow for X {}` type's fields against the live database schema — see `certo_dbschema::check_schema_sync`. Off by default so an ordinary build never needs a reachable database. |
 
+`[database] schema` (a connection string, as in the spec's example) is parsed but
+not read: `schema-sync` takes its connection from `DATABASE_URL`, or from
+`[targets.production] schema` for a `--release` build.
+
 `strict-nulls`, `query-logging`, and `effect-checking` are reserved (parsed,
 schema-validated) for the full manifest shape documented in
 `docs/Certo_Language_Specification.md` §11.4, but have **no enforcement wired
