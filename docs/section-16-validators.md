@@ -475,7 +475,7 @@ async fn submitOrder(orderId: UUID): Result<Order, OrderError> =
         let customer = db.customers.find(order.customerId)?
         let user     = currentUser()?
 
-        OrderSubmit.validate(order, context: { customer, user })?
+        OrderSubmit.validate(order, OrderSubmitContext { customer: customer, user: user })?
 
         db.orders.update(orderId, { status: Submitted })?
         Ok(order)

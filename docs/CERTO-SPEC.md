@@ -133,7 +133,7 @@ fn         type       let        val        var match      if         then      
 ## 3.2 Functions
 
 ```
-// Basic function fn add(a: Int, b: Int): Int = a + b // Multi-line with block body fn processOrder(order: Order): Result<Invoice, OrderError> = {     val validated = validate(order)     val invoice   = createInvoice(validated)     Ok(invoice) } // Generic function fn first<T>(list: List<T>): Option<T> =     if list.isEmpty() then None else Some(list.head) // Function with default arguments fn paginate<T>(query: Query<T>, page: Int = 0, size: Int = 20): Page<T> // Named arguments at call site paginate(db.users, page: 2, size: 50) // Higher-order functions fn apply<A, B>(f: A => B, value: A): B = f(value) // Lambda expressions — three equivalent forms List.map(xs, (x) => x * 2)                  // arrow lambda List.map(xs, fn(x: Int): Int = x * 2)        // fn expression List.map(xs) { x => x * 2 }                 // trailing lambda // Trailing lambda — last arg moved outside parens List.fold(xs, 0) { acc, x => acc + x }      // two-param trailing lambda List.forEach(xs) { x => println(x) }        // single-arg call, no parens needed // Async function async fn fetchUser(id: UUID): Result<User, DbError> // Function with effects declared fn calculateTax(amount: Money): Money  [pure] fn saveOrder(order: Order): Result<OrderId, DbError>  [db.write]
+// Basic function fn add(a: Int, b: Int): Int = a + b // Multi-line with block body fn processOrder(order: Order): Result<Invoice, OrderError> = {     val validated = validate(order)     val invoice   = createInvoice(validated)     Ok(invoice) } // Generic function fn first<T>(list: List<T>): Option<T> =     List.first(list) // Function with default arguments fn paginate<T>(query: Query<T>, page: Int = 0, size: Int = 20): Page<T> // Named arguments at call site paginate(db.users, page: 2, size: 50) // Higher-order functions fn apply<A, B>(f: A => B, value: A): B = f(value) // Lambda expressions — three equivalent forms List.map(xs, (x) => x * 2)                  // arrow lambda List.map(xs, fn(x: Int): Int = x * 2)        // fn expression List.map(xs) { x => x * 2 }                 // trailing lambda // Trailing lambda — last arg moved outside parens List.fold(xs, 0) { acc, x => acc + x }      // two-param trailing lambda List.forEach(xs) { x => println(x) }        // single-arg call, no parens needed // Async function async fn fetchUser(id: UUID): Result<User, DbError> // Function with effects declared fn calculateTax(amount: Money): Money  [pure] fn saveOrder(order: Order): Result<OrderId, DbError>  [db.write]
 ```
 
 ## 3.3 Type Declarations
@@ -216,7 +216,7 @@ Certo uses Algorithm W (Damas-Hindley-Milner) extended with local type inference
 Certo has minimal subtyping. There are no implicit coercions between numeric types. Conversions are always explicit and named:
 
 ```
-// Explicit numeric conversion val n: Int   = 42 val f: Float = n.toFloat()      // Explicit val d: Decimal = n.toDecimal()  // Explicit // These are compile errors in Certo val wrong: Float  = 42          // Error: Int is not Float val wrong2: Text  = 42          // Error: Int is not Text // Semantic type coercion is also explicit val id: UserId  = UserId(uuid"550e8400...") val raw: UUID   = id.unwrap()   // Explicit unwrap
+// Explicit numeric conversion val n: Int   = 42 val f: Float = n.toFloat()      // Explicit val d: Decimal = n.toDecimal()  // Explicit // These are compile errors in Certo val wrong: Float  = 42          // Error: Int is not Float val wrong2: Text  = 42          // Error: Int is not Text // Semantic type coercion is also explicit val id: UserId  = UserId(uuid"550e8400...") val raw: UUID   = id.unwrap()   // Explicit unwrap (UserId declares unwrap in its own impl; there is no built-in)
 ```
 
 ## 4.6 Effect Types
@@ -297,6 +297,8 @@ Database integration is a first-class language feature, not a library. The compi
 ```
 
 ## 6.2 Query DSL — Full Reference
+
+*The examples below assume `import Stdlib.Db`, `import Stdlib.DbQuery` (reads) and `import Stdlib.DbMutation` (writes).*
 
 ### Filtering
 
@@ -433,13 +435,13 @@ Certo uses structured concurrency — all async operations are scoped, cancellab
 ## 7.2 Parallel Execution
 
 ```
-// parallel{} — run independent tasks concurrently // Compiler verifies tasks do not share mutable state async fn generateReport(month: Date): Result<Report, ReportError> = {     // All three run at the same time     val (revenue, expenses, headcount) = await parallel {         calculateRevenue(month),         calculateExpenses(month),         getHeadcount(month)     }     // Waits for all three — fails fast if any fails     Ok(Report {         revenue:   revenue?,         expenses:  expenses?,         headcount: headcount?,         profit:    revenue? - expenses?     }) } // parallel with timeout val results = await parallel(timeout: Duration.seconds(5)) {     fetchFromServiceA(),     fetchFromServiceB(), }
+// parallel{} — run independent tasks concurrently // Compiler verifies tasks do not share mutable state async fn generateReport(month: Date): Result<Report, ReportError> = {     // All three run at the same time     val (revenue, expenses, headcount) = await parallel {         calculateRevenue(month),         calculateExpenses(month),         getHeadcount(month)     }     // Waits for all three, then the first failure (via ?) is returned     Ok(Report {         revenue:   revenue?,         expenses:  expenses?,         headcount: headcount?,         profit:    revenue? - expenses?     }) } // parallel with timeout val results = await parallel(timeout: Duration.seconds(5)) {     fetchFromServiceA(),     fetchFromServiceB(), }
 ```
 
 ## 7.3 Structured Concurrency
 
 ```
-// All tasks spawned inside a scope are cancelled when scope exits async fn processWithTimeout(orderId: UUID): Result<Receipt, Error> =     withTimeout(Duration.seconds(30)) {         processOrder(orderId)     } // Background tasks — fire and forget with supervision fn startBackgroundJobs(): Unit =     spawn {         every(Duration.minutes(5))  { cleanExpiredSessions() }         every(Duration.hours(1))    { generateHourlyReports() }         every(Duration.days(1))     { archiveOldRecords() }     } // "Supervision" here means: an every() job keeps restarting on its own // schedule regardless of failure — that's already how every()'s underlying // loop works, since it never inspects its body's return value. A job that // can fail should return Result and handle its own Err case, typically by // logging, so failures are visible instead of silently vanishing: fn cleanExpiredSessionsJob(): Result<Unit, DbError> = {     cleanExpiredSessions()     Ok(unit) } fn startSupervisedJob(): Unit =     spawn {         every(Duration.minutes(5)) {             match cleanExpiredSessionsJob() {                 Ok(_)  => {}                 Err(e) => println(f"cleanExpiredSessions failed: {e}")             }         }     } // A real panic() inside a spawned task is unrelated to the above — it still // aborts the whole process, not just the task; there is no panic-catching // mechanism today, by design (a much larger, separately-scoped change). // Channels — communicate between coroutines val channel = Channel<Order>(capacity: 100) spawn { orderProducer(channel) } spawn { orderConsumer(channel) }
+// All tasks spawned inside a scope are cancelled when scope exits async fn processWithTimeout(orderId: UUID): Receipt? =   // withTimeout returns T? (None on timeout)     withTimeout(Duration.seconds(30)) {         processOrder(orderId)     } // Background tasks — fire and forget with supervision fn startBackgroundJobs(): Unit =     spawn {         every(Duration.minutes(5))  { cleanExpiredSessions() }         every(Duration.hours(1))    { generateHourlyReports() }         every(Duration.days(1))     { archiveOldRecords() }     } // "Supervision" here means: an every() job keeps restarting on its own // schedule regardless of failure — that's already how every()'s underlying // loop works, since it never inspects its body's return value. A job that // can fail should return Result and handle its own Err case, typically by // logging, so failures are visible instead of silently vanishing: fn cleanExpiredSessionsJob(): Result<Unit, DbError> = {     cleanExpiredSessions()     Ok(unit) } fn startSupervisedJob(): Unit =     spawn {         every(Duration.minutes(5)) {             match cleanExpiredSessionsJob() {                 Ok(_)  => {}                 Err(e) => println(f"cleanExpiredSessions failed: {e}")             }         }     } // A real panic() inside a spawned task is unrelated to the above — it still // aborts the whole process, not just the task; there is no panic-catching // mechanism today, by design (a much larger, separately-scoped change). // Channels — communicate between coroutines val channel = Channel<Order>(capacity: 100) spawn { orderProducer(channel) } spawn { orderConsumer(channel) }
 ```
 
 ## 7.4 Resource Management
@@ -461,7 +463,7 @@ The most important pattern in Certo domain modeling. Design your types so that i
 ## 8.2 State Machines — Full Syntax
 
 ```
-statemachine SubscriptionLifecycle {     states:         Trial,         Active,         PastDue,         Paused,         Cancelled,         Expired     transitions:         Trial     → Active    : activate(paymentMethod: PaymentMethod)         Trial     → Cancelled : cancel(reason: CancelReason)         Active    → PastDue   : markPastDue(invoiceId: InvoiceId)         Active    → Paused    : pause(until: Date)         Active    → Cancelled : cancel(reason: CancelReason)         PastDue   → Active    : resolvePayment(receiptId: ReceiptId)         PastDue   → Cancelled : cancel(reason: CancelReason)         PastDue   → Expired   : expire()         Paused    → Active    : resume()         Paused    → Cancelled : cancel(reason: CancelReason)     // on_enter hooks — run when entering a state     on_enter PastDue:   sendPaymentFailureEmail()     on_enter Cancelled: sendCancellationEmail()     on_enter Active:    sendWelcomeEmail()     // Invariants — always true in a given state     invariant Active:   self.paymentMethod.isSome()     invariant Expired:  self.endDate < Date.today() }
+statemachine SubscriptionLifecycle {     states:         Trial,         Active,         PastDue,         Paused,         Cancelled,         Expired     transitions:         Trial     → Active    : activate(paymentMethod: PaymentMethod)         Trial     → Cancelled : cancel(reason: CancelReason)         Active    → PastDue   : markPastDue(invoiceId: InvoiceId)         Active    → Paused    : pause(until: Date)         Active    → Cancelled : cancel(reason: CancelReason)         PastDue   → Active    : resolvePayment(receiptId: ReceiptId)         PastDue   → Cancelled : cancel(reason: CancelReason)         PastDue   → Expired   : expire()         Paused    → Active    : resume()         Paused    → Cancelled : cancel(reason: CancelReason)     // on_enter hooks — run when entering a state     on_enter PastDue:   sendPaymentFailureEmail()     on_enter Cancelled: sendCancellationEmail()     on_enter Active:    sendWelcomeEmail()     // Invariants — always true in a given state     invariant Active:   self.paymentMethod.isSome()     invariant Expired:  self.endDate < Date.today()   // illustrative only: endDate is not declared above, so this is E0205 today }
 ```
 
 ## 8.3 Smart Constructors
@@ -509,13 +511,13 @@ statemachine SubscriptionLifecycle {     states:         Trial,         Active, 
 | list.find | fn(T=>Bool): Option<T> | First matching element |
 | list.partition | fn(T=>Bool): (List<T>, List<T>) | Split by predicate |
 | list.groupBy | fn<K>(T=>K): Map<K, List<T>> | Group by key function |
-| list.sortBy | fn<K: Ord>(T=>K): List<T> | Sort by key |
+| list.sortBy | fn<K: Ord>(T=>K): List<T> | Sort by key (today the key must be Int, Float or a sized int; a Text key is E0710) |
 | list.distinct | fn(): List<T> | Remove duplicates |
 | list.zip | fn<U>(List<U>): List<(T,U)> | Pair with another list |
 | list.chunked | fn(Int): List<List<T>> | Split into chunks of size n |
 | list.sumBy | fn<N: Numeric>(T=>N): N | Sum a numeric projection |
-| list.minBy | fn<K: Ord>(T=>K): Option<T> | Element with minimum key |
-| list.maxBy | fn<K: Ord>(T=>K): Option<T> | Element with maximum key |
+| list.minBy | fn<K: Ord>(T=>K): Option<T> | Element with minimum key (same key types as sortBy) |
+| list.maxBy | fn<K: Ord>(T=>K): Option<T> | Element with maximum key (same key types as sortBy) |
 
 ## 9.3 Stdlib.Text
 
@@ -574,7 +576,7 @@ The Certo UI compiler generates type-safe web interfaces from your data models a
 The fastest path to a working UI. Annotate a type with @ui.generate and the compiler produces a complete CRUD interface: list view with sorting and filtering, detail view, create and edit forms with validation.
 
 ```
-@ui.generate(Product) {     title:  "Products"     list: {         columns:    [name, sku, price, stockQuantity, status],         sortable:   [name, price, stockQuantity],         filterable: [status, categoryId],         searchable: [name, sku, description]     }     detail: {         sections: [             { title: "Product Info",  fields: [name, sku, description, categoryId] },             { title: "Pricing",       fields: [price, compareAtPrice, costPrice] },             { title: "Inventory",     fields: [stockQuantity, lowStockThreshold] }         ]     }     form: {         create: [name, sku, price, categoryId, description]         edit:   [name, price, stockQuantity, status, description]     }     permissions: {         view:   [Admin, StockManager, Viewer],         create: [Admin, StockManager],         edit:   [Admin, StockManager],         delete: [Admin]     } }
+// NOT YET IMPLEMENTED: only title and a single list/form field set are accepted; sortable, filterable, searchable, detail and permissions are rejected today (BACKLOG item 87) @ui.generate(Product) {     title:  "Products"     list: {         columns:    [name, sku, price, stockQuantity, status],         sortable:   [name, price, stockQuantity],         filterable: [status, categoryId],         searchable: [name, sku, description]     }     detail: {         sections: [             { title: "Product Info",  fields: [name, sku, description, categoryId] },             { title: "Pricing",       fields: [price, compareAtPrice, costPrice] },             { title: "Inventory",     fields: [stockQuantity, lowStockThreshold] }         ]     }     form: {         create: [name, sku, price, categoryId, description]         edit:   [name, price, stockQuantity, status, description]     }     permissions: {         view:   [Admin, StockManager, Viewer],         create: [Admin, StockManager],         edit:   [Admin, StockManager],         delete: [Admin]     } }
 ```
 
 ## 10.2 Declarative View Syntax
@@ -654,13 +656,13 @@ my-app/ ├── certo.toml              # Project manifest and config ├─�
 Certo can call C libraries through its Foreign Function Interface. FFI calls are marked unsafe — the compiler cannot verify their behavior.
 
 ```
-// Declare an external C function extern "C" {     fn strlen(s: *Byte): UInt     fn malloc(size: UInt): *Byte     fn free(ptr: *Byte): Unit } // Call it in an unsafe block fn rawStringLength(s: Text): UInt =     unsafe { strlen(s.toCString()) } // Wrap unsafe in a safe API — preferred pattern fn safeLength(s: Text): UInt = rawStringLength(s)
+// Declare an external C function extern "C" {     fn strlen(s: *Byte): UInt     fn malloc(size: UInt): *Byte     fn free(ptr: *Byte): Unit } // Call it in an unsafe block fn rawStringLength(s: Text): UInt =     unsafe { strlen(s) }   // a Text is passed to C as a NUL-terminated char* // Wrap unsafe in a safe API — preferred pattern fn safeLength(s: Text): UInt = rawStringLength(s)
 ```
 
 ## 12.2 REST API Client Generation
 
 ```
-// Generate a type-safe client from OpenAPI spec @apiClient("https://api.stripe.com/openapi.json") module Stripe // Compiler downloads spec and generates: // — Typed request/response models // — Async client functions // — Error types matching API error codes // Generated usage looks like: async fn chargeCard(amount: Money, token: Text): Result<Charge, StripeError> =     Stripe.charges.create({         amount:   amount.toCents(),         currency: "usd",         source:   token     })
+// NOT IMPLEMENTED: there is no @apiClient attribute; client generation is the separate certo-ffi tool // Generate a type-safe client from OpenAPI spec @apiClient("https://api.stripe.com/openapi.json") module Stripe // Compiler downloads spec and generates: // — Typed request/response models // — Async client functions // — Error types matching API error codes // Generated usage looks like: async fn chargeCard(amount: Money, token: Text): Result<Charge, StripeError> =     Stripe.charges.create({         amount:   amount.toCents(),         currency: "usd",         source:   token     })
 ```
 
 ## 12.3 Calling Certo from Other Languages
@@ -700,7 +702,7 @@ SQL injection is architecturally impossible in Certo. The query DSL never constr
 ## 13.3 Authorization Patterns
 
 ```
-// Role-based access using phantom types type Permission<T> = priv Permission(T) type Admin type User type Viewer // Functions that require specific roles fn deleteUser(id: UUID, _auth: Permission<Admin>): Result<Unit, DbError> fn viewReport(_auth: Permission<Admin │ Viewer>): Result<Report, DbError> // Caller must prove they have permission // The Permission value can only be obtained from the auth middleware fn handleDeleteRequest(req: Request): Response =     match req.auth.asAdmin() {         Some(perm) => deleteUser(req.userId, perm) │> toResponse         None       => Response.forbidden()     }
+// NOT YET IMPLEMENTED: phantom role types (Permission<Admin | Viewer>) and req.auth.asAdmin() do not parse or exist today (BACKLOG item 79) // Role-based access using phantom types type Permission<T> = priv Permission(T) type Admin type User type Viewer // Functions that require specific roles fn deleteUser(id: UUID, _auth: Permission<Admin>): Result<Unit, DbError> fn viewReport(_auth: Permission<Admin │ Viewer>): Result<Report, DbError> // Caller must prove they have permission // The Permission value can only be obtained from the auth middleware fn handleDeleteRequest(req: Request): Response =     match req.auth.asAdmin() {         Some(perm) => deleteUser(req.userId, perm) │> toResponse         None       => Response.forbidden()     }
 ```
 
 # 14. Implementation Roadmap
