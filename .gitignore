@@ -34,3 +34,6 @@ Thumbs.db
 # no meaningful content beyond "built N times so far" — not worth tracking).
 crates/cli/build_number.txt
 crates/xeq/build_number.txt
+
+# Claude Code worktrees (each is a full checkout of this repo)
+.claude/worktrees/
