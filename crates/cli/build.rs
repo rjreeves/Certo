@@ -45,6 +45,9 @@ fn main() {
         resource.set("ProductVersion", &version);
         resource.set("ProductName", "Certo Compiler");
         resource.set("FileDescription", "Certo Compiler");
+        // Regenerate with scripts/make-certo-icon.py.
+        resource.set_icon("assets/certo.ico");
+        println!("cargo:rerun-if-changed=assets/certo.ico");
         resource.set_version_info(winres::VersionInfo::FILEVERSION, numeric_version);
         resource.set_version_info(winres::VersionInfo::PRODUCTVERSION, numeric_version);
 
