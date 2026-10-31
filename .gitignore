@@ -36,4 +36,4 @@ crates/cli/build_number.txt
 crates/xeq/build_number.txt
 
 # Claude Code worktrees (each is a full checkout of this repo)
-.claude/worktrees/
+**/.claude/worktrees/
