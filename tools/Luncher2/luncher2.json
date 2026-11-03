@@ -1,0 +1,8 @@
+{
+  "items": [
+    { "name": "Notepad", "path": "notepad.exe" },
+    { "name": "Calculator", "path": "calc.exe" },
+    { "name": "Terminal", "path": "wt.exe" },
+    { "name": "File Explorer", "path": "explorer.exe" }
+  ]
+}

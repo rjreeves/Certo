@@ -1,0 +1,85 @@
+module Luncher2
+
+// A small launcher: Certo owns the item list and process spawning, Wisp supplies
+// the native searchable list window. Items come from luncher2.json beside the exe.
+
+import Stdlib.Core
+import Stdlib.File
+import Stdlib.Json
+import Stdlib.Path
+import Stdlib.Process
+
+extern "C" {
+    fn certo_wisp_list_json(definition: Text): Int
+    fn certo_wisp_error_with_title(title: Text, text: Text): Int
+    fn certo_wisp_last_error(): Text
+}
+
+fn textField(object: JsonValue, key: Text): Text =
+    JsonValue.asText(JsonValue.get(object, key))
+
+fn showError(message: Text): Unit [io, unsafe] = {
+    val ignored = unsafe { certo_wisp_error_with_title("Luncher2", message) }
+}
+
+fn defaultItems(): JsonValue =
+    Json.parse("[{\"name\":\"Notepad\",\"path\":\"notepad.exe\"},{\"name\":\"Calculator\",\"path\":\"calc.exe\"},{\"name\":\"Terminal\",\"path\":\"wt.exe\"},{\"name\":\"File Explorer\",\"path\":\"explorer.exe\"}]")
+
+fn loadItems(path: Text): JsonValue [io] = {
+    if let Some(source) = readFile(path) {
+        JsonValue.get(Json.parse(source), "items")
+    } else {
+        defaultItems()
+    }
+}
+
+fn listDefinition(items: JsonValue): JsonValue [io] = {
+    val rows = Json.array()
+    var index = 0
+    while index < JsonValue.length(items) {
+        val item = JsonValue.at(items, index)
+        val row = Json.array()
+        JsonValue.push(row, Json.string(textField(item, "name")))
+        JsonValue.push(row, Json.string(textField(item, "path")))
+        JsonValue.push(rows, row)
+        index = index + 1
+    }
+    val nameColumn = Json.object()
+    JsonValue.set(nameColumn, "title", Json.string("Name"))
+    JsonValue.set(nameColumn, "width", Json.int(160))
+    val pathColumn = Json.object()
+    JsonValue.set(pathColumn, "title", Json.string("Path"))
+    JsonValue.set(pathColumn, "width", Json.int(260))
+    val columns = Json.array()
+    JsonValue.push(columns, nameColumn)
+    JsonValue.push(columns, pathColumn)
+
+    val definition = Json.object()
+    JsonValue.set(definition, "title", Json.string("Luncher2"))
+    JsonValue.set(definition, "columns", columns)
+    JsonValue.set(definition, "rows", rows)
+    JsonValue.set(definition, "selected", Json.int(0))
+    JsonValue.set(definition, "searchable", Json.bool(true))
+    JsonValue.set(definition, "sortable", Json.bool(true))
+    JsonValue.set(definition, "submit_label", Json.string("Launch"))
+    definition
+}
+
+fn main(): Unit [io, unsafe] = {
+    val executable = arg(0) ?? ""
+    val baseDirectory = Path.dirname(executable)
+    val items = loadItems(Path.join(baseDirectory, "luncher2.json"))
+    if not JsonValue.isArray(items) or JsonValue.length(items) == 0 then {
+        showError("luncher2.json needs a non-empty `items` array of {name, path}.")
+    } else {
+        val picked = unsafe { certo_wisp_list_json(Json.stringify(listDefinition(items))) }
+        if picked >= 0 then {
+            val target = textField(JsonValue.at(items, picked), "path")
+            if Process.spawnDetached(target, [], baseDirectory) < 0 then {
+                showError("Could not start " ++ target ++ ".")
+            }
+        } else if picked != -1 then {
+            showError(unsafe { certo_wisp_last_error() })
+        }
+    }
+}
